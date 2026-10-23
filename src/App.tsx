@@ -180,7 +180,6 @@ function App() {
     setUserInput('');
     requestTokenRef.current = geminiService.currentRequestToken();
     geminiService.cancelAllRequests();
-    voice.stop();
     setIsProcessingQuestion(true);
     handleUserQuestion(question);
   };
@@ -497,7 +496,7 @@ function App() {
       } finally {
         setPrefetching(false);
       }
-    }, 30000);
+    }, 15000);
 
     return () => clearInterval(prefetchTimer);
   }, [isTourStarted, isOnline, geolocation.position, geolocation.movementMode]);

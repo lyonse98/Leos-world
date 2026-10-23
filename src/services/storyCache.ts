@@ -42,8 +42,9 @@ const CACHE_DISTANCE_THRESHOLD_M = 100;
 const QUEUE_MAX_AGE_MS = 10 * 60 * 1000;
 const TARGET_TTL_MS = 10 * 60 * 1000;
 const TARGET_DEDUPE_M = 400;
-const MIN_FETCH_INTERVAL_DRIVING_MS = 6000;
-const MIN_FETCH_INTERVAL_WALKING_MS = 10000;
+const MIN_FETCH_INTERVAL_DRIVING_MS = 4000;
+const MIN_FETCH_INTERVAL_WALKING_MS = 5000;
+const MIN_FETCH_INTERVAL_STATIONARY_MS = 4000;
 
 // How far a cached story may be from the listener and still play when offline.
 // Point-anchored stories (a specific landmark) go stale fast — once you're past
@@ -59,7 +60,12 @@ const STALE_PREFETCH_MS = 8 * 60 * 1000;
 
 // How far down the road to stock stories while service is still good.
 // Road trips have long dead stretches — the buffer is what covers them.
+// Freeway speeds get even farther offsets so the queue stays full at 65+ mph.
 const ROUTE_OFFSETS_DRIVING_M = [800, 2500, 5000, 8000];
+const ROUTE_OFFSETS_FREWAY_M = [1200, 3500, 7000, 12000];
+// Walking/idle: stock stories in a tight radius so the queue fills quickly
+// even when the listener isn't moving much.
+const ROUTE_OFFSETS_WALKING_M = [150, 300, 500];
 
 class StoryCacheService {
   private cache: CachedStory[] = [];
@@ -238,10 +244,13 @@ class StoryCacheService {
 
   async prefetchForPosition(position: Position, mode: MovementModeHysteresis): Promise<void> {
     if (!this.isOnline || this.isPrefetching) return;
-    // Trigger at 80% capacity so the buffer starts refilling before it's empty.
-    const triggerThreshold = Math.floor(this.maxBuffer(mode) * 0.8);
+    // Trigger at 60% capacity so the buffer starts refilling well before it's
+    // empty — this is what keeps at least one story queued during fast driving.
+    const triggerThreshold = Math.floor(this.maxBuffer(mode) * 0.6);
     if (this.unplayedCount() >= triggerThreshold) return;
-    const minInterval = mode === 'driving' ? MIN_FETCH_INTERVAL_DRIVING_MS : MIN_FETCH_INTERVAL_WALKING_MS;
+    const minInterval = mode === 'driving' ? MIN_FETCH_INTERVAL_DRIVING_MS
+      : mode === 'walking' ? MIN_FETCH_INTERVAL_WALKING_MS
+      : MIN_FETCH_INTERVAL_STATIONARY_MS;
     if (Date.now() - this.lastFetchTime < minInterval) return;
     if (this.lastFetchPosition && this.distance(position, this.lastFetchPosition) < 50) return;
 
@@ -278,12 +287,13 @@ class StoryCacheService {
   // stories were already paid for and written before the bars dropped.
   async prefetchRouteAhead(position: Position, mode: MovementModeHysteresis): Promise<number> {
     if (!this.isOnline || this.isPrefetchingAhead) return 0;
-    const triggerThreshold = Math.floor(this.maxBuffer(mode) * 0.8);
+    const triggerThreshold = Math.floor(this.maxBuffer(mode) * 0.6);
     if (this.unplayedCount() >= triggerThreshold) return 0;
 
-    const isRoad = mode === 'driving';
-    // Route-ahead only makes sense when there is a road ahead to stock.
-    if (!isRoad) return 0;
+    // Route-ahead works for both driving and walking. Driving uses heading to
+    // project forward; walking uses a tighter radius since the listener covers
+    // far less ground.
+    if (mode !== 'driving' && mode !== 'walking') return 0;
     if (position.heading === null || isNaN(position.heading)) return 0;
 
     this.isPrefetchingAhead = true;
@@ -291,7 +301,12 @@ class StoryCacheService {
     let generated = 0;
 
     try {
-      const offsets = ROUTE_OFFSETS_DRIVING_M;
+      // Freeway speeds (>= 25 m/s ~ 56 mph) get wider offsets so the queue
+      // stays full when the listener is covering ground fast.
+      const isFreeway = mode === 'driving' && position.speed !== null && position.speed >= 25;
+      const offsets = mode === 'walking' ? ROUTE_OFFSETS_WALKING_M
+        : isFreeway ? ROUTE_OFFSETS_FREWAY_M
+        : ROUTE_OFFSETS_DRIVING_M;
 
       for (const offset of offsets) {
         if (!this.isOnline) break;
@@ -317,7 +332,7 @@ class StoryCacheService {
           generatedAt: Date.now(),
           played: false,
           mode,
-          regionAnchored: true,
+          regionAnchored: mode === 'driving',
         });
         generated++;
         console.log(`[StoryCache] Prefetched ahead ${offset}m for ${mode}`);

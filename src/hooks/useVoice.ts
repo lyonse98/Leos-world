@@ -268,7 +268,7 @@ export const useVoice = () => {
         audioBlockedRef.current = true;
         setAudioBlocked(true);
         onBlocked?.();
-      }, 1500);
+      }, 3000);
     };
 
     attempt(true);
