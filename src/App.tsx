@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Eye, EyeOff, Play, MapPin, Wifi, WifiOff, Download, Clock, Compass, VolumeX, Moon, XCircle, Share2, Music, Send, Heart, UserPlus } from 'lucide-react';
+import { Eye, EyeOff, Play, MapPin, Wifi, WifiOff, Download, Clock, Compass, VolumeX, Moon, XCircle, Share2, Music, Send, Heart } from 'lucide-react';
 import { useVoice } from './hooks/useVoice';
 import { useGeolocation, Position } from './hooks/useGeolocation';
 import { useWakeLock } from './hooks/useWakeLock';
@@ -234,18 +234,6 @@ function App() {
     setResumableSession(null);
     setIsTourStarted(false);
     kickoffFiredRef.current = false;
-  };
-
-  const [showResetConfirm, setShowResetConfirm] = useState(false);
-
-  const handleNewListener = () => {
-    heardStories.resetForNewListener();
-    tasteProfile.reset();
-    storyCoverage.resetAll();
-    setStoriesCount(0);
-    setShowResetConfirm(false);
-    setShareToast('Fresh start — Leo will treat you as a new listener');
-    setTimeout(() => setShareToast(null), 3000);
   };
 
   const handleUserQuestion = useCallback(async (question: string) => {
@@ -723,13 +711,6 @@ function App() {
                 <Share2 size={16} />
                 Share Leo's World
               </button>
-              <button
-                onClick={() => setShowResetConfirm(true)}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-800/60 border border-slate-700/60 text-slate-300 hover:bg-slate-700 transition-all active:scale-95 text-sm font-medium shadow-md backdrop-blur-sm"
-              >
-                <UserPlus size={16} />
-                New Listener
-              </button>
             </div>
           </div>
         </div>
@@ -1052,36 +1033,6 @@ function App() {
       {shareToast && (
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 bg-slate-800/95 border border-slate-600/60 text-slate-200 text-xs font-medium px-4 py-2.5 rounded-xl shadow-2xl leo-fade-up">
           {shareToast}
-        </div>
-      )}
-
-      {showResetConfirm && (
-        <div className="absolute inset-0 z-50 bg-slate-950/85 backdrop-blur-md flex items-center justify-center px-6">
-          <div className="text-center max-w-sm">
-            <div className="mb-5 flex justify-center">
-              <div className="w-14 h-14 rounded-2xl bg-slate-800/80 border border-slate-600/60 flex items-center justify-center shadow-2xl">
-                <UserPlus className="text-cyan-400" size={28} strokeWidth={1.5} />
-              </div>
-            </div>
-            <h2 className="text-xl font-bold mb-2 text-white tracking-tight">Start as a new listener?</h2>
-            <p className="text-sm text-slate-400 mb-6 leading-relaxed">
-              This clears all heard stories, angle coverage, and taste preferences on this device. Leo will start fresh — as if you've never toured before. The previous listener's data is not deleted, just unlinked.
-            </p>
-            <div className="flex flex-col gap-3">
-              <button
-                onClick={handleNewListener}
-                className="px-8 py-3 bg-gradient-to-r from-cyan-600 to-blue-500 rounded-xl text-base font-semibold text-white hover:from-cyan-500 hover:to-blue-400 transition-all active:scale-95 shadow-xl shadow-cyan-900/40"
-              >
-                Yes, fresh start
-              </button>
-              <button
-                onClick={() => setShowResetConfirm(false)}
-                className="px-8 py-2.5 bg-slate-800/80 border border-slate-700 rounded-xl text-sm font-semibold text-slate-300 hover:bg-slate-700 transition-all active:scale-95"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
         </div>
       )}
     </div>

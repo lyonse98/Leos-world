@@ -269,16 +269,6 @@ class StoryCoverageService {
   getTotalAnglesCovered(): number {
     return Object.values(this.subjects).reduce((sum, coverage) => sum + Object.keys(coverage).length, 0);
   }
-
-  resetAll(): void {
-    this.subjects = {};
-    this.recent = [];
-    try {
-      localStorage.removeItem(STORAGE_KEY);
-    } catch {
-      // storage unavailable — nothing to clear
-    }
-  }
 }
 
 export const storyCoverage = new StoryCoverageService();

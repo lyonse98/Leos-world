@@ -21,9 +21,7 @@ function loadOrCreateUserKey(): string {
   }
 }
 
-export let USER_KEY = loadOrCreateUserKey();
-
-const COVERAGE_STORAGE_KEY = 'leo_story_coverage';
+export const USER_KEY = loadOrCreateUserKey();
 
 const MAX_HISTORY = 500;
 
@@ -107,22 +105,6 @@ class HeardStoriesService {
   reset(): void {
     this.heardTopics = new Set();
     this.hydrated = false;
-  }
-
-  // Full reset for a new listener — e.g. someone else using the device, or
-  // the owner wanting a clean slate. Generates a fresh per-device identity so
-  // the old listener's Supabase rows stay untouched, and clears the coverage
-  // and taste data from localStorage so angle rotation starts over.
-  resetForNewListener(): void {
-    try {
-      const newKey = `u_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
-      localStorage.setItem(USER_KEY_STORAGE, newKey);
-      localStorage.removeItem(COVERAGE_STORAGE_KEY);
-      USER_KEY = newKey;
-    } catch {
-      // storage unavailable — in-memory reset still works for this session
-    }
-    this.reset();
   }
 }
 
