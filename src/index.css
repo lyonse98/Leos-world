@@ -1,0 +1,123 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --safe-area-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-area-top: env(safe-area-inset-top, 0px);
+}
+
+html, body, #root {
+  height: 100%;
+  overscroll-behavior: none;
+}
+
+.safe-bottom {
+  padding-bottom: calc(0.75rem + var(--safe-area-bottom));
+}
+
+.safe-top {
+  padding-top: calc(0.5rem + var(--safe-area-top));
+}
+
+/* ── Floating background orbs ─────────────────────────────── */
+@keyframes leo-float {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33%      { transform: translate(30px, -40px) scale(1.08); }
+  66%      { transform: translate(-20px, 25px) scale(0.95); }
+}
+.leo-float { animation: leo-float 18s ease-in-out infinite; }
+.leo-float-slow { animation: leo-float 26s ease-in-out infinite reverse; }
+
+/* ── Pulsing ring around hero icon ────────────────────────── */
+@keyframes leo-ring {
+  0%   { transform: scale(0.85); opacity: 0.7; }
+  100% { transform: scale(1.7);  opacity: 0; }
+}
+.leo-ring { animation: leo-ring 3s ease-out infinite; }
+.leo-ring-delay { animation: leo-ring 3s ease-out infinite 1.5s; }
+
+/* ── Audio waveform bars ──────────────────────────────────── */
+@keyframes leo-wave {
+  0%, 100% { transform: scaleY(0.3); }
+  50%      { transform: scaleY(1); }
+}
+.leo-wave-bar {
+  animation: leo-wave 0.9s ease-in-out infinite;
+  transform-origin: center;
+  will-change: transform;
+}
+
+/* ── Subtle text shimmer for hero title ───────────────────── */
+@keyframes leo-shimmer {
+  0%   { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+.leo-shimmer {
+  background-size: 200% auto;
+  animation: leo-shimmer 6s linear infinite;
+}
+
+/* ── Soft glow pulse for the speaking state (cool) ────────── */
+@keyframes leo-glow {
+  0%, 100% { box-shadow: 0 0 20px 2px rgba(56, 189, 248, 0.15); }
+  50%      { box-shadow: 0 0 40px 8px rgba(56, 189, 248, 0.30); }
+}
+.leo-glow { animation: leo-glow 3s ease-in-out infinite; }
+
+/* ── Gentle fade-in for narration text ────────────────────── */
+@keyframes leo-fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.leo-fade-up { animation: leo-fade-up 0.5s ease-out; }
+
+/* ── Live status dot ──────────────────────────────────────── */
+@keyframes leo-live {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5); }
+  50%      { opacity: 0.6; box-shadow: 0 0 0 6px rgba(16, 185, 129, 0); }
+}
+.leo-live { animation: leo-live 2s ease-in-out infinite; }
+
+/* ── Map contour overlay for hero ─────────────────────────── */
+.leo-grid {
+  background-image:
+    radial-gradient(ellipse 120px 80px at 30% 40%, rgba(245, 158, 11, 0.03) 1px, transparent 2px),
+    radial-gradient(ellipse 100px 70px at 70% 60%, rgba(245, 158, 11, 0.02) 1px, transparent 2px),
+    linear-gradient(rgba(56, 189, 248, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(56, 189, 248, 0.03) 1px, transparent 1px);
+  background-size: 160px 120px, 140px 100px, 48px 48px, 48px 48px;
+  mask-image: radial-gradient(ellipse 80% 60% at 50% 50%, black 30%, transparent 80%);
+  -webkit-mask-image: radial-gradient(ellipse 80% 60% at 50% 50%, black 30%, transparent 80%);
+}
+
+/* ── Warm amber shimmer for hero title ─────────────────────── */
+@keyframes leo-shimmer-amber {
+  0%   { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+.leo-shimmer-amber {
+  background-size: 200% auto;
+  animation: leo-shimmer-amber 6s linear infinite;
+}
+
+/* ── Compass needle rotation for speaking state ────────────── */
+@keyframes leo-compass-spin {
+  0%   { transform: rotate(0deg); }
+  25%  { transform: rotate(15deg); }
+  50%  { transform: rotate(-10deg); }
+  75%  { transform: rotate(20deg); }
+  100% { transform: rotate(0deg); }
+}
+.leo-compass-spin { animation: leo-compass-spin 2s ease-in-out infinite; }
+
+/* ── Warm amber glow for speaking state ────────────────────── */
+@keyframes leo-glow-amber {
+  0%, 100% { box-shadow: 0 0 20px 2px rgba(245, 158, 11, 0.12); }
+  50%      { box-shadow: 0 0 40px 8px rgba(245, 158, 11, 0.25); }
+}
+.leo-glow-amber { animation: leo-glow-amber 3s ease-in-out infinite; }
+
+/* ── Scrollbar hide for narration ─────────────────────────── */
+.leo-scroll::-webkit-scrollbar { display: none; }
+.leo-scroll { scrollbar-width: none; }

@@ -1,0 +1,224 @@
+// Native Gemini audio generation service.
+//
+// Uses the @google/genai SDK to produce spoken audio directly from text.
+// The Gemini 3.8 Flash TTS model accepts text and returns inline base64
+// WAV audio data via generateContent with responseModalities: ['AUDIO'].
+
+import { GoogleGenAI } from '@google/genai';
+import type { FactPack } from './poiManager';
+import { formatFactPackForPrompt } from './poiManager';
+
+const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
+
+const TTS_MODEL = 'gemini-3.8-flash-tts';
+const TEXT_MODEL = 'gemini-3.8-flash';
+const VOICE_NAME = 'Puck';
+
+const LEO_SYSTEM_INSTRUCTION = `You are Leo — part local historian, part true-crime podcast host, part that friend who always knows the weird story behind everything. Think "Mysteries at the Museum" meets a road-trip buddy. Your job is to make people look at a random street corner and go "no WAY."
+
+NARRATIVE STYLE — HOOK, TWIST, LANDING:
+1. HOOK: Open with something the listener can SEE, a mystery, or a question.
+2. TWIST: The human conflict behind it — greed, rivalry, stubbornness, a scandal.
+3. LANDING: A punchy closer that sticks. A dry one-liner or a haunting detail.
+
+VOICE: Conversational and natural. Enthusiastic but never fake-hyped. You sound like a real person talking to a friend, not a narrator reading a script.
+
+OUTPUT CONTRACT: Plain spoken prose only. No asterisks, no markdown, no bullet points. This is audio — never address the listener as a reader.
+
+FACT PACK CONTRACT: The fact pack is the ONLY source you may state as hard fact. Never invent dates, names, or events. If you are not confident, zoom out to broader regional history or explicitly attribute — "the story goes", "locals will tell you".`;
+
+export interface AudioStoryResult {
+  audioUrl: string;
+  text: string;
+  model: string;
+}
+
+class GeminiAudioService {
+  private ai: GoogleGenAI | null = null;
+  private audioCache = new Map<string, string>();
+  private dbPromise: Promise<IDBDatabase | null> | null = null;
+
+  private openDb(): Promise<IDBDatabase | null> {
+    if (this.dbPromise) return this.dbPromise;
+    this.dbPromise = new Promise((resolve) => {
+      try {
+        const req = indexedDB.open('leo_tts_cache', 1);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains('audio')) {
+            db.createObjectStore('audio');
+          }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(null);
+      } catch {
+        resolve(null);
+      }
+    });
+    return this.dbPromise;
+  }
+
+  private async getCachedAudio(text: string): Promise<string | null> {
+    const key = this.cacheKey(text);
+    const memHit = this.audioCache.get(key);
+    if (memHit) return memHit;
+
+    const db = await this.openDb();
+    if (!db) return null;
+    try {
+      return await new Promise<string | null>((resolve) => {
+        const tx = db.transaction('audio', 'readonly');
+        const req = tx.objectStore('audio').get(key);
+        req.onsuccess = () => resolve(req.result ?? null);
+        req.onerror = () => resolve(null);
+      });
+    } catch {
+      return null;
+    }
+  }
+
+  private async setCachedAudio(text: string, url: string): Promise<void> {
+    const key = this.cacheKey(text);
+    this.audioCache.set(key, url);
+
+    const db = await this.openDb();
+    if (!db) return;
+    try {
+      const tx = db.transaction('audio', 'readwrite');
+      tx.objectStore('audio').put(url, key);
+      tx.oncomplete = () => {};
+    } catch {
+      // non-critical
+    }
+  }
+
+  private cacheKey(text: string): string {
+    return `${VOICE_NAME}|${text.slice(0, 500)}`;
+  }
+
+  initialize(): void {
+    if (!GEMINI_API_KEY || GEMINI_API_KEY === 'your_gemini_api_key_here') {
+      throw new Error('Gemini API key is missing. Please add VITE_GEMINI_API_KEY to your .env file.');
+    }
+    this.ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+  }
+
+  hasModel(): boolean {
+    return this.ai !== null;
+  }
+
+  async generateAudioStory(
+    factPack: FactPack,
+    options?: { mode?: 'walking' | 'driving' | 'highway' | 'rural'; destination?: string }
+  ): Promise<AudioStoryResult> {
+    if (!this.ai) {
+      throw new Error('Gemini audio service not initialized. Call initialize() first.');
+    }
+
+    const mode = options?.mode || 'walking';
+    const destination = options?.destination;
+    const prompt = this.buildPrompt(factPack, mode, destination);
+
+    const audioBase64 = await this.synthesizeSpeech(prompt);
+    const audioUrl = this.base64ToAudioUrl(audioBase64, 'audio/wav');
+    return { audioUrl, text: prompt, model: TTS_MODEL };
+  }
+
+  async textToAudioUrl(text: string): Promise<string> {
+    if (!this.ai) {
+      throw new Error('Gemini audio service not initialized. Call initialize() first.');
+    }
+
+    const cached = await this.getCachedAudio(text);
+    if (cached) {
+      console.log('[GeminiAudio] TTS cache hit — skipping synthesis');
+      return cached;
+    }
+
+    const audioBase64 = await this.synthesizeSpeech(text);
+    const url = this.base64ToAudioUrl(audioBase64, 'audio/wav');
+    await this.setCachedAudio(text, url);
+    return url;
+  }
+
+  // Core TTS method: calls generateContent with AUDIO modality to get
+  // spoken audio back as inline base64 WAV data.
+  private async synthesizeSpeech(text: string): Promise<string> {
+    if (!this.ai) {
+      throw new Error('Gemini audio service not initialized.');
+    }
+
+    const response = await this.ai.models.generateContent({
+      model: TTS_MODEL,
+      contents: [{
+        role: 'user',
+        parts: [{ text }],
+      }],
+      config: {
+        responseModalities: ['AUDIO'],
+        speechConfig: {
+          voiceConfig: { voice: VOICE_NAME },
+        },
+      },
+    });
+
+    const data = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    if (!data) {
+      throw new Error('Gemini TTS returned no audio data in response parts.');
+    }
+    return data;
+  }
+
+  async generateTextStory(
+    factPack: FactPack,
+    options?: { mode?: 'walking' | 'driving' | 'highway' | 'rural'; destination?: string }
+  ): Promise<string> {
+    if (!this.ai) {
+      throw new Error('Gemini audio service not initialized. Call initialize() first.');
+    }
+
+    const mode = options?.mode || 'walking';
+    const destination = options?.destination;
+    const prompt = this.buildPrompt(factPack, mode, destination);
+
+    const response = await this.ai.models.generateContent({
+      model: TEXT_MODEL,
+      contents: prompt,
+      config: {
+        systemInstruction: LEO_SYSTEM_INSTRUCTION,
+      },
+    });
+
+    return response.text || '';
+  }
+
+  private buildPrompt(factPack: FactPack, mode: string, destination?: string): string {
+    const parts: string[] = [];
+    parts.push(LEO_SYSTEM_INSTRUCTION);
+    parts.push('');
+    parts.push(formatFactPackForPrompt(factPack));
+    if (destination) parts.push(`Destination: ${destination}`);
+    parts.push(`MODE: ${mode}`);
+    parts.push('');
+    parts.push('Tell the best story about what is here. Follow the HOOK, TWIST, LANDING shape. Keep it to 3-5 sentences. Speak naturally as if talking to a friend in a car.');
+
+    return parts.join('\n');
+  }
+
+  private base64ToAudioUrl(base64: string, mimeType: string): string {
+    const byteChars = atob(base64);
+    const byteNumbers = new Array(byteChars.length);
+    for (let i = 0; i < byteChars.length; i++) {
+      byteNumbers[i] = byteChars.charCodeAt(i);
+    }
+    const byteArray = new Uint8Array(byteNumbers);
+    const blob = new Blob([byteArray], { type: mimeType });
+    return URL.createObjectURL(blob);
+  }
+
+  revokeAudioUrl(url: string): void {
+    URL.revokeObjectURL(url);
+  }
+}
+
+export const geminiAudio = new GeminiAudioService();

@@ -1,0 +1,432 @@
+import { Position } from '../hooks/useGeolocation';
+import { calculateDistance, offsetPositionByHeading, MovementModeHysteresis } from '../utils/geo';
+import { geminiService, StoryRotation } from './gemini';
+
+export interface CachedStory {
+  id: string;
+  text: string;
+  topic: string;
+  lat: number;
+  lng: number;
+  generatedAt: number;
+  played: boolean;
+  // Which movement mode the story was written for. Drives both the playback
+  // freshness gate and how far the story may be from the listener.
+  mode: MovementModeHysteresis;
+  // Region-anchored stories (rural/highway) describe an area, not a point,
+  // so the "you've driven past it" check does not apply.
+  regionAnchored: boolean;
+  // The landmark or subject the story is about. Empty for region-level
+  // stories that have no single subject. This is what a rating attaches to.
+  subject: string;
+  // Set when this story took a rotation angle — a return visit to a landmark,
+  // or a story about the area itself. Carried so the app can record the
+  // coverage at the moment the story actually plays.
+  rotation: StoryRotation | null;
+}
+
+interface QueueEntry {
+  position: Position;
+  timestamp: number;
+}
+
+interface PrefetchTarget {
+  lat: number;
+  lng: number;
+  at: number;
+}
+
+const MAX_BUFFER_WALKING = 20;
+const MAX_BUFFER_DRIVING = 60;
+const CACHE_DISTANCE_THRESHOLD_M = 100;
+const QUEUE_MAX_AGE_MS = 10 * 60 * 1000;
+const TARGET_TTL_MS = 10 * 60 * 1000;
+const TARGET_DEDUPE_M = 400;
+const MIN_FETCH_INTERVAL_DRIVING_MS = 6000;
+const MIN_FETCH_INTERVAL_WALKING_MS = 10000;
+
+// How far a cached story may be from the listener and still play when offline.
+// Point-anchored stories (a specific landmark) go stale fast — once you're past
+// the block, the story is about somewhere you've left. Region-anchored stories
+// (rural/highway prefetches) describe a broad area, so the gate is looser.
+const OFFLINE_POINT_MAX_M = 500;
+const OFFLINE_REGION_MAX_M = 3000;
+
+// A prefetched story that has been sitting unplayed this long is probably about
+// somewhere the listener never reached (they turned, or drove past without the
+// queue emptying). Drop it rather than risk a stale narration.
+const STALE_PREFETCH_MS = 8 * 60 * 1000;
+
+// How far down the road to stock stories while service is still good.
+// Road trips have long dead stretches — the buffer is what covers them.
+const ROUTE_OFFSETS_DRIVING_M = [800, 2500, 5000, 8000];
+
+class StoryCacheService {
+  private cache: CachedStory[] = [];
+  private missedQueue: QueueEntry[] = [];
+  private prefetchTargets: PrefetchTarget[] = [];
+  private isPrefetching = false;
+  private isPrefetchingAhead = false;
+  private isOnline = true;
+  private lastFetchPosition: Position | null = null;
+  private lastFetchTime = 0;
+  private minFetchIntervalMs = 10000;
+  private onNetworkStatusChange?: (online: boolean) => void;
+  private onCacheChange?: (cache: CachedStory[]) => void;
+  private onMissedQueueChange?: (count: number) => void;
+
+  setNetworkStatusCallback(cb: (online: boolean) => void) {
+    this.onNetworkStatusChange = cb;
+  }
+
+  setCacheChangeCallback(cb: (cache: CachedStory[]) => void) {
+    this.onCacheChange = cb;
+  }
+
+  setMissedQueueChangeCallback(cb: (count: number) => void) {
+    this.onMissedQueueChange = cb;
+  }
+
+  // True when a story is already sitting in the buffer near this position and
+  // can play with no wait. Used to decide whether a latency bridge is needed.
+  hasReadyStory(position: Position): boolean {
+    return this.cache.some(
+      s => !s.played && this.distance(position, { lat: s.lat, lng: s.lng }) <= CACHE_DISTANCE_THRESHOLD_M
+    );
+  }
+
+  getCache(): CachedStory[] {
+    return [...this.cache];
+  }
+
+  getCacheCount(): number {
+    return this.cache.filter(s => !s.played).length;
+  }
+
+  getMissedQueueCount(): number {
+    return this.missedQueue.length;
+  }
+
+  isOnlineStatus(): boolean {
+    return this.isOnline;
+  }
+
+  private maxBuffer(mode: MovementModeHysteresis): number {
+    return mode === 'walking' ? MAX_BUFFER_WALKING : MAX_BUFFER_DRIVING;
+  }
+
+  private unplayedCount(): number {
+    return this.cache.filter(s => !s.played).length;
+  }
+
+  private distance(p1: { lat: number; lng: number }, p2: { lat: number; lng: number }): number {
+    return calculateDistance(p1.lat, p1.lng, p2.lat, p2.lng);
+  }
+
+  private notifyCacheChange() {
+    this.onCacheChange?.([...this.cache]);
+  }
+
+  private notifyMissedQueueChange() {
+    this.onMissedQueueChange?.(this.missedQueue.length);
+  }
+
+  setOnline(online: boolean) {
+    const wasOffline = !this.isOnline;
+    this.isOnline = online;
+    this.onNetworkStatusChange?.(online);
+
+    if (online && wasOffline) {
+      this.processMissedQueue();
+    }
+  }
+
+  private addToCache(entry: Omit<CachedStory, 'id'>) {
+    // A story about something already waiting to be heard is not a new story.
+    // Route-ahead prefetching asks for several stories before any of them has
+    // played, and coverage is only marked when a story actually reaches the
+    // listener — so without this the same area story would be queued over and
+    // over down the same stretch of road.
+    if (this.cache.some(s => !s.played && s.topic === entry.topic)) {
+      return;
+    }
+
+    this.cache.push({ ...entry, id: `${Date.now()}_${Math.random()}` });
+    const cap = MAX_BUFFER_DRIVING * 2;
+    if (this.cache.length > cap) {
+      this.cache = this.cache.slice(-cap);
+    }
+    this.notifyCacheChange();
+  }
+
+  // Drop prefetched stories that have aged out — they were generated for a
+  // spot the listener was approaching, and if they haven't played by now the
+  // listener likely took a different route or drove past. Serving one would
+  // narrate a place the listener is no longer near.
+  private pruneStalePrefetches(position: Position): void {
+    const now = Date.now();
+    const before = this.cache.length;
+    this.cache = this.cache.filter(s => {
+      if (s.played) return true;
+      const age = now - s.generatedAt;
+      if (age < STALE_PREFETCH_MS) return true;
+      // A story still close to the listener stays, even if old — it's relevant
+      // to where they are right now.
+      const d = this.distance(position, { lat: s.lat, lng: s.lng });
+      if (d <= CACHE_DISTANCE_THRESHOLD_M) return true;
+      return false;
+    });
+    if (this.cache.length !== before) this.notifyCacheChange();
+  }
+
+  async tryGetStoryForPosition(
+    position: Position,
+    mode: MovementModeHysteresis,
+    onChunk?: (text: string) => void
+  ): Promise<{ story: string; fromCache: boolean; topic: string; subject: string; rotation: StoryRotation | null } | null> {
+    this.pruneStalePrefetches(position);
+    const cached = this.findNearestUnplayedCache(position);
+    if (cached) {
+      cached.played = true;
+      this.notifyCacheChange();
+      if (onChunk) onChunk(cached.text);
+      return {
+        story: cached.text,
+        fromCache: true,
+        topic: cached.topic,
+        subject: cached.subject,
+        rotation: cached.rotation,
+      };
+    }
+
+    if (!this.isOnline) {
+      this.missedQueue.push({ position, timestamp: Date.now() });
+      this.pruneMissedQueue();
+      this.notifyMissedQueueChange();
+      return null;
+    }
+
+    try {
+      console.log('[StoryCache] Calling getTourNarration for', position.lat.toFixed(5), position.lng.toFixed(5));
+      const result = await geminiService.getTourNarration(position, undefined, onChunk);
+      console.log('[StoryCache] getTourNarration returned:', { textLen: result.text?.length || 0, subject: result.subject, mode: result.mode });
+      const story = result.text;
+      if (story && story.trim().length > 0) {
+        const topic = result.subject || `Story at ${position.lat.toFixed(4)}, ${position.lng.toFixed(4)}`;
+        this.addToCache({
+          text: story,
+          topic,
+          subject: result.subject,
+          rotation: result.rotation,
+          lat: position.lat,
+          lng: position.lng,
+          generatedAt: Date.now(),
+          played: true,
+          mode,
+          regionAnchored: mode === 'driving',
+        });
+        return { story, fromCache: false, topic, subject: result.subject, rotation: result.rotation };
+      }
+    } catch (error) {
+      console.error('[StoryCache] Live fetch failed:', error);
+      this.missedQueue.push({ position, timestamp: Date.now() });
+      this.notifyMissedQueueChange();
+    }
+
+    return null;
+  }
+
+  async prefetchForPosition(position: Position, mode: MovementModeHysteresis): Promise<void> {
+    if (!this.isOnline || this.isPrefetching) return;
+    // Trigger at 80% capacity so the buffer starts refilling before it's empty.
+    const triggerThreshold = Math.floor(this.maxBuffer(mode) * 0.8);
+    if (this.unplayedCount() >= triggerThreshold) return;
+    const minInterval = mode === 'driving' ? MIN_FETCH_INTERVAL_DRIVING_MS : MIN_FETCH_INTERVAL_WALKING_MS;
+    if (Date.now() - this.lastFetchTime < minInterval) return;
+    if (this.lastFetchPosition && this.distance(position, this.lastFetchPosition) < 50) return;
+
+    this.isPrefetching = true;
+    this.lastFetchPosition = position;
+    this.lastFetchTime = Date.now();
+
+    try {
+      const result = await geminiService.prefetchStory(position);
+      if (result.text && result.text.trim().length > 0) {
+        this.addToCache({
+          text: result.text,
+          topic: result.subject || `Story at ${position.lat.toFixed(4)}, ${position.lng.toFixed(4)}`,
+          subject: result.subject,
+          rotation: result.rotation,
+          lat: position.lat,
+          lng: position.lng,
+          generatedAt: Date.now(),
+          played: false,
+          mode,
+          regionAnchored: mode === 'driving',
+        });
+        console.log('[StoryCache] Prefetched story for', position.lat.toFixed(4), position.lng.toFixed(4));
+      }
+    } catch (error) {
+      console.error('[StoryCache] Prefetch failed:', error);
+    } finally {
+      this.isPrefetching = false;
+    }
+  }
+
+  // Stocks the buffer with stories for the road AHEAD, while there is still
+  // signal. This is what lets Leo keep talking through a dead zone: the
+  // stories were already paid for and written before the bars dropped.
+  async prefetchRouteAhead(position: Position, mode: MovementModeHysteresis): Promise<number> {
+    if (!this.isOnline || this.isPrefetchingAhead) return 0;
+    const triggerThreshold = Math.floor(this.maxBuffer(mode) * 0.8);
+    if (this.unplayedCount() >= triggerThreshold) return 0;
+
+    const isRoad = mode === 'driving';
+    // Route-ahead only makes sense when there is a road ahead to stock.
+    if (!isRoad) return 0;
+    if (position.heading === null || isNaN(position.heading)) return 0;
+
+    this.isPrefetchingAhead = true;
+    this.prunePrefetchTargets();
+    let generated = 0;
+
+    try {
+      const offsets = ROUTE_OFFSETS_DRIVING_M;
+
+      for (const offset of offsets) {
+        if (!this.isOnline) break;
+        if (this.unplayedCount() >= this.maxBuffer(mode)) break;
+
+        const target = offsetPositionByHeading(position, position.heading as number, offset);
+
+        if (this.wasTargetPrefetched(target)) continue;
+
+        this.prefetchTargets.push({ ...target, at: Date.now() });
+
+        const aheadPosition: Position = { ...position, lat: target.lat, lng: target.lng };
+        const result = await geminiService.prefetchStory(aheadPosition);
+        if (!result.text || result.text.trim().length === 0) continue;
+
+        this.addToCache({
+          text: result.text,
+          topic: result.subject || `Story ahead at ${target.lat.toFixed(4)}, ${target.lng.toFixed(4)}`,
+          subject: result.subject,
+          rotation: result.rotation,
+          lat: target.lat,
+          lng: target.lng,
+          generatedAt: Date.now(),
+          played: false,
+          mode,
+          regionAnchored: true,
+        });
+        generated++;
+        console.log(`[StoryCache] Prefetched ahead ${offset}m for ${mode}`);
+      }
+    } catch (error) {
+      console.error('[StoryCache] Route prefetch failed:', error);
+    } finally {
+      this.isPrefetchingAhead = false;
+    }
+
+    return generated;
+  }
+
+  private prunePrefetchTargets() {
+    const now = Date.now();
+    this.prefetchTargets = this.prefetchTargets.filter(t => now - t.at < TARGET_TTL_MS);
+  }
+
+  private wasTargetPrefetched(target: { lat: number; lng: number }): boolean {
+    return this.prefetchTargets.some(t => this.distance(t, target) < TARGET_DEDUPE_M);
+  }
+
+  private findNearestUnplayedCache(position: Position): CachedStory | null {
+    let nearest: CachedStory | null = null;
+    let minDistance = Infinity;
+
+    for (const story of this.cache) {
+      if (story.played) continue;
+      const d = this.distance(position, { lat: story.lat, lng: story.lng });
+      if (d < minDistance) {
+        minDistance = d;
+        nearest = story;
+      }
+    }
+
+    if (nearest && minDistance <= CACHE_DISTANCE_THRESHOLD_M) {
+      return nearest;
+    }
+
+    // Offline fallback: serve the nearest unplayed story rather than nothing,
+    // but only if it's still within a sane distance of the listener. A story
+    // generated 5km ago is about a place the listener left long ago — playing
+    // it would be worse than silence. Region-anchored stories (rural/highway
+    // prefetches) describe a broad area, so the distance gate is loosened for
+    // them.
+    if (this.unplayedCount() > 0 && !this.isOnline) {
+      const offlineFallback = this.cache
+        .filter(s => !s.played)
+        .map(s => ({ s, d: this.distance(position, { lat: s.lat, lng: s.lng }) }))
+        .sort((a, b) => a.d - b.d)
+        .find(({ s, d }) => s.regionAnchored ? d <= OFFLINE_REGION_MAX_M : d <= OFFLINE_POINT_MAX_M);
+      return offlineFallback?.s ?? null;
+    }
+
+    return null;
+  }
+
+  private pruneMissedQueue() {
+    const now = Date.now();
+    this.missedQueue = this.missedQueue.filter(
+      entry => now - entry.timestamp < QUEUE_MAX_AGE_MS
+    );
+  }
+
+  async processMissedQueue(): Promise<void> {
+    if (!this.isOnline || this.missedQueue.length === 0) return;
+
+    this.pruneMissedQueue();
+    const queue = [...this.missedQueue];
+    this.missedQueue = [];
+    this.notifyMissedQueueChange();
+
+    for (const entry of queue) {
+      try {
+        const result = await geminiService.prefetchStory(entry.position);
+        if (result.text && result.text.trim().length > 0) {
+          this.addToCache({
+            text: result.text,
+            topic: result.subject || `Story at ${entry.position.lat.toFixed(4)}, ${entry.position.lng.toFixed(4)}`,
+            subject: result.subject,
+            rotation: result.rotation,
+            lat: entry.position.lat,
+            lng: entry.position.lng,
+            generatedAt: Date.now(),
+            played: false,
+            mode: 'walking',
+            regionAnchored: false,
+          });
+        }
+      } catch (error) {
+        console.error('[StoryCache] Catch-up fetch failed:', error);
+        this.missedQueue.push(entry);
+        this.notifyMissedQueueChange();
+        break;
+      }
+    }
+  }
+
+  reset() {
+    this.cache = [];
+    this.missedQueue = [];
+    this.prefetchTargets = [];
+    this.lastFetchPosition = null;
+    this.lastFetchTime = 0;
+    this.isPrefetching = false;
+    this.isPrefetchingAhead = false;
+    this.notifyCacheChange();
+    this.notifyMissedQueueChange();
+  }
+}
+
+export const storyCache = new StoryCacheService();

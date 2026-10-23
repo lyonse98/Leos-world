@@ -1,0 +1,1 @@
+ALTER TABLE tour_stories ADD COLUMN IF NOT EXISTS story_text text;
