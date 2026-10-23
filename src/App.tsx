@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Eye, EyeOff, Play, MapPin, Wifi, WifiOff, Download, Clock, Compass, VolumeX, Moon, XCircle, Share2, Music, Send, Heart, Sparkles } from 'lucide-react';
+import { Eye, EyeOff, Play, MapPin, Wifi, WifiOff, Download, Clock, Compass, VolumeX, Moon, XCircle, Share2, Music, Send, Heart } from 'lucide-react';
 import { useVoice } from './hooks/useVoice';
 import { useGeolocation, Position } from './hooks/useGeolocation';
 import { useWakeLock } from './hooks/useWakeLock';
@@ -74,7 +74,6 @@ function App() {
       return false;
     }
   });
-  const [storyPicker, setStoryPicker] = useState<{ choices: string[]; visible: boolean } | null>(null);
 
   const voice = useVoice();
   const geolocation = useGeolocation();
@@ -235,9 +234,6 @@ function App() {
     setResumableSession(null);
     setIsTourStarted(false);
     kickoffFiredRef.current = false;
-    setStoryPicker(null);
-    storyPickerTimerRef.current = null;
-    pickerAutoPickRef.current = null;
   };
 
   const handleUserQuestion = useCallback(async (question: string) => {
@@ -478,107 +474,6 @@ function App() {
       });
     });
   }, [voice, handleIntervalUpdate]);
-
-  // --- Story picker: every 5 minutes, between stories, Leo asks the listener
-  // to tap which nearby landmark they want to hear about. If they don't pick
-  // within 15 seconds, Leo picks for them and the tour continues.
-  const storyPickerTimerRef = useRef<number | null>(null);
-  const pickerAutoPickRef = useRef<number | null>(null);
-  const pickerActiveRef = useRef(false);
-  const STORY_PICKER_INTERVAL_MS = 5 * 60 * 1000;
-  const STORY_PICKER_TIMEOUT_MS = 15_000;
-
-  const handleStoryPickerChoice = useCallback(async (choice: string, autoPicked: boolean = false) => {
-    if (pickerAutoPickRef.current) {
-      clearTimeout(pickerAutoPickRef.current);
-      pickerAutoPickRef.current = null;
-    }
-    pickerActiveRef.current = false;
-    setStoryPicker(null);
-
-    if (!geolocation.position) return;
-    const pos = geolocation.position;
-
-    const intro = autoPicked
-      ? `Alright, let's go with ${choice}.`
-      : `Great choice — ${choice} it is.`;
-    voice.speak(intro);
-    voice.recordSpokenText(intro);
-
-    const nearby = (await placesService.getNearbyLandmarks(pos, 100)).slice(0, 5).map(p => p.name);
-    const story = await geminiService.answerQuestion(
-      `Tell me the story of ${choice} — its history, why it matters, and anything surprising about it.`,
-      pos,
-      undefined,
-      { lastSpokenSentences: voice.getLastSpokenSentences(), nearbyLandmarks: nearby }
-    );
-
-    if (story.trim().length > 0) {
-      voice.recordSpokenText(story);
-      voice.queueStory(story, pos.lat, pos.lng, pos.speed !== null && pos.speed >= 6.0, undefined, choice);
-      setStoriesCount(prev => prev + 1);
-      analytics.track('story_picker_choice', pos, pos.speed !== null && pos.speed >= 6.0 ? 'driving' : 'walking', {
-        topic: choice,
-        autoPicked,
-      });
-    }
-
-    voice.queueStory("Alright, let's get back to it.", undefined, undefined, undefined, 'scripted');
-    lastFetchTimeRef.current = Date.now();
-    handleIntervalUpdate(pos);
-  }, [geolocation.position, voice, handleIntervalUpdate]);
-
-  const showStoryPicker = useCallback(async () => {
-    if (pickerActiveRef.current || !isTourStartedRef.current) return;
-    if (!geolocation.position) return;
-    const pos = geolocation.position;
-
-    try {
-      const nearby = await placesService.getNearbyLandmarks(pos, 800);
-      const unheard = nearby
-        .filter(p => !heardStories.hasHeard(p.name))
-        .sort((a, b) => b.historicalScore - a.historicalScore)
-        .slice(0, 3)
-        .map(p => p.name);
-
-      if (unheard.length === 0) return;
-
-      pickerActiveRef.current = true;
-      setStoryPicker({ choices: unheard, visible: true });
-
-      voice.speak("Hey — want to pick what we dive into next? Tap one of these, or I'll pick for you in a few seconds.");
-
-      pickerAutoPickRef.current = window.setTimeout(() => {
-        const random = unheard[Math.floor(Math.random() * unheard.length)];
-        handleStoryPickerChoice(random, true);
-      }, STORY_PICKER_TIMEOUT_MS);
-    } catch {
-      pickerActiveRef.current = false;
-    }
-  }, [geolocation.position, voice, handleStoryPickerChoice]);
-
-  useEffect(() => {
-    if (!isTourStarted) return;
-
-    const resetPickerTimer = () => {
-      if (storyPickerTimerRef.current) clearTimeout(storyPickerTimerRef.current);
-      if (pickerActiveRef.current) return;
-      storyPickerTimerRef.current = window.setTimeout(() => {
-        if (!voice.isPlayingStory() && voice.getQueueLength() === 0 && !isProcessingQuestionRef.current) {
-          showStoryPicker();
-        } else {
-          storyPickerTimerRef.current = window.setTimeout(() => {
-            if (!voice.isPlayingStory() && !isProcessingQuestionRef.current) showStoryPicker();
-          }, 30_000);
-        }
-      }, STORY_PICKER_INTERVAL_MS);
-    };
-
-    resetPickerTimer();
-    return () => {
-      if (storyPickerTimerRef.current) clearTimeout(storyPickerTimerRef.current);
-    };
-  }, [isTourStarted, voice, showStoryPicker]);
 
   // No silence fillers. When a story arrives after a quiet gap, the transition
   // line acknowledges the pause naturally. Silence lets the listener look around.
@@ -1084,34 +979,6 @@ function App() {
 
               </div>
             </div>
-
-            {storyPicker && storyPicker.visible && (
-              <div className="absolute inset-0 z-40 bg-slate-950/80 backdrop-blur-sm flex items-center justify-center px-5">
-                <div className="w-full max-w-sm">
-                  <div className="flex items-center gap-2 mb-4 justify-center">
-                    <Sparkles size={20} className="text-amber-400" />
-                    <h3 className="text-lg font-bold text-white tracking-tight">What do you want to hear?</h3>
-                  </div>
-                  <p className="text-xs text-slate-400 text-center mb-5">Leo will pick for you in a few seconds if you'd rather keep driving.</p>
-                  <div className="flex flex-col gap-3">
-                    {storyPicker.choices.map((choice, i) => (
-                      <button
-                        key={choice}
-                        onClick={() => handleStoryPickerChoice(choice)}
-                        className="px-5 py-4 rounded-xl bg-slate-800/90 border border-slate-700/70 text-left hover:border-amber-600/50 hover:bg-slate-700/80 transition-all active:scale-95 shadow-lg group"
-                      >
-                        <div className="flex items-center gap-3">
-                          <span className="flex items-center justify-center w-7 h-7 rounded-full bg-amber-900/40 border border-amber-700/40 text-amber-400 text-xs font-bold shrink-0">
-                            {i + 1}
-                          </span>
-                          <span className="text-sm font-semibold text-slate-200 group-hover:text-amber-200 transition-colors">{choice}</span>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
 
             {pocketMode && (
               <div
