@@ -259,6 +259,15 @@ function App() {
       if (fullAnswer.trim().length > 0) {
         voice.recordSpokenText(fullAnswer);
         voice.speak(fullAnswer);
+        // Bridge back into the tour so the listener isn't left hanging after
+        // the answer ends. Queue a short handoff line, then immediately kick
+        // off the next story fetch so the gap is minimal.
+        const pos = geolocation.position;
+        if (pos) {
+          voice.queueStory("Alright, let's get back to it.", undefined, undefined, undefined, 'scripted');
+          lastFetchTimeRef.current = Date.now();
+          handleIntervalUpdate(pos);
+        }
       }
     } catch (error) {
       console.error('Error answering question:', error);
