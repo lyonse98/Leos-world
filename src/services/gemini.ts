@@ -797,7 +797,7 @@ class GeminiService {
       parts.push(`NEARBY RIGHT NOW (they can likely see these): ${qaContext.nearbyLandmarks.slice(0, 5).join(', ')}`);
     }
     parts.push(
-      'Answer the question directly and completely. Take as much time as the answer needs — 4 to 6 sentences is fine if the question warrants it. The listener asked because they are curious, so give them a satisfying, full answer, not a quick summary. Ground it in this location and what you just told them when relevant. If you do not actually know, say so plainly and offer what you do know about the wider area — never invent specifics.'
+      'Answer the question directly and completely. Take as much time as the answer needs — 4 to 6 sentences is fine if the question warrants it, but keep it under 10 sentences so the listener can get back to the tour. The listener asked because they are curious, so give them a satisfying, full answer, not a quick summary. Ground it in this location and what you just told them when relevant. If you do not actually know, say so plainly and offer what you do know about the wider area — never invent specifics.'
     );
 
     const prompt = parts.join('\n\n');
@@ -836,7 +836,7 @@ class GeminiService {
             this.ai!.models.generateContent({
               model: LEO_MODEL_ID,
               contents: prompt,
-              config: { systemInstruction: LEO_SYSTEM_INSTRUCTION },
+              config: { systemInstruction: LEO_SYSTEM_INSTRUCTION, maxOutputTokens: 1024 },
             }),
             REQUEST_TIMEOUT_MS
           )
