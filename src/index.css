@@ -121,3 +121,16 @@ html, body, #root {
 /* ── Scrollbar hide for narration ─────────────────────────── */
 .leo-scroll::-webkit-scrollbar { display: none; }
 .leo-scroll { scrollbar-width: none; }
+
+/* ── Leo avatar mouth flap (speaking state) ────────────────── */
+@keyframes leo-mouth {
+  0%, 100% { transform: scaleY(0.6); }
+  25%      { transform: scaleY(1.2); }
+  50%      { transform: scaleY(0.4); }
+  75%      { transform: scaleY(1); }
+}
+.leo-mouth-flap {
+  transform-origin: 50px 58px;
+  animation: leo-mouth 0.35s ease-in-out infinite;
+  will-change: transform;
+}

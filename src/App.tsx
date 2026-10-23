@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Eye, EyeOff, Play, MapPin, Wifi, WifiOff, Download, Clock, Compass, VolumeX, Moon, XCircle, Share2, Music, Send, Heart } from 'lucide-react';
+import LeoAvatar from './components/LeoAvatar';
 import { useVoice } from './hooks/useVoice';
 import { useGeolocation, Position } from './hooks/useGeolocation';
 import { useWakeLock } from './hooks/useWakeLock';
@@ -917,14 +918,10 @@ function App() {
                   carries the state so the listener never has to read. */}
               <div className="flex flex-col items-center">
                 <div className="relative flex items-center justify-center mb-6" style={{ width: 128, height: 128 }}>
-                  <div className={`absolute rounded-full border leo-ring ${leoStatus.ring}`} style={{ width: 128, height: 128 }} />
-                  <div className={`absolute rounded-full border leo-ring-delay ${leoStatus.ring}`} style={{ width: 128, height: 128 }} />
-                  <div className={`absolute w-24 h-24 rounded-full blur-2xl transition-colors duration-700 ${leoStatus.glow}`} />
-                  <div className={`relative w-24 h-24 rounded-full bg-gradient-to-br border flex items-center justify-center shadow-2xl transition-colors duration-500 ${leoStatus.orb}`}>
-                    {isProcessingQuestion
-                      ? <Send size={30} className={leoStatus.icon} strokeWidth={1.5} />
-                      : <Compass size={34} className={leoStatus.icon} strokeWidth={1.5} />}
-                  </div>
+                  <LeoAvatar
+                    state={isProcessingQuestion ? 'thinking' : voice.isSpeaking ? 'speaking' : 'idle'}
+                    size={128}
+                  />
                 </div>
 
                 {voice.isSpeaking && (
