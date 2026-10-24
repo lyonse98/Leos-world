@@ -124,7 +124,7 @@ class GeminiAudioService {
     return { audioUrl, text: prompt, model: TTS_MODEL };
   }
 
-  async textToAudioUrl(text: string): Promise<string> {
+  async textToAudioUrl(text: string): Promise<{ url: string; cacheHit: boolean }> {
     if (!this.ai) {
       throw new Error('Gemini audio service not initialized. Call initialize() first.');
     }
@@ -132,13 +132,13 @@ class GeminiAudioService {
     const cached = await this.getCachedAudio(text);
     if (cached) {
       console.log('[GeminiAudio] TTS cache hit — skipping synthesis');
-      return cached;
+      return { url: cached, cacheHit: true };
     }
 
     const audioBase64 = await this.synthesizeSpeech(text);
     const url = this.base64ToAudioUrl(audioBase64, 'audio/wav');
     await this.setCachedAudio(text, url);
-    return url;
+    return { url, cacheHit: false };
   }
 
   // Core TTS method: calls generateContent with AUDIO modality to get

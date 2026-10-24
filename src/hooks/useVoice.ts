@@ -32,6 +32,14 @@ interface CurrentPosition {
   heading: number | null;
 }
 
+export interface StoryTiming {
+  synthRequestAt: number | null;
+  synthResolvedAt: number | null;
+  synthCacheHit: boolean | null;
+  onPlayingAt: number | null;
+  playbackEndAt: number | null;
+}
+
 // Preference order for Leo's speaking voice. Resolved in one place so every
 // playback path agrees on who Leo sounds like.
 const PREFERRED_VOICE_NAMES = [
@@ -120,6 +128,14 @@ export const useVoice = () => {
   // onplaying/onstart, cleared on end/error/stop. Gates pre-synthesis so we
   // don't warm the TTS cache while the engine is still loading or blocked.
   const playbackStartedRef = useRef<boolean>(false);
+  // Per-story timing — set during playback, read by the app for diagnostics.
+  const storyTimingRef = useRef<StoryTiming>({
+    synthRequestAt: null,
+    synthResolvedAt: null,
+    synthCacheHit: null,
+    onPlayingAt: null,
+    playbackEndAt: null,
+  });
   const [audioBlocked, setAudioBlocked] = useState<boolean>(false);
   // Set when the listener returns to a tour whose audio the platform paused.
   // Surfaces as "tap to resume" instead of leaving them in unexplained silence.
@@ -489,7 +505,11 @@ export const useVoice = () => {
     if (preSynthTextRef.current === fullText) return;
     preSynthTextRef.current = fullText;
 
-    geminiAudio.textToAudioUrl(fullText).catch(() => {
+    geminiAudio.textToAudioUrl(fullText).then((result) => {
+      if (result.cacheHit) {
+        console.log('[Voice] Pre-synthesis was a cache hit — already warm');
+      }
+    }).catch(() => {
       // Best-effort — a failed pre-synthesis just means the next story
       // synthesizes on demand as before.
     });
@@ -527,7 +547,11 @@ export const useVoice = () => {
     }
 
     try {
-      const url = await geminiAudio.textToAudioUrl(fullText);
+      storyTimingRef.current.synthRequestAt = Date.now();
+      const ttsResult = await geminiAudio.textToAudioUrl(fullText);
+      storyTimingRef.current.synthResolvedAt = Date.now();
+      storyTimingRef.current.synthCacheHit = ttsResult.cacheHit;
+      const url = ttsResult.url;
       const audio = audioElRef.current;
       if (!audio) { finish(false); return; }
 
@@ -545,10 +569,12 @@ export const useVoice = () => {
 
       audio.onplaying = () => {
         playbackStartedRef.current = true;
+        storyTimingRef.current.onPlayingAt = Date.now();
         preSynthesizeNextRef.current();
       };
       audio.onended = () => {
         playbackStartedRef.current = false;
+        storyTimingRef.current.playbackEndAt = Date.now();
         if (ttsUrlRef.current) {
           URL.revokeObjectURL(ttsUrlRef.current);
           ttsUrlRef.current = null;
@@ -612,6 +638,7 @@ export const useVoice = () => {
       utterance.onstart = () => {
         started = true;
         playbackStartedRef.current = true;
+        storyTimingRef.current.onPlayingAt = Date.now();
         preSynthesizeNextRef.current();
         audioBlockedRef.current = false;
         setAudioBlocked(false);
@@ -623,6 +650,7 @@ export const useVoice = () => {
       utterance.onend = () => {
         if (index >= sentenceGroups.length - 1) {
           playbackStartedRef.current = false;
+          storyTimingRef.current.playbackEndAt = Date.now();
         }
         const pauseMs = index === 0 ? 500 : 350;
         setTimeout(() => playSentence(index + 1), pauseMs);
@@ -666,6 +694,15 @@ export const useVoice = () => {
     }
 
     isPlayingStoryRef.current = true;
+
+    // Reset the per-story timing tracker for the story about to play.
+    storyTimingRef.current = {
+      synthRequestAt: null,
+      synthResolvedAt: null,
+      synthCacheHit: null,
+      onPlayingAt: null,
+      playbackEndAt: null,
+    };
 
     // Record what is going on air, so a thumb tap or a skip knows exactly
     // which story it is rating and how long it ran. Scripted lines and ads
@@ -995,6 +1032,8 @@ export const useVoice = () => {
 
   const getQueueLength = useCallback(() => storyQueueRef.current.length, []);
 
+  const getStoryTiming = useCallback((): StoryTiming => storyTimingRef.current, []);
+
   const setCurrentPositionProvider = useCallback((provider: (() => CurrentPosition | null) | null) => {
     currentPositionProviderRef.current = provider;
   }, []);
@@ -1024,6 +1063,7 @@ export const useVoice = () => {
     isPlayingStory,
     setOnStoryComplete,
     getQueueLength,
+    getStoryTiming,
     setCurrentPositionProvider,
     ttsStatus,
   };

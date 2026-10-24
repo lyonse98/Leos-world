@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Eye, EyeOff, Play, MapPin, Wifi, WifiOff, Download, Clock, Compass, VolumeX, Moon, XCircle, Share2, Music, Send, Heart } from 'lucide-react';
-import { useVoice } from './hooks/useVoice';
+import { useVoice, StoryTiming } from './hooks/useVoice';
 import { useGeolocation, Position } from './hooks/useGeolocation';
 import { useWakeLock } from './hooks/useWakeLock';
 import { geminiService } from './services/gemini';
@@ -112,6 +112,15 @@ function App() {
   // Dead-air pacing. Every filler line goes through this clock so exactly one
   // plays per silence, and so the quiet stretches Leo promises actually happen.
   const lastSpeechEndRef = useRef<number>(0);
+
+  // Per-story timing — fetch and text phases recorded here, synth phases
+  // recorded in useVoice. Merged for the diagnostics panel after each story.
+  const storyFetchStartRef = useRef<number | null>(null);
+  const storyTextReadyRef = useRef<number | null>(null);
+  const [lastStoryTiming, setLastStoryTiming] = useState<string>('');
+  const prevStoryTimingEndRef = useRef<number | null>(null);
+  const prevStoryCountRef = useRef<number>(0);
+  const isFetchingStoryRef = useRef<boolean>(false);
 
   useEffect(() => {
     storyCache.setNetworkStatusCallback((online) => setIsOnline(online));
@@ -299,6 +308,8 @@ function App() {
 
     console.log('[Tour] Getting story for position:', position);
     setPipelineStatus('fetching landmarks');
+    storyFetchStartRef.current = Date.now();
+    isFetchingStoryRef.current = true;
 
     // Tier 1 landmark preemption: if a world/national-caliber landmark is
     // close by and unhearing, it jumps the queue. We don't hard-abort audio
@@ -347,6 +358,8 @@ function App() {
 
       if (result && result.story.trim().length > 0) {
         setPipelineStatus('story queued');
+        storyTextReadyRef.current = Date.now();
+        isFetchingStoryRef.current = false;
         setStoriesCount(prev => prev + 1);
         setLastStorySource(result.fromCache ? 'cache' : 'live');
         if (geminiError) { geminiService.clearError(); setGeminiError(null); }
@@ -392,8 +405,10 @@ function App() {
         storyCache.prefetchForPosition(position, position.speed !== null && position.speed >= 6.0 ? 'driving' : 'walking').catch(() => {});
       } else if (!isOnlineRef.current) {
         setPipelineStatus('offline, no cache');
+        isFetchingStoryRef.current = false;
         console.log('[Tour] Offline - no cached story available, queued position');
       } else {
+        isFetchingStoryRef.current = false;
         // Story came back empty and we're online — Gemini likely failed.
         const err = geminiService.getLastError();
         const detail = err || 'no error set — shouldTell may have returned false or generateStory returned empty';
@@ -404,6 +419,7 @@ function App() {
         }
       }
     } catch (error) {
+      isFetchingStoryRef.current = false;
       setPipelineStatus('ERROR: ' + (error instanceof Error ? error.message : String(error)).slice(0, 50));
       console.error('Error getting narration:', error);
       setGeminiError(error instanceof Error ? error.message : String(error));
@@ -425,7 +441,32 @@ function App() {
       // The anchor for "how long has it been quiet" is the end of the last
       // thing Leo actually said — not the last fetch, which would make a long
       // story look like silence and have him talk over his own gap.
-      lastSpeechEndRef.current = Date.now();
+      const speechEndNow = Date.now();
+      lastSpeechEndRef.current = speechEndNow;
+
+      // Merge this story's timings: fetch + text (recorded here) with synth +
+      // onplaying + playbackEnd (recorded in useVoice). Log one line and set
+      // the diagnostics display string.
+      const voiceTiming: StoryTiming = voice.getStoryTiming();
+      const fetchS = storyFetchStartRef.current && storyTextReadyRef.current
+        ? ((storyTextReadyRef.current - storyFetchStartRef.current) / 1000).toFixed(1)
+        : null;
+      const synthS = voiceTiming.synthRequestAt && voiceTiming.synthResolvedAt
+        ? ((voiceTiming.synthResolvedAt - voiceTiming.synthRequestAt) / 1000).toFixed(1)
+        : null;
+      const cacheHit = voiceTiming.synthCacheHit;
+      const gapS = prevStoryTimingEndRef.current
+        ? ((speechEndNow - prevStoryTimingEndRef.current) / 1000).toFixed(1)
+        : null;
+
+      if (fetchS || synthS) {
+        const timingStr = `Fetch: ${fetchS ?? '-'}s · Text: ${fetchS ? fetchS : '-'}s · Synth: ${synthS ?? '-'}s (cache: ${cacheHit === true ? 'Y' : cacheHit === false ? 'N' : '-'}) · Gap after last: ${gapS ?? '-'}s`;
+        setLastStoryTiming(timingStr);
+        console.log(`[Timing] fetch=${fetchS ?? '-'}s text=${fetchS ?? '-'}s synth=${synthS ?? '-'}s cacheHit=${cacheHit === true ? 'Y' : cacheHit === false ? 'N' : '-'} gap=${gapS ?? '-'}s`);
+      }
+      prevStoryTimingEndRef.current = speechEndNow;
+      storyFetchStartRef.current = null;
+      storyTextReadyRef.current = null;
 
       // Standing still for a while earns a deeper dive: shorter silence, and
       // Leo told to go long. This is the reward for stopping to actually look.
@@ -548,10 +589,26 @@ function App() {
   }, [isOnline, missedQueueCount, isTourStarted, voice]);
 
   useEffect(() => {
-    voice.setOnStoryStart(() => {
+    voice.setOnStoryStart((topic: string | null) => {
       setHasLikedStory(false);
+
+      // When a location story starts playing, fetch the next story's text
+      // during playback so generation overlaps with audio — the listener
+      // never hears the fetch latency as silence. The story-complete handler
+      // stays as fallback if the queue is still empty when this story ends.
+      // Scripted lines (topic === null) are exempt.
+      if (topic !== null && isTourStartedRef.current && isOnlineRef.current) {
+        if (voice.getQueueLength() === 0 && !isFetchingStoryRef.current) {
+          const pos = positionRef.current;
+          if (pos) {
+            console.log('[Tour] Pre-fetching next story during playback');
+            lastFetchTimeRef.current = Date.now();
+            handleIntervalUpdate(pos);
+          }
+        }
+      }
     });
-  }, [voice]);
+  }, [voice, handleIntervalUpdate]);
 
   useEffect(() => {
     voice.setCurrentPositionProvider(() => {
@@ -822,6 +879,9 @@ function App() {
                     <p className="text-amber-400 text-[9px] mt-1 leading-tight">No stories generated — check console for [Tour] logs</p>
                   )}
                   <p className="text-cyan-400 text-[9px] mt-1 leading-tight">Pipeline: {pipelineStatus}</p>
+                  {lastStoryTiming && (
+                    <p className="text-amber-400 text-[9px] mt-1 leading-tight">{lastStoryTiming}</p>
+                  )}
                   {geolocation.position && (
                     <p className="text-slate-500">
                       Angles covered: {storyCoverage.getTotalAnglesCovered()} across {storyCoverage.getSubjectCount()} subjects
