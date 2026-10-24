@@ -114,6 +114,13 @@ export const useVoice = () => {
   const isPlayingStoryRef = useRef<boolean>(false);
   const onStoryCompleteRef = useRef<(() => void) | null>(null);
   const watchdogRef = useRef<number | null>(null);
+  // Last moment playback demonstrably advanced — an audio timeupdate, an
+  // onplaying event, or a speech boundary. The watchdog trusts progress,
+  // never status flags: in a car (Bluetooth, locked screen, throttled
+  // timers) paused/speaking flags can read "not playing" while sound is
+  // coming out, and the old flag-based watchdog executed healthy stories.
+  const lastProgressAtRef = useRef<number>(0);
+  const lastAudioTimeRef = useRef<number>(-1);
   const mutedUntilRef = useRef<number>(0);
   const recentSpokenRef = useRef<string[]>([]);
   // What is on air right now. A rating needs to know which story it refers to
@@ -442,38 +449,48 @@ export const useVoice = () => {
       .trim();
   };
 
-  // Watchdog: detects stuck speech (no audio for 8s while a story is
-  // "playing"). Tolerates inter-sentence pauses by tracking sustained
-  // silence rather than firing the moment speech pauses.
+  // Watchdog: detects a genuinely stuck player — playback position frozen
+  // for 8s while a story is "playing". Progress is the only evidence: the
+  // audio element's currentTime advancing, engine events firing, or the
+  // browser voice mid-utterance. A story whose position is moving is alive
+  // and is never advanced, however its status flags read.
   const startWatchdog = useCallback(() => {
     clearWatchdog();
     const checkInterval = 2000;
     const maxSilence = 8000;
-    let silenceStart: number | null = null;
+    // Seed the clock so the synthesis-to-play handoff gets the same grace
+    // as any inter-sentence pause.
+    lastProgressAtRef.current = Date.now();
+    lastAudioTimeRef.current = -1;
 
     const check = () => {
       if (!isPlayingStoryRef.current) return;
 
-      const audioPlaying = audioElRef.current && !audioElRef.current.paused && !audioElRef.current.ended;
-      const isCurrentlySpeaking = (synthRef.current?.speaking ?? false) || audioPlaying;
-
-      if (!isCurrentlySpeaking) {
-        if (silenceStart === null) silenceStart = Date.now();
-        if (Date.now() - silenceStart > maxSilence) {
-          console.warn('[Voice] Watchdog: sustained silence, forcing queue advance');
-          isPlayingStoryRef.current = false;
-          clearWatchdog();
-          setIsSpeaking(false);
-          setTimeout(() => playStoryFromQueueRef.current(), 300);
-          return;
+      const now = Date.now();
+      const audio = audioElRef.current;
+      if (audio && audio.src && !audio.ended) {
+        const t = audio.currentTime;
+        if (lastAudioTimeRef.current >= 0 && t > lastAudioTimeRef.current + 0.05) {
+          lastProgressAtRef.current = now;
         }
-      } else {
-        silenceStart = null;
+        lastAudioTimeRef.current = t;
+      }
+      if (synthRef.current?.speaking) {
+        lastProgressAtRef.current = now;
+      }
+
+      if (now - lastProgressAtRef.current > maxSilence) {
+        console.warn('[Voice] Watchdog: playback position frozen for 8s, forcing queue advance');
+        isPlayingStoryRef.current = false;
+        clearWatchdog();
+        setIsSpeaking(false);
+        setTimeout(() => playStoryFromQueueRef.current(), 300);
+        return;
       }
       watchdogRef.current = window.setTimeout(check, checkInterval);
     };
 
-    watchdogRef.current = window.setTimeout(check, maxSilence);
+    watchdogRef.current = window.setTimeout(check, checkInterval);
   }, [clearWatchdog]);
 
   // --- Freshness gate ---
@@ -590,7 +607,11 @@ export const useVoice = () => {
       audio.onplaying = () => {
         playbackStartedRef.current = true;
         storyTimingRef.current.onPlayingAt = Date.now();
+        lastProgressAtRef.current = Date.now();
         preSynthesizeNextRef.current();
+      };
+      audio.ontimeupdate = () => {
+        lastProgressAtRef.current = Date.now();
       };
       audio.onended = () => {
         playbackStartedRef.current = false;
@@ -660,12 +681,17 @@ export const useVoice = () => {
         started = true;
         playbackStartedRef.current = true;
         storyTimingRef.current.onPlayingAt = Date.now();
+        lastProgressAtRef.current = Date.now();
         preSynthesizeNextRef.current();
         audioBlockedRef.current = false;
         setAudioBlocked(false);
         setWasInterrupted(false);
         setIsSpeaking(true);
         startWatchdog();
+      };
+
+      utterance.onboundary = () => {
+        lastProgressAtRef.current = Date.now();
       };
 
       utterance.onend = () => {
@@ -765,6 +791,24 @@ export const useVoice = () => {
     // Tell the app what just went on air, so the rating control points at the
     // story actually playing rather than the one most recently queued.
     onStoryStartRef.current?.(item.isLocationStory ? (item.topic ?? null) : null);
+
+    // Cut diagnostic: if the previous item's audio file was still mid-play
+    // when this story takes over, something advanced the queue early. Log
+    // the exact position — field tests use this to prove whether story
+    // cut-offs happen inside the app or outside it (car audio routing,
+    // a second app instance). A healthy handoff never logs this: the
+    // previous file has ended (ended=true or currentTime ~= duration).
+    const prevAudio = audioElRef.current;
+    if (
+      prevAudio && prevAudio.src && !prevAudio.ended &&
+      Number.isFinite(prevAudio.duration) && prevAudio.duration > 0 &&
+      prevAudio.currentTime > 0.25 && prevAudio.currentTime < prevAudio.duration - 1.5
+    ) {
+      console.warn(
+        `[Voice] CUT DIAGNOSTIC: new story starting while previous audio was mid-file ` +
+        `at ${prevAudio.currentTime.toFixed(1)}s of ${prevAudio.duration.toFixed(1)}s`
+      );
+    }
 
     // Cancel any streaming speech, then play the queued story
     synthRef.current?.cancel();
