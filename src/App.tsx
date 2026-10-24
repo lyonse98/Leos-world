@@ -900,7 +900,15 @@ function App() {
         </div>
       )}
       {!isTourStarted ? (
-        <div className="flex-1 relative overflow-y-auto overflow-x-hidden">
+        <div className="flex-1 relative overflow-hidden">
+          {/* The scene (sky, grid, beach, glows) is glued to this frame and
+              never scrolls. The content lives in its own scroll layer on
+              top: when the column is taller than the viewport it scrolls
+              WITHIN the scene instead of pushing the caption/disclaimer
+              below the beach graphic, as the previous single scroll
+              container did (absolute children anchor to the scroll
+              origin, so the beach stayed a screenful up while the text
+              flowed past it). */}
           <div className="absolute inset-0" style={{ background: skyGradient }} />
           <div className="absolute inset-0 leo-grid" />
           <SdBeach className="absolute bottom-0 left-0 w-full h-28 sm:h-36 text-slate-950/60 pointer-events-none" />
@@ -908,7 +916,8 @@ function App() {
           <div className="absolute bottom-[10%] right-[8%] w-[24rem] h-[24rem] bg-cyan-500 rounded-full opacity-[0.05] blur-[120px] leo-float-slow" />
           <div className="absolute top-[50%] left-[55%] w-[20rem] h-[20rem] bg-amber-400 rounded-full opacity-[0.03] blur-[100px] leo-float" />
 
-          <div className="relative z-10 min-h-full flex flex-col items-center justify-center text-center px-6 py-10">
+          <div className="absolute inset-0 overflow-y-auto overflow-x-hidden">
+            <div className="relative z-10 min-h-full flex flex-col items-center justify-center text-center px-6 py-8">
             <div className="mb-1 flex justify-center">
               {/* Leo himself, full body, standing in the screen and waving
                   hello — a still portrait, deliberately unanimated. His
@@ -963,6 +972,7 @@ function App() {
                 <Share2 size={16} />
                 Share Leo's World
               </button>
+            </div>
             </div>
           </div>
         </div>
