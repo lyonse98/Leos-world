@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Eye, EyeOff, Play, MapPin, Wifi, WifiOff, Download, Clock, Compass, VolumeX, Moon, XCircle, Share2, Music, Send, Heart, AlertTriangle } from 'lucide-react';
+import { Eye, EyeOff, Play, MapPin, Wifi, WifiOff, Download, Clock, Compass, VolumeX, Moon, XCircle, Share2, Music, Send, Heart, AlertTriangle, Mic } from 'lucide-react';
 import { useVoice, StoryTiming } from './hooks/useVoice';
 import { useGeolocation, Position } from './hooks/useGeolocation';
+import { useSpeechRecognition } from './hooks/useSpeechRecognition';
 import { useWakeLock } from './hooks/useWakeLock';
 import { geminiService } from './services/gemini';
 import { storyCache, CachedStory } from './services/storyCache';
@@ -77,12 +78,19 @@ function App() {
 
   const voice = useVoice();
   const geolocation = useGeolocation();
+  const speech = useSpeechRecognition();
+  // While a push-to-talk question is being asked or answered, location
+  // stories must not be queued — Leo stays quiet so the driver can ask,
+  // hear the answer, and only then get the tour back.
+  const pttHoldRef = useRef<boolean>(false);
   useWakeLock(isTourStarted);
 
   // What Leo is doing right now, reduced to one glanceable state. Nothing here
   // needs reading — the colour and the orb tell the listener everything from
   // arm's length, which is the whole point on a drive.
-  const leoStatus = isProcessingQuestion
+  const leoStatus = speech.isListening
+    ? { label: 'LISTENING — ASK AWAY', orb: 'from-rose-900/60 to-slate-900 border-rose-600/50', glow: 'bg-rose-500/25', ring: 'border-rose-400/30', icon: 'text-rose-300', text: 'text-rose-300' }
+    : isProcessingQuestion
     ? { label: 'LEO IS THINKING', orb: 'from-amber-900/60 to-slate-900 border-amber-600/50', glow: 'bg-amber-500/25', ring: 'border-amber-400/30', icon: 'text-amber-300', text: 'text-amber-300' }
     : voice.isSpeaking
       ? { label: 'LEO IS SHARING', orb: 'from-blue-900/60 to-slate-900 border-blue-600/50', glow: 'bg-blue-500/25', ring: 'border-blue-400/30', icon: 'text-blue-300', text: 'text-blue-300' }
@@ -182,21 +190,70 @@ function App() {
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);
   }, [isTourStarted, restartTracking]);
 
+  // One question pipeline for typed and spoken questions alike. Returns
+  // true when the question was accepted and processing has begun.
+  const submitQuestion = (raw: string): boolean => {
+    const question = raw.trim();
+    if (!question || isProcessingQuestion) return false;
+    if (!geolocation.position) {
+      setShareToast('Leo needs your location to answer — check location is enabled');
+      setTimeout(() => setShareToast(null), 3500);
+      return false;
+    }
+    analytics.track('question_asked', geolocation.position, geolocation.position.speed !== null && geolocation.position.speed >= 6.0 ? 'driving' : 'walking', { question: question.slice(0, 500) });
+    requestTokenRef.current = geminiService.currentRequestToken();
+    geminiService.cancelAllRequests();
+    setIsProcessingQuestion(true);
+    handleUserQuestion(question);
+    return true;
+  };
+
   const handleSubmitQuestion = () => {
-    const question = userInput.trim();
-    if (!question || isProcessingQuestion) return;
+    if (submitQuestion(userInput)) {
+      setUserInput('');
+    }
+  };
+
+  // Push-to-talk: tap the orb and Leo stops talking so the driver can ask
+  // a question out loud — the driving-safe form of the typed Q&A box. The
+  // transcript feeds the exact same submitQuestion pipeline; nothing about
+  // how questions are answered changes.
+  const handleOrbPress = () => {
+    if (!speech.isSupported || isProcessingQuestion || speech.isListening) return;
     if (!geolocation.position) {
       setShareToast('Leo needs your location to answer — check location is enabled');
       setTimeout(() => setShareToast(null), 3500);
       return;
     }
-    analytics.track('question_asked', geolocation.position, geolocation.position.speed !== null && geolocation.position.speed >= 6.0 ? 'driving' : 'walking', { question: question.slice(0, 500) });
-    setUserInput('');
-    requestTokenRef.current = geminiService.currentRequestToken();
-    geminiService.cancelAllRequests();
-    setIsProcessingQuestion(true);
-    handleUserQuestion(question);
+    // Stop Leo first: he must not talk over the question, and the mic must
+    // not transcribe his own voice coming through the car speakers.
+    if (voice.isPlayingStory()) {
+      voice.skipCurrent();
+    }
+    pttHoldRef.current = true;
+    speech.startListening();
   };
+
+  // A finished utterance becomes a submitted question.
+  useEffect(() => {
+    if (!speech.transcript) return;
+    const question = speech.transcript;
+    speech.clearTranscript();
+    if (!submitQuestion(question)) {
+      pttHoldRef.current = false;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [speech.transcript]);
+
+  // If listening ends with nothing heard (silence, error, accidental tap),
+  // release the hold so the tour resumes instead of waiting forever.
+  const prevListeningRef = useRef<boolean>(false);
+  useEffect(() => {
+    if (prevListeningRef.current && !speech.isListening && !speech.transcript && !isProcessingQuestion) {
+      pttHoldRef.current = false;
+    }
+    prevListeningRef.current = speech.isListening;
+  }, [speech.isListening, speech.transcript, isProcessingQuestion]);
 
   const handleToggleAmbient = () => {
     setAmbientOn(prev => {
@@ -241,6 +298,8 @@ function App() {
 
   const handleEndTour = () => {
     geminiService.cancelAllRequests();
+    speech.stopListening();
+    pttHoldRef.current = false;
     voice.muteForMinutes(0);
     voice.stop();
     geolocation.stopTracking();
@@ -289,7 +348,10 @@ function App() {
         voice.speak("Sorry, couldn't process that. Try asking again.");
       }
     } finally {
-      setTimeout(() => setIsProcessingQuestion(false), 2000);
+      setTimeout(() => {
+        setIsProcessingQuestion(false);
+        pttHoldRef.current = false;
+      }, 2000);
     }
   }, [geolocation.position, voice]);
 
@@ -381,17 +443,24 @@ function App() {
         // question, so his answers can refer back to the story in progress.
         voice.recordSpokenText(result.story);
 
-        console.log(`[Tour] Story from ${result.fromCache ? 'CACHE' : 'LIVE'}, length: ${result.story.length}, queueing`);
+        if (pttHoldRef.current) {
+          // A push-to-talk question owns the audio right now. The fetched
+          // story is dropped, not queued — the next cycle refetches, and
+          // the shared caches make that cheap.
+          console.log('[Tour] Story fetched but not queued — push-to-talk question in progress');
+        } else {
+          console.log(`[Tour] Story from ${result.fromCache ? 'CACHE' : 'LIVE'}, length: ${result.story.length}, queueing`);
 
-        analytics.track('story_played', position, position.speed !== null && position.speed >= 6.0 ? 'driving' : 'walking', {
-          source: result.fromCache ? 'cache' : 'live',
-          topic: result.topic,
-        });
+          analytics.track('story_played', position, position.speed !== null && position.speed >= 6.0 ? 'driving' : 'walking', {
+            source: result.fromCache ? 'cache' : 'live',
+            topic: result.topic,
+          });
 
-        // Gemini now writes its own transition into the opening of each
-        // story, so we queue directly — no app-side filler needed.
-        const isRoad = position.speed !== null && position.speed >= 6.0;
-        voice.queueStory(result.story, position.lat, position.lng, isRoad, undefined, result.subject);
+          // Gemini now writes its own transition into the opening of each
+          // story, so we queue directly — no app-side filler needed.
+          const isRoad = position.speed !== null && position.speed >= 6.0;
+          voice.queueStory(result.story, position.lat, position.lng, isRoad, undefined, result.subject);
+        }
 
         // Trigger prefetch in the background so the next story is ready.
         storyCache.prefetchForPosition(position, position.speed !== null && position.speed >= 6.0 ? 'driving' : 'walking').catch(() => {});
@@ -989,11 +1058,18 @@ function App() {
                   <div className={`absolute rounded-full border leo-ring ${leoStatus.ring}`} style={{ width: 128, height: 128 }} />
                   <div className={`absolute rounded-full border leo-ring-delay ${leoStatus.ring}`} style={{ width: 128, height: 128 }} />
                   <div className={`absolute w-24 h-24 rounded-full blur-2xl transition-colors duration-700 ${leoStatus.glow}`} />
-                  <div className={`relative w-24 h-24 rounded-full bg-gradient-to-br border flex items-center justify-center shadow-2xl transition-colors duration-500 ${leoStatus.orb}`}>
-                    {isProcessingQuestion
-                      ? <Send size={30} className={leoStatus.icon} strokeWidth={1.5} />
-                      : <Compass size={34} className={leoStatus.icon} strokeWidth={1.5} />}
-                  </div>
+                  <button
+                    type="button"
+                    onClick={handleOrbPress}
+                    aria-label="Ask Leo a question by voice"
+                    className={`relative w-24 h-24 rounded-full bg-gradient-to-br border flex items-center justify-center shadow-2xl transition-all duration-500 active:scale-95 ${leoStatus.orb}`}
+                  >
+                    {speech.isListening
+                      ? <Mic size={32} className={leoStatus.icon} strokeWidth={1.5} />
+                      : isProcessingQuestion
+                        ? <Send size={30} className={leoStatus.icon} strokeWidth={1.5} />
+                        : <Compass size={34} className={leoStatus.icon} strokeWidth={1.5} />}
+                  </button>
                 </div>
 
                 {voice.isSpeaking && (
@@ -1011,6 +1087,12 @@ function App() {
                 <p className={`text-[11px] font-bold tracking-[0.25em] transition-colors duration-500 ${leoStatus.text}`}>
                   {leoStatus.label}
                 </p>
+
+                {speech.isSupported && !speech.isListening && (
+                  <p className="mt-2 text-[10px] tracking-wider text-slate-500">
+                    Tap the orb to ask Leo a question
+                  </p>
+                )}
 
                 <div className="mt-5 flex items-center gap-3">
                   <button

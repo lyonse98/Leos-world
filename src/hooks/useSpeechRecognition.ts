@@ -80,11 +80,16 @@ export const useSpeechRecognition = () => {
     }
   }, [isListening]);
 
+  const clearTranscript = useCallback(() => {
+    setTranscript('');
+  }, []);
+
   return {
     isListening,
     transcript,
     isSupported,
     startListening,
     stopListening,
+    clearTranscript,
   };
 };
