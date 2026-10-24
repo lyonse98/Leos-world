@@ -11,7 +11,7 @@ import { deriveTags, isInterestTag } from './storyTags';
 import { storyCoverage, AREA_ANGLES, LANDMARK_ANGLES, describeAngle, describeArea, areaSubjectKey, landmarkSubjectKey, isRotationAngle } from './storyCoverage';
 import { resolveMovementMode, MovementModeHysteresis } from '../utils/geo';
 import { hashString } from '../utils/hash';
-import { LEO_MODEL_ID, LEO_PERSONA_VERSION, LEO_SYSTEM_INSTRUCTION } from './leoPersona';
+import { LEO_MODEL_ID, LEO_QA_MODEL_ID, LEO_QA_MAX_OUTPUT_TOKENS, LEO_PERSONA_VERSION, LEO_SYSTEM_INSTRUCTION } from './leoPersona';
 import { wikipedia } from './wikipedia';
 import { seasonal } from './seasonal';
 import { osmService } from './osmService';
@@ -841,7 +841,7 @@ class GeminiService {
       parts.push(`NEARBY RIGHT NOW (they can likely see these): ${qaContext.nearbyLandmarks.slice(0, 5).join(', ')}`);
     }
     parts.push(
-      'Answer the question directly and completely. Take as much time as the answer needs — 4 to 6 sentences is fine if the question warrants it, but keep it under 10 sentences so the listener can get back to the tour. The listener asked because they are curious, so give them a satisfying, full answer, not a quick summary. Ground it in this location and what you just told them when relevant. If you do not actually know, say so plainly and offer what you do know about the wider area — never invent specifics.'
+      'Answer the question directly, in one to three sentences of spoken prose — the listener asked by voice while driving, and a tight, confident answer beats a complete one. No lists. Ground it in this location and what you just told them when relevant. If you do not actually know, say so plainly and offer the nearest true thing you do know — never invent specifics.'
     );
 
     const prompt = parts.join('\n\n');
@@ -852,9 +852,13 @@ class GeminiService {
         const response = await this.withRetry(() =>
           this.withTimeout(
             this.ai!.models.generateContentStream({
-              model: LEO_MODEL_ID,
+              model: LEO_QA_MODEL_ID,
               contents: prompt,
-              config: { systemInstruction: LEO_SYSTEM_INSTRUCTION },
+              config: {
+                systemInstruction: LEO_SYSTEM_INSTRUCTION,
+                maxOutputTokens: LEO_QA_MAX_OUTPUT_TOKENS,
+                thinkingConfig: { thinkingBudget: 0 },
+              },
             }),
             REQUEST_TIMEOUT_MS
           )
@@ -878,9 +882,13 @@ class GeminiService {
         const response = await this.withRetry(() =>
           this.withTimeout(
             this.ai!.models.generateContent({
-              model: LEO_MODEL_ID,
+              model: LEO_QA_MODEL_ID,
               contents: prompt,
-              config: { systemInstruction: LEO_SYSTEM_INSTRUCTION, maxOutputTokens: 1024 },
+              config: {
+                systemInstruction: LEO_SYSTEM_INSTRUCTION,
+                maxOutputTokens: LEO_QA_MAX_OUTPUT_TOKENS,
+                thinkingConfig: { thinkingBudget: 0 },
+              },
             }),
             REQUEST_TIMEOUT_MS
           )

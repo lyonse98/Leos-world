@@ -16,6 +16,7 @@ import { storyCoverage } from './services/storyCoverage';
 
 import { ambientAudio } from './services/ambientAudio';
 import { storyLikes } from './services/storyLikes';
+import { LEO_MODEL_ID, LEO_QA_MODEL_ID } from './services/leoPersona';
 import { geminiAudio } from './services/geminiAudio';
 import { SUPABASE_CONFIGURED } from './services/supabase';
 import LeoFigure, { LeoPose } from './components/LeoFigure';
@@ -294,7 +295,7 @@ function App() {
       setTimeout(() => setShareToast(null), 3500);
       return false;
     }
-    analytics.track('question_asked', geolocation.position, geolocation.position.speed !== null && geolocation.position.speed >= 6.0 ? 'driving' : 'walking', { question: question.slice(0, 500) });
+    analytics.track('question_asked', geolocation.position, geolocation.position.speed !== null && geolocation.position.speed >= 6.0 ? 'driving' : 'walking', { question: question.slice(0, 500), model: LEO_QA_MODEL_ID });
     requestTokenRef.current = geminiService.currentRequestToken();
     geminiService.cancelAllRequests();
     setIsProcessingQuestion(true);
@@ -733,6 +734,7 @@ function App() {
           synthS: synthS ? parseFloat(synthS) : null,
           cacheHit,
           gapS: gapS ? parseFloat(gapS) : null,
+          model: LEO_MODEL_ID,
         });
       }
       prevStoryTimingEndRef.current = voiceTiming.playbackEndAt ?? speechEndNow;

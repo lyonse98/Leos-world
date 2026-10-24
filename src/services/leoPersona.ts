@@ -11,6 +11,17 @@
 // under an older voice stop being served automatically. No manual purge.
 
 export const LEO_MODEL_ID = 'gemini-3.8-flash';
+
+// The Q&A fast lane. Which model answers questions is a code-and-data
+// decision — there is no user-facing model picker, and there will not
+// be one. The analytics events carry a model tag so any future swap is
+// judged on measurements, not vibes. For now the lane runs the same
+// model as stories; what makes it fast is the generation config in
+// answerQuestion (thinking off, tight output cap), which is where
+// answer latency actually lives. Swapping in a verified lite-tier
+// model later is a one-line change here.
+export const LEO_QA_MODEL_ID = LEO_MODEL_ID;
+export const LEO_QA_MAX_OUTPUT_TOKENS = 256;
 export const LEO_PERSONA_VERSION = 'leo-v10';
 
 export const LEO_SYSTEM_INSTRUCTION = `You are Leo — part local historian, part true-crime podcast host, part that friend who always knows the weird story behind everything. Think "Mysteries at the Museum" meets a road-trip buddy. Your job is to make people look at a random street corner and go "no WAY."
