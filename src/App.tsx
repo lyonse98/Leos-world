@@ -287,6 +287,29 @@ function App() {
 
   // One question pipeline for typed and spoken questions alike. Returns
   // true when the question was accepted and processing has begun.
+  // Strict Q&A serialization (Erik's model): one question + answer at a
+  // time, across BOTH inputs. isProcessingQuestion is the single lock —
+  // the text box and Send button already disable on it, and the Leo
+  // press already refuses on it. What changed is the lock's lifespan:
+  // it used to die 2s after the answer's text arrived (while Leo was
+  // still speaking it). Now it spans the whole answer cycle and is
+  // released by releaseQuestionLock, called from the story-start
+  // handler when the next line after the answer goes on air (the
+  // answer is complete; the tour is resuming), from the failsafe
+  // below, or at tour end. No path may leave it set — a stuck lock
+  // bricks both inputs, which is worse than any overlap it prevents.
+  const answerPhaseRef = useRef<'awaiting-answer' | 'awaiting-resume' | null>(null);
+  const answerFailsafeRef = useRef<number | null>(null);
+  const releaseQuestionLock = useCallback(() => {
+    answerPhaseRef.current = null;
+    if (answerFailsafeRef.current) {
+      window.clearTimeout(answerFailsafeRef.current);
+      answerFailsafeRef.current = null;
+    }
+    setIsProcessingQuestion(false);
+    pttHoldRef.current = false;
+  }, []);
+
   const submitQuestion = (raw: string): boolean => {
     const question = raw.trim();
     if (!question || isProcessingQuestion) return false;
@@ -314,7 +337,15 @@ function App() {
   // transcript feeds the exact same submitQuestion pipeline; nothing about
   // how questions are answered changes.
   const handleOrbPress = () => {
-    if (!speech.isSupported || isProcessingQuestion || speech.isListening) return;
+    if (isProcessingQuestion) {
+      // The lock is visible here too: a press that does nothing reads
+      // as a broken button (the field test's silent-drop lesson), so
+      // say why, once, in plain language.
+      setShareToast("Leo's finishing your last answer — one moment");
+      setTimeout(() => setShareToast(null), 3000);
+      return;
+    }
+    if (!speech.isSupported || speech.isListening) return;
     if (!geolocation.position) {
       setShareToast('Leo needs your location to answer — check location is enabled');
       setTimeout(() => setShareToast(null), 3500);
@@ -499,6 +530,14 @@ function App() {
       if (token !== geminiService.currentRequestToken()) return;
       if (fullAnswer.trim().length > 0) {
         voice.recordSpokenText(fullAnswer);
+        // Arm the answer cycle BEFORE speaking: the story-start
+        // handler advances the phase when the answer goes on air and
+        // releases the lock when the next line after it starts. The
+        // failsafe guarantees release even if a start signal is ever
+        // missed — the lock must not outlive its welcome.
+        answerPhaseRef.current = 'awaiting-answer';
+        if (answerFailsafeRef.current) window.clearTimeout(answerFailsafeRef.current);
+        answerFailsafeRef.current = window.setTimeout(() => releaseQuestionLock(), 120_000);
         voice.speak(fullAnswer);
         // Bridge back into the tour so the listener isn't left hanging after
         // the answer ends. Queue a short handoff line, then immediately kick
@@ -516,10 +555,13 @@ function App() {
         voice.speak("Sorry, couldn't process that. Try asking again.");
       }
     } finally {
-      setTimeout(() => {
-        setIsProcessingQuestion(false);
-        pttHoldRef.current = false;
-      }, 2000);
+      // Paths that never armed a cycle (stale token, empty answer,
+      // generation error) end here. An armed cycle deliberately keeps
+      // the lock past this point — it ends at the story-start handler
+      // when the tour resumes, or at the failsafe.
+      if (answerPhaseRef.current === null) {
+        releaseQuestionLock();
+      }
     }
   }, [geolocation.position, voice]);
 
@@ -879,6 +921,15 @@ function App() {
 
   useEffect(() => {
     voice.setOnStoryStart((topic: string | null) => {
+      // Answer-cycle bookkeeping for strict Q&A serialization: the
+      // first start after arming is the answer going on air; the start
+      // after that (bridge line or a story) means the answer is
+      // complete and the tour is resuming — release the question lock.
+      if (answerPhaseRef.current === 'awaiting-answer') {
+        answerPhaseRef.current = 'awaiting-resume';
+      } else if (answerPhaseRef.current === 'awaiting-resume') {
+        releaseQuestionLock();
+      }
       setHasLikedStory(false);
 
       // When a location story starts playing, fetch the next story's text
