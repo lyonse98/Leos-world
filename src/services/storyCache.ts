@@ -71,6 +71,12 @@ const ROUTE_OFFSETS_WALKING_M = [150, 300, 500];
 class StoryCacheService {
   private cache: CachedStory[] = [];
   private missedQueue: QueueEntry[] = [];
+  // The first story of a session is the audition: everything the listener
+  // decides about Leo, they decide during it. While this is armed, a cache
+  // serve prefers a story with a real subject (a landmark with something
+  // to say) over a subject-less area story at the same distance. Cleared
+  // by the first serve of the session, from cache or live.
+  private openerPending = true;
   private prefetchTargets: PrefetchTarget[] = [];
   private isPrefetching = false;
   private isPrefetchingAhead = false;
@@ -192,8 +198,11 @@ class StoryCacheService {
     onChunk?: (text: string) => void
   ): Promise<{ story: string; fromCache: boolean; topic: string; subject: string; rotation: StoryRotation | null } | null> {
     this.pruneStalePrefetches(position);
-    const cached = this.findNearestUnplayedCache(position);
+    const cached = this.openerPending
+      ? (this.findOpenerCache(position) ?? this.findNearestUnplayedCache(position))
+      : this.findNearestUnplayedCache(position);
     if (cached) {
+      this.openerPending = false;
       cached.played = true;
       this.notifyCacheChange();
       if (onChunk) onChunk(cached.text);
@@ -219,6 +228,7 @@ class StoryCacheService {
       console.log('[StoryCache] getTourNarration returned:', { textLen: result.text?.length || 0, subject: result.subject, mode: result.mode });
       const story = result.text;
       if (story && story.trim().length > 0) {
+        this.openerPending = false;
         const topic = result.subject || `Story at ${position.lat.toFixed(4)}, ${position.lng.toFixed(4)}`;
         this.addToCache({
           text: story,
@@ -391,6 +401,30 @@ class StoryCacheService {
     return storyCoverage.isSubjectLockedForSession(landmarkSubjectKey(base));
   }
 
+  armOpener(): void {
+    this.openerPending = true;
+  }
+
+  // The opener serve: nearest unplayed story that is ABOUT something — a
+  // named subject — within the same tight radius the normal serve uses.
+  // Falls back to the plain nearest serve when nothing with a subject is
+  // in range (a great area story still beats a dull landmark).
+  private findOpenerCache(position: Position): CachedStory | null {
+    let best: CachedStory | null = null;
+    let minDistance = Infinity;
+    for (const story of this.cache) {
+      if (story.played) continue;
+      if (!story.subject || story.subject.trim().length === 0) continue;
+      if (this.isLockedOutWhileMoving(story, position)) continue;
+      const d = this.distance(position, { lat: story.lat, lng: story.lng });
+      if (d < minDistance) {
+        minDistance = d;
+        best = story;
+      }
+    }
+    return best && minDistance <= CACHE_DISTANCE_THRESHOLD_M ? best : null;
+  }
+
   private findNearestUnplayedCache(position: Position): CachedStory | null {
     let nearest: CachedStory | null = null;
     let minDistance = Infinity;
@@ -470,6 +504,7 @@ class StoryCacheService {
 
   reset() {
     this.cache = [];
+    this.openerPending = true;
     this.missedQueue = [];
     this.prefetchTargets = [];
     this.lastFetchPosition = null;

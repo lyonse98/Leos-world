@@ -713,6 +713,21 @@ function App() {
   const voiceRef = useRef(voice);
   voiceRef.current = voice;
 
+  // First-90-seconds guarantee, part 1: warm the story cache while the
+  // listener is still on the landing page. The seconds spent reading the
+  // landing page become generation time, so the first fetch after START
+  // is a cache hit or a fast live call instead of a cold pipeline. The
+  // prefetch guards (buffer level, min interval, 50m movement) keep this
+  // from ever generating more than the tour itself would. Coverage is
+  // recorded at play time, so warming never burns an unheard story.
+  const landingWarmupAtRef = useRef<number>(0);
+  useEffect(() => {
+    if (isTourStarted || !geolocation.position || !isOnline) return;
+    if (Date.now() - landingWarmupAtRef.current < 60_000) return;
+    landingWarmupAtRef.current = Date.now();
+    storyCache.prefetchForPosition(geolocation.position, geolocation.movementMode).catch(() => {});
+  }, [isTourStarted, geolocation.position, geolocation.movementMode, isOnline]);
+
   useEffect(() => {
     if (!isTourStarted || !isOnline) return;
 
@@ -854,6 +869,7 @@ function App() {
       if (!resume) {
         storyCache.reset();
       }
+      storyCache.armOpener();
       locationTracker.reset();
       storyCache.setOnline(navigator.onLine);
 
@@ -1189,7 +1205,7 @@ function App() {
                 >
                   <Play size={16} className="text-cyan-400 shrink-0" />
                   <span className="text-xs font-semibold text-cyan-300">
-                    Welcome back. Tap to keep the tour going.
+                    Audio paused — tap to continue.
                   </span>
                 </button>
               )}
