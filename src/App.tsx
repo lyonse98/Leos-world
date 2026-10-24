@@ -19,7 +19,7 @@ import { storyLikes } from './services/storyLikes';
 import { geminiAudio } from './services/geminiAudio';
 import { SUPABASE_CONFIGURED } from './services/supabase';
 import LeoFigure, { LeoPose } from './components/LeoFigure';
-import SdSkyline from './components/SdSkyline';
+import SdBeach from './components/SdBeach';
 
 // The sky over San Diego, by the clock. Still just a gradient — no image,
 // no weight — but the app sits in the same light the driver is in.
@@ -882,7 +882,7 @@ function App() {
         <div className="flex-1 relative overflow-y-auto overflow-x-hidden">
           <div className="absolute inset-0" style={{ background: skyGradient }} />
           <div className="absolute inset-0 leo-grid" />
-          <SdSkyline className="absolute bottom-0 left-0 w-full h-24 sm:h-32 text-slate-950/60 pointer-events-none" />
+          <SdBeach className="absolute bottom-0 left-0 w-full h-28 sm:h-36 text-slate-950/60 pointer-events-none" />
           <div className="absolute top-[15%] left-[10%] w-[28rem] h-[28rem] bg-amber-600 rounded-full opacity-[0.06] blur-[120px] leo-float" />
           <div className="absolute bottom-[10%] right-[8%] w-[24rem] h-[24rem] bg-cyan-500 rounded-full opacity-[0.05] blur-[120px] leo-float-slow" />
           <div className="absolute top-[50%] left-[55%] w-[20rem] h-[20rem] bg-amber-400 rounded-full opacity-[0.03] blur-[100px] leo-float" />
@@ -1001,7 +1001,7 @@ function App() {
           {/* MIDDLE ZONE — narrative card */}
           <div className="flex-1 relative flex items-center justify-center overflow-hidden px-3 sm:px-5" style={{ background: skyGradient }}>
             <div className="absolute inset-0 leo-grid opacity-50" />
-            <SdSkyline className="absolute bottom-0 left-0 w-full h-20 sm:h-24 text-slate-950/50 pointer-events-none" />
+            <SdBeach className="absolute bottom-0 left-0 w-full h-24 sm:h-28 text-slate-950/50 pointer-events-none" />
             <div className="absolute top-10 left-10 w-64 h-64 bg-amber-700 rounded-full opacity-[0.07] blur-[100px] leo-float" />
             <div className="absolute bottom-16 right-16 w-72 h-72 bg-cyan-600 rounded-full opacity-[0.05] blur-[100px] leo-float-slow" />
             <div className="absolute top-[40%] right-[20%] w-48 h-48 bg-amber-500 rounded-full opacity-[0.04] blur-[80px] leo-float" />
