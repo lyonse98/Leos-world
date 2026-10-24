@@ -275,28 +275,39 @@ class PlacesService {
     return calculateDistance(p1.lat, p1.lng, p2.lat, p2.lng);
   }
 
+  // Reserved for places important enough to move to the front of the story
+  // queue. This is deliberately much stricter than "worth a story": an
+  // ordinary university, cemetery, movie theater, or museum does not qualify
+  // on category alone. The place needs an unmistakably major name signal, or
+  // both a very strong historical score and a strong public rating.
   isTier1Landmark(place: NearbyPlace): boolean {
-    const tier1Types = new Set([
-      'cemetery', 'stadium', 'amusement_park', 'aquarium', 'zoo', 'casino',
-      'performing_arts_theater', 'movie_theater', 'university',
-    ]);
-    if (place.types.some(t => tier1Types.has(t))) {
-      return true;
-    }
-
-    if (place.historicalScore >= 130 && place.rating && place.rating >= 4.3) {
-      return true;
-    }
-
     const nameLower = place.name.toLowerCase();
-    const tier1NameKeywords = [
-      'national', 'memorial', 'monument', 'cathedral', 'basilica', 'capitol',
-      'capitol building', 'state house', 'city hall', 'grand central',
-      'union station', 'tower', 'observatory', 'museum of', 'gallery of',
-      'hall of', 'institute of', 'library of', 'conservatory', 'arboretum',
-      'botanical garden', 'historic district', 'national park',
+
+    const majorNameSignals = [
+      'national park', 'national memorial', 'national monument',
+      'world heritage', 'capitol building', 'state capitol', 'u.s. capitol',
+      'cathedral', 'basilica', 'grand central', 'union station',
+      'state house', 'city hall', 'botanical garden', 'historic district',
+      'observatory',
     ];
-    return tier1NameKeywords.some(kw => nameLower.includes(kw));
+    if (majorNameSignals.some(signal => nameLower.includes(signal))) {
+      return true;
+    }
+
+    const majorDestinationTypes = new Set([
+      'stadium', 'amusement_park', 'aquarium', 'zoo',
+    ]);
+    if (
+      place.types.some(t => majorDestinationTypes.has(t)) &&
+      place.rating !== undefined &&
+      place.rating >= 4.4
+    ) {
+      return true;
+    }
+
+    return place.historicalScore >= 175 &&
+      place.rating !== undefined &&
+      place.rating >= 4.5;
   }
 
   private calculateHistoricalScore(types: string[], name: string): number {

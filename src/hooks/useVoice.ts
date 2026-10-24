@@ -23,6 +23,9 @@ interface StoryQueueItem {
   // The landmark or subject the story is about, when it has one. Carried so a
   // rating taken while the story plays can be filed against the right subject.
   topic?: string;
+  // A story about a truly major landmark. Priority changes the waiting
+  // order only — it never interrupts the story currently playing.
+  priority?: boolean;
 }
 
 interface CurrentPosition {
@@ -933,16 +936,32 @@ export const useVoice = () => {
   const enqueue = useCallback((item: StoryQueueItem) => {
     const queue = storyQueueRef.current;
 
-    if (item.isLocationStory) {
+    if (item.priority) {
+      // A major-landmark story displaces ordinary waiting location stories
+      // and becomes the first location story in line. Scripted lines stay
+      // ahead of it because they are conversational glue for what is already
+      // happening. Most importantly, the currently playing story is never
+      // touched — priority only reorders what waits.
+      for (let i = queue.length - 1; i >= 0; i--) {
+        if (queue[i].isLocationStory) queue.splice(i, 1);
+      }
+      const firstLocationIndex = queue.findIndex(i => i.isLocationStory);
+      if (firstLocationIndex === -1) queue.push(item);
+      else queue.splice(firstLocationIndex, 0, item);
+      preSynthTextRef.current = null;
+      console.log('[Voice] Priority story moved to the front of the waiting queue');
+    } else if (item.isLocationStory) {
       const waitingIndex = queue.findIndex(i => i.isLocationStory);
       const waitingCount = queue.filter(i => i.isLocationStory).length;
       if (waitingCount >= MAX_PENDING_LOCATION_STORIES && waitingIndex !== -1) {
         queue.splice(waitingIndex, 1);
         console.log('[Voice] Replacing the waiting story with a fresher one');
       }
+      queue.push(item);
+    } else {
+      queue.push(item);
     }
 
-    queue.push(item);
     console.log(
       `[Voice] Story queued (waiting: ${queue.length}, currently playing: ${isPlayingStoryRef.current})`
     );
@@ -978,6 +997,31 @@ export const useVoice = () => {
       generatedAt: Date.now(),
       regionAnchored,
       isLocationStory: kind ? kind === 'location' : hasCoords,
+    });
+  }, [enqueue]);
+
+  // Queue a major-landmark story at the front of the waiting line. The
+  // current story always finishes first; this only decides what comes next.
+  const queuePriorityStory = useCallback((
+    text: string,
+    originLat?: number,
+    originLng?: number,
+    regionAnchored?: boolean,
+    topic?: string
+  ) => {
+    if (Date.now() < mutedUntilRef.current) {
+      console.log('[Voice] Muted — dropping priority story');
+      return;
+    }
+    enqueue({
+      text,
+      topic,
+      lat: originLat,
+      lng: originLng,
+      generatedAt: Date.now(),
+      regionAnchored,
+      isLocationStory: true,
+      priority: true,
     });
   }, [enqueue]);
 
@@ -1152,6 +1196,7 @@ export const useVoice = () => {
     speak,
     stop,
     queueStory,
+    queuePriorityStory,
     queueStoryWithTransition,
     skipCurrent,
     muteForMinutes,

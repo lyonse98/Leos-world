@@ -366,6 +366,12 @@ function App() {
   const isOnlineRef = useRef(isOnline);
   isOnlineRef.current = isOnline;
   const lastFetchTimeRef = useRef<number>(0);
+  // A truly major landmark detected nearby. Its story — when it is the
+  // story that comes back — goes to the front of the waiting queue. The
+  // ref survives one fetch cycle in case an unrelated cached story is
+  // served first; it expires quickly so a landmark left behind cannot
+  // hijack the queue later.
+  const queueJumpLandmarkRef = useRef<{ name: string; detectedAt: number } | null>(null);
 
   const handleIntervalUpdate = useCallback(async (position: Position | null) => {
     if (!position || !isTourStartedRef.current) {
@@ -378,12 +384,12 @@ function App() {
     storyFetchStartRef.current = Date.now();
     isFetchingStoryRef.current = true;
 
-    // Tier 1 landmark preemption: if a world/national-caliber landmark is
-    // close by and unhearing, it jumps the queue. We don't hard-abort audio
-    // mid-playback (that corrupts the speech queue); instead we skip the
-    // current Tier 2 story so the Tier 1 story plays next. This keeps the
-    // handoff clean while still ensuring you never drive past the Alamo
-    // listening to a story about a parking lot.
+    // Major-landmark queue priority: if a truly important landmark is close
+    // by and unheard, its story belongs at the front of the waiting queue.
+    // The story currently playing is NEVER cut off — it finishes, and the
+    // major landmark is simply next. Only the strict Tier 1 test qualifies;
+    // ordinary landmarks wait their normal turn.
+    let queueJumpTargetName: string | null = null;
     try {
       const nearby = await placesService.getNearbyLandmarks(position, 150);
       const tier1 = nearby.find(p =>
@@ -391,12 +397,21 @@ function App() {
         p.distance <= 150 &&
         !heardStories.hasHeardSubject(p.name)
       );
-      if (tier1 && voice.isPlayingStory()) {
+      if (tier1) {
         const currentTopic = voice.getCurrentStoryTopic();
-        if (currentTopic && currentTopic !== tier1.name) {
-          console.log(`[Tour] Tier 1 preemption: skipping "${currentTopic}" for "${tier1.name}"`);
-          voice.skipCurrent();
+        const currentBase = currentTopic?.split(' — ')[0].trim().toLowerCase();
+        if (currentBase !== tier1.name.toLowerCase()) {
+          queueJumpTargetName = tier1.name;
+          queueJumpLandmarkRef.current = { name: tier1.name, detectedAt: Date.now() };
+          console.log(`[Tour] Major landmark nearby: "${tier1.name}" — its story will go to the front of the queue (current story finishes first)`);
         }
+      } else if (
+        queueJumpLandmarkRef.current &&
+        Date.now() - queueJumpLandmarkRef.current.detectedAt < 120_000
+      ) {
+        queueJumpTargetName = queueJumpLandmarkRef.current.name;
+      } else {
+        queueJumpLandmarkRef.current = null;
       }
     } catch {
       // Places lookup failure is non-fatal — the normal story path still runs.
@@ -459,7 +474,19 @@ function App() {
           // Gemini now writes its own transition into the opening of each
           // story, so we queue directly — no app-side filler needed.
           const isRoad = position.speed !== null && position.speed >= 6.0;
-          voice.queueStory(result.story, position.lat, position.lng, isRoad, undefined, result.subject);
+          const resultBase = (result.subject || result.topic).split(' — ')[0].trim().toLowerCase();
+          const isQueueJump =
+            queueJumpTargetName !== null &&
+            resultBase === queueJumpTargetName.toLowerCase();
+          if (isQueueJump) {
+            // Front of the waiting queue — behind nothing but any scripted
+            // line already in flight, and always after the current story.
+            voice.queuePriorityStory(result.story, position.lat, position.lng, isRoad, result.subject);
+            queueJumpLandmarkRef.current = null;
+            console.log(`[Tour] Major-landmark story queued at the front: "${result.subject}"`);
+          } else {
+            voice.queueStory(result.story, position.lat, position.lng, isRoad, undefined, result.subject);
+          }
         }
 
         // Trigger prefetch in the background so the next story is ready.
