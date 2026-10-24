@@ -7,6 +7,8 @@
 import { GoogleGenAI } from '@google/genai';
 import type { FactPack } from './poiManager';
 import { formatFactPackForPrompt } from './poiManager';
+import { hashString } from '../utils/hash';
+import { supabase, SUPABASE_CONFIGURED } from './supabase';
 
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 
@@ -93,7 +95,7 @@ class GeminiAudioService {
   }
 
   private cacheKey(text: string): string {
-    return `${VOICE_NAME}|${text.slice(0, 500)}`;
+    return `${VOICE_NAME}|${text.length}|${hashString(text)}`;
   }
 
   initialize(): void {
@@ -131,14 +133,64 @@ class GeminiAudioService {
 
     const cached = await this.getCachedAudio(text);
     if (cached) {
-      console.log('[GeminiAudio] TTS cache hit — skipping synthesis');
+      console.log('[GeminiAudio] TTS local cache hit — skipping synthesis');
       return { url: cached, cacheHit: true };
+    }
+
+    // Try the shared Supabase Storage cache before paying for synthesis.
+    const key = this.cacheKey(text);
+    if (SUPABASE_CONFIGURED) {
+      const sharedUrl = await this.tryDownloadSharedAudio(key);
+      if (sharedUrl) {
+        console.log('[GeminiAudio] TTS shared cache hit — skipping synthesis');
+        await this.setCachedAudio(text, sharedUrl);
+        return { url: sharedUrl, cacheHit: true };
+      }
     }
 
     const audioBase64 = await this.synthesizeSpeech(text);
     const url = this.base64ToAudioUrl(audioBase64, 'audio/wav');
     await this.setCachedAudio(text, url);
+
+    // Fire-and-forget upload so the next listener gets a cache hit.
+    if (SUPABASE_CONFIGURED) {
+      this.uploadSharedAudio(key, audioBase64).catch((e) => {
+        console.warn('[GeminiAudio] Shared cache upload failed:', e);
+      });
+    }
+
     return { url, cacheHit: false };
+  }
+
+  private async tryDownloadSharedAudio(key: string): Promise<string | null> {
+    try {
+      const { data, error } = await supabase.storage
+        .from('tts-audio')
+        .download(`${key}.wav`);
+      if (error || !data) return null;
+      // Verify the blob looks like audio before trusting it.
+      const blob = data as Blob;
+      if (blob.size === 0 || !blob.type.startsWith('audio')) return null;
+      return URL.createObjectURL(blob);
+    } catch (e) {
+      console.warn('[GeminiAudio] Shared cache download failed:', e);
+      return null;
+    }
+  }
+
+  private async uploadSharedAudio(key: string, base64: string): Promise<void> {
+    const byteChars = atob(base64);
+    const byteArray = new Uint8Array(byteChars.length);
+    for (let i = 0; i < byteChars.length; i++) {
+      byteArray[i] = byteChars.charCodeAt(i);
+    }
+    const blob = new Blob([byteArray], { type: 'audio/wav' });
+    const { error } = await supabase.storage
+      .from('tts-audio')
+      .upload(`${key}.wav`, blob, { contentType: 'audio/wav', upsert: false });
+    if (error && error.message && !error.message.includes('already exists')) {
+      console.warn('[GeminiAudio] Shared cache upload error:', error.message);
+    }
   }
 
   // Core TTS method: calls generateContent with AUDIO modality to get

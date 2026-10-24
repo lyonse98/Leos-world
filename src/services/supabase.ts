@@ -3,11 +3,19 @@ import { createClient } from '@supabase/supabase-js';
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-if (!supabaseUrl || !supabaseAnonKey) {
-  throw new Error('Missing Supabase environment variables');
+export const SUPABASE_CONFIGURED = Boolean(supabaseUrl && supabaseAnonKey);
+
+if (!SUPABASE_CONFIGURED) {
+  console.error(
+    '[Supabase] VITE_SUPABASE_URL or VITE_SUPABASE_ANON_KEY is missing. ' +
+    'The app will load but database features (stories, heard history, taste profile) will not work.'
+  );
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+export const supabase = createClient(
+  SUPABASE_CONFIGURED ? supabaseUrl : 'https://placeholder.supabase.co',
+  SUPABASE_CONFIGURED ? supabaseAnonKey : 'placeholder-key'
+);
 
 export interface Landmark {
   id: string;

@@ -89,6 +89,15 @@ const REACH_DRIVING_M = 2000;
 const REACH_WALKING_M = 100;
 const REACH_STATIONARY_M = 30;
 
+// Deliberate silence between stories, by movement mode. The gap is measured
+// from the previous story's last audio frame to the next story's first. Too
+// short and Leo feels manic; too long and the listener thinks the tour died.
+const GAP_AFTER_SPEECH_MS: Record<'driving' | 'walking' | 'stationary', number> = {
+  driving: 8000,
+  walking: 4000,
+  stationary: 3000,
+};
+
 export const useVoice = () => {
   const [isInitialized, setIsInitialized] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -136,6 +145,13 @@ export const useVoice = () => {
     onPlayingAt: null,
     playbackEndAt: null,
   });
+  // When the previous story's audio ended — the anchor for the deliberate
+  // gap. Survives the per-story storyTimingRef reset so the next story can
+  // measure silence from it.
+  const lastPlaybackEndRef = useRef<number | null>(null);
+  // Active gap-deferral timer, cleared on stop/skip so a cancelled wait never
+  // fires into a queue it no longer owns.
+  const gapTimerRef = useRef<number | null>(null);
   const [audioBlocked, setAudioBlocked] = useState<boolean>(false);
   // Set when the listener returns to a tour whose audio the platform paused.
   // Surfaces as "tap to resume" instead of leaving them in unexplained silence.
@@ -351,6 +367,10 @@ export const useVoice = () => {
     if (ttsUrlRef.current) {
       URL.revokeObjectURL(ttsUrlRef.current);
       ttsUrlRef.current = null;
+    }
+    if (gapTimerRef.current !== null) {
+      clearTimeout(gapTimerRef.current);
+      gapTimerRef.current = null;
     }
     setIsSpeaking(false);
     isProcessingQueueRef.current = false;
@@ -575,6 +595,7 @@ export const useVoice = () => {
       audio.onended = () => {
         playbackStartedRef.current = false;
         storyTimingRef.current.playbackEndAt = Date.now();
+        lastPlaybackEndRef.current = storyTimingRef.current.playbackEndAt;
         if (ttsUrlRef.current) {
           URL.revokeObjectURL(ttsUrlRef.current);
           ttsUrlRef.current = null;
@@ -651,6 +672,7 @@ export const useVoice = () => {
         if (index >= sentenceGroups.length - 1) {
           playbackStartedRef.current = false;
           storyTimingRef.current.playbackEndAt = Date.now();
+          lastPlaybackEndRef.current = storyTimingRef.current.playbackEndAt;
         }
         const pauseMs = index === 0 ? 500 : 350;
         setTimeout(() => playSentence(index + 1), pauseMs);
@@ -691,6 +713,35 @@ export const useVoice = () => {
       isPlayingStoryRef.current = false;
       onStoryCompleteRef.current?.();
       return;
+    }
+
+    // Deliberate gap: location stories wait for a minimum silence after the
+    // previous story ended. Scripted lines (intros, fillers, Q&A answers) and
+    // the first story of a tour play immediately — there's no previous speech
+    // to space from.
+    if (item.isLocationStory && lastPlaybackEndRef.current !== null) {
+      const pos = currentPositionProviderRef.current?.();
+      const speed = pos?.speed ?? null;
+      const bucket: 'driving' | 'walking' | 'stationary' =
+        speed !== null && speed >= 5.5 ? 'driving' : speed !== null && speed > 0.5 ? 'walking' : 'stationary';
+      const requiredGap = GAP_AFTER_SPEECH_MS[bucket];
+      const elapsed = Date.now() - lastPlaybackEndRef.current;
+      if (elapsed < requiredGap) {
+        const wait = requiredGap - elapsed;
+        console.log(`[Voice] Gap pacing: waiting ${wait}ms before next story (${bucket})`);
+        storyQueueRef.current.unshift(item);
+        isPlayingStoryRef.current = false;
+        const gen = playGenRef.current;
+        gapTimerRef.current = window.setTimeout(() => {
+          gapTimerRef.current = null;
+          // Ownership check: a skip/stop/mute that happened during the wait
+          // must not let this timer advance a stale queue.
+          if (gen !== playGenRef.current) return;
+          if (isPlayingStoryRef.current) return;
+          playStoryFromQueueRef.current();
+        }, wait);
+        return;
+      }
     }
 
     isPlayingStoryRef.current = true;
@@ -928,6 +979,10 @@ export const useVoice = () => {
       URL.revokeObjectURL(ttsUrlRef.current);
       ttsUrlRef.current = null;
     }
+    if (gapTimerRef.current !== null) {
+      clearTimeout(gapTimerRef.current);
+      gapTimerRef.current = null;
+    }
     storyQueueRef.current = [];
     isPlayingStoryRef.current = false;
     sentenceQueueRef.current = [];
@@ -952,6 +1007,10 @@ export const useVoice = () => {
     if (ttsUrlRef.current) {
       URL.revokeObjectURL(ttsUrlRef.current);
       ttsUrlRef.current = null;
+    }
+    if (gapTimerRef.current !== null) {
+      clearTimeout(gapTimerRef.current);
+      gapTimerRef.current = null;
     }
     storyQueueRef.current = [];
     isPlayingStoryRef.current = false;

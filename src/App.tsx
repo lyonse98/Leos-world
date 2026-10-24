@@ -1,14 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Eye, EyeOff, Play, MapPin, Wifi, WifiOff, Download, Clock, Compass, VolumeX, Moon, XCircle, Share2, Music, Send, Heart } from 'lucide-react';
+import { Eye, EyeOff, Play, MapPin, Wifi, WifiOff, Download, Clock, Compass, VolumeX, Moon, XCircle, Share2, Music, Send, Heart, AlertTriangle } from 'lucide-react';
 import { useVoice, StoryTiming } from './hooks/useVoice';
 import { useGeolocation, Position } from './hooks/useGeolocation';
 import { useWakeLock } from './hooks/useWakeLock';
 import { geminiService } from './services/gemini';
 import { storyCache, CachedStory } from './services/storyCache';
 import { locationTracker } from './services/locationTracker';
-import { adManager } from './services/adManager';
 import { analytics } from './services/analytics';
-import { subscriptions } from './services/subscriptions';
 import { placesService } from './services/placesService';
 import { getIntro } from './services/intros';
 import { heardStories } from './services/heardStories';
@@ -18,6 +16,7 @@ import { storyCoverage } from './services/storyCoverage';
 import { ambientAudio } from './services/ambientAudio';
 import { storyLikes } from './services/storyLikes';
 import { geminiAudio } from './services/geminiAudio';
+import { SUPABASE_CONFIGURED } from './services/supabase';
 
 const RESUME_SESSION_KEY = 'leo_active_session';
 const RESUME_SESSION_TTL_MS = 30 * 60 * 1000;
@@ -74,6 +73,7 @@ function App() {
       return false;
     }
   });
+  const [backendBannerDismissed, setBackendBannerDismissed] = useState<boolean>(false);
 
   const voice = useVoice();
   const geolocation = useGeolocation();
@@ -119,7 +119,6 @@ function App() {
   const storyTextReadyRef = useRef<number | null>(null);
   const [lastStoryTiming, setLastStoryTiming] = useState<string>('');
   const prevStoryTimingEndRef = useRef<number | null>(null);
-  const prevStoryCountRef = useRef<number>(0);
   const isFetchingStoryRef = useRef<boolean>(false);
 
   useEffect(() => {
@@ -185,7 +184,13 @@ function App() {
 
   const handleSubmitQuestion = () => {
     const question = userInput.trim();
-    if (!question || isProcessingQuestion || !geolocation.position) return;
+    if (!question || isProcessingQuestion) return;
+    if (!geolocation.position) {
+      setShareToast('Leo needs your location to answer — check location is enabled');
+      setTimeout(() => setShareToast(null), 3500);
+      return;
+    }
+    analytics.track('question_asked', geolocation.position, geolocation.position.speed !== null && geolocation.position.speed >= 6.0 ? 'driving' : 'walking', { question: question.slice(0, 500) });
     setUserInput('');
     requestTokenRef.current = geminiService.currentRequestToken();
     geminiService.cancelAllRequests();
@@ -382,24 +387,11 @@ function App() {
           source: result.fromCache ? 'cache' : 'live',
           topic: result.topic,
         });
-        adManager.recordStoryPlayed();
 
         // Gemini now writes its own transition into the opening of each
         // story, so we queue directly — no app-side filler needed.
         const isRoad = position.speed !== null && position.speed >= 6.0;
         voice.queueStory(result.story, position.lat, position.lng, isRoad, undefined, result.subject);
-
-        // Ad insertion point: after every Nth story, check for an active ad campaign.
-        // No-op until ad campaigns are added to the database. Skipped for ad-free tiers.
-        if (!subscriptions.isAdFree() && adManager.shouldInsertAd() && isOnlineRef.current) {
-          const ad = await adManager.getAd(position, position.speed !== null && position.speed >= 6.0 ? 'driving' : 'walking');
-          if (ad) {
-            voice.queueStory(ad.text);
-            analytics.track('ad_played', position, position.speed !== null && position.speed >= 6.0 ? 'driving' : 'walking', {
-              campaign_id: ad.campaignId,
-            });
-          }
-        }
 
         // Trigger prefetch in the background so the next story is ready.
         storyCache.prefetchForPosition(position, position.speed !== null && position.speed >= 6.0 ? 'driving' : 'walking').catch(() => {});
@@ -448,23 +440,26 @@ function App() {
       // onplaying + playbackEnd (recorded in useVoice). Log one line and set
       // the diagnostics display string.
       const voiceTiming: StoryTiming = voice.getStoryTiming();
-      const fetchS = storyFetchStartRef.current && storyTextReadyRef.current
+      const fetchTextS = storyFetchStartRef.current && storyTextReadyRef.current
         ? ((storyTextReadyRef.current - storyFetchStartRef.current) / 1000).toFixed(1)
         : null;
       const synthS = voiceTiming.synthRequestAt && voiceTiming.synthResolvedAt
         ? ((voiceTiming.synthResolvedAt - voiceTiming.synthRequestAt) / 1000).toFixed(1)
         : null;
       const cacheHit = voiceTiming.synthCacheHit;
-      const gapS = prevStoryTimingEndRef.current
-        ? ((speechEndNow - prevStoryTimingEndRef.current) / 1000).toFixed(1)
+      // True silence: this story's first audio frame minus the previous story's
+      // last audio frame. Not speech-end to speech-end (that includes story
+      // duration, making the gap look huge for long stories).
+      const gapS = (prevStoryTimingEndRef.current && voiceTiming.onPlayingAt)
+        ? ((voiceTiming.onPlayingAt - prevStoryTimingEndRef.current) / 1000).toFixed(1)
         : null;
 
-      if (fetchS || synthS) {
-        const timingStr = `Fetch: ${fetchS ?? '-'}s · Text: ${fetchS ? fetchS : '-'}s · Synth: ${synthS ?? '-'}s (cache: ${cacheHit === true ? 'Y' : cacheHit === false ? 'N' : '-'}) · Gap after last: ${gapS ?? '-'}s`;
+      if (fetchTextS || synthS) {
+        const timingStr = `Fetch+Text: ${fetchTextS ?? '-'}s · Synth: ${synthS ?? '-'}s (cache: ${cacheHit === true ? 'Y' : cacheHit === false ? 'N' : '-'}) · Gap: ${gapS ?? '-'}s`;
         setLastStoryTiming(timingStr);
-        console.log(`[Timing] fetch=${fetchS ?? '-'}s text=${fetchS ?? '-'}s synth=${synthS ?? '-'}s cacheHit=${cacheHit === true ? 'Y' : cacheHit === false ? 'N' : '-'} gap=${gapS ?? '-'}s`);
+        console.log(`[Timing] fetchText=${fetchTextS ?? '-'}s synth=${synthS ?? '-'}s cacheHit=${cacheHit === true ? 'Y' : cacheHit === false ? 'N' : '-'} gap=${gapS ?? '-'}s`);
       }
-      prevStoryTimingEndRef.current = speechEndNow;
+      prevStoryTimingEndRef.current = voiceTiming.playbackEndAt ?? speechEndNow;
       storyFetchStartRef.current = null;
       storyTextReadyRef.current = null;
 
@@ -476,10 +471,11 @@ function App() {
         console.log(`[Dwell] Settled for ${locationTracker.getDwellMinutes()} min — deep cut`);
       }
 
-      // Cooldown: don't hammer the API if the last fetch was recent
-      // Scale with speed — driving needs longer gaps than walking
+      // API guard: don't hammer the API if the last fetch was under 3 seconds
+      // ago. Pacing between stories is handled by the gap timer in useVoice;
+      // this only prevents a tight retry loop from spamming Gemini.
       const now = Date.now();
-      const cooldownMs = pos.speed !== null && pos.speed >= 5.5 ? 30000 : dwellLevel !== null ? 3000 : 8000;
+      const cooldownMs = 3000;
       if (now - lastFetchTimeRef.current < cooldownMs) {
         console.log('[Tour] Queue empty but cooldown active, waiting');
         const wait = cooldownMs - (now - lastFetchTimeRef.current);
@@ -665,8 +661,6 @@ function App() {
 
       if (!resume) {
         storyCache.reset();
-        adManager.reset();
-        subscriptions.reset();
       }
       locationTracker.reset();
       storyCache.setOnline(navigator.onLine);
@@ -747,6 +741,21 @@ function App() {
             <p className="text-lg mb-10 text-slate-400 font-light tracking-wide">
               Your AI guide for the road
             </p>
+            {!SUPABASE_CONFIGURED && !backendBannerDismissed && (
+              <div className="mb-6 bg-amber-950/80 border border-amber-800/70 rounded-xl px-4 py-3 flex items-start gap-3 max-w-md mx-auto">
+                <AlertTriangle size={18} className="text-amber-400 shrink-0 mt-0.5" />
+                <div className="flex-1 text-left">
+                  <p className="text-xs font-semibold text-amber-300">Backend not configured in this environment</p>
+                  <p className="text-[11px] text-amber-500/80 mt-0.5">Stories will be unavailable. Check Supabase environment variables.</p>
+                </div>
+                <button
+                  onClick={() => setBackendBannerDismissed(true)}
+                  className="p-1 rounded-lg text-amber-500/60 hover:text-amber-400 transition-colors shrink-0"
+                >
+                  <XCircle size={16} />
+                </button>
+              </div>
+            )}
             <button
               onClick={() => handleStartTour(false)}
               className="px-10 py-3.5 bg-gradient-to-r from-amber-600 to-amber-500 rounded-xl text-lg font-semibold text-white hover:from-amber-500 hover:to-amber-400 transition-all transform hover:scale-105 active:scale-95 shadow-xl shadow-amber-900/40"
