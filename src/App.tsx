@@ -639,6 +639,18 @@ function App() {
         setLastStoryTiming(timingStr);
         console.log(`[Timing] fetchText=${fetchTextS ?? '-'}s synth=${synthS ?? '-'}s cacheHit=${cacheHit === true ? 'Y' : cacheHit === false ? 'N' : '-'} gap=${gapS ?? '-'}s`);
       }
+      // Persist the timing, not just display it: latency and silence are
+      // the product's vital signs, and console logs die with the session.
+      // After real drives, these rows answer "how long was the quiet,
+      // really?" across every story, not just the last one.
+      if (fetchTextS || synthS || gapS) {
+        analytics.track('story_timing', pos, pos.speed !== null && pos.speed >= 6.0 ? 'driving' : 'walking', {
+          fetchTextS: fetchTextS ? parseFloat(fetchTextS) : null,
+          synthS: synthS ? parseFloat(synthS) : null,
+          cacheHit,
+          gapS: gapS ? parseFloat(gapS) : null,
+        });
+      }
       prevStoryTimingEndRef.current = voiceTiming.playbackEndAt ?? speechEndNow;
       storyFetchStartRef.current = null;
       storyTextReadyRef.current = null;
@@ -917,7 +929,7 @@ function App() {
           <div className="absolute top-[50%] left-[55%] w-[20rem] h-[20rem] bg-amber-400 rounded-full opacity-[0.03] blur-[100px] leo-float" />
 
           <div className="absolute inset-0 overflow-y-auto overflow-x-hidden">
-            <div className="relative z-10 min-h-full flex flex-col items-center justify-center text-center px-6 py-8">
+            <div className="relative z-10 min-h-full flex flex-col items-center justify-center text-center px-6 py-4 sm:py-8">
             <div className="mb-1 flex justify-center">
               {/* Leo himself, full body, standing in the screen and waving
                   hello — a still portrait, deliberately unanimated. His
@@ -928,12 +940,12 @@ function App() {
                   scrollable zone: when the column is taller than the
                   viewport it scrolls from the top instead of the old
                   overflow-hidden clip that ate Leo's head. */}
-              <LeoFigure pose="wave" className="h-52 sm:h-72" />
+              <LeoFigure pose="wave" className="h-44 sm:h-72" />
             </div>
-            <h1 className="text-5xl sm:text-6xl font-bold mb-3 tracking-tight leo-shimmer-amber bg-gradient-to-r from-amber-200 via-white to-amber-300 bg-clip-text text-transparent" style={{ fontFamily: 'Georgia, "Times New Roman", serif' }}>
+            <h1 className="text-4xl sm:text-6xl font-bold mb-2 sm:mb-3 tracking-tight leo-shimmer-amber bg-gradient-to-r from-amber-200 via-white to-amber-300 bg-clip-text text-transparent" style={{ fontFamily: 'Georgia, "Times New Roman", serif' }}>
               LEO'S WORLD
             </h1>
-            <p className="text-lg mb-10 text-slate-400 font-light tracking-wide">
+            <p className="text-base sm:text-lg mb-6 sm:mb-10 text-slate-400 font-light tracking-wide">
               Your AI guide for the road
             </p>
             {!SUPABASE_CONFIGURED && !backendBannerDismissed && (
@@ -958,13 +970,13 @@ function App() {
               <Play className="inline-block mr-2" size={20} />
               START TOUR
             </button>
-            <p className="mt-6 text-sm text-slate-400 tracking-wide">
+            <p className="mt-4 sm:mt-6 text-sm text-slate-400 tracking-wide">
               Enables voice, location, and AI features
             </p>
             <p className="mt-2 text-xs text-slate-300 max-w-sm mx-auto leading-relaxed">
               Leo is an informational audio guide. Always keep your eyes on the road and stay aware of your surroundings.
             </p>
-            <div className="mt-8 flex items-center gap-3 justify-center">
+            <div className="mt-5 sm:mt-8 flex items-center gap-3 justify-center">
               <button
                 onClick={() => handleShare()}
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-800/60 border border-slate-700/60 text-slate-300 hover:bg-slate-700 transition-all active:scale-95 text-sm font-medium shadow-md backdrop-blur-sm"
