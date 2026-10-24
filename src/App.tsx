@@ -18,7 +18,18 @@ import { ambientAudio } from './services/ambientAudio';
 import { storyLikes } from './services/storyLikes';
 import { geminiAudio } from './services/geminiAudio';
 import { SUPABASE_CONFIGURED } from './services/supabase';
-import LeoFigure from './components/LeoFigure';
+import LeoFigure, { LeoPose } from './components/LeoFigure';
+import SdSkyline from './components/SdSkyline';
+
+// The sky over San Diego, by the clock. Still just a gradient — no image,
+// no weight — but the app sits in the same light the driver is in.
+function daySkyGradient(): string {
+  const h = new Date().getHours();
+  if (h >= 5 && h < 8) return 'linear-gradient(to bottom, #0b1226 0%, #27355c 55%, #6b3a1e 135%)';
+  if (h >= 8 && h < 17) return 'linear-gradient(to bottom, #0a1f33 0%, #155e75 60%, #0f766e 140%)';
+  if (h >= 17 && h < 20) return 'linear-gradient(to bottom, #150f2e 0%, #46224d 55%, #8a3b16 135%)';
+  return 'linear-gradient(to bottom, #020617 0%, #1e293b 55%, #020617 100%)';
+}
 
 const RESUME_SESSION_KEY = 'leo_active_session';
 const RESUME_SESSION_TTL_MS = 30 * 60 * 1000;
@@ -98,6 +109,18 @@ function App() {
       : voice.wasInterrupted
         ? { label: 'TAP TO RESUME', pose: 'idle' as const, orb: 'from-cyan-900/60 to-slate-900 border-cyan-600/50', glow: 'bg-cyan-500/25', ring: 'border-cyan-400/30', icon: 'text-cyan-300', text: 'text-cyan-300' }
         : { label: 'ON TOUR', pose: 'idle' as const, orb: 'from-slate-800 to-slate-900 border-slate-600/50', glow: 'bg-cyan-500/10', ring: 'border-slate-500/25', icon: 'text-slate-400', text: 'text-slate-500' };
+
+  // Brief pose breakouts that outrank the state pose: Leo points when a
+  // major landmark's story jumps the queue, and throws a thumbs-up when a
+  // story is liked. Pure theatre — timed, then the state pose resumes.
+  const [poseFlash, setPoseFlash] = useState<LeoPose | null>(null);
+  const skyGradient = daySkyGradient();
+  const poseFlashTimerRef = useRef<number | null>(null);
+  const flashPose = useCallback((pose: LeoPose, ms: number) => {
+    setPoseFlash(pose);
+    if (poseFlashTimerRef.current) window.clearTimeout(poseFlashTimerRef.current);
+    poseFlashTimerRef.current = window.setTimeout(() => setPoseFlash(null), ms);
+  }, []);
 
   const requestTokenRef = useRef<number>(0);
   const kickoffFiredRef = useRef(false);
@@ -483,6 +506,7 @@ function App() {
             // Front of the waiting queue — behind nothing but any scripted
             // line already in flight, and always after the current story.
             voice.queuePriorityStory(result.story, position.lat, position.lng, isRoad, result.subject);
+            flashPose('pointing', 5000);
             queueJumpLandmarkRef.current = null;
             console.log(`[Tour] Major-landmark story queued at the front: "${result.subject}"`);
           } else {
@@ -818,8 +842,9 @@ function App() {
       )}
       {!isTourStarted ? (
         <div className="flex-1 flex items-center justify-center bg-slate-900 relative overflow-hidden">
-          <div className="absolute inset-0 bg-gradient-to-b from-slate-950 via-slate-800 to-slate-950" />
+          <div className="absolute inset-0" style={{ background: skyGradient }} />
           <div className="absolute inset-0 leo-grid" />
+          <SdSkyline className="absolute bottom-0 left-0 w-full h-24 sm:h-32 text-slate-950/60 pointer-events-none" />
           <div className="absolute top-[15%] left-[10%] w-[28rem] h-[28rem] bg-amber-600 rounded-full opacity-[0.06] blur-[120px] leo-float" />
           <div className="absolute bottom-[10%] right-[8%] w-[24rem] h-[24rem] bg-cyan-500 rounded-full opacity-[0.05] blur-[120px] leo-float-slow" />
           <div className="absolute top-[50%] left-[55%] w-[20rem] h-[20rem] bg-amber-400 rounded-full opacity-[0.03] blur-[100px] leo-float" />
@@ -932,8 +957,9 @@ function App() {
           </div>
 
           {/* MIDDLE ZONE — narrative card */}
-          <div className="flex-1 relative bg-gradient-to-b from-slate-800 via-slate-850 to-slate-900 flex items-center justify-center overflow-hidden px-3 sm:px-5">
+          <div className="flex-1 relative flex items-center justify-center overflow-hidden px-3 sm:px-5" style={{ background: skyGradient }}>
             <div className="absolute inset-0 leo-grid opacity-50" />
+            <SdSkyline className="absolute bottom-0 left-0 w-full h-20 sm:h-24 text-slate-950/50 pointer-events-none" />
             <div className="absolute top-10 left-10 w-64 h-64 bg-amber-700 rounded-full opacity-[0.07] blur-[100px] leo-float" />
             <div className="absolute bottom-16 right-16 w-72 h-72 bg-cyan-600 rounded-full opacity-[0.05] blur-[100px] leo-float-slow" />
             <div className="absolute top-[40%] right-[20%] w-48 h-48 bg-amber-500 rounded-full opacity-[0.04] blur-[80px] leo-float" />
@@ -1088,26 +1114,25 @@ function App() {
                   header ribbon and the like/share row can never slide
                   under the bottom dock, on phone or desktop alike. */}
               <div className="flex flex-row items-center justify-center gap-2 sm:gap-6 w-full">
-                <LeoFigure pose={leoStatus.pose} className="h-[44vh] sm:h-[56vh] min-h-[240px] max-h-[540px] shrink-0" />
+                {/* Leo IS the button now. Tapping the orb was an abstraction;
+                    tapping Leo is a shoulder-tap — he stops, leans in, and
+                    listens. The mic badge on his hip teaches the tap once;
+                    his pose and the label carry the state from there. */}
+                <button
+                  type="button"
+                  onClick={handleOrbPress}
+                  aria-label="Tap Leo to ask him a question by voice"
+                  className="relative shrink-0 rounded-[2rem] transition-transform duration-200 active:scale-[0.98] focus:outline-none"
+                >
+                  <div className={`absolute inset-x-6 top-6 bottom-10 rounded-full blur-3xl transition-colors duration-700 ${leoStatus.glow}`} />
+                  <LeoFigure pose={poseFlash ?? leoStatus.pose} className="relative h-[44vh] sm:h-[56vh] min-h-[240px] max-h-[540px]" />
+                  <span className={`absolute bottom-[7%] right-[1%] flex items-center justify-center w-11 h-11 rounded-full border border-white/25 shadow-xl text-white transition-colors duration-500 ${
+                    leoStatus.pose === 'listening' ? 'bg-rose-500' : leoStatus.pose === 'speaking' ? 'bg-blue-500' : 'bg-amber-500'
+                  }`}>
+                    <Mic size={20} />
+                  </span>
+                </button>
                 <div className="flex flex-col items-center min-w-0">
-                <div className="relative flex items-center justify-center mb-4" style={{ width: 128, height: 128 }}>
-                  <div className={`absolute rounded-full border leo-ring ${leoStatus.ring}`} style={{ width: 128, height: 128 }} />
-                  <div className={`absolute rounded-full border leo-ring-delay ${leoStatus.ring}`} style={{ width: 128, height: 128 }} />
-                  <div className={`absolute w-24 h-24 rounded-full blur-2xl transition-colors duration-700 ${leoStatus.glow}`} />
-                  <button
-                    type="button"
-                    onClick={handleOrbPress}
-                    aria-label="Ask Leo a question by voice"
-                    className={`relative w-24 h-24 rounded-full bg-gradient-to-br border flex items-center justify-center shadow-2xl transition-all duration-500 active:scale-95 ${leoStatus.orb}`}
-                  >
-                    {speech.isListening
-                      ? <Mic size={32} className={leoStatus.icon} strokeWidth={1.5} />
-                      : isProcessingQuestion
-                        ? <Send size={30} className={leoStatus.icon} strokeWidth={1.5} />
-                        : <Mic size={34} className={leoStatus.icon} strokeWidth={1.5} />}
-                  </button>
-                </div>
-
                 {voice.isSpeaking && (
                   <div className="flex items-center gap-[3px] h-5 mb-4">
                     {[0, 1, 2, 3, 4].map(i => (
@@ -1126,7 +1151,7 @@ function App() {
 
                 {speech.isSupported && !speech.isListening && (
                   <p className="mt-2.5 text-sm tracking-wide text-slate-400">
-                    Tap the microphone to ask Leo a question
+                    Tap Leo to ask him a question
                   </p>
                 )}
 
@@ -1136,6 +1161,7 @@ function App() {
                       if (hasLikedStory || likeAnimating) return;
                       setHasLikedStory(true);
                       setLikeAnimating(true);
+                      flashPose('liked', 2000);
                       setTimeout(() => setLikeAnimating(false), 600);
                       const topic = voice.getCurrentStoryTopic();
                       const pos = geolocation.position;

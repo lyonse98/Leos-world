@@ -5,9 +5,9 @@
 // five poses share one canvas and one foot line, so a swap never makes
 // him jump or resize. Total weight of all five: under 200 KB, cached
 // after first load.
-export type LeoPose = 'idle' | 'speaking' | 'listening' | 'thinking' | 'wave';
+export type LeoPose = 'idle' | 'speaking' | 'listening' | 'thinking' | 'wave' | 'pointing' | 'liked';
 
-const POSES: LeoPose[] = ['idle', 'speaking', 'listening', 'thinking', 'wave'];
+const POSES: LeoPose[] = ['idle', 'speaking', 'listening', 'thinking', 'wave', 'pointing', 'liked'];
 
 export default function LeoFigure({
   pose,
@@ -19,7 +19,7 @@ export default function LeoFigure({
   return (
     <div
       className={`relative ${className}`}
-      style={{ aspectRatio: '427 / 916' }}
+      style={{ aspectRatio: '480 / 916' }}
       aria-hidden="true"
     >
       {/* soft ground shadow so he stands IN the scene, not on it */}
