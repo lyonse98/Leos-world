@@ -824,12 +824,15 @@ function App() {
           <div className="absolute top-[50%] left-[55%] w-[20rem] h-[20rem] bg-amber-400 rounded-full opacity-[0.03] blur-[100px] leo-float" />
 
           <div className="text-center px-6 relative z-10">
-            <div className="mb-8 flex justify-center relative">
-              <div className="absolute rounded-full border border-amber-400/30 leo-ring" style={{ width: 80, height: 80 }} />
-              <div className="absolute rounded-full border border-cyan-400/20 leo-ring-delay" style={{ width: 80, height: 80 }} />
-              <div className="relative w-20 h-20 rounded-2xl bg-gradient-to-br from-slate-700 to-slate-900 border border-amber-600/30 flex items-center justify-center shadow-2xl">
-                <Compass className="text-amber-400" size={44} strokeWidth={1.5} />
-              </div>
+            <div className="mb-8 flex justify-center">
+              {/* Leo himself — a still emblem, deliberately unanimated. The
+                  same artwork is the home-screen icon, so the face on the
+                  landing page is the face on your phone. */}
+              <img
+                src="/leo-icon-512.png"
+                alt="Leo, your guide for the road"
+                className="w-28 h-28 rounded-[1.75rem] border border-amber-600/30 shadow-2xl"
+              />
             </div>
             <h1 className="text-5xl sm:text-6xl font-bold mb-3 tracking-tight leo-shimmer-amber bg-gradient-to-r from-amber-200 via-white to-amber-300 bg-clip-text text-transparent" style={{ fontFamily: 'Georgia, "Times New Roman", serif' }}>
               LEO'S WORLD
@@ -859,7 +862,7 @@ function App() {
               <Play className="inline-block mr-2" size={20} />
               START TOUR
             </button>
-            <p className="mt-6 text-xs text-slate-500 tracking-wide">
+            <p className="mt-6 text-sm text-slate-400 tracking-wide">
               Enables voice, location, and AI features
             </p>
             <p className="mt-2 text-[11px] text-slate-600 max-w-sm mx-auto leading-relaxed">
@@ -1095,7 +1098,7 @@ function App() {
                       ? <Mic size={32} className={leoStatus.icon} strokeWidth={1.5} />
                       : isProcessingQuestion
                         ? <Send size={30} className={leoStatus.icon} strokeWidth={1.5} />
-                        : <Compass size={34} className={leoStatus.icon} strokeWidth={1.5} />}
+                        : <Mic size={34} className={leoStatus.icon} strokeWidth={1.5} />}
                   </button>
                 </div>
 
@@ -1111,13 +1114,13 @@ function App() {
                   </div>
                 )}
 
-                <p className={`text-[11px] font-bold tracking-[0.25em] transition-colors duration-500 ${leoStatus.text}`}>
+                <p className={`text-sm font-bold tracking-[0.22em] transition-colors duration-500 ${leoStatus.text}`}>
                   {leoStatus.label}
                 </p>
 
                 {speech.isSupported && !speech.isListening && (
-                  <p className="mt-2 text-[10px] tracking-wider text-slate-500">
-                    Tap the orb to ask Leo a question
+                  <p className="mt-2.5 text-sm tracking-wide text-slate-400">
+                    Tap the microphone to ask Leo a question
                   </p>
                 )}
 
