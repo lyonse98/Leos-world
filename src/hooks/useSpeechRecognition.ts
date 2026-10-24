@@ -32,7 +32,9 @@ export const useSpeechRecognition = () => {
   const [isListening, setIsListening] = useState(false);
   const [transcript, setTranscript] = useState('');
   const [isSupported, setIsSupported] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const recognitionRef = useRef<SpeechRecognitionType | null>(null);
+  const listeningRef = useRef(false);
 
   useEffect(() => {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -49,6 +51,8 @@ export const useSpeechRecognition = () => {
     if (!recognitionRef.current || !isSupported) return;
 
     setTranscript('');
+    setError(null);
+    listeningRef.current = true;
     setIsListening(true);
 
     recognitionRef.current.onresult = (event: SpeechRecognitionEvent) => {
@@ -58,10 +62,15 @@ export const useSpeechRecognition = () => {
 
     recognitionRef.current.onerror = (event: SpeechRecognitionErrorEvent) => {
       console.error('Speech recognition error:', event.error);
+      // Surface it: a silent reset reads to the user as "the button is
+      // broken". App turns this into plain-language guidance.
+      if (event.error !== 'aborted') setError(event.error);
+      listeningRef.current = false;
       setIsListening(false);
     };
 
     recognitionRef.current.onend = () => {
+      listeningRef.current = false;
       setIsListening(false);
     };
 
@@ -69,27 +78,42 @@ export const useSpeechRecognition = () => {
       recognitionRef.current.start();
     } catch (error) {
       console.error('Failed to start recognition:', error);
+      listeningRef.current = false;
       setIsListening(false);
     }
   }, [isSupported]);
 
   const stopListening = useCallback(() => {
-    if (recognitionRef.current && isListening) {
-      recognitionRef.current.stop();
+    // Ref-guarded, not state-guarded: on a quick press-and-release the
+    // isListening state may not have flushed yet, and the stop must
+    // still land or the mic hangs open after the finger lifts.
+    if (recognitionRef.current && listeningRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        /* already stopped */
+      }
+      listeningRef.current = false;
       setIsListening(false);
     }
-  }, [isListening]);
+  }, []);
 
   const clearTranscript = useCallback(() => {
     setTranscript('');
+  }, []);
+
+  const clearError = useCallback(() => {
+    setError(null);
   }, []);
 
   return {
     isListening,
     transcript,
     isSupported,
+    error,
     startListening,
     stopListening,
     clearTranscript,
+    clearError,
   };
 };

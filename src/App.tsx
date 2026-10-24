@@ -258,6 +258,44 @@ function App() {
     speech.startListening();
   };
 
+  // Press-and-hold is the interaction: finger down, Leo listens; finger
+  // up, he stops and the utterance submits. A quick tap still works —
+  // the mic simply runs until the pause, as before.
+  const pressStartRef = useRef<number>(0);
+  const handleLeoPressStart = () => {
+    pressStartRef.current = Date.now();
+    handleOrbPress();
+  };
+  const handleLeoPressEnd = () => {
+    if (speech.isListening) {
+      speech.stopListening();
+      return;
+    }
+    if (!isProcessingQuestion && Date.now() - pressStartRef.current < 400) {
+      setShareToast('Press and hold Leo while you talk — release to send');
+      setTimeout(() => setShareToast(null), 3500);
+    }
+  };
+
+  // Mic failures used to reset silently, which reads as "the button is
+  // broken". Say what happened and what to do about it instead.
+  const { error: speechError, clearError: clearSpeechError } = speech;
+  useEffect(() => {
+    if (!speechError) return;
+    const msg =
+      speechError === 'not-allowed' || speechError === 'service-not-allowed'
+        ? "Leo can't use the microphone. Allow mic access for this site in Safari — and if you're on the home-screen icon, try Leo in the Safari app, where iOS allows the mic."
+        : speechError === 'no-speech'
+          ? "Leo didn't hear anything — hold him down, speak, then release."
+          : speechError === 'audio-capture'
+            ? 'No microphone is available for Leo to hear you.'
+            : 'Microphone hiccup — try holding Leo again.';
+    setShareToast(msg);
+    setTimeout(() => setShareToast(null), 6000);
+    pttHoldRef.current = false;
+    clearSpeechError();
+  }, [speechError, clearSpeechError]);
+
   // A finished utterance becomes a submitted question.
   useEffect(() => {
     if (!speech.transcript) return;
@@ -841,7 +879,7 @@ function App() {
         </div>
       )}
       {!isTourStarted ? (
-        <div className="flex-1 flex items-center justify-center bg-slate-900 relative overflow-hidden">
+        <div className="flex-1 relative overflow-y-auto overflow-x-hidden">
           <div className="absolute inset-0" style={{ background: skyGradient }} />
           <div className="absolute inset-0 leo-grid" />
           <SdSkyline className="absolute bottom-0 left-0 w-full h-24 sm:h-32 text-slate-950/60 pointer-events-none" />
@@ -849,14 +887,18 @@ function App() {
           <div className="absolute bottom-[10%] right-[8%] w-[24rem] h-[24rem] bg-cyan-500 rounded-full opacity-[0.05] blur-[120px] leo-float-slow" />
           <div className="absolute top-[50%] left-[55%] w-[20rem] h-[20rem] bg-amber-400 rounded-full opacity-[0.03] blur-[100px] leo-float" />
 
-          <div className="text-center px-6 relative z-10">
+          <div className="relative z-10 min-h-full flex flex-col items-center justify-center text-center px-6 py-10">
             <div className="mb-1 flex justify-center">
               {/* Leo himself, full body, standing in the screen and waving
                   hello — a still portrait, deliberately unanimated. His
                   face is also the home-screen icon. Rendering the figure
                   here quietly preloads his tour poses, so when the tour
-                  starts his speaking/listening/thinking swaps are instant. */}
-              <LeoFigure pose="wave" className="h-60 sm:h-72" />
+                  starts his speaking/listening/thinking swaps are instant.
+                  The wrapper is min-h-full flex centering inside a
+                  scrollable zone: when the column is taller than the
+                  viewport it scrolls from the top instead of the old
+                  overflow-hidden clip that ate Leo's head. */}
+              <LeoFigure pose="wave" className="h-52 sm:h-72" />
             </div>
             <h1 className="text-5xl sm:text-6xl font-bold mb-3 tracking-tight leo-shimmer-amber bg-gradient-to-r from-amber-200 via-white to-amber-300 bg-clip-text text-transparent" style={{ fontFamily: 'Georgia, "Times New Roman", serif' }}>
               LEO'S WORLD
@@ -889,7 +931,7 @@ function App() {
             <p className="mt-6 text-sm text-slate-400 tracking-wide">
               Enables voice, location, and AI features
             </p>
-            <p className="mt-2 text-[11px] text-slate-600 max-w-sm mx-auto leading-relaxed">
+            <p className="mt-2 text-xs text-slate-300 max-w-sm mx-auto leading-relaxed">
               Leo is an informational audio guide. Always keep your eyes on the road and stay aware of your surroundings.
             </p>
             <div className="mt-8 flex items-center gap-3 justify-center">
@@ -1120,9 +1162,15 @@ function App() {
                     his pose and the label carry the state from there. */}
                 <button
                   type="button"
-                  onClick={handleOrbPress}
-                  aria-label="Tap Leo to ask him a question by voice"
-                  className="relative shrink-0 rounded-[2rem] transition-transform duration-200 active:scale-[0.98] focus:outline-none"
+                  onPointerDown={(e) => { e.preventDefault(); handleLeoPressStart(); }}
+                  onPointerUp={handleLeoPressEnd}
+                  onPointerCancel={handleLeoPressEnd}
+                  onPointerLeave={handleLeoPressEnd}
+                  onContextMenu={(e) => e.preventDefault()}
+                  onKeyDown={(e) => { if (!e.repeat && (e.key === ' ' || e.key === 'Enter')) { e.preventDefault(); handleLeoPressStart(); } }}
+                  onKeyUp={(e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); handleLeoPressEnd(); } }}
+                  aria-label="Hold Leo to ask him a question by voice"
+                  className="relative shrink-0 rounded-[2rem] transition-transform duration-200 active:scale-[0.98] focus:outline-none touch-none select-none [-webkit-touch-callout:none]"
                 >
                   <div className={`absolute inset-x-6 top-6 bottom-10 rounded-full blur-3xl transition-colors duration-700 ${leoStatus.glow}`} />
                   <LeoFigure pose={poseFlash ?? leoStatus.pose} className="relative h-[44vh] sm:h-[56vh] min-h-[240px] max-h-[540px]" />
@@ -1151,7 +1199,7 @@ function App() {
 
                 {speech.isSupported && !speech.isListening && (
                   <p className="mt-2.5 text-sm tracking-wide text-slate-400">
-                    Tap Leo to ask him a question
+                    Hold Leo to ask him a question
                   </p>
                 )}
 
