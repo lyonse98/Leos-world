@@ -932,7 +932,7 @@ function App() {
           </div>
 
           {/* MIDDLE ZONE — narrative card */}
-          <div className="flex-1 relative bg-gradient-to-b from-slate-800 via-slate-850 to-slate-900 flex items-center justify-center overflow-hidden px-5">
+          <div className="flex-1 relative bg-gradient-to-b from-slate-800 via-slate-850 to-slate-900 flex items-center justify-center overflow-hidden px-3 sm:px-5">
             <div className="absolute inset-0 leo-grid opacity-50" />
             <div className="absolute top-10 left-10 w-64 h-64 bg-amber-700 rounded-full opacity-[0.07] blur-[100px] leo-float" />
             <div className="absolute bottom-16 right-16 w-72 h-72 bg-cyan-600 rounded-full opacity-[0.05] blur-[100px] leo-float-slow" />
@@ -999,7 +999,7 @@ function App() {
               </div>
             )}
 
-            <div className="max-w-xl w-full relative z-10 text-center">
+            <div className="max-w-3xl w-full relative z-10 text-center">
               {geolocation.error && (
                 <div className="mb-4 bg-red-950/70 backdrop-blur border border-red-800/70 p-3 rounded-xl">
                   <p className="text-sm text-red-300">{geolocation.error}</p>
@@ -1083,9 +1083,14 @@ function App() {
               {/* Distraction-free by design: no story text on screen. Leo's
                   pose and the orb carry the state so the listener never has
                   to read. */}
-              <div className="flex flex-col items-center">
-                <LeoFigure pose={leoStatus.pose} className="h-[23vh] min-h-[148px] max-h-[248px] mb-2" />
-                <div className="relative flex items-center justify-center mb-6" style={{ width: 128, height: 128 }}>
+              {/* Leo stands beside the microphone, basically full length —
+                  a row, not a stack, so his head can never slide under the
+                  header ribbon and the like/share row can never slide
+                  under the bottom dock, on phone or desktop alike. */}
+              <div className="flex flex-row items-center justify-center gap-2 sm:gap-6 w-full">
+                <LeoFigure pose={leoStatus.pose} className="h-[44vh] sm:h-[56vh] min-h-[240px] max-h-[540px] shrink-0" />
+                <div className="flex flex-col items-center min-w-0">
+                <div className="relative flex items-center justify-center mb-4" style={{ width: 128, height: 128 }}>
                   <div className={`absolute rounded-full border leo-ring ${leoStatus.ring}`} style={{ width: 128, height: 128 }} />
                   <div className={`absolute rounded-full border leo-ring-delay ${leoStatus.ring}`} style={{ width: 128, height: 128 }} />
                   <div className={`absolute w-24 h-24 rounded-full blur-2xl transition-colors duration-700 ${leoStatus.glow}`} />
@@ -1125,7 +1130,7 @@ function App() {
                   </p>
                 )}
 
-                <div className="mt-5 flex items-center gap-3">
+                <div className="mt-4 flex flex-wrap justify-center items-center gap-3">
                   <button
                     onClick={() => {
                       if (hasLikedStory || likeAnimating) return;
@@ -1158,7 +1163,7 @@ function App() {
                     Share
                   </button>
                 </div>
-
+                </div>
               </div>
             </div>
 
