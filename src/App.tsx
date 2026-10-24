@@ -327,7 +327,7 @@ function App() {
       const tier1 = nearby.find(p =>
         placesService.isTier1Landmark(p) &&
         p.distance <= 150 &&
-        !heardStories.hasHeard(p.name)
+        !heardStories.hasHeardSubject(p.name)
       );
       if (tier1 && voice.isPlayingStory()) {
         const currentTopic = voice.getCurrentStoryTopic();

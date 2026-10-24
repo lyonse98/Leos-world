@@ -200,6 +200,27 @@ class StoryCoverageService {
     return Object.keys(coverage);
   }
 
+  // --- Session landmark lockout -------------------------------------------
+  // Within one tour, once a landmark's story has been told while the
+  // listener is moving, that landmark is out for the rest of the session —
+  // no fresh-angle retell while they are still in its area. Angle rotation
+  // is for dwell (parked, depth is the point) and for return visits on a
+  // later tour, both of which bypass this lock. In-memory only: a new tour
+  // starts with a clean slate (locationTracker.reset clears it).
+  private sessionLockedSubjects: Set<string> = new Set();
+
+  lockSubjectForSession(subjectKey: string): void {
+    this.sessionLockedSubjects.add(subjectKey);
+  }
+
+  isSubjectLockedForSession(subjectKey: string): boolean {
+    return this.sessionLockedSubjects.has(subjectKey);
+  }
+
+  clearSessionLocks(): void {
+    this.sessionLockedSubjects.clear();
+  }
+
   // True while this subject still has an angle Leo has not taken. Angles the
   // caller knows are spent but that are not recorded here — a landmark's
   // canonical telling, which lives in the heard-stories record rather than in

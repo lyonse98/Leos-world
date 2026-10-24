@@ -41,6 +41,23 @@ class HeardStoriesService {
     return this.heardTopics.has(this.normalize(topic));
   }
 
+  // Subject-level check. Stories are recorded under their display topic,
+  // which for a rotated telling is "<Place> — <angle label>", while most
+  // callers ask about a place by its bare name. A bare-name lookup against
+  // raw topics therefore misses every rotated telling and the place looks
+  // unheard — the root of same-landmark retells. A subject counts as heard
+  // when the bare name or any of its angle variants has been told.
+  hasHeardSubject(name: string): boolean {
+    const key = this.normalize(name);
+    if (key.length === 0) return false;
+    if (this.heardTopics.has(key)) return true;
+    const prefix = `${key} — `;
+    for (const topic of this.heardTopics) {
+      if (topic.startsWith(prefix)) return true;
+    }
+    return false;
+  }
+
   markHeard(topic: string): void {
     const key = this.normalize(topic);
     if (key.length > 0) this.heardTopics.add(key);

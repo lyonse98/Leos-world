@@ -144,7 +144,7 @@ export function rankPlaces(
   options: RankOptions = {}
 ): ScoredPlace[] {
   return places
-    .map(place => scorePlace(place, heardStories.hasHeard(place.name), recentPrimaryTags, options))
+    .map(place => scorePlace(place, heardStories.hasHeardSubject(place.name), recentPrimaryTags, options))
     .sort((a, b) => b.score - a.score);
 }
 

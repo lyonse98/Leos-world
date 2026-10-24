@@ -1,6 +1,7 @@
 import { Position } from '../hooks/useGeolocation';
 import { calculateDistance, offsetPositionByHeading, MovementModeHysteresis } from '../utils/geo';
 import { geminiService, StoryRotation } from './gemini';
+import { storyCoverage, landmarkSubjectKey } from './storyCoverage';
 
 export interface CachedStory {
   id: string;
@@ -355,12 +356,24 @@ class StoryCacheService {
     return this.prefetchTargets.some(t => this.distance(t, target) < TARGET_DEDUPE_M);
   }
 
+  // Session landmark lockout at the serve layer: a locally cached
+  // angle-variant of a landmark already told this session is a retell.
+  // Skipped only while moving — parked (speed ~0), rotation serves are
+  // the dwell feature and stay available.
+  private isLockedOutWhileMoving(story: CachedStory, position: Position): boolean {
+    const speed = position.speed ?? null;
+    if (speed !== null && speed < 1.0) return false;
+    const base = story.topic.split(' — ')[0].trim();
+    return storyCoverage.isSubjectLockedForSession(landmarkSubjectKey(base));
+  }
+
   private findNearestUnplayedCache(position: Position): CachedStory | null {
     let nearest: CachedStory | null = null;
     let minDistance = Infinity;
 
     for (const story of this.cache) {
       if (story.played) continue;
+      if (this.isLockedOutWhileMoving(story, position)) continue;
       const d = this.distance(position, { lat: story.lat, lng: story.lng });
       if (d < minDistance) {
         minDistance = d;
@@ -380,7 +393,7 @@ class StoryCacheService {
     // them.
     if (this.unplayedCount() > 0 && !this.isOnline) {
       const offlineFallback = this.cache
-        .filter(s => !s.played)
+        .filter(s => !s.played && !this.isLockedOutWhileMoving(s, position))
         .map(s => ({ s, d: this.distance(position, { lat: s.lat, lng: s.lng }) }))
         .sort((a, b) => a.d - b.d)
         .find(({ s, d }) => s.regionAnchored ? d <= OFFLINE_REGION_MAX_M : d <= OFFLINE_POINT_MAX_M);

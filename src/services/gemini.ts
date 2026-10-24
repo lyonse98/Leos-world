@@ -241,11 +241,25 @@ class GeminiService {
     return `${LEO_PERSONA_VERSION}|${LEO_MODEL_ID}|${factPackHash}`;
   }
 
-  private resolveSubject(factPack: StoryFactPack): StorySubject | null {
+  private resolveSubject(factPack: StoryFactPack, allowRevisit: boolean = false): StorySubject | null {
     if (factPack.places.length === 0) return null;
 
-    const unheard = factPack.places.filter(p => !heardStories.hasHeard(p.name));
+    // Session landmark lockout: while the listener is moving, a landmark
+    // told this session is out — no fresh-angle retell while they are
+    // still in its area. Dwell (allowRevisit) bypasses the lock: parked
+    // depth rotation is exactly where revisits belong.
+    const locked = (name: string) =>
+      !allowRevisit && storyCoverage.isSubjectLockedForSession(landmarkSubjectKey(name));
+
+    const unheard = factPack.places.filter(p => !heardStories.hasHeardSubject(p.name) && !locked(p.name));
     if (unheard.length > 0) return pickStorySubject(unheard, this.recentPrimaryTags());
+
+    if (!allowRevisit) {
+      // Moving with every nearby landmark already told this session: fall
+      // through to an area story rather than retelling a landmark at a
+      // new angle. The revisited pool below is dwell-only now.
+      return null;
+    }
 
     const revisited = factPack.places.filter(p =>
       storyCoverage.hasFreshAngle(landmarkSubjectKey(p.name), LANDMARK_ANGLES, [LANDMARK_ANGLES[0]])
@@ -255,6 +269,19 @@ class GeminiService {
     }
 
     return null;
+  }
+
+  // Display topics are "<Name> — <angle label>" for rotated tellings; the
+  // landmark's identity is the part before the separator.
+  private topicBaseName(topic: string): string {
+    return topic.split(' — ')[0].trim();
+  }
+
+  // True when a cached story belongs to a landmark locked out for this
+  // session. Dwell bypasses the lock — parked rotation serves are wanted.
+  private isTopicLockedForSession(topic: string, dwell: boolean): boolean {
+    if (dwell) return false;
+    return storyCoverage.isSubjectLockedForSession(landmarkSubjectKey(this.topicBaseName(topic)));
   }
 
   private chooseAreaStory(position: Position, factPack: StoryFactPack): { rotation: StoryRotation; areaName: string } {
@@ -275,14 +302,18 @@ class GeminiService {
     // area overview, not a landmark deep-dive. After that, narrow to landmarks.
     const isFirstInNeighborhood = context === 'neighborhood_intro' || context === 'initial';
 
-    const subject = isFirstInNeighborhood ? null : this.resolveSubject(factPack);
+    // Angle rotation on an already-told landmark is a dwell feature: the
+    // stationary contexts are the AREA_ANGLES strings themselves. In every
+    // moving context the session lockout applies instead.
+    const allowRevisit = !!context && context.startsWith('stationary_');
+    const subject = isFirstInNeighborhood ? null : this.resolveSubject(factPack, allowRevisit);
 
     if (subject) {
       const subjectKey = landmarkSubjectKey(subject.name);
       const angle = storyCoverage.nextAngle(
         subjectKey,
         LANDMARK_ANGLES,
-        heardStories.hasHeard(subject.name) ? [LANDMARK_ANGLES[0]] : []
+        heardStories.hasHeardSubject(subject.name) ? [LANDMARK_ANGLES[0]] : []
       );
 
       const isRotation = isRotationAngle(angle);
@@ -443,7 +474,7 @@ class GeminiService {
     }
 
     const heardNearby = factPack.places
-      .filter(p => heardStories.hasHeard(p.name))
+      .filter(p => heardStories.hasHeardSubject(p.name))
       .map(p => p.name)
       .filter(name => name !== target.subject?.name);
     if (heardNearby.length > 0) {
@@ -557,10 +588,17 @@ class GeminiService {
     [factPack, preliminaryCache] = await Promise.all([factPackPromise, cachePromise]);
 
     // If the preliminary cache found an unheard story, serve it right away.
-    if (preliminaryCache && !heardStories.hasHeard(preliminaryCache.topic)) {
+    // Session lockout applies too: a cached angle-variant of a landmark
+    // already told this session is a retell, not a cache hit.
+    if (
+      preliminaryCache &&
+      !heardStories.hasHeard(preliminaryCache.topic) &&
+      !this.isTopicLockedForSession(preliminaryCache.topic, locationTracker.getDwellDepthLevel() !== null)
+    ) {
       console.log(`[Gemini] Parallel cache hit for "${preliminaryCache.topic}" (${Math.round(preliminaryCache.distanceM)}m away)`);
       const versionKey = this.storyVersionKey(this.factPackHash(factPack));
       if (onChunk) onChunk(preliminaryCache.storyText);
+      storyCoverage.lockSubjectForSession(landmarkSubjectKey(this.topicBaseName(preliminaryCache.topic)));
       await locationTracker.updateLastStoryTopic(
         preliminaryCache.topic, position, preliminaryCache.storyText, 'cache_hit', 0, versionKey
       );
@@ -625,9 +663,12 @@ class GeminiService {
     const cached = skipCache ? null : await storyLookup.findNearbyStory(
       position.lat, position.lng, 100, versionKey, toldAngles
     );
-    if (cached && !heardStories.hasHeard(cached.topic)) {
+    if (cached && !heardStories.hasHeard(cached.topic) && !this.isTopicLockedForSession(cached.topic, effectiveContext.startsWith('stationary_'))) {
       console.log(`[Gemini] Using ${cached.source} story for "${cached.topic}" (${Math.round(cached.distanceM)}m away)`);
       if (onChunk) onChunk(cached.storyText);
+      if (target.kind === 'landmark') {
+        storyCoverage.lockSubjectForSession(subjectKey);
+      }
       await locationTracker.updateLastStoryTopic(
         cached.topic, position, cached.storyText, effectiveContext, depthLevel, versionKey
       );
@@ -643,6 +684,9 @@ class GeminiService {
     console.log('[Gemini] generateStory returned:', text ? `${text.length} chars` : 'EMPTY');
     if (text && text.trim().length > 0) {
       locationTracker.commitDepthAdvance();
+      if (target.kind === 'landmark') {
+        storyCoverage.lockSubjectForSession(subjectKey);
+      }
     }
     return {
       text,
@@ -670,7 +714,7 @@ class GeminiService {
     const cached = await storyLookup.findNearbyStory(
       position.lat, position.lng, 100, versionKey, toldAngles
     );
-    if (cached && !heardStories.hasHeard(cached.topic)) {
+    if (cached && !heardStories.hasHeard(cached.topic) && !this.isTopicLockedForSession(cached.topic, false)) {
       console.log(`[Gemini] Prefetch using ${cached.source} story for "${cached.topic}" (${Math.round(cached.distanceM)}m away)`);
       return { text: cached.storyText, subject: cached.topic, context: 'prefetch', mode: factPack.mode, rotation: null };
     }

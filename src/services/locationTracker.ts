@@ -369,6 +369,7 @@ class LocationTracker {
   reset() {
     this.lastLocation = null;
     this.dwellAnchor = null;
+    storyCoverage.clearSessionLocks();
     this.sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     this.recentStoryTexts = [];
     this.toldStories = new Set();
