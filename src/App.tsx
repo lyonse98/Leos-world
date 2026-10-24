@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Eye, EyeOff, Play, MapPin, Wifi, WifiOff, Download, Clock, Compass, VolumeX, Moon, XCircle, Share2, Music, Send, Heart, AlertTriangle, Mic } from 'lucide-react';
+import { Eye, EyeOff, Play, MapPin, Wifi, WifiOff, Download, Clock, Compass, VolumeX, Moon, XCircle, Share2, Music, Send, Heart, AlertTriangle, Mic, Smartphone } from 'lucide-react';
 import { useVoice, StoryTiming } from './hooks/useVoice';
 import { useGeolocation, Position } from './hooks/useGeolocation';
 import { useSpeechRecognition } from './hooks/useSpeechRecognition';
@@ -20,6 +20,61 @@ import { geminiAudio } from './services/geminiAudio';
 import { SUPABASE_CONFIGURED } from './services/supabase';
 import LeoFigure, { LeoPose } from './components/LeoFigure';
 import SdBeach from './components/SdBeach';
+import { isStandalone, detectInstallPlatform, canNativeInstall, nativeInstall, InstallPlatform } from './utils/install';
+
+// Platform-specific "add to home screen" guidance, shared by the landing
+// tip and the post-tour nudge. Until there is a native app, the home-
+// screen icon is the product's front door — and on iOS only Safari can
+// create it, which the ios-other-browser branch says out loud.
+function InstallHelp({ platform, nativeReady, onNativeInstall }: {
+  platform: InstallPlatform;
+  nativeReady: boolean;
+  onNativeInstall: () => void;
+}) {
+  const stepClass = "list-decimal list-inside space-y-1 text-xs text-slate-300 leading-relaxed";
+  if (platform === 'ios-safari') {
+    return (
+      <ol className={stepClass}>
+        <li>Tap the <span className="text-slate-100 font-medium">Share</span> icon in Safari's toolbar</li>
+        <li>Scroll down and tap <span className="text-slate-100 font-medium">Add to Home Screen</span></li>
+        <li>Tap <span className="text-slate-100 font-medium">Add</span> — Leo gets his own icon, full-screen</li>
+      </ol>
+    );
+  }
+  if (platform === 'ios-other-browser') {
+    return (
+      <p className="text-xs text-slate-300 leading-relaxed">
+        This only works in Safari: open Leo's World in <span className="text-slate-100 font-medium">Safari</span>,
+        then tap <span className="text-slate-100 font-medium">Share → Add to Home Screen → Add</span>.
+      </p>
+    );
+  }
+  if (platform === 'android') {
+    if (nativeReady) {
+      return (
+        <button
+          onClick={onNativeInstall}
+          className="px-4 py-2 rounded-xl bg-gradient-to-r from-amber-600 to-amber-500 text-white text-sm font-semibold hover:from-amber-500 hover:to-amber-400 transition-all active:scale-95 shadow-md"
+        >
+          Install Leo
+        </button>
+      );
+    }
+    return (
+      <ol className={stepClass}>
+        <li>Tap the browser menu (<span className="text-slate-100 font-medium">three dots</span>, top right)</li>
+        <li>Tap <span className="text-slate-100 font-medium">Add to Home screen</span> (or <span className="text-slate-100 font-medium">Install app</span>)</li>
+        <li>Confirm — Leo lands on your home screen</li>
+      </ol>
+    );
+  }
+  return (
+    <p className="text-xs text-slate-300 leading-relaxed">
+      Use your browser's menu and choose <span className="text-slate-100 font-medium">Add to Home Screen</span> or
+      <span className="text-slate-100 font-medium"> Install</span> — Leo runs like an app, no store needed.
+    </p>
+  );
+}
 
 // The sky over San Diego, by the clock. Still just a gradient — no image,
 // no weight — but the app sits in the same light the driver is in.
@@ -46,6 +101,20 @@ function App() {
   const [isProcessingQuestion, setIsProcessingQuestion] = useState(false);
   const [userInput, setUserInput] = useState('');
   const [storiesCount, setStoriesCount] = useState<number>(0);
+  const [isInstalled] = useState<boolean>(() => isStandalone());
+  const [installPlatform] = useState<InstallPlatform>(() => detectInstallPlatform());
+  const [installTipOpen, setInstallTipOpen] = useState(false);
+  const [showInstallNudge, setShowInstallNudge] = useState(false);
+  const [nativeReady, setNativeReady] = useState(false);
+
+  const handleNativeInstall = async () => {
+    const accepted = await nativeInstall();
+    if (accepted) {
+      setShowInstallNudge(false);
+      setInstallTipOpen(false);
+    }
+    setNativeReady(canNativeInstall());
+  };
   const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
   const [cacheCount, setCacheCount] = useState<number>(0);
   const [missedQueueCount, setMissedQueueCount] = useState<number>(0);
@@ -388,6 +457,21 @@ function App() {
     geolocation.stopTracking();
     localStorage.removeItem(RESUME_SESSION_KEY);
     setResumableSession(null);
+    // Ask for the home screen once, at the moment of proven value: a tour
+    // that heard at least one story and ended. Never twice, never if
+    // already installed — an icon is what turns a link click into a
+    // second drive.
+    if (storiesCount > 0 && !isInstalled) {
+      try {
+        if (!localStorage.getItem('leo_install_nudge_seen')) {
+          localStorage.setItem('leo_install_nudge_seen', '1');
+          setNativeReady(canNativeInstall());
+          setShowInstallNudge(true);
+        }
+      } catch {
+        // Storage unavailable (private mode) — skip the nudge silently.
+      }
+    }
     setIsTourStarted(false);
     kickoffFiredRef.current = false;
   };
@@ -1001,6 +1085,43 @@ function App() {
                 Share Leo's World
               </button>
             </div>
+            {!isInstalled && showInstallNudge && (
+              <div className="mt-5 max-w-sm mx-auto w-full bg-slate-800/70 border border-amber-800/40 rounded-2xl px-4 py-3.5 text-left shadow-xl backdrop-blur-sm relative">
+                <button
+                  onClick={() => setShowInstallNudge(false)}
+                  aria-label="Dismiss"
+                  className="absolute top-2.5 right-2.5 p-1 text-slate-500 hover:text-slate-300 transition-colors"
+                >
+                  <XCircle size={16} />
+                </button>
+                <p className="text-sm font-semibold text-slate-100 flex items-center gap-2">
+                  <Smartphone size={15} className="text-amber-400" />
+                  Put Leo on your home screen
+                </p>
+                <p className="mt-1 text-xs text-slate-400 leading-relaxed">
+                  One tap to start your next drive — no app store needed.
+                </p>
+                <div className="mt-2.5">
+                  <InstallHelp platform={installPlatform} nativeReady={nativeReady} onNativeInstall={handleNativeInstall} />
+                </div>
+              </div>
+            )}
+            {!isInstalled && (
+              <div className="mt-4">
+                <button
+                  onClick={() => { setInstallTipOpen(!installTipOpen); setNativeReady(canNativeInstall()); }}
+                  className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-amber-300 transition-colors underline decoration-slate-600 underline-offset-4"
+                >
+                  <Smartphone size={13} />
+                  Add Leo to your home screen
+                </button>
+                {installTipOpen && (
+                  <div className="mt-2.5 max-w-sm mx-auto text-left bg-slate-800/50 border border-slate-700/50 rounded-xl px-4 py-3">
+                    <InstallHelp platform={installPlatform} nativeReady={nativeReady} onNativeInstall={handleNativeInstall} />
+                  </div>
+                )}
+              </div>
+            )}
             </div>
           </div>
         </div>
