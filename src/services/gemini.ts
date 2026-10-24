@@ -841,32 +841,61 @@ class GeminiService {
       parts.push(`NEARBY RIGHT NOW (they can likely see these): ${qaContext.nearbyLandmarks.slice(0, 5).join(', ')}`);
     }
     parts.push(
-      'Answer the question directly, in one to three sentences of spoken prose — the listener asked by voice while driving, and a tight, confident answer beats a complete one. No lists. Ground it in this location and what you just told them when relevant. If you do not actually know, say so plainly and offer the nearest true thing you do know — never invent specifics.'
+      'Answer the question directly and completely. Take as much time as the answer needs — 4 to 6 sentences is fine if the question warrants it, but keep it under 10 sentences so the listener can get back to the tour. The listener asked because they are curious, so give them a satisfying, full answer, not a quick summary. Ground it in this location and what you just told them when relevant. If you do not actually know, say so plainly and offer what you do know about the wider area — never invent specifics.'
     );
 
     const prompt = parts.join('\n\n');
 
     await this.waitForSlot();
     try {
-      if (onChunk) {
-        const response = await this.withRetry(() =>
-          this.withTimeout(
-            this.ai!.models.generateContentStream({
-              model: LEO_QA_MODEL_ID,
-              contents: prompt,
-              config: {
-                systemInstruction: LEO_SYSTEM_INSTRUCTION,
-                maxOutputTokens: LEO_QA_MAX_OUTPUT_TOKENS,
-                thinkingConfig: { thinkingBudget: 0 },
-              },
-            }),
-            REQUEST_TIMEOUT_MS
-          )
-        );
+      return await this.generateAnswer(prompt, LEO_QA_MODEL_ID, onChunk);
+    } catch (primaryError) {
+      // The reduced Q&A model is a cost/latency optimization, never a
+      // single point of failure: if it is unavailable for any reason,
+      // the flagship story model answers instead — slower, never dead.
+      if (LEO_QA_MODEL_ID !== LEO_MODEL_ID) {
+        try {
+          console.warn('[Q&A] Reduced model failed, falling back to flagship:', primaryError);
+          return await this.generateAnswer(prompt, LEO_MODEL_ID, onChunk);
+        } catch {
+          // Fall through to the standard error copy below.
+        }
+      }
+      console.error('Gemini API error:', primaryError);
+      if (this.isQuotaError(primaryError)) {
+        return "I'm getting too many requests right now. Ask me that again in a moment!";
+      }
+      return "Having a connection hiccup. Ask me that again in a sec!";
+    } finally {
+      this.releaseSlot();
+    }
+  }
 
-        let fullText = '';
-        let lastChunkTime = Date.now();
+  private async generateAnswer(
+    prompt: string,
+    modelId: string,
+    onChunk?: (text: string) => void
+  ): Promise<string> {
+    if (onChunk) {
+      const response = await this.withRetry(() =>
+        this.withTimeout(
+          this.ai!.models.generateContentStream({
+            model: modelId,
+            contents: prompt,
+            config: {
+              systemInstruction: LEO_SYSTEM_INSTRUCTION,
+              maxOutputTokens: LEO_QA_MAX_OUTPUT_TOKENS,
+              thinkingConfig: { thinkingBudget: 0 },
+            },
+          }),
+          REQUEST_TIMEOUT_MS
+        )
+      );
 
+      let fullText = '';
+      let lastChunkTime = Date.now();
+
+      try {
         for await (const chunk of response) {
           if (Date.now() - lastChunkTime > REQUEST_TIMEOUT_MS) {
             throw new Error('Gemini stream stalled');
@@ -876,35 +905,35 @@ class GeminiService {
           onChunk(chunkText);
           lastChunkTime = Date.now();
         }
-
-        return fullText.trim();
-      } else {
-        const response = await this.withRetry(() =>
-          this.withTimeout(
-            this.ai!.models.generateContent({
-              model: LEO_QA_MODEL_ID,
-              contents: prompt,
-              config: {
-                systemInstruction: LEO_SYSTEM_INSTRUCTION,
-                maxOutputTokens: LEO_QA_MAX_OUTPUT_TOKENS,
-                thinkingConfig: { thinkingBudget: 0 },
-              },
-            }),
-            REQUEST_TIMEOUT_MS
-          )
-        );
-
-        return (response.text || '').trim();
+      } catch (streamError) {
+        // A stream that dies after producing a real answer keeps it —
+        // re-asking on the fallback model would double-print the prefix
+        // the listener already received.
+        if (fullText.trim().length > 0) {
+          return fullText.trim();
+        }
+        throw streamError;
       }
-    } catch (error) {
-      console.error('Gemini API error:', error);
-      if (this.isQuotaError(error)) {
-        return "I'm getting too many requests right now. Ask me that again in a moment!";
-      }
-      return "Having a connection hiccup. Ask me that again in a sec!";
-    } finally {
-      this.releaseSlot();
+
+      return fullText.trim();
     }
+
+    const response = await this.withRetry(() =>
+      this.withTimeout(
+        this.ai!.models.generateContent({
+          model: modelId,
+          contents: prompt,
+          config: {
+            systemInstruction: LEO_SYSTEM_INSTRUCTION,
+            maxOutputTokens: LEO_QA_MAX_OUTPUT_TOKENS,
+            thinkingConfig: { thinkingBudget: 0 },
+          },
+        }),
+        REQUEST_TIMEOUT_MS
+      )
+    );
+
+    return (response.text || '').trim();
   }
 }
 

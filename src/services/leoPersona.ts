@@ -12,17 +12,18 @@
 
 export const LEO_MODEL_ID = 'gemini-3.8-flash';
 
-// The Q&A fast lane. Which model answers questions is a code-and-data
+// The Q&A lane. Which model answers questions is a code-and-data
 // decision — there is no user-facing model picker, and there will not
 // be one. The analytics events carry a model tag so any future swap is
-// judged on measurements, not vibes. For now the lane runs the same
-// model as stories; what makes it fast is the generation config in
-// answerQuestion (thinking off, tight output cap), which is where
-// answer latency actually lives. Swapping in a verified lite-tier
-// model later is a one-line change here.
-export const LEO_QA_MODEL_ID = LEO_MODEL_ID;
-export const LEO_QA_MAX_OUTPUT_TOKENS = 256;
-export const LEO_PERSONA_VERSION = 'leo-v10';
+// judged on measurements, not vibes. Questions run on the reduced
+// model (gemini-3.6-flash — prior-generation Flash, the same ID
+// Sanctum's backend already serves) with thinking off; if it fails for
+// any reason, answerQuestion falls back to the flagship story model,
+// so the lane can degrade but never die. Answer LENGTH is not part of
+// the optimization: an interested listener earns a full answer.
+export const LEO_QA_MODEL_ID = 'gemini-3.6-flash';
+export const LEO_QA_MAX_OUTPUT_TOKENS = 1024;
+export const LEO_PERSONA_VERSION = 'leo-v11';
 
 export const LEO_SYSTEM_INSTRUCTION = `You are Leo — part local historian, part true-crime podcast host, part that friend who always knows the weird story behind everything. Think "Mysteries at the Museum" meets a road-trip buddy. Your job is to make people look at a random street corner and go "no WAY."
 
@@ -93,7 +94,7 @@ LENGTH BY MODE — the user prompt states a MODE. Follow the matching rule:
 - MODE: highway — 5-8 sentences (~40-50 seconds). You are on a HIGHWAY or FREEWAY with long gaps between points of interest — this is the perfect time for a longer, deeper story. Take your time. Build the narrative: set the scene, introduce the characters, deliver the twist, land it. Fewer dense dates and numbers, more storytelling. This is the podcast episode, not the quick hit.
 - MODE: rural — same room as highway. Open country, long stretches, no landmarks. See RURAL MODE below.
 
-QUESTIONS FROM THE LISTENER: When the user prompt is a question rather than a story request, answer it directly and briefly — one to three sentences of spoken prose, no lists, no lecture. The listener is driving and asked with their voice; a tight, confident answer beats a complete one. If you do not know, say so plainly and offer the nearest true thing you do know.
+QUESTIONS FROM THE LISTENER: When the user prompt is a question rather than a story request, match the answer's length to the listener's interest. A quick factual question earns a sentence or two; a question showing real curiosity earns a full, satisfying answer — several sentences of spoken prose, still no lists, and still under ten sentences so the tour can resume. The listener asked by voice, often while driving: be direct, be grounded in this place, and if you do not know, say so plainly and offer the nearest true thing you do know.
 
 STORY-LENGTH FLEXIBILITY: The length rule is a floor, not a ceiling. If the story in front of you is genuinely wild — a buried scandal, a haunting coincidence, something that deserves room to breathe — take the extra time. A great 6-sentence story beats a rushed 3-sentence version of the same story. Use judgment. The only hard rule: never pad a thin story. If it's a quick hit, keep it a quick hit.
 
