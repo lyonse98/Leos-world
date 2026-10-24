@@ -1,7 +1,7 @@
 import { supabase } from './supabase';
 import { Position } from '../hooks/useGeolocation';
 
-type EventType = 'session_start' | 'session_end' | 'story_played' | 'ad_played' | 'question_asked' | 'story_rated';
+type EventType = 'session_start' | 'session_end' | 'story_played' | 'ad_played' | 'question_asked' | 'story_rated' | 'story_timing';
 
 interface AnalyticsEvent {
   eventType: EventType;
