@@ -243,6 +243,25 @@ class StoryCacheService {
     return null;
   }
 
+  // Predictive radial: where the radial prefetch should be centered — the
+  // position the listener is ANTICIPATED to reach, projected along their
+  // heading by ~90 seconds of travel. The radial machinery itself is
+  // unchanged; only its center moves. At low speed the projection shrinks
+  // toward zero and the center converges on the current position, so no
+  // mode switching is needed. The distance is capped so a stale or
+  // glitchy heading can't throw the center across town.
+  private anticipatedCenter(position: Position): Position {
+    const LOOKAHEAD_S = 90;
+    const MAX_PROJECTION_M = 2500;
+    const speed = position.speed ?? 0;
+    const heading = position.heading;
+    if (heading === null || isNaN(heading) || speed < 1.5) return position;
+    const distance = Math.min(speed * LOOKAHEAD_S, MAX_PROJECTION_M);
+    if (distance < 50) return position;
+    const projected = offsetPositionByHeading(position, heading, distance);
+    return { ...position, lat: projected.lat, lng: projected.lng };
+  }
+
   async prefetchForPosition(position: Position, mode: MovementModeHysteresis): Promise<void> {
     if (!this.isOnline || this.isPrefetching) return;
     // Trigger at 60% capacity so the buffer starts refilling well before it's
@@ -259,22 +278,27 @@ class StoryCacheService {
     this.lastFetchPosition = position;
     this.lastFetchTime = Date.now();
 
+    // Generate around the anticipated position, and anchor the cached
+    // story there — serve-time distance and freshness checks then measure
+    // against where the listener will be, not where they were.
+    const center = this.anticipatedCenter(position);
+
     try {
-      const result = await geminiService.prefetchStory(position);
+      const result = await geminiService.prefetchStory(center);
       if (result.text && result.text.trim().length > 0) {
         this.addToCache({
           text: result.text,
-          topic: result.subject || `Story at ${position.lat.toFixed(4)}, ${position.lng.toFixed(4)}`,
+          topic: result.subject || `Story at ${center.lat.toFixed(4)}, ${center.lng.toFixed(4)}`,
           subject: result.subject,
           rotation: result.rotation,
-          lat: position.lat,
-          lng: position.lng,
+          lat: center.lat,
+          lng: center.lng,
           generatedAt: Date.now(),
           played: false,
           mode,
           regionAnchored: mode === 'driving',
         });
-        console.log('[StoryCache] Prefetched story for', position.lat.toFixed(4), position.lng.toFixed(4));
+        console.log('[StoryCache] Prefetched story for', center.lat.toFixed(4), center.lng.toFixed(4));
       }
     } catch (error) {
       console.error('[StoryCache] Prefetch failed:', error);
