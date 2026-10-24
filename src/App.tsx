@@ -18,6 +18,7 @@ import { ambientAudio } from './services/ambientAudio';
 import { storyLikes } from './services/storyLikes';
 import { geminiAudio } from './services/geminiAudio';
 import { SUPABASE_CONFIGURED } from './services/supabase';
+import LeoFigure from './components/LeoFigure';
 
 const RESUME_SESSION_KEY = 'leo_active_session';
 const RESUME_SESSION_TTL_MS = 30 * 60 * 1000;
@@ -89,14 +90,14 @@ function App() {
   // needs reading — the colour and the orb tell the listener everything from
   // arm's length, which is the whole point on a drive.
   const leoStatus = speech.isListening
-    ? { label: 'LISTENING — ASK AWAY', orb: 'from-rose-900/60 to-slate-900 border-rose-600/50', glow: 'bg-rose-500/25', ring: 'border-rose-400/30', icon: 'text-rose-300', text: 'text-rose-300' }
+    ? { label: 'LISTENING — ASK AWAY', pose: 'listening' as const, orb: 'from-rose-900/60 to-slate-900 border-rose-600/50', glow: 'bg-rose-500/25', ring: 'border-rose-400/30', icon: 'text-rose-300', text: 'text-rose-300' }
     : isProcessingQuestion
-    ? { label: 'LEO IS THINKING', orb: 'from-amber-900/60 to-slate-900 border-amber-600/50', glow: 'bg-amber-500/25', ring: 'border-amber-400/30', icon: 'text-amber-300', text: 'text-amber-300' }
+    ? { label: 'LEO IS THINKING', pose: 'thinking' as const, orb: 'from-amber-900/60 to-slate-900 border-amber-600/50', glow: 'bg-amber-500/25', ring: 'border-amber-400/30', icon: 'text-amber-300', text: 'text-amber-300' }
     : voice.isSpeaking
-      ? { label: 'LEO IS SHARING', orb: 'from-blue-900/60 to-slate-900 border-blue-600/50', glow: 'bg-blue-500/25', ring: 'border-blue-400/30', icon: 'text-blue-300', text: 'text-blue-300' }
+      ? { label: 'LEO IS SHARING', pose: 'speaking' as const, orb: 'from-blue-900/60 to-slate-900 border-blue-600/50', glow: 'bg-blue-500/25', ring: 'border-blue-400/30', icon: 'text-blue-300', text: 'text-blue-300' }
       : voice.wasInterrupted
-        ? { label: 'TAP TO RESUME', orb: 'from-cyan-900/60 to-slate-900 border-cyan-600/50', glow: 'bg-cyan-500/25', ring: 'border-cyan-400/30', icon: 'text-cyan-300', text: 'text-cyan-300' }
-        : { label: 'ON TOUR', orb: 'from-slate-800 to-slate-900 border-slate-600/50', glow: 'bg-cyan-500/10', ring: 'border-slate-500/25', icon: 'text-slate-400', text: 'text-slate-500' };
+        ? { label: 'TAP TO RESUME', pose: 'idle' as const, orb: 'from-cyan-900/60 to-slate-900 border-cyan-600/50', glow: 'bg-cyan-500/25', ring: 'border-cyan-400/30', icon: 'text-cyan-300', text: 'text-cyan-300' }
+        : { label: 'ON TOUR', pose: 'idle' as const, orb: 'from-slate-800 to-slate-900 border-slate-600/50', glow: 'bg-cyan-500/10', ring: 'border-slate-500/25', icon: 'text-slate-400', text: 'text-slate-500' };
 
   const requestTokenRef = useRef<number>(0);
   const kickoffFiredRef = useRef(false);
@@ -824,15 +825,13 @@ function App() {
           <div className="absolute top-[50%] left-[55%] w-[20rem] h-[20rem] bg-amber-400 rounded-full opacity-[0.03] blur-[100px] leo-float" />
 
           <div className="text-center px-6 relative z-10">
-            <div className="mb-8 flex justify-center">
-              {/* Leo himself — a still emblem, deliberately unanimated. The
-                  same artwork is the home-screen icon, so the face on the
-                  landing page is the face on your phone. */}
-              <img
-                src="/leo-icon-512.png"
-                alt="Leo, your guide for the road"
-                className="w-28 h-28 rounded-[1.75rem] border border-amber-600/30 shadow-2xl"
-              />
+            <div className="mb-1 flex justify-center">
+              {/* Leo himself, full body, standing in the screen and waving
+                  hello — a still portrait, deliberately unanimated. His
+                  face is also the home-screen icon. Rendering the figure
+                  here quietly preloads his tour poses, so when the tour
+                  starts his speaking/listening/thinking swaps are instant. */}
+              <LeoFigure pose="wave" className="h-60 sm:h-72" />
             </div>
             <h1 className="text-5xl sm:text-6xl font-bold mb-3 tracking-tight leo-shimmer-amber bg-gradient-to-r from-amber-200 via-white to-amber-300 bg-clip-text text-transparent" style={{ fontFamily: 'Georgia, "Times New Roman", serif' }}>
               LEO'S WORLD
@@ -1081,9 +1080,11 @@ function App() {
                 </div>
               )}
 
-              {/* Distraction-free by design: no story text on screen. The orb
-                  carries the state so the listener never has to read. */}
+              {/* Distraction-free by design: no story text on screen. Leo's
+                  pose and the orb carry the state so the listener never has
+                  to read. */}
               <div className="flex flex-col items-center">
+                <LeoFigure pose={leoStatus.pose} className="h-[23vh] min-h-[148px] max-h-[248px] mb-2" />
                 <div className="relative flex items-center justify-center mb-6" style={{ width: 128, height: 128 }}>
                   <div className={`absolute rounded-full border leo-ring ${leoStatus.ring}`} style={{ width: 128, height: 128 }} />
                   <div className={`absolute rounded-full border leo-ring-delay ${leoStatus.ring}`} style={{ width: 128, height: 128 }} />
