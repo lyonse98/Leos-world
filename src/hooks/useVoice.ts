@@ -201,21 +201,23 @@ export const useVoice = () => {
   // to play at all. A single silent prime on the audio element satisfies the
   // autoplay policy so Gemini TTS can use it later without being blocked.
   const unlock = useCallback(() => {
-    if (unlockedRef.current) {
-      // Already unlocked, but still resume the synth in case the platform
-      // paused it while backgrounded.
-      try { synthRef.current?.resume(); } catch { /* engine missing */ }
-      return;
-    }
-    unlockedRef.current = true;
-
+    // Resume the speech synth in case the platform paused it while
+    // backgrounded — needed on every call, latched or not.
     const synth = synthRef.current;
     if (synth) {
       try { synth.resume(); } catch { /* engine missing */ }
     }
 
     // Prime the HTMLAudioElement inside this gesture so Safari/DuckDuckGo
-    // allow future programmatic plays for Gemini TTS audio.
+    // allow future programmatic plays for Gemini TTS audio. This runs on
+    // EVERY unlock call, not just the first. The old latch made the
+    // "your browser muted Leo" banner a dead end: the first prime could
+    // miss the tap's activation window (one await before it is enough),
+    // the latch set anyway, every later banner tap early-returned
+    // without re-priming, and each queued story's play() rejected in
+    // turn — the banner flashing off as a story was attempted and back
+    // on as it was blocked and dropped. Now the latch is set only when
+    // a prime actually succeeds, and a banner tap genuinely re-primes.
     const audio = audioElRef.current;
     if (audio) {
       audio.muted = true;
@@ -225,9 +227,11 @@ export const useVoice = () => {
         audio.currentTime = 0;
         audio.muted = false;
         audio.removeAttribute('src');
+        unlockedRef.current = true;
       }).catch(() => {
         audio.muted = false;
         audio.removeAttribute('src');
+        unlockedRef.current = false;
       });
     }
 

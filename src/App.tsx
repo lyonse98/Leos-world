@@ -925,6 +925,12 @@ function App() {
 
   const handleStartTour = async (resume: boolean = false) => {
     try {
+      // Prime the audio element FIRST, synchronously inside this tap.
+      // iOS Safari's user-activation window is short, and everything
+      // below (init, voice loading, the ensureVoiceReady await) can
+      // burn it — a prime that lands after the window closes leaves
+      // every story's play() blocked for the whole tour.
+      voice.unlock();
       geminiService.initialize();
       try { geminiAudio.initialize(); } catch (e) { console.error('[Tour] Gemini TTS init failed:', e); }
 
