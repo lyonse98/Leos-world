@@ -113,6 +113,9 @@ export const useVoice = () => {
   // Callbacks from a story that no longer owns the queue check this and bail,
   // so a cancelled story can never advance the queue out from under a newer one.
   const playGenRef = useRef<number>(0);
+  // Tracks the text currently being pre-synthesized so we don't kick off
+  // duplicate TTS calls for the same story.
+  const preSynthTextRef = useRef<string | null>(null);
   const [audioBlocked, setAudioBlocked] = useState<boolean>(false);
   // Set when the listener returns to a tour whose audio the platform paused.
   // Surfaces as "tap to resume" instead of leaving them in unexplained silence.
@@ -335,6 +338,7 @@ export const useVoice = () => {
     sentenceQueueRef.current = [];
     storyQueueRef.current = [];
     isPlayingStoryRef.current = false;
+    preSynthTextRef.current = null;
     clearWatchdog();
   }, [clearWatchdog]);
 
@@ -606,6 +610,34 @@ export const useVoice = () => {
     playSentence(0);
   }, [dispatchSpeech, startWatchdog]);
 
+  // Pre-synthesize the next queued story's audio while the current one plays.
+  // This warms the TTS cache so the next story starts with zero synthesis
+  // delay. Fire-and-forget — if the story gets pruned or skipped, one wasted
+  // API call is the only cost.
+  const preSynthesizeNext = useCallback(() => {
+    if (!geminiAudio.hasModel()) {
+      try { geminiAudio.initialize(); } catch { return; }
+    }
+    if (!geminiAudio.hasModel()) return;
+
+    const next = storyQueueRef.current[0];
+    if (!next) return;
+
+    const fullText = next.transitionText ? `${next.transitionText} ${next.text}` : next.text;
+    if (!fullText || fullText.trim().length === 0) return;
+    if (preSynthTextRef.current === fullText) return;
+    preSynthTextRef.current = fullText;
+
+    geminiAudio.textToAudioUrl(fullText).catch(() => {
+      // Best-effort — a failed pre-synthesis just means the next story
+      // synthesizes on demand as before.
+    });
+    console.log('[Voice] Pre-synthesizing next story audio');
+  }, []);
+
+  const preSynthesizeNextRef = useRef(preSynthesizeNext);
+  preSynthesizeNextRef.current = preSynthesizeNext;
+
   const playStoryFromQueue = useCallback(() => {
     if (isPlayingStoryRef.current) return;
 
@@ -678,6 +710,7 @@ export const useVoice = () => {
 
     if (useGeminiTTS) {
       playSegmentsWithGemini(fullText, onDone);
+      preSynthesizeNextRef.current();
     } else {
       playSegmentsBrowser([fullText], onDone);
     }
@@ -775,6 +808,8 @@ export const useVoice = () => {
     );
     if (!isPlayingStoryRef.current) {
       playStoryFromQueueRef.current();
+    } else {
+      preSynthesizeNextRef.current();
     }
   }, []);
 
@@ -853,6 +888,7 @@ export const useVoice = () => {
     sentenceQueueRef.current = [];
     streamBufferRef.current = '';
     isProcessingQueueRef.current = false;
+    preSynthTextRef.current = null;
     clearWatchdog();
     setIsSpeaking(false);
     setTimeout(() => onStoryCompleteRef.current?.(), 50);
@@ -876,6 +912,7 @@ export const useVoice = () => {
     sentenceQueueRef.current = [];
     streamBufferRef.current = '';
     isProcessingQueueRef.current = false;
+    preSynthTextRef.current = null;
     clearWatchdog();
     setIsSpeaking(false);
   }, [clearWatchdog]);
