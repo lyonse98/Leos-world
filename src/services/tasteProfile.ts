@@ -1,5 +1,5 @@
 import { supabase } from './supabase';
-import { USER_KEY } from './heardStories';
+import { getUserKey } from './heardStories';
 import { deriveTags, describeTag, isInterestTag, TagInput } from './storyTags';
 
 // What this listener likes, learned from their own ratings.
@@ -66,7 +66,7 @@ class TasteProfileService {
         // aggregate weights for the device key we present, so no caller can
         // read anyone else's taste profile — or even its own raw rows.
         const { data, error } = await supabase.rpc('get_taste_weights', {
-          p_user_key: USER_KEY,
+          p_user_key: getUserKey(),
           p_limit: 200,
         });
 
@@ -140,7 +140,7 @@ class TasteProfileService {
     // tour, and the local weights already reflect it.
     supabase
       .rpc('record_story_feedback', {
-        p_user_key: USER_KEY,
+        p_user_key: getUserKey(),
         p_session_id: this.sessionId,
         p_topic: input.topic,
         p_lat: input.lat ?? null,

@@ -221,6 +221,22 @@ class StoryCoverageService {
     this.sessionLockedSubjects.clear();
   }
 
+  // Full wipe — every angle on every subject forgotten, in memory and in
+  // storage. Exists for field testing: a developer driving the same test
+  // routes daily burns through their own coverage until Leo has nothing
+  // left to say. Paired with the heard-stories reset and device-key
+  // rotation in App, this makes the listener brand new again.
+  resetAll(): void {
+    this.subjects = {};
+    this.recent = [];
+    this.clearSessionLocks();
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // storage unavailable — the in-memory wipe still applies this session
+    }
+  }
+
   // True while this subject still has an angle Leo has not taken. Angles the
   // caller knows are spent but that are not recorded here — a landmark's
   // canonical telling, which lives in the heard-stories record rather than in

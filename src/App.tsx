@@ -10,7 +10,7 @@ import { locationTracker } from './services/locationTracker';
 import { analytics } from './services/analytics';
 import { placesService } from './services/placesService';
 import { getIntro } from './services/intros';
-import { heardStories } from './services/heardStories';
+import { heardStories, rotateUserKey } from './services/heardStories';
 import { tasteProfile } from './services/tasteProfile';
 import { storyCoverage } from './services/storyCoverage';
 
@@ -42,6 +42,7 @@ interface SavedTourSession {
 function App() {
   const [isTourStarted, setIsTourStarted] = useState(false);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [resetArmed, setResetArmed] = useState(false);
   const [isProcessingQuestion, setIsProcessingQuestion] = useState(false);
   const [userInput, setUserInput] = useState('');
   const [storiesCount, setStoriesCount] = useState<number>(0);
@@ -316,6 +317,26 @@ function App() {
     }
     prevListeningRef.current = speech.isListening;
   }, [speech.isListening, speech.transcript, isProcessingQuestion]);
+
+  // Diagnostics-only full reset of Leo's memory of this listener: angle
+  // coverage wiped locally, heard set cleared, and the anonymous device
+  // key rotated so the server-side heard history no longer applies.
+  // Two-tap arming instead of a modal — it lives behind the diagnostics
+  // toggle, and the second tap is confirmation enough there.
+  const handleResetStoryMemory = () => {
+    if (!resetArmed) {
+      setResetArmed(true);
+      setTimeout(() => setResetArmed(false), 3000);
+      return;
+    }
+    storyCoverage.resetAll();
+    heardStories.reset();
+    rotateUserKey();
+    void heardStories.hydrate();
+    setResetArmed(false);
+    setShareToast('Story memory cleared — Leo will treat every place as new');
+    setTimeout(() => setShareToast(null), 3500);
+  };
 
   const handleToggleAmbient = () => {
     setAmbientOn(prev => {
@@ -1063,6 +1084,16 @@ function App() {
                     </p>
                   )}
                   <p className="text-slate-500">Taste tags: {tasteProfile.getTagCount()}</p>
+                  <button
+                    onClick={handleResetStoryMemory}
+                    className={`mt-2 w-full px-2 py-1.5 rounded-lg border text-[10px] font-semibold tracking-wide transition-colors ${
+                      resetArmed
+                        ? 'bg-red-950/80 border-red-700 text-red-300'
+                        : 'bg-slate-800/80 border-slate-700 text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    {resetArmed ? 'TAP AGAIN TO CONFIRM RESET' : 'RESET STORY MEMORY'}
+                  </button>
                 </div>
               </div>
             )}

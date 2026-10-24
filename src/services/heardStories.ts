@@ -6,22 +6,44 @@ import { supabase } from './supabase';
 // same story twice.
 const USER_KEY_STORAGE = 'leo_user_key';
 
+function createUserKey(): string {
+  return `u_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+}
+
 function loadOrCreateUserKey(): string {
   try {
     const existing = localStorage.getItem(USER_KEY_STORAGE);
     if (existing && existing.length > 0) return existing;
 
-    const key = `u_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+    const key = createUserKey();
     localStorage.setItem(USER_KEY_STORAGE, key);
     return key;
   } catch {
     // Private mode or storage disabled — fall back to a per-session key so
     // the app still works, just without cross-session memory.
-    return `u_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+    return createUserKey();
   }
 }
 
-export const USER_KEY = loadOrCreateUserKey();
+let currentUserKey = loadOrCreateUserKey();
+
+export function getUserKey(): string {
+  return currentUserKey;
+}
+
+// Start over as a "new listener": mint a fresh device key so the server
+// has no heard history for this device. The old rows are not deleted —
+// they sit keyed to an anonymous random id nothing will ever present
+// again. Used by the diagnostics story-memory reset.
+export function rotateUserKey(): string {
+  currentUserKey = createUserKey();
+  try {
+    localStorage.setItem(USER_KEY_STORAGE, currentUserKey);
+  } catch {
+    // storage unavailable — the new key still applies for this session
+  }
+  return currentUserKey;
+}
 
 const MAX_HISTORY = 500;
 
@@ -73,7 +95,7 @@ class HeardStoriesService {
         // routine returns only the rows matching the device key we present,
         // so no caller can enumerate anyone else's listening history.
         const { data, error } = await supabase.rpc('get_heard_topics', {
-          p_user_key: USER_KEY,
+          p_user_key: getUserKey(),
           p_limit: MAX_HISTORY,
         });
 
@@ -108,7 +130,7 @@ class HeardStoriesService {
       .from('heard_stories')
       .insert({
         session_id: entry.sessionId,
-        user_key: USER_KEY,
+        user_key: getUserKey(),
         topic: entry.topic,
         story_text: entry.storyText || null,
         lat: entry.lat,
