@@ -15,6 +15,10 @@ export interface NearbyPlace {
   distance: number;
   historicalScore: number;
   direction: string;
+  // Which candidate tier produced this entry. Absent = Google Places
+  // (the original pool). Ranking caps and the Tier-1 exclusion key off
+  // this for the historic-registry tier.
+  source?: 'google_places' | 'historic_registry';
 }
 
 interface CacheEntry {
@@ -214,6 +218,7 @@ class PlacesService {
           distance: Math.round(distance),
           historicalScore,
           direction,
+          source: 'google_places' as const,
         };
       })
       .filter(place => place.distance <= searchRadius);
@@ -233,6 +238,36 @@ class PlacesService {
         if (Math.abs(scoreDiff) > 20) return scoreDiff;
         return a.distance - b.distance;
       });
+  }
+
+  // Builds a NearbyPlace for a candidate that did not come from Google
+  // Places (today: the historic-registry tier), computing distance and
+  // directional framing exactly as Google candidates get them, so the
+  // shared ranking in relevance.ts treats every tier identically.
+  buildNearbyPlace(
+    position: Position,
+    spec: {
+      name: string;
+      lat: number;
+      lng: number;
+      types: string[];
+      vicinity: string;
+      rating?: number;
+      historicalScore: number;
+      source: 'google_places' | 'historic_registry';
+    }
+  ): NearbyPlace {
+    const distance = calculateDistance(position.lat, position.lng, spec.lat, spec.lng);
+    return {
+      name: spec.name,
+      types: spec.types,
+      vicinity: spec.vicinity,
+      rating: spec.rating,
+      distance: Math.round(distance),
+      historicalScore: spec.historicalScore,
+      direction: this.directionFromTo(position, { lat: spec.lat, lng: spec.lng }),
+      source: spec.source,
+    };
   }
 
   private directionFromTo(from: Position, to: { lat: number; lng: number }): string {
@@ -266,6 +301,11 @@ class PlacesService {
   // on category alone. The place needs an unmistakably major name signal, or
   // both a very strong historical score and a strong public rating.
   isTier1Landmark(place: NearbyPlace): boolean {
+    // Registry candidates are NEVER Tier 1, whatever their name says:
+    // designation earns a capped nudge in ranking (relevance.ts), never
+    // the queue jump reserved for major landmarks.
+    if (place.source === 'historic_registry') return false;
+
     const nameLower = place.name.toLowerCase();
 
     const majorNameSignals = [

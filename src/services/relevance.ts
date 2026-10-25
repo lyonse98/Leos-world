@@ -30,6 +30,18 @@ const HEARD_PENALTY = 120;
 // Below this, a place is not worth telling a story about at all.
 const MIN_WORTHY_SCORE = 30;
 
+// Historic-registry guardrail (hard cap). A registry candidate's total
+// ranked score can never exceed this, no matter how close it is or how
+// well it matches the listener's taste. The weakest realistic Tier-1
+// landmark scores ~140+ before position bonuses (placesService's
+// isTier1Landmark paths start at a 130-point type score plus rating),
+// so a 120 ceiling guarantees a designated place can win its
+// neighborhood but can never outrank a Tier-1 landmark. The registry
+// historicalScore is also bounded at construction (<= 85 in
+// historicRegistry.ts), and registry candidates are excluded from
+// isTier1Landmark outright — three independent layers, one rule.
+const REGISTRY_SCORE_CAP = 120;
+
 // Diversity guard. Even a favourite subject wears thin on the fourth story in
 // a row, so a repeat of the same tag is gently pushed down. It is a nudge, not
 // a veto — a major landmark still wins on its own merits.
@@ -132,6 +144,13 @@ export function scorePlace(
   if (heard && !options.ignoreHeardPenalty) {
     score -= HEARD_PENALTY;
     reasons.push(`already heard -${HEARD_PENALTY}`);
+  }
+
+  // Registry ceiling, applied last so no combination of proximity,
+  // direction or taste bonuses can lift a designated place past it.
+  if (place.source === 'historic_registry' && score > REGISTRY_SCORE_CAP) {
+    score = REGISTRY_SCORE_CAP;
+    reasons.push(`registry cap ${REGISTRY_SCORE_CAP}`);
   }
 
   return { place, score, reasons };

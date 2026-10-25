@@ -17,6 +17,7 @@ import { seasonal } from './seasonal';
 import { osmService } from './osmService';
 import { quotaGuard } from './quotaGuard';
 import { wikidata } from './wikidata';
+import { historicRegistry } from './historicRegistry';
 import { analytics } from './analytics';
 
 export interface QAContext {
@@ -34,6 +35,7 @@ export interface StoryFactPack {
   wikiContext: string;
   osmContext: string;
   wikidataContext: string;
+  registryContext: string;
 }
 
 export interface StoryRotation {
@@ -231,6 +233,32 @@ class GeminiService {
       console.error('Error fetching fact pack:', error);
     }
 
+    // Historic-registry candidates (Level 2): designated places with
+    // verified coordinates join the shared candidate pool as the
+    // 'historic_registry' tier, so a designated place Google doesn't
+    // list is still story-eligible. They flow through the same heard
+    // set, session lockout and angle coverage as Google candidates —
+    // resolveSubject makes no distinction — with a capped score
+    // (relevance.ts) and no Tier-1 eligibility (placesService). A
+    // registry record that duplicates a Google candidate by name is
+    // dropped: the Google entry carries rating/types and wins. Local
+    // dataset lookup — synchronous, no network; wrapped so it can
+    // never break the pack.
+    try {
+      const registryPlaces = historicRegistry
+        .candidatesAsPlaces(position, 500)
+        .filter(rc => !places.some(p => historicRegistry.namesMatch(p.name, rc.name)));
+      if (registryPlaces.length > 0) {
+        // Appended after the Google candidates (which keep their own
+        // ranking order); relevance scoring, not list position, decides
+        // the subject. With no Google candidates, the nearest registry
+        // place becomes the lead subject for fact enrichment below.
+        places = [...places, ...registryPlaces];
+      }
+    } catch (error) {
+      console.warn('[Gemini] Registry candidate merge failed (continuing without):', error);
+    }
+
     // Wikidata verified facts for the lead subject (top place, else top
     // Wikipedia article). Enrichment only — fails to '' silently.
     let wikidataContext = '';
@@ -239,16 +267,30 @@ class GeminiService {
       wikidataContext = await wikidata.getFactsForPlace(subjectName, position);
     }
 
+    // Historic-registry facts for the same lead subject (Level 1):
+    // designation status/year/significance as hard fact, name- and
+    // proximity-verified in historicRegistry. Enrichment only, like
+    // Wikidata — fails to '' silently and is excluded from the fact
+    // pack hash below, so facts ride first-writer-wins.
+    let registryContext = '';
+    if (subjectName) {
+      registryContext = historicRegistry.factsForSubject(subjectName, position.lat, position.lng);
+    }
+
     const movement = resolveMovementMode(position.speed, this.lastKnownMode);
     const isRural =
       movement === 'driving' && !areaInfo.neighborhood && !areaInfo.city && places.length === 0;
     const mode = this.resolveMode(position, { isRural });
 
-    return { places, areaInfo, mode, isRural, wikiContext, osmContext, wikidataContext };
+    return { places, areaInfo, mode, isRural, wikiContext, osmContext, wikidataContext, registryContext };
   }
 
   factPackHash(factPack: StoryFactPack): string {
+    // Registry candidates are excluded from the hash, same doctrine as
+    // the wikidata/registry fact blocks: enrichment rides
+    // first-writer-wins and must not mint new cache identities.
     const placeKey = factPack.places
+      .filter(p => p.source !== 'historic_registry')
       .slice(0, 10)
       .map(p => `${p.name}|${p.types.slice(0, 2).join(',')}|${Math.round(p.distance / 50)}`)
       .join(';');
@@ -440,6 +482,7 @@ class GeminiService {
     if (factPack.wikiContext) parts.push(factPack.wikiContext);
     if (factPack.osmContext) parts.push(factPack.osmContext);
     if (factPack.wikidataContext) parts.push(factPack.wikidataContext);
+    if (factPack.registryContext) parts.push(factPack.registryContext);
     if (destination) parts.push(`Destination: ${destination}`);
 
     if (target.kind === 'landmark' && target.subject) {

@@ -5,11 +5,14 @@
 //
 // TIER 1 — Wikipedia GeoSearch (articles near the coordinates)
 // TIER 2 — OpenStreetMap Overpass (historical markers, plaques, features)
-// TIER 3 — Google Places API (venue metadata)
-// TIER 4 — Corridor fallback (generic narrative for quiet stretches)
+// TIER 3 — Historic registry (San Diego designated places, local dataset)
+// TIER 4 — Google Places API (venue metadata)
+// TIER 5 — Corridor fallback (generic narrative for quiet stretches)
+
+import { historicRegistry } from './historicRegistry';
 
 export interface POIResult {
-  tier: 'google_places' | 'wikipedia' | 'openstreetmap' | 'corridor';
+  tier: 'google_places' | 'wikipedia' | 'openstreetmap' | 'historic_registry' | 'corridor';
   title: string;
   summary: string;
   types: string[];
@@ -151,7 +154,40 @@ async function fetchOpenStreetMap(lat: number, lng: number): Promise<POIResult[]
   }
 }
 
-// --- Tier 4: Corridor fallback ---
+// --- Tier 3: Historic registry (San Diego designated places) ---
+
+// Local dataset, no network. Any record with coordinates can inform this
+// fact-grade surface; the stricter verified-only eligibility for story
+// *candidates* lives in historicRegistry.selectionCandidates and is
+// applied on the gemini.ts selection path, not here.
+function fetchHistoricRegistry(lat: number, lng: number): POIResult[] {
+  try {
+    return historicRegistry.recordsNear(lat, lng, 500).slice(0, 3).map(({ record, distanceM }) => {
+      const registers = record.registers
+        .map(r => (r === 'national' ? 'National Register of Historic Places' : 'San Diego Register of Historic Resources'))
+        .join(' and ');
+      const details = [
+        `designated historic place, listed on the ${registers}`,
+        record.designatedYear ? `designated ${record.designatedYear}` : '',
+        record.significance ? `significance: ${record.significance}` : '',
+        record.address || '',
+      ].filter(part => part.length > 0);
+
+      return {
+        tier: 'historic_registry' as const,
+        title: record.name,
+        summary: details.join(' — '),
+        types: ['historic_registry'],
+        distance: Math.round(distanceM),
+        rawTags: record.registers.map(r => (r === 'national' ? 'national_register' : 'san_diego_register')),
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+// --- Tier 5: Corridor fallback ---
 
 function corridorFallback(): POIResult[] {
   return [{
@@ -179,6 +215,13 @@ export async function getFactPack(lat: number, lng: number): Promise<FactPack> {
   const osm = await fetchOpenStreetMap(lat, lng);
   if (osm.length > 0) {
     return { lat, lng, results: osm, tier: 'openstreetmap', areaLabel: osm[0].title };
+  }
+
+  // Designated historic places outrank raw venue metadata: a registry
+  // record is a curated, citable fact; a Places listing is a pin.
+  const registry = fetchHistoricRegistry(lat, lng);
+  if (registry.length > 0) {
+    return { lat, lng, results: registry, tier: 'historic_registry', areaLabel: registry[0].title };
   }
 
   const places = await fetchGooglePlaces(lat, lng);
