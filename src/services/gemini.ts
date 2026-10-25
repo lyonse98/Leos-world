@@ -17,6 +17,7 @@ import { seasonal } from './seasonal';
 import { osmService } from './osmService';
 import { quotaGuard } from './quotaGuard';
 import { wikidata } from './wikidata';
+import { analytics } from './analytics';
 
 export interface QAContext {
   lastSpokenSentences: string;
@@ -852,6 +853,21 @@ class GeminiService {
       return "Hey, AI's still loading up. Give me just a second.";
     }
 
+    // Instrumentation (Oct 25): time the answer and record which model
+    // actually produced it, so the Q&A fast lane is measurable in the
+    // daily rollup. Observational only — wrapped so it can never
+    // interfere with answering.
+    const qaStartedAt = Date.now();
+    const emitTiming = (model: string, source: string) => {
+      try {
+        analytics.track('question_timing', position, position.speed !== null && position.speed >= 6.0 ? 'driving' : 'walking', {
+          fetchTextS: parseFloat(((Date.now() - qaStartedAt) / 1000).toFixed(3)),
+          model,
+          source,
+        });
+      } catch { /* never break an answer for a metric */ }
+    };
+
     const parts: string[] = [];
     parts.push(`The listener is at ${position.lat.toFixed(5)}, ${position.lng.toFixed(5)} and asks: "${question}"`);
 
@@ -869,7 +885,9 @@ class GeminiService {
 
     await this.waitForSlot();
     try {
-      return await this.generateAnswer(prompt, LEO_QA_MODEL_ID, onChunk);
+      const answer = await this.generateAnswer(prompt, LEO_QA_MODEL_ID, onChunk);
+      emitTiming(LEO_QA_MODEL_ID, 'primary');
+      return answer;
     } catch (primaryError) {
       // The reduced Q&A model is a cost/latency optimization, never a
       // single point of failure: if it is unavailable for any reason,
@@ -877,15 +895,19 @@ class GeminiService {
       if (LEO_QA_MODEL_ID !== LEO_MODEL_ID) {
         try {
           console.warn('[Q&A] Reduced model failed, falling back to flagship:', primaryError);
-          return await this.generateAnswer(prompt, LEO_MODEL_ID, onChunk);
+          const fallbackAnswer = await this.generateAnswer(prompt, LEO_MODEL_ID, onChunk);
+          emitTiming(LEO_MODEL_ID, 'fallback');
+          return fallbackAnswer;
         } catch {
           // Fall through to the standard error copy below.
         }
       }
       console.error('Gemini API error:', primaryError);
       if (this.isQuotaError(primaryError)) {
+        emitTiming(LEO_QA_MODEL_ID, 'quota_blocked');
         return "I'm getting too many requests right now. Ask me that again in a moment!";
       }
+      emitTiming(LEO_QA_MODEL_ID, 'error');
       return "Having a connection hiccup. Ask me that again in a sec!";
     } finally {
       this.releaseSlot();

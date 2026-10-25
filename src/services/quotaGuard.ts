@@ -16,6 +16,8 @@
 // daily cap is the likely wall, so the key stays quiet for an hour at a
 // time rather than probing the wall (and spending requests) repeatedly.
 
+import { analytics } from './analytics';
+
 export type QuotaLane = 'text' | 'tts';
 
 const COOLDOWN_LADDER_MS = [120_000, 900_000, 3_600_000]; // 2 min, 15 min, 60 min
@@ -62,6 +64,12 @@ export const quotaGuard = {
     console.warn(
       `[QuotaGuard] ${keyFor(lane, model)} tripped (trip #${state.tripTimes.length} in window) — quiet for ${Math.round(cooldown / 1000)}s`
     );
+    // Observational only: count the trip for the daily rollup — trip
+    // frequency is the Tier-1 pain metric. Wrapped so instrumentation
+    // can never interfere with the breaker itself.
+    try {
+      analytics.track('quota_tripped', null, undefined, { model: model ?? '', source: lane, lane });
+    } catch { /* a metric must never break a trip */ }
   },
 
   isTripped(lane: QuotaLane, model?: string): boolean {

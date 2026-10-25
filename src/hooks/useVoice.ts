@@ -7,6 +7,7 @@ import {
 import { tasteProfile } from '../services/tasteProfile';
 import { geminiAudio, TTS_MODEL } from '../services/geminiAudio';
 import { quotaGuard } from '../services/quotaGuard';
+import { analytics } from '../services/analytics';
 
 interface StoryQueueItem {
   text: string;
@@ -184,6 +185,10 @@ export const useVoice = () => {
     audioBlockedRef.current = true;
     setAudioBlockedKind(kind);
     setAudioBlocked(true);
+    // Observational only: count audio blocks for the daily rollup.
+    try {
+      analytics.track('audio_blocked', null, undefined, { source: kind, kind });
+    } catch { /* a metric must never break the banner */ }
   };
   // Set when the listener returns to a tour whose audio the platform paused.
   // Surfaces as "tap to resume" instead of leaving them in unexplained silence.
@@ -582,6 +587,10 @@ export const useVoice = () => {
     // listener is in — drop it rather than narrate yesterday's road.
     if (isFarBehindAtFreeway(item, current, d)) {
       console.log(`[Voice] Dropping stale highway story — anchor ${Math.round(d)}m behind at freeway speed`);
+      // Observational only: count stale drops for the daily rollup.
+      try {
+        analytics.track('story_dropped', null, undefined, { source: 'stale_highway', topic: item.topic ?? '' });
+      } catch { /* a metric must never break the gate */ }
       return false;
     }
 
