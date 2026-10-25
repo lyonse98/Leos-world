@@ -9,10 +9,11 @@ import type { FactPack } from './poiManager';
 import { formatFactPackForPrompt } from './poiManager';
 import { hashString } from '../utils/hash';
 import { supabase, SUPABASE_CONFIGURED } from './supabase';
+import { quotaGuard } from './quotaGuard';
 
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 
-const TTS_MODEL = 'gemini-3.8-flash-tts';
+export const TTS_MODEL = 'gemini-3.8-flash-tts';
 const TEXT_MODEL = 'gemini-3.8-flash';
 const VOICE_NAME = 'Puck';
 
@@ -200,19 +201,32 @@ class GeminiAudioService {
       throw new Error('Gemini audio service not initialized.');
     }
 
-    const response = await this.ai.models.generateContent({
-      model: TTS_MODEL,
-      contents: [{
-        role: 'user',
-        parts: [{ text }],
-      }],
-      config: {
-        responseModalities: ['AUDIO'],
-        speechConfig: {
-          voiceConfig: { voice: VOICE_NAME },
+    // Circuit breaker: cache hits are checked by callers BEFORE this point,
+    // so a tripped TTS lane means "ride the cache / fallback voice" — never
+    // spend a request against the quota wall.
+    if (quotaGuard.isTripped('tts', TTS_MODEL)) {
+      throw new Error('TTS quota cooldown active — skipping synthesis');
+    }
+
+    let response;
+    try {
+      response = await this.ai.models.generateContent({
+        model: TTS_MODEL,
+        contents: [{
+          role: 'user',
+          parts: [{ text }],
+        }],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: { voice: VOICE_NAME },
+          },
         },
-      },
-    });
+      });
+    } catch (error) {
+      if (quotaGuard.isQuotaError(error)) quotaGuard.trip('tts', TTS_MODEL);
+      throw error;
+    }
 
     const data = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     if (!data) {

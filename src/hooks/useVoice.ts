@@ -5,7 +5,8 @@ import {
   MovementModeHysteresis,
 } from '../utils/geo';
 import { tasteProfile } from '../services/tasteProfile';
-import { geminiAudio } from '../services/geminiAudio';
+import { geminiAudio, TTS_MODEL } from '../services/geminiAudio';
+import { quotaGuard } from '../services/quotaGuard';
 
 interface StoryQueueItem {
   text: string;
@@ -603,6 +604,8 @@ export const useVoice = () => {
   // browser SpeechSynthesis if Gemini TTS is unavailable or fails — so the
   // tour still works offline or before the audio service initializes.
   const preSynthesizeNext = useCallback(() => {
+    // Circuit breaker: no pre-synthesis while the TTS lane is tripped.
+    if (quotaGuard.isTripped('tts', TTS_MODEL)) return;
     if (!geminiAudio.hasModel()) {
       try { geminiAudio.initialize(); } catch { return; }
     }
