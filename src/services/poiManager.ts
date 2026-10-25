@@ -33,25 +33,43 @@ const GOOGLE_PLACES_KEY = import.meta.env.VITE_GOOGLE_PLACES_API_KEY || import.m
 async function fetchGooglePlaces(lat: number, lng: number): Promise<POIResult[]> {
   if (!GOOGLE_PLACES_KEY) return [];
 
-  const url = `https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=${lat},${lng}&radius=200&key=${GOOGLE_PLACES_KEY}`;
-
+  // Places API (New) searchNearby (migrated Oct 25, 2026 — the legacy
+  // nearbysearch endpoint cannot be enabled on new Google projects).
+  // Field mask omits rating: this tier doesn't consume it, keeping these
+  // calls in the cheapest field tier.
   try {
-    const res = await fetch(url);
+    const res = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': GOOGLE_PLACES_KEY,
+        'X-Goog-FieldMask': 'places.displayName,places.formattedAddress,places.types,places.location',
+      },
+      body: JSON.stringify({
+        maxResultCount: 10,
+        locationRestriction: {
+          circle: {
+            center: { latitude: lat, longitude: lng },
+            radius: 200,
+          },
+        },
+      }),
+    });
     if (!res.ok) return [];
     const data = await res.json();
 
-    if (!data.results || data.results.length === 0) return [];
+    if (!data.places || data.places.length === 0) return [];
 
-    return data.results
-      .filter((r: any) => r.name && r.geometry?.location)
+    return data.places
+      .filter((p: any) => p.displayName?.text && p.location)
       .slice(0, 3)
-      .map((r: any) => ({
+      .map((p: any) => ({
         tier: 'google_places' as const,
-        title: r.name,
-        summary: r.vicinity || r.types?.join(', ') || '',
-        types: r.types || [],
+        title: p.displayName.text,
+        summary: p.formattedAddress || p.types?.join(', ') || '',
+        types: p.types || [],
         distance: 0,
-        rawTags: r.types || [],
+        rawTags: p.types || [],
       }));
   } catch {
     return [];

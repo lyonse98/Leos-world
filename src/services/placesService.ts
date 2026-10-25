@@ -37,28 +37,23 @@ export interface AreaInfo {
 const API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
 const REQUEST_TIMEOUT_MS = 8000;
 
-// Lazily-loaded Google Maps SDK services. The JS SDK bypasses CORS by loading
-// through a script tag, unlike direct REST calls which browsers block.
-let mapsLoaderPromise: Promise<void> | null = null;
-let placesServiceInstance: any = null;
-let geocoderServiceInstance: any = null;
+// Places access (migrated Oct 25, 2026): the legacy Places API can no longer
+// be enabled on new Google Cloud projects, so nearby search runs on the
+// Places API (New) REST endpoint (CORS-enabled, key in a header), and area
+// reverse-geocoding runs on OpenStreetMap Nominatim — no JS SDK, no legacy
+// service. Public interface of this service is unchanged for callers.
+const PLACES_NEW_URL = 'https://places.googleapis.com/v1/places:searchNearby';
+const PLACES_FIELD_MASK =
+  'places.displayName,places.formattedAddress,places.location,places.rating,places.userRatingCount,places.types,places.id';
 
-async function ensureMapsLoaded(): Promise<void> {
-  if (mapsLoaderPromise) return mapsLoaderPromise;
-  mapsLoaderPromise = (async () => {
-    const { Loader } = await import('@googlemaps/js-api-loader');
-    const loader = new Loader({
-      apiKey: API_KEY,
-      version: 'weekly',
-      libraries: ['places'],
-    });
-    await loader.load();
-    placesServiceInstance = new (window as any).google.maps.places.PlacesService(
-      (window as any).document.createElement('div')
-    );
-    geocoderServiceInstance = new (window as any).google.maps.Geocoder();
-  })();
-  return mapsLoaderPromise;
+async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 class PlacesService {
@@ -74,15 +69,11 @@ class PlacesService {
     }
   }
 
-  // Load the Google Maps SDK before the first story request needs it. Called
-  // at app startup so the 1-2 second script load doesn't delay the first story.
+  // Kept for caller compatibility. The old implementation pre-loaded the Maps
+  // JS SDK so the first story wasn't delayed by a script fetch; the REST
+  // endpoints need no warm-up.
   async prewarm(): Promise<void> {
-    if (!API_KEY) return;
-    try {
-      await ensureMapsLoaded();
-    } catch (error) {
-      console.warn('[Places] Pre-warm failed (will retry lazily):', error);
-    }
+    return;
   }
 
   private getCached(position: Position): NearbyPlace[] | null {
@@ -165,73 +156,67 @@ class PlacesService {
 
   private async fetchNearbyLandmarks(position: Position, radiusMeters: number): Promise<NearbyPlace[]> {
     if (!API_KEY) return [];
+
+    const searchRadius = Math.min(Math.round(radiusMeters), 1500);
+
+    // Places API (New) searchNearby. One call returns up to 20 places; the
+    // old JS-SDK path paged to 40 — the multi-radius expansion in
+    // getNearbyLandmarks compensates by searching again at wider radii.
+    let rawPlaces: any[] = [];
     try {
-      await ensureMapsLoaded();
+      const res = await fetchWithTimeout(
+        PLACES_NEW_URL,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Goog-Api-Key': API_KEY,
+            'X-Goog-FieldMask': PLACES_FIELD_MASK,
+          },
+          body: JSON.stringify({
+            maxResultCount: 20,
+            locationRestriction: {
+              circle: {
+                center: { latitude: position.lat, longitude: position.lng },
+                radius: searchRadius,
+              },
+            },
+          }),
+        },
+        REQUEST_TIMEOUT_MS
+      );
+      if (!res.ok) {
+        console.error('[Places] searchNearby error:', res.status);
+        return [];
+      }
+      const data = await res.json();
+      rawPlaces = data.places || [];
     } catch (error) {
-      console.error('[Places] Failed to load Google Maps SDK:', error);
+      console.warn('[Places] searchNearby failed or timed out:', error);
       return [];
     }
 
-    const searchRadius = Math.min(Math.round(radiusMeters), 1500);
-    const center = new (window as any).google.maps.LatLng(position.lat, position.lng);
+    const places: NearbyPlace[] = rawPlaces
+      .filter((place: any) => place.location && place.displayName?.text)
+      .map((place: any) => {
+        const placeLat = place.location.latitude;
+        const placeLng = place.location.longitude;
+        const distance = calculateDistance(position.lat, position.lng, placeLat, placeLng);
+        const name = place.displayName.text as string;
+        const historicalScore = this.calculateHistoricalScore(place.types || [], name);
+        const direction = this.directionFromTo(position, { lat: placeLat, lng: placeLng });
 
-    const request: any = {
-      location: center,
-      radius: searchRadius,
-    };
-
-    const places = await new Promise<NearbyPlace[]>((resolve) => {
-      const allRaw: any[] = [];
-      const timer = setTimeout(() => {
-        console.warn('[Places] nearbySearch timed out');
-        resolve(mapAndFilter(allRaw));
-      }, REQUEST_TIMEOUT_MS);
-
-      const mapAndFilter = (raw: any[]): NearbyPlace[] => {
-        const mapped: NearbyPlace[] = raw
-          .filter((place: any) => place.geometry?.location && place.name)
-          .map((place: any) => {
-            const placeLat = place.geometry.location.lat();
-            const placeLng = place.geometry.location.lng();
-            const distance = calculateDistance(position.lat, position.lng, placeLat, placeLng);
-            const historicalScore = this.calculateHistoricalScore(place.types || [], place.name || '');
-            const direction = this.directionFromTo(position, { lat: placeLat, lng: placeLng });
-
-            return {
-              name: place.name,
-              types: place.types || [],
-              vicinity: place.vicinity || '',
-              rating: place.rating,
-              distance: Math.round(distance),
-              historicalScore,
-              direction,
-            };
-          })
-          .filter(place => place.distance <= searchRadius);
-        return mapped;
-      };
-
-      const callback = (results: any[], status: string, pagination?: any) => {
-        if (status !== 'OK' && status !== 'ZERO_RESULTS') {
-          clearTimeout(timer);
-          console.error('[Places] nearbySearch error:', status);
-          resolve([]);
-          return;
-        }
-        if (results) allRaw.push(...results);
-
-        // Fetch the second page too — in dense areas a temple at 200m can be
-        // pushed off the first 20-result page by closer businesses.
-        if (pagination && pagination.hasNextPage) {
-          pagination.nextPage();
-        } else {
-          clearTimeout(timer);
-          resolve(mapAndFilter(allRaw));
-        }
-      };
-
-      placesServiceInstance.nearbySearch(request, callback);
-    });
+        return {
+          name,
+          types: place.types || [],
+          vicinity: place.formattedAddress || '',
+          rating: place.rating,
+          distance: Math.round(distance),
+          historicalScore,
+          direction,
+        };
+      })
+      .filter(place => place.distance <= searchRadius);
 
     const uniquePlaces = Array.from(
       new Map(places.map(place => [place.name, place])).values()
@@ -441,7 +426,7 @@ class PlacesService {
   }
 
   async getAreaInfo(position: Position): Promise<AreaInfo> {
-    if (!API_KEY) return { neighborhood: null, city: null, district: null, street: null };
+    // No Google key gate: area info comes from Nominatim now.
 
     const cached = this.areaCache.find(
       c => this.distance(position, { lat: c.lat, lng: c.lng }) < 100
@@ -466,58 +451,27 @@ class PlacesService {
   }
 
   private async fetchAreaInfo(position: Position): Promise<AreaInfo> {
-    if (!API_KEY) return { neighborhood: null, city: null, district: null, street: null };
+    // Reverse geocoding via OpenStreetMap Nominatim (free, no key). The old
+    // path used the Google JS Geocoder; Nominatim's address fields map onto
+    // the same AreaInfo shape. Callers cache per 100m / 5 min and dedupe
+    // in-flight requests, keeping volume within Nominatim's fair-use policy.
     try {
-      await ensureMapsLoaded();
+      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${position.lat}&lon=${position.lng}&zoom=18&addressdetails=1`;
+      const res = await fetchWithTimeout(url, {}, REQUEST_TIMEOUT_MS);
+      if (!res.ok) return { neighborhood: null, city: null, district: null, street: null };
+      const data = await res.json();
+      const a = data?.address || {};
+
+      return {
+        neighborhood: a.neighbourhood || a.suburb || null,
+        city: a.city || a.town || a.village || a.county || null,
+        district: a.state || null,
+        street: a.road || null,
+      };
     } catch (error) {
-      console.error('[Places] Failed to load Google Maps SDK for geocode:', error);
+      console.warn('[Places] Area lookup failed or timed out:', error);
       return { neighborhood: null, city: null, district: null, street: null };
     }
-
-    const request: any = {
-      location: { lat: position.lat, lng: position.lng },
-    };
-
-    return new Promise<AreaInfo>((resolve) => {
-      const timer = setTimeout(() => {
-        console.warn('[Places] Geocode timed out');
-        resolve({ neighborhood: null, city: null, district: null, street: null });
-      }, REQUEST_TIMEOUT_MS);
-
-      geocoderServiceInstance.geocode(request, (results: any[], status: string) => {
-        clearTimeout(timer);
-        if (status !== 'OK' || !results) {
-          resolve({ neighborhood: null, city: null, district: null, street: null });
-          return;
-        }
-
-        let neighborhood: string | null = null;
-        let city: string | null = null;
-        let district: string | null = null;
-        let street: string | null = null;
-
-        for (const result of results) {
-          for (const comp of result.address_components) {
-            const types = comp.types;
-            if (!neighborhood && (types.includes('neighborhood') || types.includes('sublocality'))) {
-              neighborhood = comp.long_name;
-            }
-            if (!city && (types.includes('locality') || types.includes('administrative_area_level_2'))) {
-              city = comp.long_name;
-            }
-            if (!district && types.includes('administrative_area_level_1')) {
-              district = comp.long_name;
-            }
-            if (!street && types.includes('route')) {
-              street = comp.long_name;
-            }
-          }
-          if (neighborhood && city) break;
-        }
-
-        resolve({ neighborhood, city, district, street });
-      });
-    });
   }
 
   formatPlacesForPrompt(places: NearbyPlace[]): string {
