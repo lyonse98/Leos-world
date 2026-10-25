@@ -119,7 +119,7 @@ function App() {
   const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
   const [cacheCount, setCacheCount] = useState<number>(0);
   const [missedQueueCount, setMissedQueueCount] = useState<number>(0);
-  const [lastStorySource, setLastStorySource] = useState<'live' | 'cache' | null>(null);
+  const [lastStorySource, setLastStorySource] = useState<'live' | 'cache' | 'library' | null>(null);
   const [catchUpActive, setCatchUpActive] = useState<boolean>(false);
   const [prefetching, setPrefetching] = useState<boolean>(false);
   const [resumableSession, setResumableSession] = useState<SavedTourSession | null>(() => {
@@ -653,7 +653,7 @@ function App() {
         storyTextReadyRef.current = Date.now();
         isFetchingStoryRef.current = false;
         setStoriesCount(prev => prev + 1);
-        setLastStorySource(result.fromCache ? 'cache' : 'live');
+        setLastStorySource(result.fromLibrary ? 'library' : result.fromCache ? 'cache' : 'live');
         if (geminiError) { geminiService.clearError(); setGeminiError(null); }
 
         // A rotation story has now actually reached the listener, so this angle
@@ -674,16 +674,21 @@ function App() {
           // the shared caches make that cheap.
           console.log('[Tour] Story fetched but not queued — push-to-talk question in progress');
         } else {
-          console.log(`[Tour] Story from ${result.fromCache ? 'CACHE' : 'LIVE'}, length: ${result.story.length}, queueing`);
+          console.log(`[Tour] Story from ${result.fromLibrary ? 'LIBRARY' : result.fromCache ? 'CACHE' : 'LIVE'}, length: ${result.story.length}, queueing`);
 
           analytics.track('story_played', position, position.speed !== null && position.speed >= 6.0 ? 'driving' : 'walking', {
-            source: result.fromCache ? 'cache' : 'live',
+            source: result.fromLibrary ? 'library' : result.fromCache ? 'cache' : 'live',
             topic: result.topic,
           });
 
           // Gemini now writes its own transition into the opening of each
           // story, so we queue directly — no app-side filler needed.
           const isRoad = position.speed !== null && position.speed >= 6.0;
+          // Library stories anchor at the place itself (the freshness gates
+          // measure against the entry's coordinates); every other source
+          // anchors at the fetch position, exactly as before.
+          const originLat = result.anchorLat ?? position.lat;
+          const originLng = result.anchorLng ?? position.lng;
           const resultBase = (result.subject || result.topic).split(' — ')[0].trim().toLowerCase();
           const isQueueJump =
             queueJumpTargetName !== null &&
@@ -691,12 +696,12 @@ function App() {
           if (isQueueJump) {
             // Front of the waiting queue — behind nothing but any scripted
             // line already in flight, and always after the current story.
-            voice.queuePriorityStory(result.story, position.lat, position.lng, isRoad, result.subject);
+            voice.queuePriorityStory(result.story, originLat, originLng, isRoad, result.subject, result.audioUrl);
             flashPose('pointing', 5000);
             queueJumpLandmarkRef.current = null;
             console.log(`[Tour] Major-landmark story queued at the front: "${result.subject}"`);
           } else {
-            voice.queueStory(result.story, position.lat, position.lng, isRoad, undefined, result.subject);
+            voice.queueStory(result.story, originLat, originLng, isRoad, undefined, result.subject, result.audioUrl);
           }
         }
 

@@ -28,6 +28,10 @@ interface StoryQueueItem {
   // A story about a truly major landmark. Priority changes the waiting
   // order only — it never interrupts the story currently playing.
   priority?: boolean;
+  // Pre-made audio (curated library episode): playback uses this URL
+  // directly and pre-synthesis skips the item entirely — the audio
+  // already exists, so no quota is ever spent on it.
+  audioUrl?: string;
 }
 
 interface CurrentPosition {
@@ -623,6 +627,10 @@ export const useVoice = () => {
     const next = storyQueueRef.current[0];
     if (!next) return;
 
+    // Library stories arrive with their audio already made — never spend
+    // synthesis quota warming them.
+    if (next.audioUrl) return;
+
     // Don't spend synthesis (quota) on a story the freeway staleness gate
     // will drop at dequeue — at highway speed a far-behind next story is
     // exactly the one most likely never to air.
@@ -654,7 +662,7 @@ export const useVoice = () => {
   const preSynthesizeNextRef = useRef(preSynthesizeNext);
   preSynthesizeNextRef.current = preSynthesizeNext;
 
-  const playSegmentsWithGemini = useCallback(async (fullText: string, onDone: (blocked: boolean) => void) => {
+  const playSegmentsWithGemini = useCallback(async (fullText: string, onDone: (blocked: boolean) => void, providedUrl?: string) => {
     let finished = false;
     const finish = (blocked: boolean) => {
       if (finished) return;
@@ -673,20 +681,33 @@ export const useVoice = () => {
       playSegmentsBrowser([fullText], finish);
     };
 
-    if (!geminiAudio.hasModel()) {
-      try { geminiAudio.initialize(); } catch (e) { fallbackToBrowser('init failed: ' + (e instanceof Error ? e.message : String(e))); return; }
-    }
-    if (!geminiAudio.hasModel()) {
-      fallbackToBrowser('no model after init');
-      return;
+    // Pre-made audio (library episode) needs no TTS model at all — skip the
+    // init gate; the audio element plays the URL directly.
+    if (!providedUrl) {
+      if (!geminiAudio.hasModel()) {
+        try { geminiAudio.initialize(); } catch (e) { fallbackToBrowser('init failed: ' + (e instanceof Error ? e.message : String(e))); return; }
+      }
+      if (!geminiAudio.hasModel()) {
+        fallbackToBrowser('no model after init');
+        return;
+      }
     }
 
     try {
       storyTimingRef.current.synthRequestAt = Date.now();
-      const ttsResult = await geminiAudio.textToAudioUrl(fullText);
-      storyTimingRef.current.synthResolvedAt = Date.now();
-      storyTimingRef.current.synthCacheHit = ttsResult.cacheHit;
-      const url = ttsResult.url;
+      let url: string;
+      if (providedUrl) {
+        // The audio existed before the story was even asked for: the synth
+        // segment measures ~0 and counts as a cache hit.
+        storyTimingRef.current.synthResolvedAt = Date.now();
+        storyTimingRef.current.synthCacheHit = true;
+        url = providedUrl;
+      } else {
+        const ttsResult = await geminiAudio.textToAudioUrl(fullText);
+        storyTimingRef.current.synthResolvedAt = Date.now();
+        storyTimingRef.current.synthCacheHit = ttsResult.cacheHit;
+        url = ttsResult.url;
+      }
       const audio = audioElRef.current;
       if (!audio) { finish(false); return; }
 
@@ -950,7 +971,7 @@ export const useVoice = () => {
     };
 
     if (useGeminiTTS) {
-      playSegmentsWithGemini(fullText, onDone);
+      playSegmentsWithGemini(fullText, onDone, item.audioUrl);
     } else {
       playSegmentsBrowser([fullText], onDone);
     }
@@ -1079,7 +1100,8 @@ export const useVoice = () => {
     originLng?: number,
     regionAnchored?: boolean,
     kind?: 'location' | 'scripted',
-    topic?: string
+    topic?: string,
+    audioUrl?: string
   ) => {
     if (Date.now() < mutedUntilRef.current) {
       console.log('[Voice] Muted — dropping queued story');
@@ -1094,6 +1116,7 @@ export const useVoice = () => {
       generatedAt: Date.now(),
       regionAnchored,
       isLocationStory: kind ? kind === 'location' : hasCoords,
+      audioUrl,
     });
   }, [enqueue]);
 
@@ -1104,7 +1127,8 @@ export const useVoice = () => {
     originLat?: number,
     originLng?: number,
     regionAnchored?: boolean,
-    topic?: string
+    topic?: string,
+    audioUrl?: string
   ) => {
     if (Date.now() < mutedUntilRef.current) {
       console.log('[Voice] Muted — dropping priority story');
@@ -1119,6 +1143,7 @@ export const useVoice = () => {
       regionAnchored,
       isLocationStory: true,
       priority: true,
+      audioUrl,
     });
   }, [enqueue]);
 

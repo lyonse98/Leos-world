@@ -24,6 +24,12 @@ export interface CachedStory {
   // or a story about the area itself. Carried so the app can record the
   // coverage at the moment the story actually plays.
   rotation: StoryRotation | null;
+  // Curated-library serves: the entry's pre-made audio travels with the
+  // story so playback never synthesizes, and the entry's own coordinates
+  // (already in lat/lng above) are the queue anchor the gates measure
+  // against — where the place IS, not where it was fetched.
+  audioUrl?: string;
+  fromLibrary?: boolean;
 }
 
 interface QueueEntry {
@@ -196,7 +202,7 @@ class StoryCacheService {
     position: Position,
     mode: MovementModeHysteresis,
     onChunk?: (text: string) => void
-  ): Promise<{ story: string; fromCache: boolean; topic: string; subject: string; rotation: StoryRotation | null } | null> {
+  ): Promise<{ story: string; fromCache: boolean; topic: string; subject: string; rotation: StoryRotation | null; fromLibrary: boolean; audioUrl?: string; anchorLat?: number; anchorLng?: number } | null> {
     this.pruneStalePrefetches(position);
     const cached = this.openerPending
       ? (this.findOpenerCache(position) ?? this.findNearestUnplayedCache(position))
@@ -212,6 +218,10 @@ class StoryCacheService {
         topic: cached.topic,
         subject: cached.subject,
         rotation: cached.rotation,
+        fromLibrary: !!cached.fromLibrary,
+        audioUrl: cached.audioUrl,
+        anchorLat: cached.fromLibrary ? cached.lat : undefined,
+        anchorLng: cached.fromLibrary ? cached.lng : undefined,
       };
     }
 
@@ -235,14 +245,16 @@ class StoryCacheService {
           topic,
           subject: result.subject,
           rotation: result.rotation,
-          lat: position.lat,
-          lng: position.lng,
+          lat: result.anchorLat ?? position.lat,
+          lng: result.anchorLng ?? position.lng,
           generatedAt: Date.now(),
           played: true,
           mode,
           regionAnchored: mode === 'driving',
+          audioUrl: result.audioUrl,
+          fromLibrary: result.fromLibrary,
         });
-        return { story, fromCache: false, topic, subject: result.subject, rotation: result.rotation };
+        return { story, fromCache: false, topic, subject: result.subject, rotation: result.rotation, fromLibrary: !!result.fromLibrary, audioUrl: result.audioUrl, anchorLat: result.anchorLat, anchorLng: result.anchorLng };
       }
     } catch (error) {
       console.error('[StoryCache] Live fetch failed:', error);
@@ -301,12 +313,14 @@ class StoryCacheService {
           topic: result.subject || `Story at ${center.lat.toFixed(4)}, ${center.lng.toFixed(4)}`,
           subject: result.subject,
           rotation: result.rotation,
-          lat: center.lat,
-          lng: center.lng,
+          lat: result.anchorLat ?? center.lat,
+          lng: result.anchorLng ?? center.lng,
           generatedAt: Date.now(),
           played: false,
           mode,
           regionAnchored: mode === 'driving',
+          audioUrl: result.audioUrl,
+          fromLibrary: result.fromLibrary,
         });
         console.log('[StoryCache] Prefetched story for', center.lat.toFixed(4), center.lng.toFixed(4));
       }
@@ -362,12 +376,14 @@ class StoryCacheService {
           topic: result.subject || `Story ahead at ${target.lat.toFixed(4)}, ${target.lng.toFixed(4)}`,
           subject: result.subject,
           rotation: result.rotation,
-          lat: target.lat,
-          lng: target.lng,
+          lat: result.anchorLat ?? target.lat,
+          lng: result.anchorLng ?? target.lng,
           generatedAt: Date.now(),
           played: false,
           mode,
           regionAnchored: mode === 'driving',
+          audioUrl: result.audioUrl,
+          fromLibrary: result.fromLibrary,
         });
         generated++;
         console.log(`[StoryCache] Prefetched ahead ${offset}m for ${mode}`);
@@ -485,12 +501,14 @@ class StoryCacheService {
             topic: result.subject || `Story at ${entry.position.lat.toFixed(4)}, ${entry.position.lng.toFixed(4)}`,
             subject: result.subject,
             rotation: result.rotation,
-            lat: entry.position.lat,
-            lng: entry.position.lng,
+            lat: result.anchorLat ?? entry.position.lat,
+            lng: result.anchorLng ?? entry.position.lng,
             generatedAt: Date.now(),
             played: false,
             mode: 'walking',
             regionAnchored: false,
+            audioUrl: result.audioUrl,
+            fromLibrary: result.fromLibrary,
           });
         }
       } catch (error) {

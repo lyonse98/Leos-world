@@ -3,6 +3,7 @@ import type { Position } from '../hooks/useGeolocation';
 import { placesService, NearbyPlace, AreaInfo } from './placesService';
 import { locationTracker } from './locationTracker';
 import { storyLookup } from './storyLookup';
+import { storyLibrary } from './storyLibrary';
 import type { CachedStoryResult } from './storyLookup';
 import { heardStories } from './heardStories';
 import { pickStorySubject, StorySubject } from './relevance';
@@ -49,6 +50,14 @@ export interface NarrationResult {
   context: string;
   mode: StoryMode;
   rotation: StoryRotation | null;
+  // Set only when the story came from the curated library: pre-made
+  // audio the voice layer plays instead of synthesizing, and the
+  // entry's own coordinates — the serve anchor the freshness gates
+  // measure against, not the position the story was fetched at.
+  audioUrl?: string;
+  anchorLat?: number;
+  anchorLng?: number;
+  fromLibrary?: boolean;
 }
 
 const EMPTY_NARRATION: NarrationResult = { text: '', subject: '', context: '', mode: 'walking', rotation: null };
@@ -59,6 +68,10 @@ interface StoryTarget {
   rotation: StoryRotation | null;
   areaName: string;
   displayTopic: string;
+  // The exact angle chosen for this target — the serve path asks the
+  // library for THIS angle. Null when no angle applies; the library
+  // holds no entries for those.
+  angle: string | null;
 }
 
 const MIN_REQUEST_INTERVAL_MS = 3000;
@@ -387,6 +400,7 @@ class GeminiService {
         rotation: isRotation && angle ? { subjectKey, angle } : null,
         areaName: '',
         displayTopic: isRotation && angle ? `${subject.name} — ${describeAngle(angle)}` : subject.name,
+        angle,
       };
     }
 
@@ -397,6 +411,7 @@ class GeminiService {
       rotation,
       areaName,
       displayTopic: `${areaName} — ${describeAngle(rotation.angle)}`,
+      angle: rotation.angle,
     };
   }
 
@@ -660,6 +675,25 @@ class GeminiService {
       !heardStories.hasHeard(preliminaryCache.topic) &&
       !this.isTopicLockedForSession(preliminaryCache.topic, locationTracker.getDwellDepthLevel() !== null)
     ) {
+      // LIBRARY FIRST (Erik's shelf order): the preliminary topic names an
+      // exact (place, angle) — if the library holds that episode, the
+      // curated entry displaces the ephemeral cache copy. Recording mirrors
+      // the cache serve below exactly.
+      const libHit = await storyLibrary.lookupForTopic(preliminaryCache.topic);
+      if (
+        libHit &&
+        !heardStories.hasHeard(libHit.topic) &&
+        !this.isTopicLockedForSession(libHit.topic, locationTracker.getDwellDepthLevel() !== null)
+      ) {
+        console.log(`[Gemini] Library hit for "${libHit.topic}" — displacing ephemeral cache serve`);
+        const versionKey = this.storyVersionKey(this.factPackHash(factPack));
+        if (onChunk) onChunk(libHit.text);
+        storyCoverage.lockSubjectForSession(landmarkSubjectKey(this.topicBaseName(libHit.topic)));
+        await locationTracker.updateLastStoryTopic(
+          libHit.topic, position, libHit.text, 'cache_hit', 0, versionKey
+        );
+        return { text: libHit.text, subject: libHit.topic, context: 'cache_hit', mode: factPack.mode, rotation: null, audioUrl: libHit.audioUrl, anchorLat: libHit.lat, anchorLng: libHit.lng, fromLibrary: true };
+      }
       console.log(`[Gemini] Parallel cache hit for "${preliminaryCache.topic}" (${Math.round(preliminaryCache.distanceM)}m away)`);
       const versionKey = this.storyVersionKey(this.factPackHash(factPack));
       if (onChunk) onChunk(preliminaryCache.storyText);
@@ -725,6 +759,33 @@ class GeminiService {
         ? landmarkSubjectKey(target.subject.name)
         : areaSubjectKey(position.lat, position.lng);
     const toldAngles = storyCoverage.getToldAngles(subjectKey);
+    // LIBRARY FIRST (Erik's shelf order): for the exact (place, angle) just
+    // chosen, a curated library entry beats both the ephemeral cache and a
+    // live generation. Intros stay personal (skipCache), and area stories
+    // have no library entries by construction. Recording mirrors the cached
+    // branch below (record here, rotation null in the result).
+    if (!skipCache && target.kind === 'landmark' && target.subject && target.angle) {
+      const libHit = await storyLibrary.lookup(target.subject.name, target.angle);
+      if (libHit) {
+        console.log(`[Gemini] Library hit: "${target.displayTopic}" (${target.angle})`);
+        if (onChunk) onChunk(libHit.text);
+        storyCoverage.lockSubjectForSession(subjectKey);
+        await locationTracker.updateLastStoryTopic(
+          target.displayTopic, position, libHit.text, effectiveContext, depthLevel, versionKey
+        );
+        return {
+          text: libHit.text,
+          subject: target.displayTopic,
+          context: effectiveContext,
+          mode: factPack.mode,
+          rotation: null,
+          audioUrl: libHit.audioUrl,
+          anchorLat: libHit.lat,
+          anchorLng: libHit.lng,
+          fromLibrary: true,
+        };
+      }
+    }
     const cached = skipCache ? null : await storyLookup.findNearbyStory(
       position.lat, position.lng, 100, versionKey, toldAngles
     );
@@ -776,6 +837,27 @@ class GeminiService {
         ? landmarkSubjectKey(target.subject.name)
         : areaSubjectKey(position.lat, position.lng);
     const toldAngles = storyCoverage.getToldAngles(subjectKey);
+    // Library first here too: a prefetched library entry carries its audio
+    // with it, so the play-time serve spends no synthesis quota. Nothing is
+    // recorded at prefetch time — exactly like a generated prefetch, App
+    // records the play via the returned rotation.
+    if (target.kind === 'landmark' && target.subject && target.angle) {
+      const libHit = await storyLibrary.lookup(target.subject.name, target.angle);
+      if (libHit) {
+        console.log(`[Gemini] Prefetch library hit: "${target.displayTopic}" (${target.angle})`);
+        return {
+          text: libHit.text,
+          subject: target.displayTopic,
+          context: 'prefetch',
+          mode: factPack.mode,
+          rotation: target.rotation,
+          audioUrl: libHit.audioUrl,
+          anchorLat: libHit.lat,
+          anchorLng: libHit.lng,
+          fromLibrary: true,
+        };
+      }
+    }
     const cached = await storyLookup.findNearbyStory(
       position.lat, position.lng, 100, versionKey, toldAngles
     );
