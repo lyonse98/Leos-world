@@ -172,6 +172,18 @@ export const useVoice = () => {
   // fires into a queue it no longer owns.
   const gapTimerRef = useRef<number | null>(null);
   const [audioBlocked, setAudioBlocked] = useState<boolean>(false);
+  // WHY the audio is blocked, so the banner can tell the truth: 'blocked' is
+  // a genuine platform refusal (autoplay/permission — the user CAN fix it
+  // with a tap); 'error' is everything else (a synthesis failure, a quota
+  // cascade into the fallback voice, speech that never began). The old
+  // banner claimed "your browser muted Leo" for all of them, which was
+  // wrong in the majority of field cases (Erik, Oct 24).
+  const [audioBlockedKind, setAudioBlockedKind] = useState<'blocked' | 'error'>('error');
+  const markAudioBlocked = (kind: 'blocked' | 'error') => {
+    audioBlockedRef.current = true;
+    setAudioBlockedKind(kind);
+    setAudioBlocked(true);
+  };
   // Set when the listener returns to a tour whose audio the platform paused.
   // Surfaces as "tap to resume" instead of leaving them in unexplained silence.
   const [wasInterrupted, setWasInterrupted] = useState<boolean>(false);
@@ -327,8 +339,7 @@ export const useVoice = () => {
           return;
         }
         console.warn('[Voice] Speech never began — audio appears to be blocked');
-        audioBlockedRef.current = true;
-        setAudioBlocked(true);
+        markAudioBlocked('error');
         onBlocked?.();
       }, 3000);
     };
@@ -705,10 +716,13 @@ export const useVoice = () => {
       };
 
       setTtsStatus('gemini');
-      await audio.play().catch(() => {
+      await audio.play().catch((playError: unknown) => {
         playbackStartedRef.current = false;
-        audioBlockedRef.current = true;
-        setAudioBlocked(true);
+        markAudioBlocked(
+          playError instanceof DOMException && playError.name === 'NotAllowedError'
+            ? 'blocked'
+            : 'error'
+        );
         finish(true);
       });
     } catch (error) {
@@ -781,8 +795,7 @@ export const useVoice = () => {
       utterance.onerror = (event) => {
         playbackStartedRef.current = false;
         if (event.error === 'not-allowed') {
-          audioBlockedRef.current = true;
-          setAudioBlocked(true);
+          markAudioBlocked('blocked');
           finish(true);
           return;
         }
@@ -1261,6 +1274,7 @@ export const useVoice = () => {
     isInitialized,
     isSpeaking,
     audioBlocked,
+    audioBlockedKind,
     wasInterrupted,
     unlock,
     ensureVoiceReady,

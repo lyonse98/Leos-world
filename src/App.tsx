@@ -1373,7 +1373,9 @@ function App() {
                 >
                   <VolumeX size={16} className="text-amber-500 shrink-0" />
                   <span className="text-xs font-semibold text-amber-300">
-                    Your browser muted Leo. Tap here to turn the sound back on.
+                    {voice.audioBlockedKind === 'blocked'
+                      ? 'Sound is blocked — tap to turn it on.'
+                      : "Leo's voice hit a snag — tap to retry."}
                   </span>
                 </button>
               )}
