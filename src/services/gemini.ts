@@ -15,6 +15,8 @@ import { LEO_MODEL_ID, LEO_QA_MODEL_ID, LEO_QA_MAX_OUTPUT_TOKENS, LEO_PERSONA_VE
 import { wikipedia } from './wikipedia';
 import { seasonal } from './seasonal';
 import { osmService } from './osmService';
+import { quotaGuard } from './quotaGuard';
+import { wikidata } from './wikidata';
 
 export interface QAContext {
   lastSpokenSentences: string;
@@ -30,6 +32,7 @@ export interface StoryFactPack {
   isRural: boolean;
   wikiContext: string;
   osmContext: string;
+  wikidataContext: string;
 }
 
 export interface StoryRotation {
@@ -158,7 +161,13 @@ class GeminiService {
     }
   }
 
-  private async withRetry<T>(fn: () => Promise<T>): Promise<T> {
+  private async withRetry<T>(modelId: string, fn: () => Promise<T>): Promise<T> {
+    // Circuit breaker: while this model is tripped, do not call the API at
+    // all — callers degrade to cache / designed silence instead of spending
+    // requests against a quota wall.
+    if (quotaGuard.isTripped('text', modelId)) {
+      throw new Error(`Gemini quota cooldown active for ${modelId} — request skipped`);
+    }
     let lastError: unknown;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
@@ -166,11 +175,12 @@ class GeminiService {
         return await fn();
       } catch (error) {
         lastError = error;
-        if (this.isQuotaError(error) && attempt < MAX_RETRIES) {
-          const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
-          console.warn(`[Gemini] Quota hit, retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RETRIES})`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-          continue;
+        if (this.isQuotaError(error)) {
+          // Never retry a quota error: against a per-minute wall the retry
+          // lands inside the same window; against a per-day wall it is
+          // pure waste. Trip the breaker for this model and degrade.
+          quotaGuard.trip('text', modelId);
+          throw error;
         }
         throw error;
       }
@@ -202,6 +212,7 @@ class GeminiService {
     let areaInfo: AreaInfo = { neighborhood: null, city: null, district: null, street: null };
     let wikiContext = '';
     let osmContext = '';
+    let wikiTopTitle = '';
     const deepMode = locationTracker.getDwellDepthLevel() !== null;
     try {
       const [placesResult, areaResult, wikiResult, osmResult] = await Promise.all([
@@ -214,8 +225,17 @@ class GeminiService {
       areaInfo = areaResult;
       wikiContext = wikipedia.formatForPrompt(wikiResult);
       osmContext = osmService.formatForPrompt(osmResult);
+      wikiTopTitle = wikiResult?.[0]?.title || '';
     } catch (error) {
       console.error('Error fetching fact pack:', error);
+    }
+
+    // Wikidata verified facts for the lead subject (top place, else top
+    // Wikipedia article). Enrichment only — fails to '' silently.
+    let wikidataContext = '';
+    const subjectName = places[0]?.name || wikiTopTitle;
+    if (subjectName) {
+      wikidataContext = await wikidata.getFactsForPlace(subjectName, position);
     }
 
     const movement = resolveMovementMode(position.speed, this.lastKnownMode);
@@ -223,7 +243,7 @@ class GeminiService {
       movement === 'driving' && !areaInfo.neighborhood && !areaInfo.city && places.length === 0;
     const mode = this.resolveMode(position, { isRural });
 
-    return { places, areaInfo, mode, isRural, wikiContext, osmContext };
+    return { places, areaInfo, mode, isRural, wikiContext, osmContext, wikidataContext };
   }
 
   factPackHash(factPack: StoryFactPack): string {
@@ -418,6 +438,7 @@ class GeminiService {
     parts.push(this.buildFactPackBlock(position, factPack));
     if (factPack.wikiContext) parts.push(factPack.wikiContext);
     if (factPack.osmContext) parts.push(factPack.osmContext);
+    if (factPack.wikidataContext) parts.push(factPack.wikidataContext);
     if (destination) parts.push(`Destination: ${destination}`);
 
     if (target.kind === 'landmark' && target.subject) {
@@ -750,7 +771,7 @@ class GeminiService {
     await this.waitForSlot();
     try {
       if (onChunk) {
-        const response = await this.withRetry(() =>
+        const response = await this.withRetry(LEO_MODEL_ID, () =>
           this.withTimeout(
             this.ai!.models.generateContentStream({
               model: LEO_MODEL_ID,
@@ -781,7 +802,7 @@ class GeminiService {
 
         return finalText;
       } else {
-        const response = await this.withRetry(() =>
+        const response = await this.withRetry(LEO_MODEL_ID, () =>
           this.withTimeout(
             this.ai!.models.generateContent({
               model: LEO_MODEL_ID,
@@ -877,7 +898,7 @@ class GeminiService {
     onChunk?: (text: string) => void
   ): Promise<string> {
     if (onChunk) {
-      const response = await this.withRetry(() =>
+      const response = await this.withRetry(modelId, () =>
         this.withTimeout(
           this.ai!.models.generateContentStream({
             model: modelId,
@@ -918,7 +939,7 @@ class GeminiService {
       return fullText.trim();
     }
 
-    const response = await this.withRetry(() =>
+    const response = await this.withRetry(modelId, () =>
       this.withTimeout(
         this.ai!.models.generateContent({
           model: modelId,
