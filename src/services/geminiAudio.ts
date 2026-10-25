@@ -10,6 +10,7 @@ import { formatFactPackForPrompt } from './poiManager';
 import { hashString } from '../utils/hash';
 import { supabase, SUPABASE_CONFIGURED } from './supabase';
 import { quotaGuard } from './quotaGuard';
+import { applyPronunciation } from './pronunciation';
 
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 
@@ -208,13 +209,19 @@ class GeminiAudioService {
       throw new Error('TTS quota cooldown active — skipping synthesis');
     }
 
+    // Pronunciation lexicon: respell known local-name traps in the payload
+    // only. Callers checked every cache with the canonical text before this
+    // point, and the canonical text is what gets stored and displayed — the
+    // voice alone hears the phonetic forms.
+    const spokenText = applyPronunciation(text);
+
     let response;
     try {
       response = await this.ai.models.generateContent({
         model: TTS_MODEL,
         contents: [{
           role: 'user',
-          parts: [{ text }],
+          parts: [{ text: spokenText }],
         }],
         config: {
           responseModalities: ['AUDIO'],
