@@ -92,6 +92,15 @@ const REACH_DRIVING_M = 2000;
 const REACH_WALKING_M = 100;
 const REACH_STATIONARY_M = 30;
 
+// Freeway staleness gate (Erik field report, Oct 24): the behind-you exemption
+// above is right at city speeds — absolute framing keeps a passed landmark
+// worth hearing. At freeway speed it breaks down: a story can air up to the
+// full 2 km reach BEHIND the listener, over a minute of road already gone,
+// and it lands as out-of-area. So at freeway speed only, an anchor far behind
+// the direction of travel is stale and the story is dropped instead.
+const FREEWAY_SPEED_MPS = 20; // ~45 mph
+const STALE_BEHIND_FREEWAY_M = 1500;
+
 // Deliberate silence between stories, by movement mode. The gap is measured
 // from the previous story's last audio frame to the next story's first. Too
 // short and Leo feels manic; too long and the listener thinks the tour died.
@@ -504,6 +513,45 @@ export const useVoice = () => {
 
   // A story is only worth playing if the listener is still near where it was
   // written, heading toward it (not away), and it has not gone stale.
+  // Direction of travel for the freeway staleness gate: GPS heading when the
+  // provider supplies one, otherwise derived from recent movement (≥25 m of
+  // displacement between provider readings). Null when neither is known —
+  // the gate then stays inert rather than dropping stories blind.
+  const lastTravelPosRef = useRef<{ lat: number; lng: number } | null>(null);
+  const resolveTravelHeading = (current: CurrentPosition): number | null => {
+    if (typeof current.heading === 'number' && Number.isFinite(current.heading)) {
+      return current.heading;
+    }
+    const last = lastTravelPosRef.current;
+    if (last) {
+      const moved = calculateDistance(last.lat, last.lng, current.lat, current.lng);
+      if (moved >= 25) {
+        const dLng = (current.lng - last.lng) * Math.cos((current.lat * Math.PI) / 180);
+        const heading = (Math.atan2(dLng, current.lat - last.lat) * 180) / Math.PI;
+        lastTravelPosRef.current = { lat: current.lat, lng: current.lng };
+        return (heading + 360) % 360;
+      }
+    } else {
+      lastTravelPosRef.current = { lat: current.lat, lng: current.lng };
+    }
+    return null;
+  };
+
+  // True only at freeway speed, with a known direction of travel, when the
+  // story's anchor sits far BEHIND the listener (>90° off heading, beyond
+  // STALE_BEHIND_FREEWAY_M). Conservative by design: any unknown → false.
+  const isFarBehindAtFreeway = (item: StoryQueueItem, current: CurrentPosition, d: number): boolean => {
+    if (item.lat === undefined || item.lng === undefined) return false;
+    if (typeof current.speed !== 'number' || current.speed < FREEWAY_SPEED_MPS) return false;
+    if (d <= STALE_BEHIND_FREEWAY_M) return false;
+    const heading = resolveTravelHeading(current);
+    if (heading === null) return false;
+    const dLng = (item.lng - current.lng) * Math.cos((current.lat * Math.PI) / 180);
+    const bearing = ((Math.atan2(dLng, item.lat - current.lat) * 180) / Math.PI + 360) % 360;
+    const diff = Math.abs(((bearing - heading + 360) % 360) - 180);
+    return diff < 90; // |bearing − heading| in (90°, 270°): rear hemisphere
+  };
+
   const isStillRelevant = useCallback((item: StoryQueueItem): boolean => {
     if (item.lat === undefined || item.lng === undefined) return true;
     const current = currentPositionProviderRef.current?.();
@@ -516,6 +564,14 @@ export const useVoice = () => {
     const reach =
       mode === 'driving' ? REACH_DRIVING_M : mode === 'walking' ? REACH_WALKING_M : REACH_STATIONARY_M;
     if (d > reach) return false;
+
+    // Freeway exception to the behind-you exemption below: at freeway speed
+    // an anchor far behind the direction of travel is out of the area the
+    // listener is in — drop it rather than narrate yesterday's road.
+    if (isFarBehindAtFreeway(item, current, d)) {
+      console.log(`[Voice] Dropping stale highway story — anchor ${Math.round(d)}m behind at freeway speed`);
+      return false;
+    }
 
     // Region-anchored stories have no single spot to pass.
     // The behind-you check is intentionally removed for driving mode: with
@@ -543,6 +599,18 @@ export const useVoice = () => {
 
     const next = storyQueueRef.current[0];
     if (!next) return;
+
+    // Don't spend synthesis (quota) on a story the freeway staleness gate
+    // will drop at dequeue — at highway speed a far-behind next story is
+    // exactly the one most likely never to air.
+    const presynthPos = currentPositionProviderRef.current?.();
+    if (presynthPos && next.lat !== undefined && next.lng !== undefined) {
+      const dNext = calculateDistance(presynthPos.lat, presynthPos.lng, next.lat, next.lng);
+      if (isFarBehindAtFreeway(next, presynthPos, dNext)) {
+        console.log('[Voice] Skipping pre-synthesis — next story is stale highway content');
+        return;
+      }
+    }
 
     const fullText = next.transitionText ? `${next.transitionText} ${next.text}` : next.text;
     if (!fullText || fullText.trim().length === 0) return;
