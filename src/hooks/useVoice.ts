@@ -189,10 +189,18 @@ export const useVoice = () => {
   // The queue item currently in the player, with its lifecycle state.
   // Settled exactly once — by natural completion, a watchdog advance, a
   // skip, or a stop — so a tracked item's owner always learns whether
-  // it sounded, and never hears twice.
+  // it sounded, and never hears twice. The success it reports is
+  // `sounded && completed`: an item that was cut short — watchdog
+  // advance, engine error, exhausted retries — reports NOT delivered
+  // even if part of it was heard. The only tracked consumer is the
+  // Q&A cycle, and a partial answer reported as answered is exactly
+  // the lost-answer failure (Oct 25) wearing a new coat: the bridge
+  // played, the lock released, and the listener never heard the end
+  // of what they asked (Oct 26 field test: input unlocked mid-answer).
   const currentPlaybackRef = useRef<{
     gen: number;
     sounded: boolean;
+    completed: boolean;
     onEnd?: (sounded: boolean) => void;
   } | null>(null);
   const currentPositionProviderRef = useRef<(() => CurrentPosition | null) | null>(null);
@@ -259,10 +267,12 @@ export const useVoice = () => {
     text: string;
     onPlaybackStart?: () => void;
     onPlaybackEnd?: (sounded: boolean) => void;
+    front?: boolean;
   } | null>(null);
   const speakTrackedRef = useRef<(
     text: string,
-    cbs: { onPlaybackStart?: () => void; onPlaybackEnd?: (sounded: boolean) => void }
+    cbs: { onPlaybackStart?: () => void; onPlaybackEnd?: (sounded: boolean) => void },
+    opts?: { front?: boolean }
   ) => void>(() => {});
 
   useEffect(() => {
@@ -334,7 +344,7 @@ export const useVoice = () => {
         const heldTracked = pendingTrackedRef.current;
         if (heldTracked) {
           pendingTrackedRef.current = null;
-          speakTrackedRef.current(heldTracked.text, heldTracked);
+          speakTrackedRef.current(heldTracked.text, heldTracked, { front: heldTracked.front });
         }
       }).catch(() => {
         audio.muted = false;
@@ -351,7 +361,7 @@ export const useVoice = () => {
     const pendingTracked = pendingTrackedRef.current;
     if (pendingTracked) {
       pendingTrackedRef.current = null;
-      speakTrackedRef.current(pendingTracked.text, pendingTracked);
+      speakTrackedRef.current(pendingTracked.text, pendingTracked, { front: pendingTracked.front });
     }
   }, []);
 
@@ -411,10 +421,22 @@ export const useVoice = () => {
   // will happily accept a request and then never start it — no error, no
   // event — which leaves the queue waiting forever for an onend that never
   // arrives. Nudge once, then report the blockage instead of hanging.
+  //
+  // The retry is a BLIND re-speak of the same utterance object: when the
+  // start was merely late (not blocked), the engine ends up holding two
+  // copies, the second still sounding after the first copy's end events
+  // have advanced — and for a tracked item, settled — the player. That
+  // is the fallback "repeating itself" Erik heard in the field (Oct 26)
+  // and one way a Q&A answer could report completion while its tail
+  // was still coming out of the speaker. Callers whose item lifecycle
+  // is tracked (the story queue's sentence chain) pass allowRetry=false:
+  // a sentence that never begins routes to the blocked path and the
+  // bounded attempt economy instead of a duplicate.
   const dispatchSpeech = useCallback((
     utterance: SpeechSynthesisUtterance,
     hasStarted: () => boolean,
-    onBlocked?: () => void
+    onBlocked?: () => void,
+    allowRetry: boolean = true
   ) => {
     const synth = synthRef.current;
     if (!synth) return;
@@ -425,7 +447,7 @@ export const useVoice = () => {
 
       window.setTimeout(() => {
         if (hasStarted()) return;
-        if (mayRetry) {
+        if (mayRetry && allowRetry) {
           console.log('[Voice] Speech did not begin — retrying once');
           attempt(false);
           return;
@@ -445,18 +467,33 @@ export const useVoice = () => {
   const speakPriority = useCallback((text: string, cbs?: {
     onPlaybackStart?: () => void;
     onPlaybackEnd?: (sounded: boolean) => void;
-  }, opts?: { localVoice?: boolean }) => {
+  }, opts?: { localVoice?: boolean; front?: boolean }) => {
     const trimmed = text.trim();
     if (!trimmed) return;
 
-    storyQueueRef.current.push({
+    const item: StoryQueueItem = {
       text: trimmed,
       generatedAt: Date.now(),
       isLocationStory: false,
       localVoice: opts?.localVoice,
       onPlaybackStart: cbs?.onPlaybackStart,
       onPlaybackEnd: cbs?.onPlaybackEnd,
-    });
+    };
+
+    if (opts?.front) {
+      // Conversational glue belongs ahead of waiting location stories —
+      // the queue's own doctrine (see enqueue's priority branch) —
+      // without displacing anything already waiting. The Q&A bridge is
+      // the case that needs it: it must be the NEXT line after the
+      // answer, not trail behind a story fetched while the answer was
+      // generating, or the resume the lock waits for happens in the
+      // wrong order.
+      const idx = storyQueueRef.current.findIndex(i => i.isLocationStory);
+      if (idx === -1) storyQueueRef.current.push(item);
+      else storyQueueRef.current.splice(idx, 0, item);
+    } else {
+      storyQueueRef.current.push(item);
+    }
 
     if (!isPlayingStoryRef.current) {
       playStoryFromQueueRef.current();
@@ -490,7 +527,7 @@ export const useVoice = () => {
   const speakTracked = useCallback((text: string, cbs: {
     onPlaybackStart?: () => void;
     onPlaybackEnd?: (sounded: boolean) => void;
-  }) => {
+  }, opts?: { front?: boolean }) => {
     const trimmed = text.trim();
     if (!trimmed) {
       cbs.onPlaybackEnd?.(false);
@@ -498,11 +535,11 @@ export const useVoice = () => {
     }
 
     if (!unlockedRef.current) {
-      pendingTrackedRef.current = { text: trimmed, ...cbs };
+      pendingTrackedRef.current = { text: trimmed, ...cbs, front: opts?.front };
       return;
     }
 
-    speakPriority(trimmed, cbs);
+    speakPriority(trimmed, cbs, { front: opts?.front });
   }, [speakPriority]);
 
   speakTrackedRef.current = speakTracked;
@@ -515,15 +552,17 @@ export const useVoice = () => {
   }, []);
 
   // Settle the item currently in the player: fire its onPlaybackEnd
-  // exactly once with whether it ever sounded, and forget it. Every
+  // exactly once with whether it FULLY delivered (sounded AND ran to
+  // natural completion — see currentPlaybackRef), and forget it. Every
   // exit path from the player — natural end, watchdog advance, skip,
   // stop — goes through here, so a tracked item can neither be lost
-  // silently nor reported twice.
+  // silently nor reported twice, and a truncated item can never be
+  // reported as delivered.
   const settleCurrentPlayback = useCallback(() => {
     const pb = currentPlaybackRef.current;
     if (!pb) return;
     currentPlaybackRef.current = null;
-    pb.onEnd?.(pb.sounded);
+    pb.onEnd?.(pb.sounded && pb.completed);
   }, []);
 
   const stop = useCallback(() => {
@@ -654,6 +693,25 @@ export const useVoice = () => {
         isPlayingStoryRef.current = false;
         clearWatchdog();
         setIsSpeaking(false);
+        // Silence the engines BEFORE settling. A settle is the player
+        // declaring this item over, and it must be true at the speaker
+        // too: the old order settled first and left the still-loaded
+        // audio element / still-speaking utterance to be stopped by
+        // the NEXT dequeue — on exactly the false-negative this
+        // watchdog exists for (iOS reporting not-speaking mid-utterance),
+        // a tracked item's owner was told "ended" while its audio was
+        // still coming out, and the Q&A lock released under a
+        // still-playing answer (Oct 26 field test).
+        if (audio) {
+          audio.pause();
+          audio.removeAttribute('src');
+        }
+        if (ttsUrlRef.current) {
+          URL.revokeObjectURL(ttsUrlRef.current);
+          ttsUrlRef.current = null;
+        }
+        try { synthRef.current?.cancel(); } catch { /* engine missing */ }
+        playbackStartedRef.current = false;
         // The item being abandoned still settles: if it never sounded,
         // its owner (e.g. the Q&A cycle) must learn that now, not from
         // watching the next item start.
@@ -799,7 +857,7 @@ export const useVoice = () => {
   const preSynthesizeNextRef = useRef(preSynthesizeNext);
   preSynthesizeNextRef.current = preSynthesizeNext;
 
-  const playSegmentsWithGemini = useCallback(async (fullText: string, onDone: (blocked: boolean) => void, providedUrl?: string, onAir?: () => void, isLocationStory?: boolean) => {
+  const playSegmentsWithGemini = useCallback(async (fullText: string, onDone: (blocked: boolean) => void, providedUrl?: string, onAir?: () => void, isLocationStory?: boolean, tracked?: boolean) => {
     // Runway bridge state (see the arming site below): declared first
     // because finish() — which can fire synchronously on the init-fail
     // path — must be able to cancel it.
@@ -826,13 +884,26 @@ export const useVoice = () => {
 
     const fallbackToBrowser = (reason: string) => {
       if (playbackStartedRef.current) {
+        if (tracked) {
+          // A tracked line (the Q&A answer) that dies mid-playback has
+          // NOT delivered — the listener heard a fragment. Settling it
+          // as done would let its owner bridge over the hole and
+          // release the question lock over an answer that never
+          // finished (the Oct 25 failure, re-entering through the
+          // error path). Route it through the blocked path instead:
+          // the bounded attempt economy replays it whole, or settles
+          // it honestly as not delivered.
+          console.log('[Voice] Gemini audio errored mid-playback on a tracked line — requeueing for a whole replay');
+          finish(true);
+          return;
+        }
         console.log('[Voice] Gemini audio errored mid-playback — skipping replay, moving on');
         finish(false);
         return;
       }
       console.log('[Voice] Gemini TTS fallback:', reason);
       setTtsStatus('fallback: ' + reason);
-      playSegmentsBrowser([fullText], finish, onAir);
+      playSegmentsBrowser([fullText], finish, onAir, tracked);
     };
 
     // Pre-made audio (library episode) needs no TTS model at all — skip the
@@ -951,7 +1022,7 @@ export const useVoice = () => {
   // Browser SpeechSynthesis playback — the original sentence-by-sentence path.
   // Used as a fallback when Gemini TTS is unavailable, and for short scripted
   // lines that don't justify a TTS API call.
-  const playSegmentsBrowser = useCallback((segments: string[], onDone: (blocked: boolean) => void, onAir?: () => void) => {
+  const playSegmentsBrowser = useCallback((segments: string[], onDone: (blocked: boolean) => void, onAir?: () => void, tracked?: boolean) => {
     const sentenceGroups = segments
       .map(seg => {
         const cleaned = cleanTextForSpeech(seg);
@@ -974,14 +1045,23 @@ export const useVoice = () => {
     // retry can re-speak an utterance whose start was merely late —
     // fires its end events twice, and two interleaved chains speaking
     // the same text was the audible "fallback on repeat" (Oct 26).
+    // Two further guards on the same theme: the chain dispatches with
+    // the retry disabled (a never-started sentence enters the attempt
+    // economy instead of being re-spoken blind), and once the chain
+    // has finished — for ANY reason, including a blocked settle that
+    // requeued the item — it never advances again. A late-starting
+    // utterance may finish its own sentence, but it cannot resurrect
+    // the chain and speak the rest of an item the player has settled.
     let advancedThrough = -1;
     const advanceTo = (index: number) => {
+      if (finished) return;
       if (index <= advancedThrough) return;
       advancedThrough = index;
       playSentence(index);
     };
 
     const playSentence = (index: number) => {
+      if (finished) return;
       if (index >= sentenceGroups.length || !synthRef.current) {
         finish(false);
         return;
@@ -1032,10 +1112,23 @@ export const useVoice = () => {
         if (event.error !== 'interrupted' && event.error !== 'canceled') {
           console.error('Story speech error:', event);
         }
+        if (tracked) {
+          // A tracked line (the Q&A answer/bridge) that errors
+          // mid-chain has NOT fully delivered, however many sentences
+          // already sounded. Settling it as complete would report a
+          // truncated answer as answered — re-enter the bounded
+          // attempt economy instead, which either replays it whole or
+          // settles it honestly as not delivered.
+          finish(true);
+          return;
+        }
         finish(false);
       };
 
-      dispatchSpeech(utterance, () => started, () => finish(true));
+      // No blind retry in the queue chain: a sentence whose start is
+      // merely late must not be duplicated (see dispatchSpeech), and
+      // one that never starts enters the attempt economy via onBlocked.
+      dispatchSpeech(utterance, () => started, () => finish(true), false);
     };
 
     advanceTo(0);
@@ -1155,9 +1248,17 @@ export const useVoice = () => {
     // Lifecycle record for this dequeue. markSounded is the ONLY way
     // `sounded` becomes true — an engine event proving audio began —
     // and the record settles exactly once when the item leaves the
-    // player (see onDone, the watchdog, skip, and stop).
-    const playback = { gen, sounded: false, onEnd: item.onPlaybackEnd };
+    // player (see onDone, the watchdog, skip, and stop). `completed`
+    // is set ONLY by onDone's natural-completion path below: success
+    // reported to a tracked owner means sounded AND finished, never
+    // merely started.
+    const playback = { gen, sounded: false, completed: false, onEnd: item.onPlaybackEnd };
     currentPlaybackRef.current = playback;
+    // A tracked item (one carrying lifecycle callbacks — the Q&A
+    // answer and bridge) gets honest-partial handling in both engines:
+    // a mid-playback failure re-enters the attempt economy rather than
+    // settling a fragment as delivered.
+    const tracked = !!item.onPlaybackEnd;
     const markSounded = () => {
       if (playback.sounded) return;
       playback.sounded = true;
@@ -1200,6 +1301,13 @@ export const useVoice = () => {
         return;
       }
 
+      // Natural completion: the engine ran the item to its end. Only
+      // this path may mark the record completed — every other exit
+      // (blocked above, watchdog, skip, stop) settles a tracked item
+      // as not delivered.
+      if (currentPlaybackRef.current === playback) {
+        playback.completed = true;
+      }
       settleCurrentPlayback();
       setTimeout(() => playStoryFromQueueRef.current(), 100);
     };
@@ -1208,11 +1316,11 @@ export const useVoice = () => {
       // Canned opener lines are local-voice BY DESIGN: immediate (no
       // synthesis wait), quota-free, and immune to the TTS lane's state
       // — they speak while the story pipeline warms up behind them.
-      playSegmentsBrowser([fullText], onDone, markSounded);
+      playSegmentsBrowser([fullText], onDone, markSounded, tracked);
     } else if (useGeminiTTS) {
-      playSegmentsWithGemini(fullText, onDone, item.audioUrl, markSounded, item.isLocationStory);
+      playSegmentsWithGemini(fullText, onDone, item.audioUrl, markSounded, item.isLocationStory, tracked);
     } else {
-      playSegmentsBrowser([fullText], onDone, markSounded);
+      playSegmentsBrowser([fullText], onDone, markSounded, tracked);
     }
   }, [isStillRelevant, playSegmentsBrowser, playSegmentsWithGemini, clearWatchdog, settleCurrentPlayback]);
 

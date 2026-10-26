@@ -301,19 +301,30 @@ function App() {
   //
   // The cycle is driven by CONFIRMED playback, never by queue movement
   // (Oct 25 lost-answer fix): the answer is spoken via speakTracked,
-  // and only when the player reports the answer item has ENDED — with
-  // proof it sounded — is the bridge line queued and the tour resumed;
-  // the lock then releases when the next line goes on air. An answer
-  // that ends without ever sounding (both voice engines failed) gets
-  // an honest spoken apology and a clean release instead. The earlier
-  // design inferred completion from the next queue item starting,
-  // which cannot tell a finished answer from a dropped one — it
-  // played "Alright, let's get back to it" over an answer that never
-  // aired and released the lock as if all was well. The failsafe below
-  // remains as a backstop, and tour end releases too. No path may
+  // and the player reports its end as success ONLY for a full delivery
+  // (sounded AND ran to completion). The lock releases on the third of
+  // three confirmed beats, per Erik's ruling — not a moment sooner:
+  //   1. the answer fully played, 2. the bridge line fully played,
+  //   3. a location story back on air (story-start handler below).
+  // The bridge is itself a tracked, front-queued line so its playing
+  // is confirmed the same way and it cannot be jumped by a story
+  // fetched during the answer. An answer that does not fully deliver
+  // (both voice engines failed, retries exhausted) gets an honest
+  // spoken apology and a clean release instead. The earlier design
+  // inferred completion from the next queue item starting, which
+  // cannot tell a finished answer from a dropped one — it played
+  // "Alright, let's get back to it" over an answer that never aired
+  // and released the lock as if all was well; and the Oct 26 field
+  // test showed the release could land while the answer was still
+  // playing, because "next line started" is not "answer + bridge
+  // played, stories resumed". The failsafe below remains as a
+  // backstop, sized from the answer's spoken length and re-armed at
+  // every phase change (Oct 26: the flat 120s was shorter than a
+  // legal 1024-token answer, ~5 minutes of speech, so the backstop
+  // itself could fire mid-answer); tour end releases too. No path may
   // leave the lock set — a stuck lock bricks both inputs, which is
   // worse than any overlap it prevents.
-  const answerPhaseRef = useRef<'awaiting-answer' | 'awaiting-resume' | null>(null);
+  const answerPhaseRef = useRef<'awaiting-answer' | 'awaiting-bridge' | 'awaiting-resume' | null>(null);
   const answerCycleRef = useRef(0);
   const answerFailsafeRef = useRef<number | null>(null);
   const releaseQuestionLock = useCallback(() => {
@@ -325,6 +336,17 @@ function App() {
     setIsProcessingQuestion(false);
     pttHoldRef.current = false;
   }, []);
+  const armAnswerFailsafe = useCallback((ms: number) => {
+    if (answerFailsafeRef.current) window.clearTimeout(answerFailsafeRef.current);
+    answerFailsafeRef.current = window.setTimeout(() => releaseQuestionLock(), ms);
+  }, [releaseQuestionLock]);
+  // Failsafe horizon for the answer phase, sized from the answer's
+  // spoken length: Leo speaks ~13 chars/sec, and a legal answer runs
+  // to 1024 tokens (~5 minutes aloud), so any flat horizon short of
+  // that can fire mid-answer. Estimate the worst-case duration, give
+  // it 2.5× headroom plus a minute, floor 3 minutes, cap 15.
+  const answerFailsafeMs = (text: string) =>
+    Math.min(900_000, Math.max(180_000, (text.length / 13) * 2500 + 60_000));
 
   const submitQuestion = (raw: string): boolean => {
     const question = raw.trim();
@@ -555,8 +577,7 @@ function App() {
         // backstop. What happens next is decided by the tracked
         // playback callbacks below — not by watching the queue move.
         answerPhaseRef.current = 'awaiting-answer';
-        if (answerFailsafeRef.current) window.clearTimeout(answerFailsafeRef.current);
-        answerFailsafeRef.current = window.setTimeout(() => releaseQuestionLock(), 120_000);
+        armAnswerFailsafe(answerFailsafeMs(fullAnswer));
         const cycle = ++answerCycleRef.current;
         voice.speakTracked(fullAnswer, {
           onPlaybackEnd: (sounded: boolean) => {
@@ -564,30 +585,47 @@ function App() {
             // settled phase (failsafe beat us): nothing to do.
             if (cycle !== answerCycleRef.current) return;
             if (answerPhaseRef.current !== 'awaiting-answer') return;
-            if (sounded) {
-              // The answer genuinely aired and has now ended. Only
-              // NOW queue the bridge back into the tour, and kick the
-              // next story fetch so the gap is minimal. The lock
-              // releases when the next line (bridge or story) goes on
-              // air — the answer has fully played AND the tour has
-              // resumed, per the serialization rule.
-              answerPhaseRef.current = 'awaiting-resume';
-              const pos = geolocation.position;
-              if (pos) {
-                voice.queueStory("Alright, let's get back to it.", undefined, undefined, undefined, 'scripted');
-                lastFetchTimeRef.current = Date.now();
-                handleIntervalUpdate(pos);
-              } else {
-                releaseQuestionLock();
-              }
-            } else {
-              // The answer never sounded — both engines failed under
-              // it. Say so honestly, out loud, and release cleanly;
-              // never bridge over a hole and call it an answer.
+            if (!sounded) {
+              // The answer did not fully deliver — it never sounded,
+              // or it was cut short and its retries ran out (the voice
+              // layer reports success only for a complete delivery).
+              // Say so honestly, out loud, and release cleanly; never
+              // bridge over a hole and call it an answer.
               answerPhaseRef.current = null;
               voice.speak("Sorry — that answer didn't come through. Ask me again.");
               releaseQuestionLock();
+              return;
             }
+            // Beat 1 confirmed: the answer genuinely aired, whole.
+            // Queue the bridge back into the tour as a TRACKED line at
+            // the FRONT of the waiting queue — a story fetched during
+            // the answer must not jump it, or the resume would happen
+            // in the wrong order — and kick the next story fetch now
+            // so a story is warming while the bridge plays.
+            const pos = geolocation.position;
+            if (!pos) {
+              releaseQuestionLock();
+              return;
+            }
+            answerPhaseRef.current = 'awaiting-bridge';
+            armAnswerFailsafe(90_000);
+            lastFetchTimeRef.current = Date.now();
+            handleIntervalUpdate(pos);
+            voice.speakTracked("Alright, let's get back to it.", {
+              onPlaybackEnd: () => {
+                if (cycle !== answerCycleRef.current) return;
+                if (answerPhaseRef.current !== 'awaiting-bridge') return;
+                // Beat 2 confirmed: the bridge has played (sounded
+                // or not — it is glue, not the thing being confirmed).
+                // The lock releases when a location story goes on
+                // air (story-start handler below). The grace arming
+                // is the bounded exit if the area has nothing to tell
+                // right now: the tour has still resumed — into its
+                // normal fetch cycle — so the lock must not hold.
+                answerPhaseRef.current = 'awaiting-resume';
+                armAnswerFailsafe(45_000);
+              },
+            }, { front: true });
           },
         });
       }
@@ -605,7 +643,7 @@ function App() {
         releaseQuestionLock();
       }
     }
-  }, [geolocation.position, voice]);
+  }, [geolocation.position, voice, armAnswerFailsafe]);
 
   // These refs are declared BEFORE handleIntervalUpdate because the callback
   // reads them at call time, not capture time. The GPS interval can fire its
@@ -988,13 +1026,18 @@ function App() {
 
   useEffect(() => {
     voice.setOnStoryStart((topic: string | null) => {
-      // Answer-cycle bookkeeping: the lock releases when the first
-      // line AFTER a confirmed answer goes on air — the bridge line or
-      // a resumed story. Starts while the phase is 'awaiting-answer'
-      // (the answer item itself dequeuing, or anything else) prove
-      // nothing about the answer and are ignored; confirmation comes
-      // from the tracked playback callback in handleUserQuestion.
-      if (answerPhaseRef.current === 'awaiting-resume') {
+      // Answer-cycle bookkeeping: the lock releases when a LOCATION
+      // STORY goes on air while the cycle is in 'awaiting-resume' —
+      // i.e. after the answer AND the bridge have both fully played
+      // (confirmed in handleUserQuestion's tracked callbacks). Story
+      // starts in any other phase prove nothing about the answer and
+      // are ignored; scripted starts (topic === null — the bridge
+      // itself, the opener, apologies) never release the lock. The
+      // previous rule released on ANY start in the resume phase,
+      // including the bridge merely starting and including a story
+      // that had been queued ahead of the bridge — the input unlocked
+      // before the cycle had actually completed (Oct 26 field test).
+      if (answerPhaseRef.current === 'awaiting-resume' && topic !== null) {
         releaseQuestionLock();
       }
       setHasLikedStory(false);
