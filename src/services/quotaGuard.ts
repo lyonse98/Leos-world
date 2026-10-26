@@ -16,7 +16,7 @@
 // daily cap is the likely wall, so the key stays quiet for an hour at a
 // time rather than probing the wall (and spending requests) repeatedly.
 
-import { analytics } from './analytics';
+import { analytics, trackDiag } from './analytics';
 
 export type QuotaLane = 'text' | 'tts';
 
@@ -26,6 +26,11 @@ const LADDER_WINDOW_MS = 3 * 3_600_000; // trips within 3h escalate the ladder
 interface KeyState {
   trippedUntil: number;
   tripTimes: number[];
+  // Whether the recovery from the current/last trip has already
+  // been reported: the breaker has no timer of its own, so recovery
+  // is observed (once) by the first isTripped() check that finds the
+  // cooldown elapsed.
+  recoveryNoted: boolean;
 }
 
 const states = new Map<string, KeyState>();
@@ -38,7 +43,7 @@ function stateFor(lane: QuotaLane, model?: string): KeyState {
   const key = keyFor(lane, model);
   let state = states.get(key);
   if (!state) {
-    state = { trippedUntil: 0, tripTimes: [] };
+    state = { trippedUntil: 0, tripTimes: [], recoveryNoted: true };
     states.set(key, state);
   }
   return state;
@@ -61,19 +66,40 @@ export const quotaGuard = {
     const step = Math.min(state.tripTimes.length - 1, COOLDOWN_LADDER_MS.length - 1);
     const cooldown = COOLDOWN_LADDER_MS[step];
     state.trippedUntil = Math.max(state.trippedUntil, now + cooldown);
+    state.recoveryNoted = false;
     console.warn(
       `[QuotaGuard] ${keyFor(lane, model)} tripped (trip #${state.tripTimes.length} in window) — quiet for ${Math.round(cooldown / 1000)}s`
     );
     // Observational only: count the trip for the daily rollup — trip
     // frequency is the Tier-1 pain metric. Wrapped so instrumentation
-    // can never interfere with the breaker itself.
+    // can never interfere with the breaker itself. stage/reason/
+    // message ride along (Oct 26, 2026) in the pipeline_diag
+    // vocabulary, so the trip is readable per-event in the
+    // recent-events view like every other diagnostic.
     try {
-      analytics.track('quota_tripped', null, undefined, { model: model ?? '', source: lane, lane });
+      analytics.track('quota_tripped', null, undefined, {
+        model: model ?? '',
+        source: lane,
+        lane,
+        stage: 'quota',
+        reason: 'tripped',
+        message: `${keyFor(lane, model)} tripped (trip #${state.tripTimes.length} in window) — quiet for ${Math.round(cooldown / 1000)}s`,
+      });
     } catch { /* a metric must never break a trip */ }
   },
 
   isTripped(lane: QuotaLane, model?: string): boolean {
-    return Date.now() < stateFor(lane, model).trippedUntil;
+    const state = stateFor(lane, model);
+    const now = Date.now();
+    // Recovery is a transition worth one event (Oct 26, 2026): the
+    // breaker has no timer, so the first check that finds an elapsed
+    // cooldown reports it — "the lane came back" used to be invisible
+    // anywhere but the console.
+    if (state.trippedUntil > 0 && now >= state.trippedUntil && !state.recoveryNoted) {
+      state.recoveryNoted = true;
+      trackDiag('quota', 'recovered', `${keyFor(lane, model)} cooldown elapsed — lane available again`);
+    }
+    return now < state.trippedUntil;
   },
 
   remainingMs(lane: QuotaLane, model?: string): number {

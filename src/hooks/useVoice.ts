@@ -7,7 +7,7 @@ import {
 import { tasteProfile } from '../services/tasteProfile';
 import { geminiAudio, TTS_MODEL } from '../services/geminiAudio';
 import { quotaGuard } from '../services/quotaGuard';
-import { analytics } from '../services/analytics';
+import { analytics, trackDiag } from '../services/analytics';
 
 interface StoryQueueItem {
   text: string;
@@ -52,6 +52,20 @@ interface StoryQueueItem {
   // a failed item advances the queue exactly like a finished one.
   onPlaybackStart?: () => void;
   onPlaybackEnd?: (sounded: boolean) => void;
+  // Full settle truth (Oct 26, 2026), fired alongside onPlaybackEnd
+  // for items whose owner needs the details for analytics: whether
+  // the item ran to natural completion, which engine actually
+  // sounded it, how many attempts it took, and how long it sounded.
+  onSettleDetail?: (info: PlaybackSettle) => void;
+}
+
+/** The complete truth about one item's final dequeue, at settle. */
+export interface PlaybackSettle {
+  sounded: boolean;
+  completed: boolean;
+  engine: 'gemini' | 'browser' | null;
+  attempts: number;
+  soundedMs: number;
 }
 
 interface CurrentPosition {
@@ -201,7 +215,13 @@ export const useVoice = () => {
     gen: number;
     sounded: boolean;
     completed: boolean;
+    engine: 'gemini' | 'browser' | null;
+    soundedAt: number | null;
+    attempts: number;
+    isLocationStory: boolean;
+    topic: string | null;
     onEnd?: (sounded: boolean) => void;
+    onSettleDetail?: (info: PlaybackSettle) => void;
   } | null>(null);
   const currentPositionProviderRef = useRef<(() => CurrentPosition | null) | null>(null);
   const lastKnownModeRef = useRef<MovementModeHysteresis>('stationary');
@@ -248,8 +268,20 @@ export const useVoice = () => {
     setAudioBlockedKind(kind);
     setAudioBlocked(true);
     // Observational only: count audio blocks for the daily rollup.
+    // stage/reason/message ride along (Oct 26, 2026) so the block is
+    // readable per-event through the recent-events view, in the same
+    // vocabulary as pipeline_diag, instead of existing only as a
+    // banner Erik had to describe from memory.
     try {
-      analytics.track('audio_blocked', null, undefined, { source: kind, kind });
+      analytics.track('audio_blocked', null, undefined, {
+        source: kind,
+        kind,
+        stage: 'playback',
+        reason: kind,
+        message: kind === 'blocked'
+          ? 'audio blocked by the platform (autoplay/permission)'
+          : 'audio error (synthesis or playback failure)',
+      });
     } catch { /* a metric must never break the banner */ }
   };
   // Set when the listener returns to a tour whose audio the platform paused.
@@ -261,17 +293,18 @@ export const useVoice = () => {
   const backgroundedRef = useRef<boolean>(false);
   // A line requested before the first gesture is held here and spoken the
   // instant the listener taps, since that tap is what permits sound.
-  const pendingSpeechRef = useRef<{ text: string; localVoice?: boolean } | null>(null);
-  const speakRef = useRef<(text: string, opts?: { localVoice?: boolean }) => void>(() => {});
+  const pendingSpeechRef = useRef<{ text: string; localVoice?: boolean; onSettle?: (info: PlaybackSettle) => void } | null>(null);
+  const speakRef = useRef<(text: string, opts?: { localVoice?: boolean; onSettle?: (info: PlaybackSettle) => void }) => void>(() => {});
   const pendingTrackedRef = useRef<{
     text: string;
     onPlaybackStart?: () => void;
     onPlaybackEnd?: (sounded: boolean) => void;
+    onSettleDetail?: (info: PlaybackSettle) => void;
     front?: boolean;
   } | null>(null);
   const speakTrackedRef = useRef<(
     text: string,
-    cbs: { onPlaybackStart?: () => void; onPlaybackEnd?: (sounded: boolean) => void },
+    cbs: { onPlaybackStart?: () => void; onPlaybackEnd?: (sounded: boolean) => void; onSettleDetail?: (info: PlaybackSettle) => void },
     opts?: { front?: boolean }
   ) => void>(() => {});
 
@@ -339,7 +372,7 @@ export const useVoice = () => {
         const held = pendingSpeechRef.current;
         if (held) {
           pendingSpeechRef.current = null;
-          speakRef.current(held.text, { localVoice: held.localVoice });
+          speakRef.current(held.text, { localVoice: held.localVoice, onSettle: held.onSettle });
         }
         const heldTracked = pendingTrackedRef.current;
         if (heldTracked) {
@@ -356,7 +389,7 @@ export const useVoice = () => {
     const pending = pendingSpeechRef.current;
     if (pending) {
       pendingSpeechRef.current = null;
-      speakRef.current(pending.text, { localVoice: pending.localVoice });
+      speakRef.current(pending.text, { localVoice: pending.localVoice, onSettle: pending.onSettle });
     }
     const pendingTracked = pendingTrackedRef.current;
     if (pendingTracked) {
@@ -467,6 +500,7 @@ export const useVoice = () => {
   const speakPriority = useCallback((text: string, cbs?: {
     onPlaybackStart?: () => void;
     onPlaybackEnd?: (sounded: boolean) => void;
+    onSettleDetail?: (info: PlaybackSettle) => void;
   }, opts?: { localVoice?: boolean; front?: boolean }) => {
     const trimmed = text.trim();
     if (!trimmed) return;
@@ -478,6 +512,7 @@ export const useVoice = () => {
       localVoice: opts?.localVoice,
       onPlaybackStart: cbs?.onPlaybackStart,
       onPlaybackEnd: cbs?.onPlaybackEnd,
+      onSettleDetail: cbs?.onSettleDetail,
     };
 
     if (opts?.front) {
@@ -500,7 +535,7 @@ export const useVoice = () => {
     }
   }, []);
 
-  const speak = useCallback((text: string, opts?: { localVoice?: boolean }) => {
+  const speak = useCallback((text: string, opts?: { localVoice?: boolean; onSettle?: (info: PlaybackSettle) => void }) => {
     const trimmed = text.trim();
     if (!trimmed) return;
 
@@ -508,11 +543,11 @@ export const useVoice = () => {
     // and let the unlock step speak it. Dropping it here would silently lose
     // whatever the app most wanted to say.
     if (!unlockedRef.current) {
-      pendingSpeechRef.current = { text: trimmed, localVoice: opts?.localVoice };
+      pendingSpeechRef.current = { text: trimmed, localVoice: opts?.localVoice, onSettle: opts?.onSettle };
       return;
     }
 
-    speakPriority(trimmed, undefined, opts);
+    speakPriority(trimmed, opts?.onSettle ? { onSettleDetail: opts.onSettle } : undefined, opts);
   }, [speakPriority]);
 
   speakRef.current = speak;
@@ -527,6 +562,7 @@ export const useVoice = () => {
   const speakTracked = useCallback((text: string, cbs: {
     onPlaybackStart?: () => void;
     onPlaybackEnd?: (sounded: boolean) => void;
+    onSettleDetail?: (info: PlaybackSettle) => void;
   }, opts?: { front?: boolean }) => {
     const trimmed = text.trim();
     if (!trimmed) {
@@ -562,7 +598,31 @@ export const useVoice = () => {
     const pb = currentPlaybackRef.current;
     if (!pb) return;
     currentPlaybackRef.current = null;
-    pb.onEnd?.(pb.sounded && pb.completed);
+    const delivered = pb.sounded && pb.completed;
+    const settle: PlaybackSettle = {
+      sounded: pb.sounded,
+      completed: pb.completed,
+      engine: pb.engine,
+      attempts: pb.attempts,
+      soundedMs: pb.soundedAt !== null ? Math.max(0, Date.now() - pb.soundedAt) : 0,
+    };
+    // Per-story settle truth (Oct 26, 2026): story_timing proves a
+    // story's generation latency, but nothing recorded whether its
+    // playback actually completed or was cut — truncations were only
+    // visible as aggregate audio_blocked counts. Location stories now
+    // settle on the record, so a cut-off is countable per event.
+    if (pb.isLocationStory) {
+      try {
+        analytics.track('story_playback', null, undefined, {
+          completed: settle.completed,
+          engine: settle.engine ?? 'none',
+          attempts: settle.attempts,
+          topic: pb.topic ?? '',
+        });
+      } catch { /* a metric must never break a settle */ }
+    }
+    pb.onSettleDetail?.(settle);
+    pb.onEnd?.(delivered);
   }, []);
 
   const stop = useCallback(() => {
@@ -857,7 +917,7 @@ export const useVoice = () => {
   const preSynthesizeNextRef = useRef(preSynthesizeNext);
   preSynthesizeNextRef.current = preSynthesizeNext;
 
-  const playSegmentsWithGemini = useCallback(async (fullText: string, onDone: (blocked: boolean) => void, providedUrl?: string, onAir?: () => void, isLocationStory?: boolean, tracked?: boolean) => {
+  const playSegmentsWithGemini = useCallback(async (fullText: string, onDone: (blocked: boolean) => void, providedUrl?: string, onAir?: (engine: 'gemini' | 'browser') => void, isLocationStory?: boolean, tracked?: boolean) => {
     // Runway bridge state (see the arming site below): declared first
     // because finish() — which can fire synchronously on the init-fail
     // path — must be able to cancel it.
@@ -883,6 +943,14 @@ export const useVoice = () => {
     };
 
     const fallbackToBrowser = (reason: string) => {
+      // Capture the failure into the event stream (Oct 26, 2026): a
+      // TTS failure used to exist only as this console line and the
+      // diagnostics-panel status, both gone with the session. Now it
+      // is a pipeline_diag row — stage 'tts', reason 'fallback' when
+      // the browser lane engages for the item, 'tts-error' when the
+      // Gemini audio died mid-playback — readable per-event through
+      // the recent-events view. Message is sanitized centrally.
+      trackDiag('tts', playbackStartedRef.current ? 'tts-error' : 'fallback', reason);
       if (playbackStartedRef.current) {
         if (tracked) {
           // A tracked line (the Q&A answer) that dies mid-playback has
@@ -981,7 +1049,7 @@ export const useVoice = () => {
         storyTimingRef.current.onPlayingAt = Date.now();
         lastProgressAtRef.current = Date.now();
         cancelBridge();
-        onAir?.();
+        onAir?.('gemini');
         preSynthesizeNextRef.current();
       };
       audio.ontimeupdate = () => {
@@ -1022,7 +1090,7 @@ export const useVoice = () => {
   // Browser SpeechSynthesis playback — the original sentence-by-sentence path.
   // Used as a fallback when Gemini TTS is unavailable, and for short scripted
   // lines that don't justify a TTS API call.
-  const playSegmentsBrowser = useCallback((segments: string[], onDone: (blocked: boolean) => void, onAir?: () => void, tracked?: boolean) => {
+  const playSegmentsBrowser = useCallback((segments: string[], onDone: (blocked: boolean) => void, onAir?: (engine: 'gemini' | 'browser') => void, tracked?: boolean) => {
     const sentenceGroups = segments
       .map(seg => {
         const cleaned = cleanTextForSpeech(seg);
@@ -1080,7 +1148,7 @@ export const useVoice = () => {
         playbackStartedRef.current = true;
         storyTimingRef.current.onPlayingAt = Date.now();
         lastProgressAtRef.current = Date.now();
-        onAir?.();
+        onAir?.('browser');
         preSynthesizeNextRef.current();
         audioBlockedRef.current = false;
         setAudioBlocked(false);
@@ -1251,17 +1319,34 @@ export const useVoice = () => {
     // player (see onDone, the watchdog, skip, and stop). `completed`
     // is set ONLY by onDone's natural-completion path below: success
     // reported to a tracked owner means sounded AND finished, never
-    // merely started.
-    const playback = { gen, sounded: false, completed: false, onEnd: item.onPlaybackEnd };
+    // merely started. The engine that actually sounded the item
+    // records itself here (Oct 26, 2026): a Gemini item that fell
+    // back to the browser voice reports 'browser', because that is
+    // what the listener heard — settle analytics must describe the
+    // ear, not the intention.
+    const playback = {
+      gen,
+      sounded: false,
+      completed: false,
+      engine: null as 'gemini' | 'browser' | null,
+      soundedAt: null as number | null,
+      attempts: item.attempts ?? 1,
+      isLocationStory: item.isLocationStory,
+      topic: item.topic ?? null,
+      onEnd: item.onPlaybackEnd,
+      onSettleDetail: item.onSettleDetail,
+    };
     currentPlaybackRef.current = playback;
     // A tracked item (one carrying lifecycle callbacks — the Q&A
     // answer and bridge) gets honest-partial handling in both engines:
     // a mid-playback failure re-enters the attempt economy rather than
     // settling a fragment as delivered.
     const tracked = !!item.onPlaybackEnd;
-    const markSounded = () => {
+    const markSounded = (engine: 'gemini' | 'browser') => {
       if (playback.sounded) return;
       playback.sounded = true;
+      playback.engine = engine;
+      playback.soundedAt = Date.now();
       item.onPlaybackStart?.();
     };
 

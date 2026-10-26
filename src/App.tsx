@@ -7,7 +7,7 @@ import { useWakeLock } from './hooks/useWakeLock';
 import { geminiService } from './services/gemini';
 import { storyCache, CachedStory } from './services/storyCache';
 import { locationTracker } from './services/locationTracker';
-import { analytics } from './services/analytics';
+import { analytics, trackDiag } from './services/analytics';
 import { placesService } from './services/placesService';
 import { getIntro } from './services/intros';
 import { heardStories, rotateUserKey } from './services/heardStories';
@@ -325,9 +325,30 @@ function App() {
   // leave the lock set — a stuck lock bricks both inputs, which is
   // worse than any overlap it prevents.
   const answerPhaseRef = useRef<'awaiting-answer' | 'awaiting-bridge' | 'awaiting-resume' | null>(null);
+  // Mirror of the question lock for the release-reason event gate in
+  // releaseQuestionLock (set in submitQuestion where the lock is
+  // taken; cleared on release).
+  const questionInFlightRef = useRef(false);
   const answerCycleRef = useRef(0);
   const answerFailsafeRef = useRef<number | null>(null);
-  const releaseQuestionLock = useCallback(() => {
+  const releaseQuestionLock = useCallback((reason?: 'story-resumed' | 'failsafe' | 'answer-failed') => {
+    // Record WHY the lock released, when the release is one of the
+    // three meaningful exits (Oct 26, 2026): a mid-answer release was
+    // only diagnosable while it was happening on Erik's screen; as an
+    // event it is provable after the fact. Gated on a question
+    // actually being in flight — releases with no question (tour end,
+    // defensive cleanups) and releases outside the three named
+    // reasons (the no-position edge) stay silent, so the event means
+    // something. questionInFlightRef mirrors the lock for exactly
+    // this gate: set where the lock is taken in submitQuestion,
+    // cleared here, so the finally-path release (cycle never armed,
+    // phase already null) still records its reason.
+    if (reason && questionInFlightRef.current) {
+      try {
+        analytics.track('question_lock_released', null, undefined, { reason });
+      } catch { /* a metric must never break a release */ }
+    }
+    questionInFlightRef.current = false;
     answerPhaseRef.current = null;
     if (answerFailsafeRef.current) {
       window.clearTimeout(answerFailsafeRef.current);
@@ -338,7 +359,7 @@ function App() {
   }, []);
   const armAnswerFailsafe = useCallback((ms: number) => {
     if (answerFailsafeRef.current) window.clearTimeout(answerFailsafeRef.current);
-    answerFailsafeRef.current = window.setTimeout(() => releaseQuestionLock(), ms);
+    answerFailsafeRef.current = window.setTimeout(() => releaseQuestionLock('failsafe'), ms);
   }, [releaseQuestionLock]);
   // Failsafe horizon for the answer phase, sized from the answer's
   // spoken length: Leo speaks ~13 chars/sec, and a legal answer runs
@@ -359,6 +380,7 @@ function App() {
     analytics.track('question_asked', geolocation.position, geolocation.position.speed !== null && geolocation.position.speed >= 6.0 ? 'driving' : 'walking', { question: question.slice(0, 500), model: LEO_QA_MODEL_ID });
     requestTokenRef.current = geminiService.currentRequestToken();
     geminiService.cancelAllRequests();
+    questionInFlightRef.current = true;
     setIsProcessingQuestion(true);
     handleUserQuestion(question);
     return true;
@@ -555,6 +577,10 @@ function App() {
     if (!geolocation.position) return;
 
     const token = geminiService.issueRequestToken();
+    // Set when the answer never reaches playback (generation threw,
+    // or came back empty): the finally-path release then records
+    // 'answer-failed' instead of releasing silently.
+    let generationFailed = false;
 
     try {
       let fullAnswer = '';
@@ -580,6 +606,25 @@ function App() {
         armAnswerFailsafe(answerFailsafeMs(fullAnswer));
         const cycle = ++answerCycleRef.current;
         voice.speakTracked(fullAnswer, {
+          onSettleDetail: (info) => {
+            // The answer's settle truth, on the record (Oct 26,
+            // 2026): did it complete, which voice actually sounded
+            // it, how long it sounded. A settle that did not
+            // complete is also a pipeline_diag — the failure Erik
+            // used to have to describe from the driver's seat.
+            const pos = geolocation.position;
+            try {
+              analytics.track('question_playback', pos, pos !== null && pos.speed !== null && pos.speed >= 6.0 ? 'driving' : 'walking', {
+                completed: info.completed,
+                voice: info.engine === 'gemini' ? 'gemini' : info.engine === 'browser' ? 'browser-fallback' : 'none',
+                sounded_ms: info.soundedMs,
+                attempts: info.attempts,
+              });
+            } catch { /* a metric must never break an answer */ }
+            if (!info.completed) {
+              trackDiag('playback', 'answer-settle', `answer did not fully deliver (sounded=${info.sounded}, engine=${info.engine ?? 'none'}, attempts=${info.attempts})`);
+            }
+          },
           onPlaybackEnd: (sounded: boolean) => {
             // Stale cycle (a newer question, a tour end) or an already
             // settled phase (failsafe beat us): nothing to do.
@@ -591,9 +636,8 @@ function App() {
               // layer reports success only for a complete delivery).
               // Say so honestly, out loud, and release cleanly; never
               // bridge over a hole and call it an answer.
-              answerPhaseRef.current = null;
               voice.speak("Sorry — that answer didn't come through. Ask me again.");
-              releaseQuestionLock();
+              releaseQuestionLock('answer-failed');
               return;
             }
             // Beat 1 confirmed: the answer genuinely aired, whole.
@@ -628,8 +672,15 @@ function App() {
             }, { front: true });
           },
         });
+      } else {
+        // An empty answer is a generation failure with no exception:
+        // record it as one so the finally-path release says why.
+        generationFailed = true;
+        trackDiag('text', 'empty', 'answer generation returned empty');
       }
     } catch (error) {
+      generationFailed = true;
+      trackDiag('text', 'answer-error', error);
       console.error('Error answering question:', error);
       if (token === geminiService.currentRequestToken()) {
         voice.speak("Sorry, couldn't process that. Try asking again.");
@@ -640,7 +691,7 @@ function App() {
       // the lock past this point — it ends in the tracked playback
       // callback when the answer's fate is known, or at the failsafe.
       if (answerPhaseRef.current === null) {
-        releaseQuestionLock();
+        releaseQuestionLock(generationFailed ? 'answer-failed' : undefined);
       }
     }
   }, [geolocation.position, voice, armAnswerFailsafe]);
@@ -791,6 +842,7 @@ function App() {
         storyCache.prefetchForPosition(position, position.speed !== null && position.speed >= 6.0 ? 'driving' : 'walking').catch(() => {});
       } else if (!isOnlineRef.current) {
         setPipelineStatus('offline, no cache');
+        trackDiag('pipeline', 'offline', 'offline — no cached story available');
         isFetchingStoryRef.current = false;
         console.log('[Tour] Offline - no cached story available, queued position');
       } else {
@@ -799,6 +851,14 @@ function App() {
         const err = geminiService.getLastError();
         const detail = err || 'no error set — shouldTell may have returned false or generateStory returned empty';
         setPipelineStatus('EMPTY: ' + detail.slice(0, 50));
+        // The EMPTY status used to die with the session (Oct 26,
+        // 2026): file it as a diagnostic with the reason the message
+        // already names — deadline abort, quota wall, or plain empty.
+        trackDiag('text',
+          detail.includes('deadline') ? 'deadline'
+            : (detail.includes('429') || detail.toLowerCase().includes('quota')) ? 'quota'
+            : 'empty',
+          detail);
         console.error('[Tour] Story came back EMPTY. result:', result, 'lastError:', err);
         if (err) {
           setGeminiError(err);
@@ -807,6 +867,11 @@ function App() {
     } catch (error) {
       isFetchingStoryRef.current = false;
       setPipelineStatus('ERROR: ' + (error instanceof Error ? error.message : String(error)).slice(0, 50));
+      trackDiag('text',
+        (error instanceof Error ? error.message : String(error)).includes('deadline') ? 'deadline'
+          : (error instanceof Error ? error.message : String(error)).includes('429') ? 'quota'
+          : 'error',
+        error);
       console.error('Error getting narration:', error);
       setGeminiError(error instanceof Error ? error.message : String(error));
     }
@@ -1038,7 +1103,7 @@ function App() {
       // that had been queued ahead of the bridge — the input unlocked
       // before the cycle had actually completed (Oct 26 field test).
       if (answerPhaseRef.current === 'awaiting-resume' && topic !== null) {
-        releaseQuestionLock();
+        releaseQuestionLock('story-resumed');
       }
       setHasLikedStory(false);
 
@@ -1115,7 +1180,28 @@ function App() {
       // through Gemini like everything else, the fixed intro texts hit
       // the poisoned TTS cache and the welcome fell to the fallback
       // path or vanished entirely.)
-      voice.speak(intro, { localVoice: true });
+      voice.speak(intro, {
+        localVoice: true,
+        onSettle: (info) => {
+          // The canned welcome's settle, on the record (Oct 26,
+          // 2026): until now first_serve proved the welcome STORY
+          // served first, but the greeting line itself had no event —
+          // its three field failures were provable only by Erik's
+          // ears. Voice is 'local' by design (see above); a settle
+          // that did not complete also files a pipeline_diag.
+          try {
+            analytics.track('opener_spoken', null, undefined, {
+              voice: 'local',
+              sounded: info.sounded,
+              completed: info.completed,
+              ms_from_tour_start: analytics.tourElapsedMs(),
+            });
+          } catch { /* a metric must never break the opener */ }
+          if (!info.completed) {
+            trackDiag('playback', 'opener-settle', `welcome line did not fully deliver (sounded=${info.sounded}, engine=${info.engine ?? 'none'}, attempts=${info.attempts})`);
+          }
+        },
+      });
       if (ambientOn) ambientAudio.start();
 
       // Flip to the tour view immediately. The intro is already playing — the

@@ -1,4 +1,5 @@
 import { Position } from '../hooks/useGeolocation';
+import { trackDiag } from './analytics';
 import {
   calculateDistance,
   resolveMovementMode,
@@ -206,12 +207,14 @@ class PlacesService {
       );
       if (!res.ok) {
         console.error('[Places] searchNearby error:', res.status);
+        trackDiag('places', String(res.status), `searchNearby HTTP ${res.status}`);
         return [];
       }
       const data = await res.json();
       rawPlaces = data.places || [];
     } catch (error) {
       console.warn('[Places] searchNearby failed or timed out:', error);
+      trackDiag('places', 'error', `searchNearby failed: ${error instanceof Error ? error.message : String(error)}`);
       return [];
     }
 
@@ -547,6 +550,7 @@ class PlacesService {
       };
     } catch (error) {
       console.warn('[Places] Area lookup failed or timed out:', error);
+      trackDiag('places', 'error', `area lookup failed: ${error instanceof Error ? error.message : String(error)}`);
       return { neighborhood: null, city: null, district: null, street: null };
     }
   }
