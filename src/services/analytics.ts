@@ -5,7 +5,13 @@ type EventType = 'session_start' | 'session_end' | 'story_played' | 'ad_played' 
   // Observational counters for field-reported symptoms (Oct 25, 2026):
   // Q&A answer latency, quota circuit-breaker trips, audio blocks, and
   // stale-story drops. Emits are fire-and-forget and must stay that way.
-  | 'question_timing' | 'quota_tripped' | 'audio_blocked' | 'story_dropped';
+  | 'question_timing' | 'quota_tripped' | 'audio_blocked' | 'story_dropped'
+  // First-serve audit (Oct 25, 2026): one event per tour session naming
+  // what the FIRST story served actually was — event_data.source is
+  // 'welcome' | 'area' | 'landmark' — so the opener sequence is
+  // countable in the field. The daily-rollup trigger counts it by its
+  // generic (day, event_type, source) grouping; no DDL was needed.
+  | 'first_serve';
 
 interface AnalyticsEvent {
   eventType: EventType;

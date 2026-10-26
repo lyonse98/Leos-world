@@ -259,6 +259,19 @@ export const useVoice = () => {
         audio.muted = false;
         audio.removeAttribute('src');
         unlockedRef.current = true;
+        // The prime just landed — NOW any line being held can actually
+        // be heard. Flush it here, not only in unlock(): the tour-start
+        // flow speaks the intro after its last unlock() call, and if
+        // the prime hadn't resolved yet the intro was held in
+        // pendingSpeechRef with no further unlock coming — in a car,
+        // possibly no tap ever — so the welcome simply never sounded.
+        // A held line must be spoken the moment the engine unlocks,
+        // whoever's call made it happen.
+        const held = pendingSpeechRef.current;
+        if (held) {
+          pendingSpeechRef.current = null;
+          speakRef.current(held);
+        }
       }).catch(() => {
         audio.muted = false;
         audio.removeAttribute('src');

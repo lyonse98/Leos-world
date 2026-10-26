@@ -676,7 +676,8 @@ class GeminiService {
   async getTourNarration(
     position: Position,
     destination?: string,
-    onChunk?: (text: string) => void
+    onChunk?: (text: string) => void,
+    opts?: { requireWelcomeStory?: boolean }
   ): Promise<NarrationResult> {
     if (!this.ai) {
       return { ...EMPTY_NARRATION, text: "Hey, AI's still loading up. Give me just a second." };
@@ -700,10 +701,31 @@ class GeminiService {
     // for the fallback path even if the cache hits.
     [factPack, preliminaryCache] = await Promise.all([factPackPromise, cachePromise]);
 
+    // Decide the context BEFORE any cache serve. The preliminary lookup
+    // used to run first and could serve any unheard nearby story before
+    // the tracker ever assigned a context — which is how a landmark
+    // story could consume the first serve of a tour (and, mid-tour, the
+    // serve on which a neighborhood intro was due). When this serve IS
+    // an intro — the tour's first story, a neighborhood entry, a
+    // welcome-back — no cache serve may substitute for it: the intro is
+    // generated on the main path below, where skipCache already keeps
+    // it personal. The caller can also demand the welcome explicitly
+    // (the storyCache opener), which covers the first serve even if
+    // tracker state was warmed by an earlier fetch.
+    const landmarkNames = factPack.places.map(p => p.name);
+    const decision = locationTracker.shouldTellNewStory(
+      position,
+      landmarkNames,
+      factPack.areaInfo.neighborhood
+    );
+    const introContext = decision.context === 'initial' || decision.context === 'neighborhood_intro';
+    const cacheServeBlocked = introContext || opts?.requireWelcomeStory === true;
+
     // If the preliminary cache found an unheard story, serve it right away.
     // Session lockout applies too: a cached angle-variant of a landmark
     // already told this session is a retell, not a cache hit.
     if (
+      !cacheServeBlocked &&
       preliminaryCache &&
       !heardStories.hasHeard(preliminaryCache.topic) &&
       !this.isTopicLockedForSession(preliminaryCache.topic, locationTracker.getDwellDepthLevel() !== null)
@@ -737,12 +759,7 @@ class GeminiService {
       return { text: preliminaryCache.storyText, subject: preliminaryCache.topic, context: 'cache_hit', mode: factPack.mode, rotation: null };
     }
 
-    const landmarkNames = factPack.places.map(p => p.name);
-    const { shouldTell, context, depthLevel, depthCycle } = locationTracker.shouldTellNewStory(
-      position,
-      landmarkNames,
-      factPack.areaInfo.neighborhood
-    );
+    const { shouldTell, context, depthLevel, depthCycle } = decision;
 
     console.log(
       '[Gemini] Story check - shouldTell:',

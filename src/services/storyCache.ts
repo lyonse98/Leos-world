@@ -2,6 +2,7 @@ import { Position } from '../hooks/useGeolocation';
 import { calculateDistance, offsetPositionByHeading, MovementModeHysteresis } from '../utils/geo';
 import { geminiService, StoryRotation } from './gemini';
 import { storyCoverage, landmarkSubjectKey } from './storyCoverage';
+import { analytics } from './analytics';
 
 export interface CachedStory {
   id: string;
@@ -77,11 +78,14 @@ const ROUTE_OFFSETS_WALKING_M = [150, 300, 500];
 class StoryCacheService {
   private cache: CachedStory[] = [];
   private missedQueue: QueueEntry[] = [];
-  // The first story of a session is the audition: everything the listener
-  // decides about Leo, they decide during it. While this is armed, a cache
-  // serve prefers a story with a real subject (a landmark with something
-  // to say) over a subject-less area story at the same distance. Cleared
-  // by the first serve of the session, from cache or live.
+  // The first serve of a session is RESERVED for the welcome sequence:
+  // the canned intro line, then the contextual welcome story, then
+  // landmarks. While the opener is pending, no locally cached story may
+  // take the slot — the local cache used to be checked first and its
+  // opener serve preferred a subject-ful (landmark) story, so a buffer
+  // warmed on the landing screen silently replaced the welcome story
+  // and the tour opened mid-landmark-hunt. Cleared only by a live serve
+  // that actually returns the first story.
   private openerPending = true;
   private prefetchTargets: PrefetchTarget[] = [];
   private isPrefetching = false;
@@ -202,13 +206,14 @@ class StoryCacheService {
     position: Position,
     mode: MovementModeHysteresis,
     onChunk?: (text: string) => void
-  ): Promise<{ story: string; fromCache: boolean; topic: string; subject: string; rotation: StoryRotation | null; fromLibrary: boolean; audioUrl?: string; anchorLat?: number; anchorLng?: number } | null> {
+  ): Promise<{ story: string; fromCache: boolean; topic: string; subject: string; context: string; rotation: StoryRotation | null; fromLibrary: boolean; audioUrl?: string; anchorLat?: number; anchorLng?: number } | null> {
     this.pruneStalePrefetches(position);
-    const cached = this.openerPending
-      ? (this.findOpenerCache(position) ?? this.findNearestUnplayedCache(position))
-      : this.findNearestUnplayedCache(position);
+    const openerServe = this.openerPending;
+    // While the opener is pending the local cache is not consulted at
+    // all — the first story must be generated live as the welcome (see
+    // the openerPending note). After the opener, serves are unchanged.
+    const cached = openerServe ? null : this.findNearestUnplayedCache(position);
     if (cached) {
-      this.openerPending = false;
       cached.played = true;
       this.notifyCacheChange();
       if (onChunk) onChunk(cached.text);
@@ -217,6 +222,7 @@ class StoryCacheService {
         fromCache: true,
         topic: cached.topic,
         subject: cached.subject,
+        context: 'cache',
         rotation: cached.rotation,
         fromLibrary: !!cached.fromLibrary,
         audioUrl: cached.audioUrl,
@@ -234,11 +240,29 @@ class StoryCacheService {
 
     try {
       console.log('[StoryCache] Calling getTourNarration for', position.lat.toFixed(5), position.lng.toFixed(5));
-      const result = await geminiService.getTourNarration(position, undefined, onChunk);
+      const result = await geminiService.getTourNarration(position, undefined, onChunk, {
+        requireWelcomeStory: openerServe,
+      });
       console.log('[StoryCache] getTourNarration returned:', { textLen: result.text?.length || 0, subject: result.subject, mode: result.mode });
       const story = result.text;
       if (story && story.trim().length > 0) {
         this.openerPending = false;
+        if (openerServe) {
+          // First-serve audit: was the tour's first story the welcome,
+          // an area story, or a landmark? Aggregate-only (the daily
+          // rollup counts it by its generic trigger) — this is the
+          // counter that makes the opener sequence provable in the
+          // field instead of arguable.
+          const source =
+            result.context === 'initial' || result.context === 'neighborhood_intro' || result.context === 'welcome_back'
+              ? 'welcome'
+              : result.subject && result.subject.trim().length > 0
+                ? 'landmark'
+                : 'area';
+          try {
+            analytics.track('first_serve', position, mode, { source });
+          } catch { /* a metric must never break a serve */ }
+        }
         const topic = result.subject || `Story at ${position.lat.toFixed(4)}, ${position.lng.toFixed(4)}`;
         this.addToCache({
           text: story,
@@ -254,7 +278,7 @@ class StoryCacheService {
           audioUrl: result.audioUrl,
           fromLibrary: result.fromLibrary,
         });
-        return { story, fromCache: false, topic, subject: result.subject, rotation: result.rotation, fromLibrary: !!result.fromLibrary, audioUrl: result.audioUrl, anchorLat: result.anchorLat, anchorLng: result.anchorLng };
+        return { story, fromCache: false, topic, subject: result.subject, context: result.context, rotation: result.rotation, fromLibrary: !!result.fromLibrary, audioUrl: result.audioUrl, anchorLat: result.anchorLat, anchorLng: result.anchorLng };
       }
     } catch (error) {
       console.error('[StoryCache] Live fetch failed:', error);
@@ -419,26 +443,6 @@ class StoryCacheService {
 
   armOpener(): void {
     this.openerPending = true;
-  }
-
-  // The opener serve: nearest unplayed story that is ABOUT something — a
-  // named subject — within the same tight radius the normal serve uses.
-  // Falls back to the plain nearest serve when nothing with a subject is
-  // in range (a great area story still beats a dull landmark).
-  private findOpenerCache(position: Position): CachedStory | null {
-    let best: CachedStory | null = null;
-    let minDistance = Infinity;
-    for (const story of this.cache) {
-      if (story.played) continue;
-      if (!story.subject || story.subject.trim().length === 0) continue;
-      if (this.isLockedOutWhileMoving(story, position)) continue;
-      const d = this.distance(position, { lat: story.lat, lng: story.lng });
-      if (d < minDistance) {
-        minDistance = d;
-        best = story;
-      }
-    }
-    return best && minDistance <= CACHE_DISTANCE_THRESHOLD_M ? best : null;
   }
 
   private findNearestUnplayedCache(position: Position): CachedStory | null {
