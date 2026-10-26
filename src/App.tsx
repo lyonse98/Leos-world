@@ -218,8 +218,14 @@ function App() {
 
   // Per-story timing — fetch and text phases recorded here, synth phases
   // recorded in useVoice. Merged for the diagnostics panel after each story.
-  const storyFetchStartRef = useRef<number | null>(null);
-  const storyTextReadyRef = useRef<number | null>(null);
+  // The two fetch markers live in ONE record, written atomically by the
+  // fetch that produced them: they used to be separate refs, and
+  // overlapping fetches (an interval fetch starting while a slow one was
+  // still in flight) overwrote the start marker after the ready marker
+  // was set — pairing one fetch's start with another's finish and
+  // recording negative fetch times (-149.1s in the field). A matched
+  // pair cannot go negative.
+  const fetchCycleRef = useRef<{ startAt: number; readyAt: number } | null>(null);
   const [lastStoryTiming, setLastStoryTiming] = useState<string>('');
   const prevStoryTimingEndRef = useRef<number | null>(null);
   const isFetchingStoryRef = useRef<boolean>(false);
@@ -627,7 +633,9 @@ function App() {
 
     console.log('[Tour] Getting story for position:', position);
     setPipelineStatus('fetching landmarks');
-    storyFetchStartRef.current = Date.now();
+    // This fetch's start, held LOCALLY until its own result lands —
+    // the timing pair is only ever written whole (see fetchCycleRef).
+    const fetchStartAt = Date.now();
     isFetchingStoryRef.current = true;
 
     // Major-landmark queue priority: if a truly important landmark is close
@@ -686,7 +694,7 @@ function App() {
 
       if (result && result.story.trim().length > 0) {
         setPipelineStatus('story queued');
-        storyTextReadyRef.current = Date.now();
+        fetchCycleRef.current = { startAt: fetchStartAt, readyAt: Date.now() };
         isFetchingStoryRef.current = false;
         setStoriesCount(prev => prev + 1);
         setLastStorySource(result.fromLibrary ? 'library' : result.fromCache ? 'cache' : 'live');
@@ -788,8 +796,8 @@ function App() {
       // onplaying + playbackEnd (recorded in useVoice). Log one line and set
       // the diagnostics display string.
       const voiceTiming: StoryTiming = voice.getStoryTiming();
-      const fetchTextS = storyFetchStartRef.current && storyTextReadyRef.current
-        ? ((storyTextReadyRef.current - storyFetchStartRef.current) / 1000).toFixed(1)
+      const fetchTextS = fetchCycleRef.current
+        ? ((fetchCycleRef.current.readyAt - fetchCycleRef.current.startAt) / 1000).toFixed(1)
         : null;
       const synthS = voiceTiming.synthRequestAt && voiceTiming.synthResolvedAt
         ? ((voiceTiming.synthResolvedAt - voiceTiming.synthRequestAt) / 1000).toFixed(1)
@@ -821,8 +829,7 @@ function App() {
         });
       }
       prevStoryTimingEndRef.current = voiceTiming.playbackEndAt ?? speechEndNow;
-      storyFetchStartRef.current = null;
-      storyTextReadyRef.current = null;
+      fetchCycleRef.current = null;
 
       // Standing still for a while earns a deeper dive: shorter silence, and
       // Leo told to go long. This is the reward for stopping to actually look.
