@@ -2,6 +2,7 @@ import { Position } from '../hooks/useGeolocation';
 import { calculateDistance, offsetPositionByHeading, MovementModeHysteresis } from '../utils/geo';
 import { geminiService, StoryRotation } from './gemini';
 import { storyCoverage, landmarkSubjectKey } from './storyCoverage';
+import { storyLibrary } from './storyLibrary';
 import { analytics } from './analytics';
 
 export interface CachedStory {

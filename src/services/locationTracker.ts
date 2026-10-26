@@ -311,6 +311,12 @@ class LocationTracker {
     storyText: string
   ): void {
     void this.updateLastStoryTopic(topic, position, storyText, undefined, undefined, undefined, rotation);
+    // Rotation plays are the one telling funnel App records directly,
+    // so the daily tally hooks in here too (landmark keys only —
+    // recordDailyTelling ignores area keys). The gemini serve paths
+    // count their own non-rotation tellings; between the two funnels
+    // every telling is counted exactly once.
+    storyCoverage.recordDailyTelling(rotation.subjectKey);
     console.log(`[StoryCoverage] Covered "${rotation.angle}" on ${rotation.subjectKey}`);
   }
 
@@ -369,7 +375,11 @@ class LocationTracker {
   reset() {
     this.lastLocation = null;
     this.dwellAnchor = null;
-    storyCoverage.clearSessionLocks();
+    // Day-scoped lockout: a tour restart does NOT clear today's
+    // landmark locks, aliases, or telling counts (see storyCoverage).
+    // Only the calendar rolling over — or the diagnostics full reset —
+    // clears them. beginSession just performs the rollover check.
+    storyCoverage.beginSession();
     this.sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     this.recentStoryTexts = [];
     this.toldStories = new Set();

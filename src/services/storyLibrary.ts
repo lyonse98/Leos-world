@@ -40,6 +40,8 @@ interface LibraryRow {
   audio_path: string;
 }
 
+const LIBRARY_PLACES_KEY = 'leo_library_place_keys';
+
 // The one normalization for library identity, shared verbatim with the
 // library builder (which bundles this module rather than copying the
 // function): lowercase, collapsed whitespace, no periods/apostrophes —
@@ -148,6 +150,70 @@ class StoryLibraryService {
     const angle = LANDMARK_ANGLES.find(a => describeAngle(a) === label);
     if (!base || !angle) return null;
     return this.lookup(base, angle);
+  }
+
+  // --- Place index ---------------------------------------------------------
+  // The set of place keys the library holds ANY angle for. Selection
+  // layers need it synchronously (the daily cap exempts library places:
+  // a curated place is not a "minor subject"), so the index is primed
+  // once per session by an async fetch, persisted in localStorage so
+  // it survives restarts, and read through hasPlace. Until the first
+  // successful prime, hasPlace answers from the persisted copy (or
+  // false on a truly fresh device) — the exemption fails open for one
+  // session rather than blocking the serve path on the network.
+  private placeIndex: Set<string> | null = null;
+  private placeIndexPromise: Promise<void> | null = null;
+
+  private loadPersistedPlaceIndex(): Set<string> {
+    try {
+      const raw = localStorage.getItem(LIBRARY_PLACES_KEY);
+      if (!raw) return new Set();
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return new Set();
+      return new Set(parsed.filter((k): k is string => typeof k === 'string'));
+    } catch {
+      return new Set();
+    }
+  }
+
+  hasPlace(placeName: string): boolean {
+    const key = normalizePlaceKey(placeName);
+    if (!key) return false;
+    const index = this.placeIndex ?? this.loadPersistedPlaceIndex();
+    return index.has(key);
+  }
+
+  async primePlaceIndex(): Promise<void> {
+    if (this.placeIndex !== null || this.tableMissing) return;
+    if (!SUPABASE_CONFIGURED) return;
+    if (this.placeIndexPromise) return this.placeIndexPromise;
+    this.placeIndexPromise = (async () => {
+      try {
+        const { data, error } = await supabase
+          .from('story_library')
+          .select('place_key')
+          .limit(1000);
+        if (error) {
+          if (this.isMissingTableError(error)) this.tableMissing = true;
+          return; // leave unprimed; a later call may retry
+        }
+        const keys = new Set<string>(
+          (data ?? []).map(r => (r as { place_key: string }).place_key).filter(Boolean)
+        );
+        this.placeIndex = keys;
+        try {
+          localStorage.setItem(LIBRARY_PLACES_KEY, JSON.stringify([...keys]));
+        } catch {
+          // persistence is a resilience bonus, not a requirement
+        }
+      } catch {
+        // the index is an exemption hint — failing to load it must
+        // never break a serve
+      } finally {
+        this.placeIndexPromise = null;
+      }
+    })();
+    return this.placeIndexPromise;
   }
 }
 

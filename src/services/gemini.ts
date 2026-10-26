@@ -442,11 +442,19 @@ class GeminiService {
     return topic.split(' — ')[0].trim();
   }
 
-  // True when a cached story belongs to a landmark locked out for this
-  // session. Dwell bypasses the lock — parked rotation serves are wanted.
+  // True when a cached story must not be served while moving: its
+  // landmark is locked out for this session, or it is a minor subject
+  // that has hit the daily telling cap. Dwell bypasses both — parked
+  // rotation serves are wanted. (Tier-1 exemption rides the majors
+  // registry inside isDailyCapped; the library exemption is checked
+  // here, where the place name is at hand.)
   private isTopicLockedForSession(topic: string, dwell: boolean): boolean {
     if (dwell) return false;
-    return storyCoverage.isSubjectLockedForSession(landmarkSubjectKey(this.topicBaseName(topic)));
+    const base = this.topicBaseName(topic);
+    const key = landmarkSubjectKey(base);
+    if (storyCoverage.isSubjectLockedForSession(key)) return true;
+    if (storyCoverage.isDailyCapped(key) && !storyLibrary.hasPlace(base)) return true;
+    return false;
   }
 
   private chooseAreaStory(position: Position, factPack: StoryFactPack): { rotation: StoryRotation; areaName: string } {
@@ -799,7 +807,10 @@ class GeminiService {
         console.log(`[Gemini] Library hit for "${libHit.topic}" — displacing ephemeral cache serve`);
         const versionKey = this.storyVersionKey(this.factPackHash(factPack));
         if (onChunk) onChunk(libHit.text);
-        storyCoverage.lockSubjectForSession(landmarkSubjectKey(this.topicBaseName(libHit.topic)));
+        const libKey = landmarkSubjectKey(this.topicBaseName(libHit.topic));
+        storyCoverage.lockSubjectForSession(libKey);
+        storyCoverage.markMajorSubject(libKey);
+        storyCoverage.recordDailyTelling(libKey);
         await locationTracker.updateLastStoryTopic(
           libHit.topic, position, libHit.text, 'cache_hit', 0, versionKey
         );
@@ -808,7 +819,9 @@ class GeminiService {
       console.log(`[Gemini] Parallel cache hit for "${preliminaryCache.topic}" (${Math.round(preliminaryCache.distanceM)}m away)`);
       const versionKey = this.storyVersionKey(this.factPackHash(factPack));
       if (onChunk) onChunk(preliminaryCache.storyText);
-      storyCoverage.lockSubjectForSession(landmarkSubjectKey(this.topicBaseName(preliminaryCache.topic)));
+      const prelimKey = landmarkSubjectKey(this.topicBaseName(preliminaryCache.topic));
+      storyCoverage.lockSubjectForSession(prelimKey);
+      storyCoverage.recordDailyTelling(prelimKey);
       await locationTracker.updateLastStoryTopic(
         preliminaryCache.topic, position, preliminaryCache.storyText, 'cache_hit', 0, versionKey
       );
@@ -846,6 +859,7 @@ class GeminiService {
       }
     }
 
+    await storyLibrary.primePlaceIndex();
     const target = this.chooseTarget(position, factPack, effectiveContext);
     console.log(
       '[Gemini] Target:',
@@ -876,6 +890,8 @@ class GeminiService {
         console.log(`[Gemini] Library hit: "${target.displayTopic}" (${target.angle})`);
         if (onChunk) onChunk(libHit.text);
         storyCoverage.lockSubjectForSession(subjectKey);
+        storyCoverage.markMajorSubject(subjectKey);
+        storyCoverage.recordDailyTelling(subjectKey);
         await locationTracker.updateLastStoryTopic(
           target.displayTopic, position, libHit.text, effectiveContext, depthLevel, versionKey
         );
@@ -927,6 +943,10 @@ class GeminiService {
       locationTracker.commitDepthAdvance();
       if (target.kind === 'landmark') {
         storyCoverage.lockSubjectForSession(subjectKey);
+        // Canonical tellings count here; rotation tellings count at
+        // play time through App's recordRotationStory funnel — every
+        // telling exactly once.
+        if (!target.rotation) storyCoverage.recordDailyTelling(subjectKey);
       }
     }
     return {
@@ -945,6 +965,7 @@ class GeminiService {
 
     const factPack = await this.gatherFactPack(position);
     const versionKey = this.storyVersionKey(this.factPackHash(factPack));
+    await storyLibrary.primePlaceIndex();
     const target = this.chooseTarget(position, factPack);
 
     const subjectKey =

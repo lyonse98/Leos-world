@@ -30,6 +30,19 @@ const STORAGE_KEY = 'leo_story_coverage';
 const MAX_SUBJECTS = 300;
 const MAX_RECENT_ANGLES = 6;
 
+// Day-scoped subject state (locks, alias links, telling counts) — see
+// the lockout section below for why the scope is a calendar day.
+const DAY_STATE_KEY = 'leo_day_state';
+// Cap-exempt major subjects (Tier-1 landmarks, library places). No date
+// stamp: a place does not stop being major overnight.
+const MAJOR_SUBJECTS_KEY = 'leo_major_subjects';
+
+// Prominence-scaled daily cap: a MINOR subject (not Tier-1, not in the
+// library) may be told at most this many times per calendar day across
+// all sessions. Majors are exempt; area stories are the fall-through
+// the cap steers toward and are never capped.
+export const DAILY_MINOR_CAP = 2;
+
 // The angles Leo takes on a neighborhood, in the order he works through them.
 //
 // Ordered deliberately: the first pass gives you the neighborhood's history and
@@ -153,12 +166,20 @@ interface StoredCoverage {
   recent: string[];
 }
 
+interface StoredDayState {
+  date: string;
+  locks: string[];
+  aliases: [string, string][];
+  counts: Record<string, number>;
+}
+
 class StoryCoverageService {
   private subjects: Record<string, SubjectCoverage> = {};
   private recent: string[] = [];
 
   constructor() {
     this.load();
+    this.loadDayState();
   }
 
   private load(): void {
@@ -202,13 +223,29 @@ class StoryCoverageService {
     return Object.keys(coverage);
   }
 
-  // --- Session landmark lockout -------------------------------------------
+  // --- Day-scoped landmark lockout + telling tally -------------------------
   // Within one tour, once a landmark's story has been told while the
-  // listener is moving, that landmark is out for the rest of the session —
-  // no fresh-angle retell while they are still in its area. Angle rotation
-  // is for dwell (parked, depth is the point) and for return visits on a
-  // later tour, both of which bypass this lock. In-memory only: a new tour
-  // starts with a clean slate (locationTracker.reset clears it).
+  // listener is moving, that landmark is out — no fresh-angle retell
+  // while they are still in its area. Angle rotation is for dwell
+  // (parked, depth is the point) and for return visits on a later day,
+  // both of which bypass this lock.
+  //
+  // The lock set is DAY-scoped, not tour-scoped (Oct 25 amendment): it
+  // persists across tour restarts within the same calendar day, in
+  // localStorage next to the coverage record. The failure this fixes
+  // was precise — the lock lived in memory and cleared at every tour
+  // start, so a minor place (Balboa Avenue Station) became fully
+  // eligible after each of the day's nine restarts and, with angle
+  // coverage rotating by design, was told ~10 times in one day, every
+  // telling individually rule-abiding. A new calendar day clears the
+  // set; the dwell exception is untouched because the checks, not the
+  // set, are what movement mode gates.
+  //
+  // Alongside the locks, a per-day telling tally per subject powers
+  // the prominence-scaled daily cap (minor subjects: DAILY_MINOR_CAP
+  // tellings/day across ALL sessions — see recordDailyTelling). Alias
+  // groups persist with the locks so a place locked or counted under
+  // one name stays bound under its variants for the whole day.
   private sessionLockedSubjects: Set<string> = new Set();
 
   // Session alias groups: subject keys proven to be the SAME place under
@@ -216,11 +253,112 @@ class StoryCoverageService {
   // ground, linked when the candidate pool is assembled). Locking or
   // checking any member binds the whole group — otherwise the lockout
   // holds only the spelling that happened to be told, and the same place
-  // walks back in under its other name. Session-scoped like the locks
-  // themselves; the links are re-derived on every candidate merge.
+  // walks back in under its other name. The links are re-derived on every
+  // candidate merge and persist with the day state.
   private sessionAliasGroups: Map<string, Set<string>> = new Map();
 
-  linkSubjectAliases(keyA: string, keyB: string): void {
+  // Per-day telling counts by subject key (landmarks only — area
+  // stories are the fall-through the cap steers TOWARD, never capped).
+  private dailyCounts: Record<string, number> = {};
+  private dayStamp: string = StoryCoverageService.todayStamp();
+
+  // Subjects exempt from the daily cap because they are majors: Tier-1
+  // landmarks (marked when a candidate pool evaluates them) and library
+  // places (marked on a library serve). Unlike the day state this set
+  // does not expire — a place does not stop being major overnight; it
+  // is re-derived whenever the place is evaluated or served anyway.
+  private majorSubjects: Set<string> = new Set();
+
+  private static todayStamp(): string {
+    const d = new Date();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${d.getFullYear()}-${mm}-${dd}`;
+  }
+
+  private loadDayState(): void {
+    try {
+      const rawMajors = localStorage.getItem(MAJOR_SUBJECTS_KEY);
+      if (rawMajors) {
+        const parsed = JSON.parse(rawMajors) as unknown;
+        if (Array.isArray(parsed)) {
+          this.majorSubjects = new Set(parsed.filter((k): k is string => typeof k === 'string'));
+        }
+      }
+      const raw = localStorage.getItem(DAY_STATE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as StoredDayState;
+      if (!parsed || parsed.date !== this.dayStamp) return; // a new day starts clean
+      if (Array.isArray(parsed.locks)) {
+        this.sessionLockedSubjects = new Set(parsed.locks.filter(k => typeof k === 'string'));
+      }
+      if (Array.isArray(parsed.aliases)) {
+        for (const pair of parsed.aliases) {
+          if (Array.isArray(pair) && pair.length === 2) {
+            this.linkSubjectsInternal(pair[0], pair[1]);
+          }
+        }
+      }
+      if (parsed.counts && typeof parsed.counts === 'object') {
+        this.dailyCounts = parsed.counts;
+      }
+    } catch {
+      // storage unavailable or corrupt — day state lives in memory only
+    }
+  }
+
+  private saveDayState(): void {
+    try {
+      const pairs: [string, string][] = [];
+      const seenGroups = new Set<Set<string>>();
+      for (const group of this.sessionAliasGroups.values()) {
+        if (seenGroups.has(group)) continue;
+        seenGroups.add(group);
+        const members = [...group];
+        for (let i = 1; i < members.length; i++) pairs.push([members[0], members[i]]);
+      }
+      const payload: StoredDayState = {
+        date: this.dayStamp,
+        locks: [...this.sessionLockedSubjects],
+        aliases: pairs,
+        counts: this.dailyCounts,
+      };
+      localStorage.setItem(DAY_STATE_KEY, JSON.stringify(payload));
+    } catch {
+      // storage unavailable — the in-memory day state still applies
+    }
+  }
+
+  private saveMajors(): void {
+    try {
+      localStorage.setItem(MAJOR_SUBJECTS_KEY, JSON.stringify([...this.majorSubjects]));
+    } catch {
+      // storage unavailable — majors live in memory only
+    }
+  }
+
+  // Day rollover, checked on entry to the day-state operations: a tour
+  // left open across midnight (or a state restored from yesterday by a
+  // fresh page load whose constructor ran before midnight) must not
+  // carry yesterday's locks or counts into today.
+  private syncDay(): void {
+    const today = StoryCoverageService.todayStamp();
+    if (today === this.dayStamp) return;
+    this.dayStamp = today;
+    this.sessionLockedSubjects.clear();
+    this.sessionAliasGroups.clear();
+    this.dailyCounts = {};
+    this.saveDayState();
+  }
+
+  // Called at every tour start (locationTracker.reset). Same-day locks,
+  // aliases, and counts SURVIVE — that is the point of the day scope.
+  // The only work here is the rollover check.
+  beginSession(): void {
+    this.syncDay();
+  }
+
+  private linkSubjectsInternal(keyA: string, keyB: string): void {
     if (!keyA || !keyB || keyA === keyB) return;
     const groupA = this.sessionAliasGroups.get(keyA);
     const groupB = this.sessionAliasGroups.get(keyB);
