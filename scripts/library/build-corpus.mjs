@@ -5,21 +5,27 @@
 //   node scripts/library/build-corpus.mjs --places=13,12,3
 //   node scripts/library/build-corpus.mjs --all [--tts=batch|live|off]
 //
-// Texts are generated with the REAL leo-v12 persona (bundled from the
-// app) from free fact sources only. Audio: one Gemini Batch API TTS job
+// Texts are generated with the app's REAL current persona (bundled from
+// production modules) from free fact sources only. Audio: one Gemini
+// Batch API TTS job
 // per run by default; if the batch path fails, live synthesis is the
 // fallback with a hard stop at 85 syntheses per Pacific day (Erik's
 // interactive quota is 100/day on the same key — the builder never
 // spends the last of it). Progress lives in the corpus manifest, so
 // every run is resumable: finished stories are never regenerated.
 //
-// Outputs: ~/workspace/leos-world/library-corpus/{manifest.json, audio/}
+// TTS input is the story text EXACTLY as written — no pronunciation
+// transform (Erik killed the pronunciation guide, Oct 25, 2026: Gemini
+// voices canonical spellings its own way).
+//
+// Outputs: LEO_CORPUS_DIR or ~/workspace/leos-world/library-corpus
+// ({manifest.json, audio/})
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SEEDS, CORRIDOR_ORDER, NORTH_PARK_ORDER } from './seeds.mjs';
+import { SEEDS, CORRIDOR_ORDER, NORTH_PARK_ORDER, TEST_GEO_ORDER } from './seeds.mjs';
 import {
   loadKeys, makeTextClient, loadRegistry, registryCoordsFor, nominatimSearch, wikipediaCoords,
   assembleFacts, buildPrompt, generateText, liveTts, submitTtsBatch, pollTtsBatch,
@@ -29,7 +35,7 @@ import {
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..', '..');
-const corpusDir = path.join(homedir(), 'workspace/leos-world/library-corpus');
+const corpusDir = process.env.LEO_CORPUS_DIR || path.join(homedir(), 'workspace/leos-world/library-corpus');
 const audioDir = path.join(corpusDir, 'audio');
 const manifestPath = path.join(corpusDir, 'manifest.json');
 const batchLogPath = path.join(corpusDir, 'batch-jobs.json');
@@ -47,8 +53,8 @@ if (args.includes('--pilot')) {
 } else if (argVal('places', null)) {
   selected = argVal('places', '').split(',').map(s => parseInt(s, 10)).filter(Boolean);
 } else if (args.includes('--all')) {
-  const rest = SEEDS.map(s => s.n).filter(n => !CORRIDOR_ORDER.includes(n) && !NORTH_PARK_ORDER.includes(n));
-  selected = [...CORRIDOR_ORDER, ...NORTH_PARK_ORDER, ...rest];
+  const rest = SEEDS.map(s => s.n).filter(n => !CORRIDOR_ORDER.includes(n) && !NORTH_PARK_ORDER.includes(n) && !TEST_GEO_ORDER.includes(n));
+  selected = [...CORRIDOR_ORDER, ...NORTH_PARK_ORDER, ...TEST_GEO_ORDER, ...rest];
 } else {
   console.error('Usage: build-corpus.mjs --pilot | --places=1,2,12 | --all [--tts=batch|live|off]');
   process.exit(2);
@@ -79,10 +85,16 @@ for (const n of selected) {
   const placeKey = app.normalizePlaceKey(seed.name);
 
   let coords;
-  const regRec = registryCoordsFor(records, seed.name);
-  if (regRec) {
-    coords = { lat: regRec.lat, lng: regRec.lng, source: `registry (${regRec.coordQuality})` };
+  if (seed.coords) {
+    // A pinned seed coordinate outranks every resolver: the registry
+    // name-match is a substring rule and can land on a same-named place
+    // in the wrong city (the Santa Fe Depot → Vista failure).
+    coords = { lat: seed.coords.lat, lng: seed.coords.lng, source: seed.coords.source };
   } else {
+    const regRec = registryCoordsFor(records, seed.name);
+    if (regRec) {
+      coords = { lat: regRec.lat, lng: regRec.lng, source: `registry (${regRec.coordQuality})` };
+    } else {
     // Nominatim is picky about long comma-suffixed queries — fall back
     // through progressively simpler forms before giving up on a place.
     let geo = null;
@@ -101,6 +113,7 @@ for (const n of selected) {
       }
     } else {
       coords = { ...geo, source: `nominatim (${usedQuery})` };
+    }
     }
   }
 
@@ -170,7 +183,9 @@ async function runLiveTts(list, route) {
       console.warn(`[tts] LIVE STOP: ${liveTtsCount()} live syntheses today (cap ${LIVE_DAILY_STOP}) — ${list.length - done} stories deferred`);
       break;
     }
-    const spoken = app.applyPronunciation(entry.story_text);
+    // Canonical text as written — NO pronunciation transform (dropped
+    // for the v13 corpus per Erik's call).
+    const spoken = entry.story_text;
     try {
       let result;
       try {
@@ -241,7 +256,7 @@ if (collectBatch && pending.length > 0) {
     for (const chunkEntries of chunks) {
       const items = chunkEntries.map(e => ({
         key: `${e.place_key}|${e.angle}`,
-        text: app.applyPronunciation(e.story_text),
+        text: e.story_text, // canonical text — no pronunciation transform (v13)
       }));
       let jobName = null;
       try {

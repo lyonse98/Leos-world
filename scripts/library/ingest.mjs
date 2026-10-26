@@ -18,7 +18,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { loadKeys } from './lib.mjs';
 
-const corpusDir = path.join(homedir(), 'workspace/leos-world/library-corpus');
+const corpusDir = process.env.LEO_CORPUS_DIR || path.join(homedir(), 'workspace/leos-world/library-corpus');
 const manifestPath = path.join(corpusDir, 'manifest.json');
 const audioDir = path.join(corpusDir, 'audio');
 const dryRun = process.argv.includes('--dry-run');
