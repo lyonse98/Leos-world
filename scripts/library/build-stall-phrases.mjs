@@ -52,11 +52,14 @@ const PHRASES = [
   },
   {
     id: 'lining-up',
-    text: "One more drawer — I'm lining up the story this street deserves.",
+    text: "Flipping the pages — I'm lining up the story this street deserves.",
     // Re-voiced Oct 26 (closing pass): the original text promised
-    // "Three more seconds" — a duration TTS can't guarantee. The
-    // bucket is insert-only, so the take uploads to the v2 key.
-    path: 'stall-phrases/lining-up-v2.wav',
+    // "Three more seconds" — a duration TTS can't guarantee. v2
+    // ("One more drawer") was re-voiced the same day and then
+    // rejected by Erik on first hearing; v3 is his pick. The bucket
+    // is insert-only, so each take uploads to a fresh key and the
+    // earlier ones stay orphaned.
+    path: 'stall-phrases/lining-up-v3.wav',
   },
   {
     id: 'shoes-on',

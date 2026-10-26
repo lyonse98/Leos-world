@@ -75,9 +75,13 @@ export const STALL_PHRASES: StallPhrase[] = [
     // no small-talk exceptions). The bucket is insert-only, so the
     // new take lives at a v2 key; the original stays orphaned at
     // stall-phrases/lining-up.wav.
-    path: 'stall-phrases/lining-up-v2.wav',
-    durationSec: 4.4,
-    transcript: "One more drawer — I'm lining up the story this street deserves.",
+    // v3 (Oct 26, Erik's pick): supersedes v2 — Erik rejected the
+    // "One more drawer" opener on first hearing and chose this
+    // wording himself. Same insert-only rule: the v3 key is live,
+    // v1 and v2 stay orphaned.
+    path: 'stall-phrases/lining-up-v3.wav',
+    durationSec: 4.6,
+    transcript: "Flipping the pages — I'm lining up the story this street deserves.",
   },
   {
     id: 'shoes-on',
