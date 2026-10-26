@@ -955,17 +955,56 @@ export const useVoice = () => {
     // path — must be able to cancel it.
     let bridgeTimer: number | null = null;
     let bridgeAudio: HTMLAudioElement | null = null;
+    let bridgeFadeTimer: number | null = null;
+    const retireBridgeEl = (el: HTMLAudioElement) => {
+      if (bridgeAudio === el) bridgeAudio = null;
+      if (stallAudioRef.current === el) stallAudioRef.current = null;
+      try { el.pause(); el.removeAttribute('src'); el.load(); } catch { /* element already gone */ }
+    };
+    // Hard exit — every cancel except "the story's own audio just
+    // started" lands here: immediate silence, nothing lingers.
     const cancelBridge = () => {
       if (bridgeTimer !== null) {
         clearTimeout(bridgeTimer);
         bridgeTimer = null;
       }
-      if (bridgeAudio) {
-        const el = bridgeAudio;
-        bridgeAudio = null;
-        if (stallAudioRef.current === el) stallAudioRef.current = null;
-        try { el.pause(); el.removeAttribute('src'); el.load(); } catch { /* element already gone */ }
+      if (bridgeFadeTimer !== null) {
+        clearInterval(bridgeFadeTimer);
+        bridgeFadeTimer = null;
       }
+      if (bridgeAudio) retireBridgeEl(bridgeAudio);
+    };
+    // Duck exit — ONLY for the moment the story's own Gemini audio
+    // starts (audio.onplaying): the phrase ramps to zero over ~250 ms
+    // under the story's first quarter-second instead of chopping
+    // mid-word (Erik, Oct 26: a fade reads as a deliberate duck; a
+    // hard cut reads as a glitch). Any hard cancel during the ramp
+    // clears the interval and silences the element at once, so a fade
+    // can never leak past a skip, a settle, or a fallback.
+    const fadeBridge = () => {
+      if (bridgeTimer !== null) {
+        clearTimeout(bridgeTimer);
+        bridgeTimer = null;
+      }
+      const el = bridgeAudio;
+      if (!el || bridgeFadeTimer !== null) return;
+      const startVolume = el.volume;
+      const steps = 10;
+      let step = 0;
+      bridgeFadeTimer = window.setInterval(() => {
+        step++;
+        if (bridgeAudio !== el || el.paused) {
+          // Retired, stopped, or replaced mid-ramp — the exit is
+          // owned elsewhere now; just stop ticking.
+          if (bridgeFadeTimer !== null) { clearInterval(bridgeFadeTimer); bridgeFadeTimer = null; }
+          return;
+        }
+        try { el.volume = Math.max(0, startVolume * (1 - step / steps)); } catch { /* element already gone */ }
+        if (step >= steps) {
+          if (bridgeFadeTimer !== null) { clearInterval(bridgeFadeTimer); bridgeFadeTimer = null; }
+          retireBridgeEl(el);
+        }
+      }, 25);
     };
 
     let finished = false;
@@ -1036,7 +1075,8 @@ export const useVoice = () => {
     // day — bearings language belongs to the intro period, and a stall
     // mid-tour should sound like Leo, not like the phone. The phrase
     // never enters the queue, plays at most once per story, and is
-    // cancelled the instant the real audio starts or the item settles.
+    // ducked out (~250 ms fade) the moment the real audio starts —
+    // hard-cut if the item settles or the browser voice engages.
     // If no phrase is available (rotation spent) or the clip fails to
     // play, nothing fires — silence beats the wrong voice here.
     if (isLocationStory && !providedUrl) {
@@ -1052,6 +1092,7 @@ export const useVoice = () => {
         // message = the phrase id — readable per-event in the view.
         try { trackDiag('playback', 'stall-phrase', phrase.id); } catch { /* a metric must never break cover */ }
         const el = new Audio(stallPhraseAudioUrl(phrase));
+        el.volume = 1; // every phrase starts at full level — a prior phrase's fade-out lived on its own element
         bridgeAudio = el;
         stallAudioRef.current = el;
         const release = () => {
@@ -1103,7 +1144,7 @@ export const useVoice = () => {
         playbackStartedRef.current = true;
         storyTimingRef.current.onPlayingAt = Date.now();
         lastProgressAtRef.current = Date.now();
-        cancelBridge();
+        fadeBridge(); // duck a playing stall phrase out under the story's start
         onAir?.('gemini');
         preSynthesizeNextRef.current();
       };

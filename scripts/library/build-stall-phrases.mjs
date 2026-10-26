@@ -52,7 +52,11 @@ const PHRASES = [
   },
   {
     id: 'lining-up',
-    text: "Three more seconds — I'm lining up the story this street deserves.",
+    text: "One more drawer — I'm lining up the story this street deserves.",
+    // Re-voiced Oct 26 (closing pass): the original text promised
+    // "Three more seconds" — a duration TTS can't guarantee. The
+    // bucket is insert-only, so the take uploads to the v2 key.
+    path: 'stall-phrases/lining-up-v2.wav',
   },
   {
     id: 'shoes-on',
@@ -84,7 +88,7 @@ if (dryRun) {
 mkdirSync(outDir, { recursive: true });
 const manifest = [];
 for (const p of PHRASES) {
-  const bucketKey = `stall-phrases/${p.id}.wav`;
+  const bucketKey = p.path ?? `stall-phrases/${p.id}.wav`;
   if (dryRun) {
     manifest.push({ id: p.id, path: bucketKey, durationSec: null });
     continue;

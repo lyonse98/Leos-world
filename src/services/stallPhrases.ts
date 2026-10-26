@@ -70,9 +70,14 @@ export const STALL_PHRASES: StallPhrase[] = [
   },
   {
     id: 'lining-up',
-    path: 'stall-phrases/lining-up.wav',
-    durationSec: 4.7,
-    transcript: "Three more seconds — I'm lining up the story this street deserves.",
+    // v2 (Oct 26 closing pass): re-voiced without the promised
+    // duration ("Three more seconds" broke the honesty contract —
+    // no small-talk exceptions). The bucket is insert-only, so the
+    // new take lives at a v2 key; the original stays orphaned at
+    // stall-phrases/lining-up.wav.
+    path: 'stall-phrases/lining-up-v2.wav',
+    durationSec: 4.4,
+    transcript: "One more drawer — I'm lining up the story this street deserves.",
   },
   {
     id: 'shoes-on',
