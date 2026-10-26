@@ -377,13 +377,13 @@ export async function submitTtsBatch(geminiKey, items, displayName) {
 }
 
 // Poll a batch job to completion. Returns Map key → { mimeType, bytes } | { error }.
-export async function pollTtsBatch(geminiKey, name, { timeoutMs = 25 * 60 * 1000, intervalMs = 15000 } = {}) {
+export async function pollTtsBatch(geminiKey, name, { timeoutMs = 50 * 60 * 1000, intervalMs = 15000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   let lastState = '';
   while (Date.now() < deadline) {
     const res = await fetchText(`https://generativelanguage.googleapis.com/v1beta/${name}?key=${geminiKey}`, {
       headers: { Referer: APP_REFERER },
-    });
+    }, 180000);
     if (!res.ok) throw new Error(`batch poll HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
     const json = await res.json();
     // State enum arrives as BATCH_STATE_* on this API surface (JOB_STATE_*

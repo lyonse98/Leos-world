@@ -83,9 +83,16 @@ for (const n of selected) {
   if (regRec) {
     coords = { lat: regRec.lat, lng: regRec.lng, source: `registry (${regRec.coordQuality})` };
   } else {
-    const geo = await nominatimSearch(seed.query);
+    // Nominatim is picky about long comma-suffixed queries — fall back
+    // through progressively simpler forms before giving up on a place.
+    let geo = null;
+    let usedQuery = null;
+    for (const q of [seed.query, seed.name, `${seed.name}, California`]) {
+      geo = await nominatimSearch(q).catch(() => null);
+      if (geo) { usedQuery = q; break; }
+    }
     if (!geo) { console.error(`[build] #${n} ${seed.name}: no coordinates found — SKIPPED`); continue; }
-    coords = { ...geo, source: 'nominatim' };
+    coords = { ...geo, source: `nominatim (${usedQuery})` };
   }
 
   const facts = await assembleFacts(app, records, seed, coords);
@@ -204,43 +211,71 @@ if (collectBatch && pending.length > 0) {
     if (failed.length > 0) await runLiveTts(failed, 'live-after-batch-failure');
   } catch (e) {
     console.error(`[batch] COLLECT FAILED: ${e.message}`);
-    await runLiveTts(pending, 'live-fallback');
+    if (String(e.message).includes('timed out')) {
+      // The job is almost certainly still running server-side. NEVER
+      // fall back to live quota on a mere client timeout — re-run
+      // --collect-batch later instead.
+      console.error('[batch] collect timed out — job left running server-side; NOT falling back to live TTS');
+    } else {
+      await runLiveTts(pending, 'live-fallback');
+    }
   }
 } else if (ttsMode !== 'off' && pending.length > 0) {
   if (ttsMode === 'batch') {
-    const items = pending.map(e => ({
-      key: `${e.place_key}|${e.angle}`,
-      text: app.applyPronunciation(e.story_text),
-    }));
-    let jobName = null;
-    try {
-      jobName = await submitTtsBatch(keys.geminiKey, items, `leo-library-${new Date().toISOString().slice(0, 19)}`);
-      batchLog.push({ job: jobName, submitted: items.length, at: new Date().toISOString(), keys: items.map(i => i.key) });
-      writeFileSync(batchLogPath, JSON.stringify(batchLog, null, 2));
-      console.log(`[batch] submitted ${items.length} requests as ${jobName}`);
-      const results = await pollTtsBatch(keys.geminiKey, jobName);
-      let ok = 0;
-      for (const entry of pending) {
-        const r = results.get(`${entry.place_key}|${entry.angle}`);
-        if (r?.bytes) { recordAudio(entry, r, 'batch', jobName); ok++; }
-        else {
-          entry.tts_error = r?.error || 'missing from batch output';
+    // Chunked submissions: 10 requests per job keeps each job's inlined
+    // response ~40 MB — JSON.parse-able in one piece. (Lesson of the
+    // 69-story job: its response was >512 MB, past Node's max string
+    // length; it needed the streaming collector in collect-stream.mjs.)
+    const CHUNK = 10;
+    const chunks = [];
+    for (let i = 0; i < pending.length; i += CHUNK) chunks.push(pending.slice(i, i + CHUNK));
+    for (const chunkEntries of chunks) {
+      const items = chunkEntries.map(e => ({
+        key: `${e.place_key}|${e.angle}`,
+        text: app.applyPronunciation(e.story_text),
+      }));
+      let jobName = null;
+      try {
+        jobName = await submitTtsBatch(keys.geminiKey, items, `leo-library-${new Date().toISOString().slice(0, 19)}`);
+        batchLog.push({ job: jobName, submitted: items.length, at: new Date().toISOString(), keys: items.map(i => i.key) });
+        writeFileSync(batchLogPath, JSON.stringify(batchLog, null, 2));
+        console.log(`[batch] submitted ${items.length} requests as ${jobName}`);
+        const results = await pollTtsBatch(keys.geminiKey, jobName);
+        let ok = 0;
+        for (const entry of chunkEntries) {
+          const r = results.get(`${entry.place_key}|${entry.angle}`);
+          if (r?.bytes) { recordAudio(entry, r, 'batch', jobName); ok++; }
+          else {
+            entry.tts_error = r?.error || 'missing from batch output';
+            saveManifest();
+            console.error(`[batch] no audio for ${entry.place_key}|${entry.angle}: ${entry.tts_error}`);
+          }
+        }
+        console.log(`[batch] ${ok}/${chunkEntries.length} audio files from batch job`);
+        // Per-item failures stay pending for a later targeted run —
+        // at corpus scale an automatic live fallback spends Erik's
+        // interactive quota on what is usually a content problem that
+        // would fail live too. (The pilot-scale whole-batch failure
+        // below is the brief's fallback case.)
+      } catch (e) {
+        console.error(`[batch] CHUNK FAILED: ${e.message}`);
+        batchLog.push({ job: jobName, error: String(e.message).slice(0, 300), at: new Date().toISOString() });
+        writeFileSync(batchLogPath, JSON.stringify(batchLog, null, 2));
+        if (jobName && String(e.message).includes('timed out')) {
+          // Job submitted and likely still running server-side — collect
+          // it later with --collect-batch instead of burning live quota.
+          console.error(`[batch] poll timed out; job ${jobName} left running — NOT falling back to live TTS`);
+        } else if (!jobName) {
+          // Submission itself failed: the batch path looks unavailable,
+          // which is exactly the brief's live-fallback case.
+          console.log('[batch] submit failed — falling back to live TTS for this chunk');
+          await runLiveTts(chunkEntries, 'live-fallback');
+        } else {
+          console.error('[batch] job failed server-side; chunk left pending for a later run (no live fallback)');
+          for (const entry of chunkEntries) entry.tts_error = String(e.message).slice(0, 300);
           saveManifest();
-          console.error(`[batch] no audio for ${entry.place_key}|${entry.angle}: ${entry.tts_error}`);
         }
       }
-      console.log(`[batch] ${ok}/${pending.length} audio files from batch job`);
-      const failed = pending.filter(e => !e.audio_file);
-      if (failed.length > 0) {
-        console.log(`[batch] falling back to live TTS for ${failed.length} failed item(s)`);
-        await runLiveTts(failed, 'live-after-batch-failure');
-      }
-    } catch (e) {
-      console.error(`[batch] BATCH PATH FAILED: ${e.message}`);
-      batchLog.push({ job: jobName, error: String(e.message).slice(0, 300), at: new Date().toISOString() });
-      writeFileSync(batchLogPath, JSON.stringify(batchLog, null, 2));
-      console.log('[batch] falling back to live TTS for the whole pending set');
-      await runLiveTts(pending, 'live-fallback');
     }
   } else {
     await runLiveTts(pending, 'live');
