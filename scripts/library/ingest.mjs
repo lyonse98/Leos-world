@@ -49,16 +49,28 @@ for (const e of ready) {
     continue;
   }
   const bytes = readFileSync(filePath);
-  const up = await fetch(`${base}/storage/v1/object/tts-audio/${bucketKey.split('/').map(encodeURIComponent).join('/')}`, {
-    method: 'POST',
-    headers: { ...headers, 'Content-Type': 'audio/wav', 'x-upsert': 'false' },
-    body: bytes,
-  });
-  if (up.ok) uploaded++;
-  else {
-    const body = await up.text();
-    // 409 = object already exists — the idempotent outcome, not an error.
-    if (up.status !== 409) throw new Error(`storage upload failed for ${bucketKey}: HTTP ${up.status} ${body.slice(0, 200)}`);
+  // Supabase Storage signals a duplicate as HTTP 400 with a KeyAlreadyExists
+  // body (NOT HTTP 409) when x-upsert is false — that is the idempotent
+  // outcome, not an error. Retry transient stalls on a fresh connection.
+  let done = false;
+  for (let attempt = 1; attempt <= 3 && !done; attempt++) {
+    try {
+      const up = await fetch(`${base}/storage/v1/object/tts-audio/${bucketKey.split('/').map(encodeURIComponent).join('/')}`, {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'audio/wav', 'x-upsert': 'false' },
+        body: bytes,
+        signal: AbortSignal.timeout(120_000),
+      });
+      if (up.ok) { uploaded++; done = true; }
+      else {
+        const body = await up.text();
+        if (up.status === 409 || body.includes('KeyAlreadyExists') || body.includes('already exists')) done = true;
+        else throw new Error(`HTTP ${up.status} ${body.slice(0, 200)}`);
+      }
+    } catch (err) {
+      if (attempt === 3) throw new Error(`storage upload failed for ${bucketKey}: ${err.message}`);
+      console.warn(`  upload attempt ${attempt} failed for ${bucketKey} (${err.message}); retrying`);
+    }
   }
 
   const row = {
