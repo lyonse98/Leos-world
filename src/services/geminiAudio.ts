@@ -39,7 +39,15 @@ export interface AudioStoryResult {
 
 class GeminiAudioService {
   private ai: GoogleGenAI | null = null;
-  private audioCache = new Map<string, string>();
+  // The cache holds audio BLOBS, never object URLs. An object URL is
+  // valid only in the document that minted it, yet the old cache stored
+  // the URL string in IndexedDB and handed it back as a "hit" in later
+  // sessions — a dead blob: URL that the audio element cannot load.
+  // The canned intro lines, being the most-repeated texts in the app,
+  // were the surest victims: their Gemini playback errored on the dead
+  // URL and the line fell to the browser voice (or was lost entirely).
+  // Blobs persist correctly; each playback mints a fresh object URL.
+  private audioCache = new Map<string, Blob>();
   private dbPromise: Promise<IDBDatabase | null> | null = null;
 
   private openDb(): Promise<IDBDatabase | null> {
@@ -62,7 +70,7 @@ class GeminiAudioService {
     return this.dbPromise;
   }
 
-  private async getCachedAudio(text: string): Promise<string | null> {
+  private async getCachedAudio(text: string): Promise<Blob | null> {
     const key = this.cacheKey(text);
     const memHit = this.audioCache.get(key);
     if (memHit) return memHit;
@@ -70,10 +78,13 @@ class GeminiAudioService {
     const db = await this.openDb();
     if (!db) return null;
     try {
-      return await new Promise<string | null>((resolve) => {
+      return await new Promise<Blob | null>((resolve) => {
         const tx = db.transaction('audio', 'readonly');
         const req = tx.objectStore('audio').get(key);
-        req.onsuccess = () => resolve(req.result ?? null);
+        // Entries written by older builds are URL strings, not Blobs —
+        // treat them as the misses they are (the URL died with its
+        // document) and let the fresh Blob overwrite them below.
+        req.onsuccess = () => resolve(req.result instanceof Blob ? req.result : null);
         req.onerror = () => resolve(null);
       });
     } catch {
@@ -81,15 +92,15 @@ class GeminiAudioService {
     }
   }
 
-  private async setCachedAudio(text: string, url: string): Promise<void> {
+  private async setCachedAudio(text: string, blob: Blob): Promise<void> {
     const key = this.cacheKey(text);
-    this.audioCache.set(key, url);
+    this.audioCache.set(key, blob);
 
     const db = await this.openDb();
     if (!db) return;
     try {
       const tx = db.transaction('audio', 'readwrite');
-      tx.objectStore('audio').put(url, key);
+      tx.objectStore('audio').put(blob, key);
       tx.oncomplete = () => {};
     } catch {
       // non-critical
@@ -124,7 +135,7 @@ class GeminiAudioService {
     const prompt = this.buildPrompt(factPack, mode, destination);
 
     const audioBase64 = await this.synthesizeSpeech(prompt);
-    const audioUrl = this.base64ToAudioUrl(audioBase64, 'audio/wav');
+    const audioUrl = URL.createObjectURL(this.base64ToBlob(audioBase64, 'audio/wav'));
     return { audioUrl, text: prompt, model: TTS_MODEL };
   }
 
@@ -136,35 +147,37 @@ class GeminiAudioService {
     const cached = await this.getCachedAudio(text);
     if (cached) {
       console.log('[GeminiAudio] TTS local cache hit — skipping synthesis');
-      return { url: cached, cacheHit: true };
+      // A fresh object URL per playback: the player revokes the URL it
+      // played, which must never invalidate the cached audio itself.
+      return { url: URL.createObjectURL(cached), cacheHit: true };
     }
 
     // Try the shared Supabase Storage cache before paying for synthesis.
     const key = this.cacheKey(text);
     if (SUPABASE_CONFIGURED) {
-      const sharedUrl = await this.tryDownloadSharedAudio(key);
-      if (sharedUrl) {
+      const sharedBlob = await this.tryDownloadSharedAudio(key);
+      if (sharedBlob) {
         console.log('[GeminiAudio] TTS shared cache hit — skipping synthesis');
-        await this.setCachedAudio(text, sharedUrl);
-        return { url: sharedUrl, cacheHit: true };
+        await this.setCachedAudio(text, sharedBlob);
+        return { url: URL.createObjectURL(sharedBlob), cacheHit: true };
       }
     }
 
     const audioBase64 = await this.synthesizeSpeech(text);
-    const url = this.base64ToAudioUrl(audioBase64, 'audio/wav');
-    await this.setCachedAudio(text, url);
+    const blob = this.base64ToBlob(audioBase64, 'audio/wav');
+    await this.setCachedAudio(text, blob);
 
     // Fire-and-forget upload so the next listener gets a cache hit.
     if (SUPABASE_CONFIGURED) {
-      this.uploadSharedAudio(key, audioBase64).catch((e) => {
+      this.uploadSharedAudio(key, blob).catch((e) => {
         console.warn('[GeminiAudio] Shared cache upload failed:', e);
       });
     }
 
-    return { url, cacheHit: false };
+    return { url: URL.createObjectURL(blob), cacheHit: false };
   }
 
-  private async tryDownloadSharedAudio(key: string): Promise<string | null> {
+  private async tryDownloadSharedAudio(key: string): Promise<Blob | null> {
     try {
       const { data, error } = await supabase.storage
         .from('tts-audio')
@@ -173,20 +186,14 @@ class GeminiAudioService {
       // Verify the blob looks like audio before trusting it.
       const blob = data as Blob;
       if (blob.size === 0 || !blob.type.startsWith('audio')) return null;
-      return URL.createObjectURL(blob);
+      return blob;
     } catch (e) {
       console.warn('[GeminiAudio] Shared cache download failed:', e);
       return null;
     }
   }
 
-  private async uploadSharedAudio(key: string, base64: string): Promise<void> {
-    const byteChars = atob(base64);
-    const byteArray = new Uint8Array(byteChars.length);
-    for (let i = 0; i < byteChars.length; i++) {
-      byteArray[i] = byteChars.charCodeAt(i);
-    }
-    const blob = new Blob([byteArray], { type: 'audio/wav' });
+  private async uploadSharedAudio(key: string, blob: Blob): Promise<void> {
     const { error } = await supabase.storage
       .from('tts-audio')
       .upload(`${key}.wav`, blob, { contentType: 'audio/wav', upsert: false });
@@ -278,15 +285,14 @@ class GeminiAudioService {
     return parts.join('\n');
   }
 
-  private base64ToAudioUrl(base64: string, mimeType: string): string {
+  private base64ToBlob(base64: string, mimeType: string): Blob {
     const byteChars = atob(base64);
     const byteNumbers = new Array(byteChars.length);
     for (let i = 0; i < byteChars.length; i++) {
       byteNumbers[i] = byteChars.charCodeAt(i);
     }
     const byteArray = new Uint8Array(byteNumbers);
-    const blob = new Blob([byteArray], { type: mimeType });
-    return URL.createObjectURL(blob);
+    return new Blob([byteArray], { type: mimeType });
   }
 
   revokeAudioUrl(url: string): void {

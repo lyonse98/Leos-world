@@ -1065,7 +1065,14 @@ function App() {
       const intro = getIntro(resume);
       await voice.ensureVoiceReady();
       voice.unlock();
-      voice.speak(intro);
+      // The canned opener is local-voice by design: it must sound
+      // immediately, while the Gemini pipeline for the neighborhood
+      // intro and stories warms up behind it — no synthesis wait, no
+      // quota, no TTS-cache dependence. (Oct 26 field regression: sent
+      // through Gemini like everything else, the fixed intro texts hit
+      // the poisoned TTS cache and the welcome fell to the fallback
+      // path or vanished entirely.)
+      voice.speak(intro, { localVoice: true });
       if (ambientOn) ambientAudio.start();
 
       // Flip to the tour view immediately. The intro is already playing — the

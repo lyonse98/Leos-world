@@ -22,6 +22,18 @@ interface StoryQueueItem {
   regionAnchored?: boolean;
   // Location stories compete for the single waiting slot; scripted lines do not.
   isLocationStory: boolean;
+  // Speak through the local (browser) voice FIRST, never Gemini TTS.
+  // Reserved for the canned opener lines: they must sound immediately
+  // at tour start — no synthesis wait, no quota spend, no dependence on
+  // the TTS cache — while the story pipeline warms up behind them.
+  // This was the opener's historical behavior, and its loss was the
+  // Oct 26 field regression: routed through Gemini, the fixed intro
+  // texts were the surest victims of the poisoned TTS cache.
+  localVoice?: boolean;
+  // How many times this item has been dequeued for playback. Bounded by
+  // MAX_PLAYBACK_ATTEMPTS: a blocked or failing item is retried, never
+  // looped forever (the Oct 26 fallback-voice repeat).
+  attempts?: number;
   // The landmark or subject the story is about, when it has one. Carried so a
   // rating taken while the story plays can be filed against the right subject.
   topic?: string;
@@ -130,6 +142,21 @@ const GAP_AFTER_SPEECH_MS: Record<'driving' | 'walking' | 'stationary', number> 
 // starts once audio exists. On timeout the browser voice takes over.
 const TTS_SYNTH_TIMEOUT_MS = 30000;
 
+// How long a location story's synthesis may run, inside the player,
+// before a one-line local-voice bridge covers the wait. Long enough
+// that the common case (pre-synthesized during the opener, or a ~6 s
+// synthesis) rarely triggers it; short enough that a cold first story
+// never leaves the listener in unexplained silence.
+const BRIDGE_AFTER_MS = 4000;
+
+// Total playback attempts for one queue item across ALL failure exits
+// (blocked, engine failure, watchdog advance). When the bound is hit
+// the item is dropped and the queue moves on: a line that cannot be
+// heard must never wedge or loop the tour (Oct 26: fallback voice
+// repeating the same line because a failing item kept being requeued
+// and re-attempted on every fetch-cycle trigger).
+const MAX_PLAYBACK_ATTEMPTS = 3;
+
 export const useVoice = () => {
   const [isInitialized, setIsInitialized] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -226,8 +253,8 @@ export const useVoice = () => {
   const backgroundedRef = useRef<boolean>(false);
   // A line requested before the first gesture is held here and spoken the
   // instant the listener taps, since that tap is what permits sound.
-  const pendingSpeechRef = useRef<string | null>(null);
-  const speakRef = useRef<(text: string) => void>(() => {});
+  const pendingSpeechRef = useRef<{ text: string; localVoice?: boolean } | null>(null);
+  const speakRef = useRef<(text: string, opts?: { localVoice?: boolean }) => void>(() => {});
   const pendingTrackedRef = useRef<{
     text: string;
     onPlaybackStart?: () => void;
@@ -302,7 +329,7 @@ export const useVoice = () => {
         const held = pendingSpeechRef.current;
         if (held) {
           pendingSpeechRef.current = null;
-          speakRef.current(held);
+          speakRef.current(held.text, { localVoice: held.localVoice });
         }
         const heldTracked = pendingTrackedRef.current;
         if (heldTracked) {
@@ -319,7 +346,7 @@ export const useVoice = () => {
     const pending = pendingSpeechRef.current;
     if (pending) {
       pendingSpeechRef.current = null;
-      speakRef.current(pending);
+      speakRef.current(pending.text, { localVoice: pending.localVoice });
     }
     const pendingTracked = pendingTrackedRef.current;
     if (pendingTracked) {
@@ -418,7 +445,7 @@ export const useVoice = () => {
   const speakPriority = useCallback((text: string, cbs?: {
     onPlaybackStart?: () => void;
     onPlaybackEnd?: (sounded: boolean) => void;
-  }) => {
+  }, opts?: { localVoice?: boolean }) => {
     const trimmed = text.trim();
     if (!trimmed) return;
 
@@ -426,6 +453,7 @@ export const useVoice = () => {
       text: trimmed,
       generatedAt: Date.now(),
       isLocationStory: false,
+      localVoice: opts?.localVoice,
       onPlaybackStart: cbs?.onPlaybackStart,
       onPlaybackEnd: cbs?.onPlaybackEnd,
     });
@@ -435,7 +463,7 @@ export const useVoice = () => {
     }
   }, []);
 
-  const speak = useCallback((text: string) => {
+  const speak = useCallback((text: string, opts?: { localVoice?: boolean }) => {
     const trimmed = text.trim();
     if (!trimmed) return;
 
@@ -443,11 +471,11 @@ export const useVoice = () => {
     // and let the unlock step speak it. Dropping it here would silently lose
     // whatever the app most wanted to say.
     if (!unlockedRef.current) {
-      pendingSpeechRef.current = trimmed;
+      pendingSpeechRef.current = { text: trimmed, localVoice: opts?.localVoice };
       return;
     }
 
-    speakPriority(trimmed);
+    speakPriority(trimmed, undefined, opts);
   }, [speakPriority]);
 
   speakRef.current = speak;
@@ -612,7 +640,12 @@ export const useVoice = () => {
         }
         lastAudioTimeRef.current = t;
       }
-      if (synthRef.current?.speaking) {
+      if (synthRef.current?.speaking || synthRef.current?.pending) {
+        // pending matters for the browser voice: iOS routinely reports
+        // speaking=false between (and during) queued utterances of a
+        // multi-sentence line, and on that false negative the watchdog
+        // force-advanced healthy openers mid-line (Oct 26, start #3 —
+        // the welcome cut off). A queued utterance is progress too.
         lastProgressAtRef.current = now;
       }
 
@@ -766,11 +799,28 @@ export const useVoice = () => {
   const preSynthesizeNextRef = useRef(preSynthesizeNext);
   preSynthesizeNextRef.current = preSynthesizeNext;
 
-  const playSegmentsWithGemini = useCallback(async (fullText: string, onDone: (blocked: boolean) => void, providedUrl?: string, onAir?: () => void) => {
+  const playSegmentsWithGemini = useCallback(async (fullText: string, onDone: (blocked: boolean) => void, providedUrl?: string, onAir?: () => void, isLocationStory?: boolean) => {
+    // Runway bridge state (see the arming site below): declared first
+    // because finish() — which can fire synchronously on the init-fail
+    // path — must be able to cancel it.
+    let bridgeTimer: number | null = null;
+    let bridgeUtterance: SpeechSynthesisUtterance | null = null;
+    const cancelBridge = () => {
+      if (bridgeTimer !== null) {
+        clearTimeout(bridgeTimer);
+        bridgeTimer = null;
+      }
+      if (bridgeUtterance) {
+        bridgeUtterance = null;
+        try { synthRef.current?.cancel(); } catch { /* engine missing */ }
+      }
+    };
+
     let finished = false;
     const finish = (blocked: boolean) => {
       if (finished) return;
       finished = true;
+      cancelBridge();
       onDone(blocked);
     };
 
@@ -795,6 +845,29 @@ export const useVoice = () => {
         fallbackToBrowser('no model after init');
         return;
       }
+    }
+
+    // Arm the runway bridge for a location story that must synthesize:
+    // if the audio is not in hand within a few seconds, one short
+    // local-voice line covers the wait so the listener never sits in
+    // uncovered silence wondering whether the tour died (Oct 26, start
+    // #3 — a long hush before the first story while its synthesis ran
+    // serialized in the player). The bridge never enters the queue, is
+    // spoken at most once per story, and is cancelled the instant the
+    // real audio starts or the item settles.
+    if (isLocationStory && !providedUrl) {
+      bridgeTimer = window.setTimeout(() => {
+        bridgeTimer = null;
+        if (finished || playbackStartedRef.current) return;
+        const synth = synthRef.current;
+        if (!synth) return;
+        bridgeUtterance = new SpeechSynthesisUtterance('Hang on — let me get my bearings here.');
+        pickVoice();
+        if (voiceRef.current) bridgeUtterance.voice = voiceRef.current;
+        bridgeUtterance.pitch = 0.95;
+        bridgeUtterance.rate = 0.95;
+        try { synth.speak(bridgeUtterance); } catch { /* best-effort cover */ }
+      }, BRIDGE_AFTER_MS);
     }
 
     try {
@@ -836,6 +909,7 @@ export const useVoice = () => {
         playbackStartedRef.current = true;
         storyTimingRef.current.onPlayingAt = Date.now();
         lastProgressAtRef.current = Date.now();
+        cancelBridge();
         onAir?.();
         preSynthesizeNextRef.current();
       };
@@ -895,6 +969,18 @@ export const useVoice = () => {
       onDone(blocked);
     };
 
+    // The chain advances exactly once per sentence, whichever event
+    // gets there first. A duplicated utterance — dispatchSpeech's
+    // retry can re-speak an utterance whose start was merely late —
+    // fires its end events twice, and two interleaved chains speaking
+    // the same text was the audible "fallback on repeat" (Oct 26).
+    let advancedThrough = -1;
+    const advanceTo = (index: number) => {
+      if (index <= advancedThrough) return;
+      advancedThrough = index;
+      playSentence(index);
+    };
+
     const playSentence = (index: number) => {
       if (index >= sentenceGroups.length || !synthRef.current) {
         finish(false);
@@ -934,7 +1020,7 @@ export const useVoice = () => {
           lastPlaybackEndRef.current = storyTimingRef.current.playbackEndAt;
         }
         const pauseMs = index === 0 ? 500 : 350;
-        setTimeout(() => playSentence(index + 1), pauseMs);
+        setTimeout(() => advanceTo(index + 1), pauseMs);
       };
       utterance.onerror = (event) => {
         playbackStartedRef.current = false;
@@ -952,7 +1038,7 @@ export const useVoice = () => {
       dispatchSpeech(utterance, () => started, () => finish(true));
     };
 
-    playSentence(0);
+    advanceTo(0);
   }, [dispatchSpeech, startWatchdog]);
 
   const playStoryFromQueue = useCallback(() => {
@@ -972,6 +1058,11 @@ export const useVoice = () => {
       onStoryCompleteRef.current?.();
       return;
     }
+
+    // Every dequeue is one playback attempt, whatever exit it takes.
+    // The blocked path below requeues the item, and this count is what
+    // keeps that retry economy finite.
+    item.attempts = (item.attempts ?? 0) + 1;
 
     // Deliberate gap: location stories wait for a minimum silence after the
     // previous story ended. Scripted lines (intros, fillers, Q&A answers) and
@@ -1085,6 +1176,17 @@ export const useVoice = () => {
       setIsSpeaking(false);
 
       if (blocked) {
+        if ((item.attempts ?? 0) >= MAX_PLAYBACK_ATTEMPTS) {
+          // Retry bound hit: this line cannot be heard right now, and
+          // requeuing it forever was the Oct 26 fallback loop — the same
+          // item re-attempted (and re-spoken) on every fetch trigger.
+          // Settle it honestly (owner learns it never sounded) and let
+          // the queue move on.
+          console.warn('[Voice] Playback attempts exhausted — dropping this line and moving on');
+          settleCurrentPlayback();
+          setTimeout(() => playStoryFromQueueRef.current(), 100);
+          return;
+        }
         // Not an ending: the item goes back to the front of the queue
         // to be retried once sound is allowed, and its lifecycle
         // record goes with it — it will settle when it finally plays
@@ -1102,8 +1204,13 @@ export const useVoice = () => {
       setTimeout(() => playStoryFromQueueRef.current(), 100);
     };
 
-    if (useGeminiTTS) {
-      playSegmentsWithGemini(fullText, onDone, item.audioUrl, markSounded);
+    if (item.localVoice) {
+      // Canned opener lines are local-voice BY DESIGN: immediate (no
+      // synthesis wait), quota-free, and immune to the TTS lane's state
+      // — they speak while the story pipeline warms up behind them.
+      playSegmentsBrowser([fullText], onDone, markSounded);
+    } else if (useGeminiTTS) {
+      playSegmentsWithGemini(fullText, onDone, item.audioUrl, markSounded, item.isLocationStory);
     } else {
       playSegmentsBrowser([fullText], onDone, markSounded);
     }
@@ -1217,7 +1324,14 @@ export const useVoice = () => {
     );
     if (!isPlayingStoryRef.current) {
       playStoryFromQueueRef.current();
-    } else if (playbackStartedRef.current) {
+    } else {
+      // Warm the next story's audio while the current item plays — this
+      // overlap IS the runway: story #1's synthesis must run during the
+      // opener, not serialized after it ends. The old gate (only once
+      // playback had audibly started) left the common tour-start case —
+      // story text ready while the intro's first utterance was still
+      // spinning up — with a cold synthesis and a long silence after
+      // the intro (Oct 26, start #3).
       preSynthesizeNextRef.current();
     }
   }, []);
