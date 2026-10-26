@@ -10,7 +10,7 @@ import { pickStorySubject, StorySubject } from './relevance';
 import { tasteProfile } from './tasteProfile';
 import { deriveTags, isInterestTag } from './storyTags';
 import { storyCoverage, AREA_ANGLES, LANDMARK_ANGLES, describeAngle, describeArea, areaSubjectKey, landmarkSubjectKey, isRotationAngle } from './storyCoverage';
-import { resolveMovementMode, MovementModeHysteresis } from '../utils/geo';
+import { resolveMovementMode, MovementModeHysteresis, calculateDistance } from '../utils/geo';
 import { hashString } from '../utils/hash';
 import { LEO_MODEL_ID, LEO_QA_MODEL_ID, LEO_QA_MAX_OUTPUT_TOKENS, LEO_PERSONA_VERSION, LEO_SYSTEM_INSTRUCTION } from './leoPersona';
 import { wikipedia } from './wikipedia';
@@ -258,15 +258,48 @@ class GeminiService {
     // dataset lookup — synchronous, no network; wrapped so it can
     // never break the pack.
     try {
-      const registryPlaces = historicRegistry
-        .candidatesAsPlaces(position, 500)
-        .filter(rc => !places.some(p => historicRegistry.namesMatch(p.name, rc.name)));
-      if (registryPlaces.length > 0) {
+      const registryCandidates = historicRegistry.candidatesAsPlaces(position, 500);
+      const extras: NearbyPlace[] = [];
+      for (const rc of registryCandidates) {
+        // Same place under a matching name: the Google entry carries
+        // rating/types and wins — but the two names are linked as
+        // session aliases, so a lock earned under either name binds
+        // both spellings (subject-identity hardening).
+        const nameTwin = places.find(p => historicRegistry.namesMatch(p.name, rc.name));
+        if (nameTwin) {
+          storyCoverage.linkSubjectAliases(landmarkSubjectKey(nameTwin.name), landmarkSubjectKey(rc.name));
+          continue;
+        }
+        // Same ground under unrelated names (the registry's "Naval
+        // Training Station" vs Google's "Liberty Station"): a verified
+        // registry point within 150 m of a Google candidate is that
+        // candidate's designation, not a rival subject. Fold it in as
+        // a designation boost on the Google entry (kept OUT of
+        // historicalScore, so it can never mint Tier-1 eligibility)
+        // and link the names as aliases.
+        const nearTwin =
+          rc.lat !== undefined && rc.lng !== undefined
+            ? places.find(
+                p =>
+                  p.lat !== undefined &&
+                  p.lng !== undefined &&
+                  calculateDistance(p.lat, p.lng, rc.lat as number, rc.lng as number) <= 150
+              )
+            : undefined;
+        if (nearTwin) {
+          const boost = rc.historicalScore >= 85 ? 40 : 25;
+          nearTwin.designationBoost = Math.max(nearTwin.designationBoost ?? 0, boost);
+          storyCoverage.linkSubjectAliases(landmarkSubjectKey(nearTwin.name), landmarkSubjectKey(rc.name));
+          continue;
+        }
+        extras.push(rc);
+      }
+      if (extras.length > 0) {
         // Appended after the Google candidates (which keep their own
         // ranking order); relevance scoring, not list position, decides
         // the subject. With no Google candidates, the nearest registry
         // place becomes the lead subject for fact enrichment below.
-        places = [...places, ...registryPlaces];
+        places = [...places, ...extras];
       }
     } catch (error) {
       console.warn('[Gemini] Registry candidate merge failed (continuing without):', error);

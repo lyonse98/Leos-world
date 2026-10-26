@@ -19,6 +19,21 @@ export interface NearbyPlace {
   // (the original pool). Ranking caps and the Tier-1 exclusion key off
   // this for the historic-registry tier.
   source?: 'google_places' | 'historic_registry';
+  // Public review volume (Google Places userRatingCount) — the best
+  // available proxy for physical scale and public prominence. Carried
+  // so ranking can treat prominence as a first-class input instead of
+  // inferring importance from category alone.
+  userRatingCount?: number;
+  // The candidate's own coordinates, when its tier knows them. Used to
+  // recognise that two candidates from different tiers are the same
+  // ground (subject-identity linking in gemini.ts) — never for serving.
+  lat?: number;
+  lng?: number;
+  // Historic-designation weight folded in from a registry record that
+  // proved to be this same place (see the candidate merge in gemini.ts).
+  // Applied as its own ranking input in relevance.ts; deliberately NOT
+  // part of historicalScore, so it can never mint Tier-1 eligibility.
+  designationBoost?: number;
 }
 
 interface CacheEntry {
@@ -207,7 +222,8 @@ class PlacesService {
         const placeLng = place.location.longitude;
         const distance = calculateDistance(position.lat, position.lng, placeLat, placeLng);
         const name = place.displayName.text as string;
-        const historicalScore = this.calculateHistoricalScore(place.types || [], name);
+        const userRatingCount = typeof place.userRatingCount === 'number' ? place.userRatingCount : undefined;
+        const historicalScore = this.calculateHistoricalScore(place.types || [], name, userRatingCount ?? 0);
         const direction = this.directionFromTo(position, { lat: placeLat, lng: placeLng });
 
         return {
@@ -215,6 +231,9 @@ class PlacesService {
           types: place.types || [],
           vicinity: place.formattedAddress || '',
           rating: place.rating,
+          userRatingCount,
+          lat: placeLat,
+          lng: placeLng,
           distance: Math.round(distance),
           historicalScore,
           direction,
@@ -263,6 +282,8 @@ class PlacesService {
       types: spec.types,
       vicinity: spec.vicinity,
       rating: spec.rating,
+      lat: spec.lat,
+      lng: spec.lng,
       distance: Math.round(distance),
       historicalScore: spec.historicalScore,
       direction: this.directionFromTo(position, { lat: spec.lat, lng: spec.lng }),
@@ -335,7 +356,7 @@ class PlacesService {
       place.rating >= 4.5;
   }
 
-  private calculateHistoricalScore(types: string[], name: string): number {
+  private calculateHistoricalScore(types: string[], name: string, userRatingCount: number = 0): number {
     let score = 0;
     const highValueTypes = new Set([
       'landmark', 'museum', 'tourist_attraction', 'church', 'place_of_worship',
@@ -415,7 +436,16 @@ class PlacesService {
     const nameLower = name.toLowerCase();
 
     const isNotableBusiness = notableBusinessKeywords.some(k => nameLower.includes(k));
-    if (hasExcludedType && !hasSuburbanType && !hasHighValueType && !isNotableBusiness) return 0;
+    // Prominence rescue: the type exclusion below exists to keep shops
+    // and services out of the story pool — but it also zeroes exactly
+    // the wrong places. A great district reads to Google as a
+    // 'shopping_mall' (Liberty Station did), and its thousands of
+    // reviews are the tell that it is a destination, not a shop. A
+    // place the public has reviewed at destination scale is never
+    // zeroed on type alone; ranking (relevance.ts) weighs how much
+    // that prominence should count.
+    const prominenceRescue = userRatingCount >= 1500;
+    if (hasExcludedType && !hasSuburbanType && !hasHighValueType && !isNotableBusiness && !prominenceRescue) return 0;
 
     const businessNameBlacklist = [
       'clinic', 'dental', 'dentist', 'orthodontics', 'law', 'attorney', 'lawyer',
@@ -447,6 +477,13 @@ class PlacesService {
       else if (mediumValueTypes.has(type) && !genericTypes.has(type)) score += 50;
       else if (suburbanValueTypes.has(type)) score += 25;
     });
+
+    // Destination-scale base for a rescued place whose types and name
+    // earned nothing on their own — enough to stay in the pool and let
+    // ranking decide, never enough to win by itself.
+    if (score === 0 && userRatingCount >= 5000) {
+      score += 30;
+    }
 
     for (const keyword of historicNameKeywords) {
       if (nameLower.includes(keyword)) {

@@ -2,6 +2,7 @@ import { NearbyPlace } from './placesService';
 import { heardStories } from './heardStories';
 import { tasteProfile } from './tasteProfile';
 import { deriveTags, isInterestTag } from './storyTags';
+import { normalizePlaceName } from './placeName';
 
 export interface ScoredPlace {
   place: NearbyPlace;
@@ -62,6 +63,49 @@ export interface RankOptions {
   ignoreHeardPenalty?: boolean;
 }
 
+// Prominence: how much public attention a place commands, proxied by
+// review volume. It is the closest measurable thing to "you can SEE
+// this place matters" — a ten-block district with twelve thousand
+// reviews is a landmark in the lived sense whatever its category says.
+// Tiered so the merely popular don't swamp the genuinely major.
+function prominenceBonus(userRatingCount: number | undefined): number {
+  if (userRatingCount === undefined) return 0;
+  if (userRatingCount >= 10000) return 60;
+  if (userRatingCount >= 5000) return 45;
+  if (userRatingCount >= 2500) return 35;
+  if (userRatingCount >= 1000) return 25;
+  if (userRatingCount >= 400) return 18;
+  if (userRatingCount >= 150) return 12;
+  if (userRatingCount >= 50) return 6;
+  return 0;
+}
+
+// Physical scale: types whose footprint you can see from the road —
+// the place occupies ground, not a storefront. Max one applies; the
+// point is that bigness itself is story signal, separate from the
+// category interest already inside historicalScore.
+const SCALE_TYPE_BONUS: Record<string, number> = {
+  airport: 30, amusement_park: 30, stadium: 30, zoo: 30,
+  aquarium: 25, university: 20, shopping_mall: 15, neighborhood: 15,
+  train_station: 15, transit_station: 10, park: 10, marina: 10,
+};
+
+// Minor-subject demotion. A place whose entire claim is a name keyword
+// (historicalScore at keyword level), with no public footprint and no
+// designation, is the "house on the hill" — tellable when nothing
+// better exists, but it must not beat the district it sits in or crowd
+// out the neighborhood's own story. Applied as a ranking penalty, not
+// an exclusion: with nothing else around, it still clears the floor.
+const MINOR_SUBJECT_PENALTY = 40;
+const MINOR_KEYWORD_CEILING = 45;
+
+// The whole place outranks its parts. When one candidate's name is
+// contained in another's ("Liberty Station" inside "THE LOT Liberty
+// Station"), the contained name is the whole — a district, a campus, a
+// complex — and the container is a tenant. Until the whole has been
+// introduced, telling the tenant first is exactly backwards.
+const CONTAINER_BONUS = 50;
+
 export function scorePlace(
   place: NearbyPlace,
   heard: boolean,
@@ -75,6 +119,42 @@ export function scorePlace(
   // (museums 100, parks 50, schools 25, businesses excluded).
   let score = place.historicalScore;
   reasons.push(`interest ${place.historicalScore}`);
+
+  // Prominence and physical scale: first-class inputs (Erik's rule,
+  // Oct 25) — a large, much-visited, visually unavoidable place
+  // outranks a minor subject even when the minor one is closer.
+  const prom = prominenceBonus(place.userRatingCount);
+  if (prom > 0) {
+    score += prom;
+    reasons.push(`prominence +${prom} (${place.userRatingCount} reviews)`);
+  }
+  let scaleBonus = 0;
+  for (const t of place.types) scaleBonus = Math.max(scaleBonus, SCALE_TYPE_BONUS[t] ?? 0);
+  if (scaleBonus > 0) {
+    score += scaleBonus;
+    reasons.push(`scale +${scaleBonus}`);
+  }
+
+  // Historic designation folded in from a registry record proven to be
+  // this same place (the merge in gemini.ts). Google-tier candidates
+  // only — a registry candidate's own score already IS its designation.
+  if (place.source !== 'historic_registry' && place.designationBoost) {
+    score += place.designationBoost;
+    reasons.push(`designated historic +${place.designationBoost}`);
+  }
+
+  // Minor-subject demotion (see the constant). Registry candidates are
+  // exempt by construction: designation IS significance, and their
+  // bounded score already encodes it.
+  if (
+    place.source !== 'historic_registry' &&
+    place.historicalScore <= MINOR_KEYWORD_CEILING &&
+    (place.userRatingCount ?? 0) < 100 &&
+    !place.designationBoost
+  ) {
+    score -= MINOR_SUBJECT_PENALTY;
+    reasons.push(`minor subject -${MINOR_SUBJECT_PENALTY}`);
+  }
 
   // Proximity: close places are easier to point at, but this is a gentle
   // bonus — it must not let a minor place outrank a major one.
@@ -162,9 +242,30 @@ export function rankPlaces(
   recentPrimaryTags: string[] = [],
   options: RankOptions = {}
 ): ScoredPlace[] {
-  return places
-    .map(place => scorePlace(place, heardStories.hasHeardSubject(place.name), recentPrimaryTags, options))
-    .sort((a, b) => b.score - a.score);
+  const scored = places.map(place =>
+    scorePlace(place, heardStories.hasHeardSubject(place.name), recentPrimaryTags, options)
+  );
+
+  // Container rule: needs the whole candidate set, so it runs here
+  // rather than in scorePlace. A candidate whose normalized name is
+  // contained in another candidate's name is the whole place; it earns
+  // the bonus once, however many tenants surround it. The registry
+  // ceiling is re-applied afterwards so the cap stays absolute.
+  const normalized = places.map(p => normalizePlaceName(p.name));
+  scored.forEach((entry, i) => {
+    const self = normalized[i];
+    if (self.length < 8) return;
+    const hasTenant = normalized.some((other, j) => j !== i && other.length > self.length && other.includes(self));
+    if (!hasTenant) return;
+    entry.score += CONTAINER_BONUS;
+    entry.reasons.push(`whole place +${CONTAINER_BONUS}`);
+    if (entry.place.source === 'historic_registry' && entry.score > REGISTRY_SCORE_CAP) {
+      entry.score = REGISTRY_SCORE_CAP;
+      entry.reasons.push(`registry cap ${REGISTRY_SCORE_CAP}`);
+    }
+  });
+
+  return scored.sort((a, b) => b.score - a.score);
 }
 
 // The single best subject to tell a story about right now, or null if nothing
