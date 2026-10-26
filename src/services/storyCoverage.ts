@@ -228,26 +228,113 @@ class StoryCoverageService {
     for (const member of merged) this.sessionAliasGroups.set(member, merged);
   }
 
+  linkSubjectAliases(keyA: string, keyB: string): void {
+    this.syncDay();
+    this.linkSubjectsInternal(keyA, keyB);
+    this.saveDayState();
+  }
+
   private aliasGroupOf(subjectKey: string): Set<string> {
     return this.sessionAliasGroups.get(subjectKey) ?? new Set([subjectKey]);
   }
 
   lockSubjectForSession(subjectKey: string): void {
+    this.syncDay();
     for (const member of this.aliasGroupOf(subjectKey)) {
       this.sessionLockedSubjects.add(member);
     }
+    this.saveDayState();
   }
 
   isSubjectLockedForSession(subjectKey: string): boolean {
+    this.syncDay();
     for (const member of this.aliasGroupOf(subjectKey)) {
       if (this.sessionLockedSubjects.has(member)) return true;
     }
     return false;
   }
 
+  // --- Daily cap (prominence-scaled) ---------------------------------------
+  // A minor subject may be TOLD at most DAILY_MINOR_CAP times per
+  // calendar day across all sessions. Majors (Tier-1, library) are
+  // exempt — their repeat tellings across a day of restarts are the
+  // marquee working as intended; the cap exists so one minor place
+  // cannot dominate a day through restart churn. Enforcement lives at
+  // the selection/serve layers next to the lockout; this is the count.
+
+  recordDailyTelling(subjectKey: string): void {
+    if (!subjectKey.startsWith('landmark:')) return;
+    this.syncDay();
+    this.dailyCounts[subjectKey] = (this.dailyCounts[subjectKey] ?? 0) + 1;
+    this.saveDayState();
+  }
+
+  // Tellings of this place today, summed across its alias group — a
+  // telling recorded under any name variant counts toward the place.
+  dailyTellingCount(subjectKey: string): number {
+    this.syncDay();
+    let total = 0;
+    for (const member of this.aliasGroupOf(subjectKey)) {
+      total += this.dailyCounts[member] ?? 0;
+    }
+    return total;
+  }
+
+  markMajorSubject(subjectKey: string): void {
+    if (!subjectKey || this.majorSubjects.has(subjectKey)) return;
+    this.majorSubjects.add(subjectKey);
+    this.saveMajors();
+  }
+
+  isMajorSubject(subjectKey: string): boolean {
+    for (const member of this.aliasGroupOf(subjectKey)) {
+      if (this.majorSubjects.has(member)) return true;
+    }
+    return false;
+  }
+
+  isDailyCapped(subjectKey: string): boolean {
+    if (this.isMajorSubject(subjectKey)) return false;
+    return this.dailyTellingCount(subjectKey) >= DAILY_MINOR_CAP;
+  }
+
+  // --- Pending subjects (generation guard) ---------------------------------
+  // Subjects with a story already generated and waiting unplayed in the
+  // local cache. Subject selection must not generate ANOTHER story
+  // about a pending subject: across successive prefetch cycles the
+  // first story hasn't played yet, so nothing about the subject is
+  // locked, heard, or covered — without this guard each cycle deals
+  // the same place a fresh angle, and the buffer fills with one place
+  // wearing five angles (the generation half of the Balboa pile-up;
+  // the serve half was the unmarked lock). storyCache re-derives this
+  // set from its cache contents on every mutation, so it cannot leak:
+  // a pending subject exists exactly while its story sits unplayed.
+  // Generation-only — serving the pending story itself is the point.
+  private pendingSubjects: Set<string> = new Set();
+
+  setPendingSubjects(keys: Iterable<string>): void {
+    this.pendingSubjects = new Set(keys);
+  }
+
+  isSubjectPending(subjectKey: string): boolean {
+    for (const member of this.aliasGroupOf(subjectKey)) {
+      if (this.pendingSubjects.has(member)) return true;
+    }
+    return false;
+  }
+
+  // Hard wipe of the lock/alias/day state only (the diagnostics full
+  // reset calls resetAll, which wipes everything including storage).
   clearSessionLocks(): void {
     this.sessionLockedSubjects.clear();
     this.sessionAliasGroups.clear();
+    this.dailyCounts = {};
+    this.dayStamp = StoryCoverageService.todayStamp();
+    try {
+      localStorage.removeItem(DAY_STATE_KEY);
+    } catch {
+      // storage unavailable — the in-memory wipe still applies
+    }
   }
 
   // Full wipe — every angle on every subject forgotten, in memory and in
@@ -259,8 +346,11 @@ class StoryCoverageService {
     this.subjects = {};
     this.recent = [];
     this.clearSessionLocks();
+    this.majorSubjects.clear();
+    this.pendingSubjects.clear();
     try {
       localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(MAJOR_SUBJECTS_KEY);
     } catch {
       // storage unavailable — the in-memory wipe still applies this session
     }

@@ -179,6 +179,7 @@ class StoryCacheService {
     if (this.cache.length > cap) {
       this.cache = this.cache.slice(-cap);
     }
+    this.refreshPendingSubjects();
     this.notifyCacheChange();
   }
 
@@ -199,7 +200,10 @@ class StoryCacheService {
       if (d <= CACHE_DISTANCE_THRESHOLD_M) return true;
       return false;
     });
-    if (this.cache.length !== before) this.notifyCacheChange();
+    if (this.cache.length !== before) {
+      this.refreshPendingSubjects();
+      this.notifyCacheChange();
+    }
   }
 
   async tryGetStoryForPosition(
@@ -216,6 +220,25 @@ class StoryCacheService {
     if (cached) {
       cached.played = true;
       this.notifyCacheChange();
+      this.refreshPendingSubjects();
+      // A local serve is a telling, so it marks what it tells — this
+      // layer used to only CHECK the lock, and since prefetched stories
+      // are recorded nowhere at generation, a session could serve the
+      // same place from the buffer all day with the lock set staying
+      // empty. While moving, serving a landmark locks its subject and
+      // counts toward the daily tally (rotation stories count later,
+      // at play, through App's recordRotationStory funnel; library
+      // serves also mark the place major/cap-exempt).
+      const speed = position.speed ?? null;
+      const moving = !(speed !== null && speed < 1.0);
+      if (moving) {
+        const servedKey = cached.rotation?.subjectKey ?? landmarkSubjectKey(cached.topic.split(' — ')[0].trim());
+        if (servedKey.startsWith('landmark:')) {
+          storyCoverage.lockSubjectForSession(servedKey);
+          if (!cached.rotation) storyCoverage.recordDailyTelling(servedKey);
+          if (cached.fromLibrary) storyCoverage.markMajorSubject(servedKey);
+        }
+      }
       if (onChunk) onChunk(cached.text);
       return {
         story: cached.text,
@@ -431,14 +454,30 @@ class StoryCacheService {
   }
 
   // Session landmark lockout at the serve layer: a locally cached
-  // angle-variant of a landmark already told this session is a retell.
-  // Skipped only while moving — parked (speed ~0), rotation serves are
-  // the dwell feature and stay available.
+  // angle-variant of a landmark already told this session is a retell,
+  // and so is a story about a minor subject that has hit the daily
+  // telling cap. Skipped only while moving — parked (speed ~0),
+  // rotation serves are the dwell feature and stay available.
   private isLockedOutWhileMoving(story: CachedStory, position: Position): boolean {
     const speed = position.speed ?? null;
     if (speed !== null && speed < 1.0) return false;
     const base = story.topic.split(' — ')[0].trim();
-    return storyCoverage.isSubjectLockedForSession(landmarkSubjectKey(base));
+    const key = landmarkSubjectKey(base);
+    if (storyCoverage.isSubjectLockedForSession(key)) return true;
+    if (storyCoverage.isDailyCapped(key) && !storyLibrary.hasPlace(base)) return true;
+    return false;
+  }
+
+  // Re-derive the pending-subject set from the cache contents: the
+  // subjects of every unplayed story currently buffered. Called on
+  // every cache mutation so the set cannot drift from reality.
+  refreshPendingSubjects(): void {
+    const keys = new Set<string>();
+    for (const s of this.cache) {
+      if (s.played) continue;
+      keys.add(s.rotation?.subjectKey ?? landmarkSubjectKey(s.topic.split(' — ')[0].trim()));
+    }
+    storyCoverage.setPendingSubjects(keys);
   }
 
   armOpener(): void {
@@ -533,6 +572,7 @@ class StoryCacheService {
     this.lastFetchTime = 0;
     this.isPrefetching = false;
     this.isPrefetchingAhead = false;
+    this.refreshPendingSubjects();
     this.notifyCacheChange();
     this.notifyMissedQueueChange();
   }

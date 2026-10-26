@@ -389,14 +389,34 @@ class GeminiService {
   private resolveSubject(factPack: StoryFactPack, allowRevisit: boolean = false): StorySubject | null {
     if (factPack.places.length === 0) return null;
 
-    // Session landmark lockout: while the listener is moving, a landmark
-    // told this session is out — no fresh-angle retell while they are
-    // still in its area. Dwell (allowRevisit) bypasses the lock: parked
-    // depth rotation is exactly where revisits belong.
-    const locked = (name: string) =>
-      !allowRevisit && storyCoverage.isSubjectLockedForSession(landmarkSubjectKey(name));
+    // Tier-1 places in the pool are majors — cap-exempt by definition.
+    // Marking them as they are evaluated is what lets the topic-only
+    // serve layers (which hold no candidate object) honor the exemption.
+    for (const place of factPack.places) {
+      if (placesService.isTier1Landmark(place)) {
+        storyCoverage.markMajorSubject(landmarkSubjectKey(place.name));
+      }
+    }
 
-    const unheard = factPack.places.filter(p => !heardStories.hasHeardSubject(p.name) && !locked(p.name));
+    // A moving-context candidate is unavailable when ANY of these hold:
+    //  - session lock: the place was already TOLD this session;
+    //  - pending: a story about it is already generated and waiting
+    //    unplayed in the local cache — generating a second angle before
+    //    the first plays is how one place fills the buffer;
+    //  - daily cap: a minor subject already told DAILY_MINOR_CAP times
+    //    today across sessions (Tier-1 and library places exempt).
+    // Dwell (allowRevisit) bypasses all three: parked depth rotation is
+    // the designed exception to each.
+    const blocked = (place: NearbyPlace) => {
+      if (allowRevisit) return false;
+      const key = landmarkSubjectKey(place.name);
+      if (storyCoverage.isSubjectLockedForSession(key)) return true;
+      if (storyCoverage.isSubjectPending(key)) return true;
+      if (storyCoverage.isDailyCapped(key) && !storyLibrary.hasPlace(place.name)) return true;
+      return false;
+    };
+
+    const unheard = factPack.places.filter(p => !heardStories.hasHeardSubject(p.name) && !blocked(p));
     if (unheard.length > 0) return pickStorySubject(unheard, this.recentPrimaryTags());
 
     if (!allowRevisit) {
@@ -878,9 +898,18 @@ class GeminiService {
     if (cached && !heardStories.hasHeard(cached.topic) && !this.isTopicLockedForSession(cached.topic, effectiveContext.startsWith('stationary_'))) {
       console.log(`[Gemini] Using ${cached.source} story for "${cached.topic}" (${Math.round(cached.distanceM)}m away)`);
       if (onChunk) onChunk(cached.storyText);
-      if (target.kind === 'landmark') {
-        storyCoverage.lockSubjectForSession(subjectKey);
-      }
+      // Lock the SERVED story's subject — the fix for the within-session
+      // retell pile-up. This block used to lock only the generation
+      // TARGET's key (and only when the target was a landmark): once a
+      // place counted as "heard", the target resolved to an area story,
+      // yet this serve kept dealing that place's next angle from the
+      // shared cache — the serve checked the lock every time and marked
+      // it never, so the subject-level guard never engaged and the
+      // place was told angle after angle in a single moving session.
+      // The story actually told is the one that locks (and counts).
+      const servedKey = landmarkSubjectKey(this.topicBaseName(cached.topic));
+      storyCoverage.lockSubjectForSession(servedKey);
+      storyCoverage.recordDailyTelling(servedKey);
       await locationTracker.updateLastStoryTopic(
         cached.topic, position, cached.storyText, effectiveContext, depthLevel, versionKey
       );
@@ -947,7 +976,17 @@ class GeminiService {
     const cached = await storyLookup.findNearbyStory(
       position.lat, position.lng, 100, versionKey, toldAngles
     );
-    if (cached && !heardStories.hasHeard(cached.topic) && !this.isTopicLockedForSession(cached.topic, false)) {
+    // Subject-level guards, not just the exact topic: prefetch deals
+    // stories for a moving listener, so a place already heard this
+    // listener (any angle) or locked for the session must not be dealt
+    // a fresh angle here. This check used to be exact-topic only (plus
+    // the lock) — one of the paths that kept re-dealing the same place.
+    if (
+      cached &&
+      !heardStories.hasHeard(cached.topic) &&
+      !heardStories.hasHeardSubject(this.topicBaseName(cached.topic)) &&
+      !this.isTopicLockedForSession(cached.topic, false)
+    ) {
       console.log(`[Gemini] Prefetch using ${cached.source} story for "${cached.topic}" (${Math.round(cached.distanceM)}m away)`);
       return { text: cached.storyText, subject: cached.topic, context: 'prefetch', mode: factPack.mode, rotation: null };
     }

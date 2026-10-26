@@ -12,7 +12,7 @@ import { placesService } from './services/placesService';
 import { getIntro } from './services/intros';
 import { heardStories, rotateUserKey } from './services/heardStories';
 import { tasteProfile } from './services/tasteProfile';
-import { storyCoverage } from './services/storyCoverage';
+import { storyCoverage, landmarkSubjectKey } from './services/storyCoverage';
 
 import { ambientAudio } from './services/ambientAudio';
 import { storyLikes } from './services/storyLikes';
@@ -949,13 +949,32 @@ function App() {
           voice.queueStory(intro);
           // Catch-up is a deliberate replay of stories missed in the dead zone,
           // so these are queued as scripted lines — they keep their order and
-          // are not subject to the live freshness gate.
+          // are not subject to the live freshness gate. The session lockout
+          // still applies WITHIN the batch: two buffered angles of the same
+          // place must not both replay back to back, and a place told
+          // earlier this session stays told. Each queued landmark locks
+          // its subject as it goes (moving only — parked catch-up keeps
+          // the dwell rotation freedom).
+          const speed = geolocation.position?.speed ?? null;
+          const moving = !(speed !== null && speed < 1.0);
+          let queuedCount = 0;
           for (const story of unplayed) {
             story.played = true;
+            const subjectKey = story.rotation?.subjectKey
+              ?? landmarkSubjectKey(story.topic.split(' — ')[0].trim());
+            if (moving && subjectKey.startsWith('landmark:')) {
+              if (storyCoverage.isSubjectLockedForSession(subjectKey)) continue;
+              storyCoverage.lockSubjectForSession(subjectKey);
+              // Counted here (all angles): catch-up plays bypass the
+              // recordRotationStory funnel other rotation plays use.
+              storyCoverage.recordDailyTelling(subjectKey);
+            }
             voice.queueStory(story.text);
+            queuedCount++;
           }
+          storyCache.refreshPendingSubjects();
 
-          setStoriesCount(prev => prev + unplayed.length);
+          setStoriesCount(prev => prev + queuedCount);
           setLastStorySource('cache');
           setCatchUpActive(false);
         } else {
