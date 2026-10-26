@@ -57,6 +57,11 @@ export const SEEDS = [
   { n: 48, name: 'The Observatory North Park', area: 'North Park, San Diego', query: 'North Park Theatre, San Diego', angles: ['origin', 'music', 'building'] },
   { n: 49, name: 'Morley Field Sports Complex', area: 'North Park, San Diego', query: 'Morley Field, San Diego', angles: ['origin', 'sports', 'people'] },
   { n: 50, name: 'Presidio Park', area: 'Presidio, San Diego', query: 'Presidio Park, San Diego', angles: ['origin', 'event', 'building'] },
+  // Round 2 / first addition (Oct 25, 2026): added the same night the
+  // field test exposed the miss — Erik drove the length of it and Leo
+  // told its tenants instead. THE place itself: the former Naval
+  // Training Center, NRHP-listed as "Naval Training Station".
+  { n: 51, name: 'Liberty Station', area: 'Point Loma, San Diego', query: 'Liberty Station, San Diego', angles: ['origin', 'event', 'people'] },
 ];
 
 // Run order when the live-TTS daily cap forces prioritization: the I-5
