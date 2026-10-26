@@ -79,6 +79,23 @@ const MAX_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 5000;
 const REQUEST_TIMEOUT_MS = 30000;
 
+// Fail-fast bounds (Oct 25 field wedge): a story request once stalled
+// ~149 s, and because every generation shares this one lane, the whole
+// session wedged behind it until a full relaunch. The old bounds only
+// timed out the initial request (30 s) and the gaps BETWEEN stream
+// chunks (30 s each, unbounded in count) — a stream dribbling a chunk
+// every 29 s could hold the lane for minutes — and the fact pack had
+// no bound at all. Now: one hard overall deadline per generation
+// attempt (request + full stream), a bound on the fact pack, and a
+// bound on WAITING for the lane, so a hang fails in seconds and the
+// pipeline moves on instead of dying quietly. Quota semantics are
+// untouched: quota errors still trip the breaker and are never
+// retried — a deadline expiry is a plain failure, not a quota signal.
+const GEN_DEADLINE_MS = 20000;
+const FACTPACK_TIMEOUT_MS = 12000;
+const WIKIDATA_TIMEOUT_MS = 6000;
+const SLOT_WAIT_TIMEOUT_MS = 90000;
+
 const MAX_TOLD_TOPICS_IN_PROMPT = 15;
 const MAX_PREVIOUS_STORY_CHARS = 300;
 const MAX_RECENT_STORY_CHARS = 200;
@@ -150,7 +167,16 @@ class GeminiService {
   }
 
   private async waitForSlot(): Promise<void> {
+    // Bounded wait: the lane's holder is itself deadline-bound (worst
+    // case ~40 s for a Q&A primary + fallback), so a wait past this
+    // bound means the holder is gone, not slow. Fail the call instead
+    // of queueing behind a corpse forever — the callers all degrade
+    // (cache, designed silence, an honest error line) rather than hang.
+    const waitStartedAt = Date.now();
     while (this.requestInProgress) {
+      if (Date.now() - waitStartedAt > SLOT_WAIT_TIMEOUT_MS) {
+        throw new Error('Gemini lane busy — a previous request never released the slot');
+      }
       await new Promise(resolve => setTimeout(resolve, 200));
     }
     this.requestInProgress = true;
@@ -231,12 +257,19 @@ class GeminiService {
     let wikiTopTitle = '';
     const deepMode = locationTracker.getDwellDepthLevel() !== null;
     try {
-      const [placesResult, areaResult, wikiResult, osmResult] = await Promise.all([
-        placesService.getNearbyLandmarks(position, 100),
-        placesService.getAreaInfo(position),
-        wikipedia.getNearbyArticles(position, deepMode),
-        osmService.getNearbyFeatures(position, position.speed),
-      ]);
+      // Bounded: on a half-dead connection any one of these sources can
+      // hang far longer than a story is worth. On timeout the pack
+      // proceeds with whatever defaults stand (the sources' own caches
+      // still warm in the background for the next fetch).
+      const [placesResult, areaResult, wikiResult, osmResult] = await this.withTimeout(
+        Promise.all([
+          placesService.getNearbyLandmarks(position, 100),
+          placesService.getAreaInfo(position),
+          wikipedia.getNearbyArticles(position, deepMode),
+          osmService.getNearbyFeatures(position, position.speed),
+        ]),
+        FACTPACK_TIMEOUT_MS
+      );
       places = placesResult;
       areaInfo = areaResult;
       wikiContext = wikipedia.formatForPrompt(wikiResult);
@@ -310,7 +343,10 @@ class GeminiService {
     let wikidataContext = '';
     const subjectName = places[0]?.name || wikiTopTitle;
     if (subjectName) {
-      wikidataContext = await wikidata.getFactsForPlace(subjectName, position);
+      wikidataContext = await this.withTimeout(
+        wikidata.getFactsForPlace(subjectName, position),
+        WIKIDATA_TIMEOUT_MS
+      ).catch(() => '');
     }
 
     // Historic-registry facts for the same lead subject (Level 1):
@@ -947,6 +983,7 @@ class GeminiService {
     await this.waitForSlot();
     try {
       if (onChunk) {
+        const deadlineAt = Date.now() + GEN_DEADLINE_MS;
         const response = await this.withRetry(LEO_MODEL_ID, () =>
           this.withTimeout(
             this.ai!.models.generateContentStream({
@@ -954,7 +991,7 @@ class GeminiService {
               contents: prompt,
               config: { systemInstruction: LEO_SYSTEM_INSTRUCTION },
             }),
-            REQUEST_TIMEOUT_MS
+            Math.max(1000, deadlineAt - Date.now())
           )
         );
 
@@ -962,6 +999,9 @@ class GeminiService {
         let lastChunkTime = Date.now();
 
         for await (const chunk of response) {
+          if (Date.now() > deadlineAt) {
+            throw new Error('Gemini generation deadline exceeded');
+          }
           if (Date.now() - lastChunkTime > REQUEST_TIMEOUT_MS) {
             throw new Error('Gemini stream stalled');
           }
@@ -985,7 +1025,7 @@ class GeminiService {
               contents: prompt,
               config: { systemInstruction: LEO_SYSTEM_INSTRUCTION },
             }),
-            REQUEST_TIMEOUT_MS
+            GEN_DEADLINE_MS
           )
         );
 
@@ -1095,6 +1135,7 @@ class GeminiService {
     onChunk?: (text: string) => void
   ): Promise<string> {
     if (onChunk) {
+      const deadlineAt = Date.now() + GEN_DEADLINE_MS;
       const response = await this.withRetry(modelId, () =>
         this.withTimeout(
           this.ai!.models.generateContentStream({
@@ -1106,7 +1147,7 @@ class GeminiService {
               thinkingConfig: { thinkingBudget: 0 },
             },
           }),
-          REQUEST_TIMEOUT_MS
+          Math.max(1000, deadlineAt - Date.now())
         )
       );
 
@@ -1115,6 +1156,9 @@ class GeminiService {
 
       try {
         for await (const chunk of response) {
+          if (Date.now() > deadlineAt) {
+            throw new Error('Gemini generation deadline exceeded');
+          }
           if (Date.now() - lastChunkTime > REQUEST_TIMEOUT_MS) {
             throw new Error('Gemini stream stalled');
           }
@@ -1147,7 +1191,7 @@ class GeminiService {
             thinkingConfig: { thinkingBudget: 0 },
           },
         }),
-        REQUEST_TIMEOUT_MS
+        GEN_DEADLINE_MS
       )
     );
 
