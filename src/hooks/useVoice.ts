@@ -8,6 +8,7 @@ import { tasteProfile } from '../services/tasteProfile';
 import { geminiAudio, TTS_MODEL } from '../services/geminiAudio';
 import { quotaGuard } from '../services/quotaGuard';
 import { analytics, trackDiag } from '../services/analytics';
+import { pickStallPhrase, stallPhraseAudioUrl } from '../services/stallPhrases';
 
 interface StoryQueueItem {
   text: string;
@@ -157,7 +158,7 @@ const GAP_AFTER_SPEECH_MS: Record<'driving' | 'walking' | 'stationary', number> 
 const TTS_SYNTH_TIMEOUT_MS = 30000;
 
 // How long a location story's synthesis may run, inside the player,
-// before a one-line local-voice bridge covers the wait. Long enough
+// before a stored Puck stall phrase covers the wait. Long enough
 // that the common case (pre-synthesized during the opener, or a ~6 s
 // synthesis) rarely triggers it; short enough that a cold first story
 // never leaves the listener in unexplained silence.
@@ -177,6 +178,10 @@ export const useVoice = () => {
   const synthRef = useRef<SpeechSynthesis | null>(null);
   const voiceRef = useRef<SpeechSynthesisVoice | null>(null);
   const audioElRef = useRef<HTMLAudioElement | null>(null);
+  // The stall-phrase clip currently sounding, if any (see the arming
+  // site in playSegmentsWithGemini). Hook-level so skip/mute — which
+  // stop every other sound source individually — can stop it too.
+  const stallAudioRef = useRef<HTMLAudioElement | null>(null);
   const ttsUrlRef = useRef<string | null>(null);
   const streamBufferRef = useRef<string>('');
   const sentenceQueueRef = useRef<string[]>([]);
@@ -945,19 +950,21 @@ export const useVoice = () => {
   preSynthesizeNextRef.current = preSynthesizeNext;
 
   const playSegmentsWithGemini = useCallback(async (fullText: string, onDone: (blocked: boolean) => void, providedUrl?: string, onAir?: (engine: 'gemini' | 'browser') => void, isLocationStory?: boolean, tracked?: boolean) => {
-    // Runway bridge state (see the arming site below): declared first
+    // Stall-phrase state (see the arming site below): declared first
     // because finish() — which can fire synchronously on the init-fail
     // path — must be able to cancel it.
     let bridgeTimer: number | null = null;
-    let bridgeUtterance: SpeechSynthesisUtterance | null = null;
+    let bridgeAudio: HTMLAudioElement | null = null;
     const cancelBridge = () => {
       if (bridgeTimer !== null) {
         clearTimeout(bridgeTimer);
         bridgeTimer = null;
       }
-      if (bridgeUtterance) {
-        bridgeUtterance = null;
-        try { synthRef.current?.cancel(); } catch { /* engine missing */ }
+      if (bridgeAudio) {
+        const el = bridgeAudio;
+        bridgeAudio = null;
+        if (stallAudioRef.current === el) stallAudioRef.current = null;
+        try { el.pause(); el.removeAttribute('src'); el.load(); } catch { /* element already gone */ }
       }
     };
 
@@ -970,6 +977,11 @@ export const useVoice = () => {
     };
 
     const fallbackToBrowser = (reason: string) => {
+      // The browser voice is about to speak this item — a stall phrase
+      // must never talk over it. (With the old device-voice bridge this
+      // was free: both lines shared the one speech queue. A stored
+      // audio clip plays on its own element, so it is cut explicitly.)
+      cancelBridge();
       // Capture the failure into the event stream (Oct 26, 2026): a
       // TTS failure used to exist only as this console line and the
       // diagnostics-panel status, both gone with the session. Now it
@@ -1013,26 +1025,42 @@ export const useVoice = () => {
       }
     }
 
-    // Arm the runway bridge for a location story that must synthesize:
+    // Arm the stall phrase for a location story that must synthesize:
     // if the audio is not in hand within a few seconds, one short
-    // local-voice line covers the wait so the listener never sits in
-    // uncovered silence wondering whether the tour died (Oct 26, start
-    // #3 — a long hush before the first story while its synthesis ran
-    // serialized in the player). The bridge never enters the queue, is
-    // spoken at most once per story, and is cancelled the instant the
-    // real audio starts or the item settles.
+    // STORED Puck clip (services/stallPhrases) covers the wait so the
+    // listener never sits in uncovered silence wondering whether the
+    // tour died (Oct 26, start #3 — a long hush before the first story
+    // while its synthesis ran serialized in the player). This slot was
+    // originally a device-voice line ("Hang on — let me get my
+    // bearings here."); Erik replaced it with stored phrases the same
+    // day — bearings language belongs to the intro period, and a stall
+    // mid-tour should sound like Leo, not like the phone. The phrase
+    // never enters the queue, plays at most once per story, and is
+    // cancelled the instant the real audio starts or the item settles.
+    // If no phrase is available (rotation spent) or the clip fails to
+    // play, nothing fires — silence beats the wrong voice here.
     if (isLocationStory && !providedUrl) {
+      const genAtArm = playGenRef.current;
       bridgeTimer = window.setTimeout(() => {
         bridgeTimer = null;
         if (finished || playbackStartedRef.current) return;
-        const synth = synthRef.current;
-        if (!synth) return;
-        bridgeUtterance = new SpeechSynthesisUtterance('Hang on — let me get my bearings here.');
-        pickVoice();
-        if (voiceRef.current) bridgeUtterance.voice = voiceRef.current;
-        bridgeUtterance.pitch = 0.95;
-        bridgeUtterance.rate = 0.95;
-        try { synth.speak(bridgeUtterance); } catch { /* best-effort cover */ }
+        if (playGenRef.current !== genAtArm) return; // skipped/stopped while waiting
+        const phrase = pickStallPhrase();
+        if (!phrase) return;
+        // On the record (Oct 26 instrumentation): a fired stall is a
+        // pipeline_diag row — stage 'playback', reason 'stall-phrase',
+        // message = the phrase id — readable per-event in the view.
+        try { trackDiag('playback', 'stall-phrase', phrase.id); } catch { /* a metric must never break cover */ }
+        const el = new Audio(stallPhraseAudioUrl(phrase));
+        bridgeAudio = el;
+        stallAudioRef.current = el;
+        const release = () => {
+          if (bridgeAudio === el) bridgeAudio = null;
+          if (stallAudioRef.current === el) stallAudioRef.current = null;
+        };
+        el.onended = release;
+        el.onerror = release;
+        el.play().catch(release);
       }, BRIDGE_AFTER_MS);
     }
 
@@ -1652,6 +1680,11 @@ export const useVoice = () => {
       audioElRef.current.pause();
       audioElRef.current.removeAttribute('src');
     }
+    if (stallAudioRef.current) {
+      stallAudioRef.current.pause();
+      stallAudioRef.current.removeAttribute('src');
+      stallAudioRef.current = null;
+    }
     if (ttsUrlRef.current) {
       URL.revokeObjectURL(ttsUrlRef.current);
       ttsUrlRef.current = null;
@@ -1681,6 +1714,11 @@ export const useVoice = () => {
     if (audioElRef.current) {
       audioElRef.current.pause();
       audioElRef.current.removeAttribute('src');
+    }
+    if (stallAudioRef.current) {
+      stallAudioRef.current.pause();
+      stallAudioRef.current.removeAttribute('src');
+      stallAudioRef.current = null;
     }
     if (ttsUrlRef.current) {
       URL.revokeObjectURL(ttsUrlRef.current);
