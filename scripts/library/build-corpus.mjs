@@ -21,7 +21,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SEEDS, CORRIDOR_ORDER, NORTH_PARK_ORDER } from './seeds.mjs';
 import {
-  loadKeys, makeTextClient, loadRegistry, registryCoordsFor, nominatimSearch,
+  loadKeys, makeTextClient, loadRegistry, registryCoordsFor, nominatimSearch, wikipediaCoords,
   assembleFacts, buildPrompt, generateText, liveTts, submitTtsBatch, pollTtsBatch,
   ensureWav, wavDurationSec, liveTtsCount, bumpLiveTtsCount, LIVE_DAILY_STOP,
   TTS_MODEL, TTS_VOICE,
@@ -91,8 +91,17 @@ for (const n of selected) {
       geo = await nominatimSearch(q).catch(() => null);
       if (geo) { usedQuery = q; break; }
     }
-    if (!geo) { console.error(`[build] #${n} ${seed.name}: no coordinates found — SKIPPED`); continue; }
-    coords = { ...geo, source: `nominatim (${usedQuery})` };
+    if (!geo) {
+      const wiki = await wikipediaCoords(seed.name).catch(() => null);
+      if (wiki) {
+        coords = { lat: wiki.lat, lng: wiki.lng, source: wiki.source };
+      } else {
+        console.error(`[build] #${n} ${seed.name}: no coordinates found — SKIPPED`);
+        continue;
+      }
+    } else {
+      coords = { ...geo, source: `nominatim (${usedQuery})` };
+    }
   }
 
   const facts = await assembleFacts(app, records, seed, coords);

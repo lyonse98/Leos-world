@@ -109,6 +109,35 @@ export async function nominatimSearch(query) {
   return { lat: parseFloat(out[0].lat), lng: parseFloat(out[0].lon) };
 }
 
+// Last-resort coordinates: the place's Wikipedia article. Search by
+// name, take the first result whose coordinates land in San Diego
+// County (the bounds check rejects same-named places elsewhere — e.g.
+// the Self-Realization Fellowship's Lake Shrine in Los Angeles).
+export async function wikipediaCoords(name) {
+  const headers = { 'User-Agent': UA };
+  const srRes = await fetchText(
+    `https://en.wikipedia.org/w/api.php?action=query&list=search&srlimit=5&format=json&srsearch=${encodeURIComponent(name)}`,
+    { headers }
+  );
+  if (!srRes.ok) return null;
+  const sr = await srRes.json();
+  const titles = (sr?.query?.search || []).map(r => r.title);
+  for (const title of titles) {
+    const coRes = await fetchText(
+      `https://en.wikipedia.org/w/api.php?action=query&prop=coordinates&format=json&titles=${encodeURIComponent(title)}`,
+      { headers }
+    );
+    if (!coRes.ok) continue;
+    const co = await coRes.json();
+    const pages = Object.values(co?.query?.pages || {});
+    const c = pages[0]?.coordinates?.[0];
+    if (c && c.lat >= 32.4 && c.lat <= 33.6 && c.lon >= -117.8 && c.lon <= -116.3) {
+      return { lat: c.lat, lng: c.lon, source: `wikipedia (${title})` };
+    }
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------- registry
 // Mirrors src/services/historicRegistry.ts (name normalization, matching
 // rule, and fact formatting) over the vendored dataset the app itself
