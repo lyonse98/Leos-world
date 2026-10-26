@@ -108,7 +108,7 @@ export const SEEDS = [
   { n: 87, name: 'The Marine Room', area: 'La Jolla, San Diego', query: 'The Marine Room, La Jolla', angles: ['origin', 'building', 'recent'] },
   { n: 88, name: 'Waterfront Bar & Grill', area: 'Little Italy, San Diego', query: 'Waterfront Bar and Grill, San Diego', angles: ['origin', 'people', 'legends'] },
   { n: 89, name: 'The Casbah', area: 'Middletown, San Diego', query: 'The Casbah, San Diego', angles: ['origin', 'music', 'people'] },
-  { n: 90, name: 'Belly Up', area: 'Solana Beach', query: 'Belly Up Tavern, Solana Beach', angles: ['origin', 'music', 'event'] },
+  { n: 90, name: 'Belly Up', area: 'Solana Beach', query: 'Belly Up Tavern, Solana Beach, CA', angles: ['origin', 'music', 'event'], coords: { lat: 32.9898, lng: -117.2698, source: 'manual pin — 143 S Cedros Ave, Solana Beach (bare Nominatim resolves to Belly Up Aspen, Colorado)' } },
   { n: 91, name: 'Pechanga Arena', area: 'Midway District, San Diego', query: 'Pechanga Arena, San Diego', angles: ['origin', 'music', 'sports'] },
   { n: 92, name: 'Humphreys Concerts by the Bay', area: 'Shelter Island, San Diego', query: 'Humphreys Concerts by the Bay, San Diego', angles: ['origin', 'music', 'event'] },
   { n: 93, name: "Black's Beach", area: 'La Jolla, San Diego', query: "Black's Beach, San Diego", angles: ['origin', 'sports', 'legends'] },
