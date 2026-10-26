@@ -47,7 +47,7 @@ export const SEEDS = [
   { n: 38, name: 'Mormon Battalion Historic Site', area: 'Old Town, San Diego', query: 'Mormon Battalion Historic Site, San Diego', angles: ['origin', 'event', 'people'] },
   { n: 39, name: 'Del Mar Racetrack', area: 'Del Mar', query: 'Del Mar Racetrack', angles: ['origin', 'sports', 'people'] },
   { n: 40, name: 'Self-Realization Fellowship Hermitage & Meditation Gardens', area: 'Encinitas', query: 'Self-Realization Fellowship Hermitage, Encinitas', angles: ['origin', 'people', 'sports'] },
-  { n: 41, name: 'The Flower Fields', area: 'Carlsbad', query: 'The Flower Fields, Carlsbad', angles: ['origin', 'surroundings', 'recent'] },
+  { n: 41, name: 'The Flower Fields', area: 'Carlsbad', query: 'The Flower Fields, Carlsbad', angles: ['origin', 'surroundings', 'recent'], coords: { lat: 33.1231, lng: -117.3176, source: 'manual pin — 5704 Paseo Del Norte, Carlsbad (Wikipedia coords, inside the OSM garden polygon; the v13 build geocoded it to 52.416,-1.971 in the UK)' } },
   { n: 42, name: 'Leo Carrillo Ranch Historic Park', area: 'Carlsbad', query: 'Leo Carrillo Ranch Historic Park, Carlsbad', angles: ['origin', 'people', 'building'] },
   { n: 43, name: 'Oceanside Pier', area: 'Oceanside', query: 'Oceanside Pier', angles: ['origin', 'building', 'event'] },
   { n: 44, name: 'Mission Bay Park', area: 'Mission Bay, San Diego', query: 'Mission Bay Park, San Diego', angles: ['origin', 'event', 'role'] },
