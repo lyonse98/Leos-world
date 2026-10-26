@@ -32,6 +32,14 @@ interface StoryQueueItem {
   // directly and pre-synthesis skips the item entirely — the audio
   // already exists, so no quota is ever spent on it.
   audioUrl?: string;
+  // Per-item playback lifecycle, for items whose delivery must be
+  // CONFIRMED rather than assumed (the Q&A answer). onPlaybackStart
+  // fires when audio actually begins for this item; onPlaybackEnd
+  // fires exactly once when the item leaves the player, reporting
+  // whether it ever sounded. Queue movement alone proves nothing —
+  // a failed item advances the queue exactly like a finished one.
+  onPlaybackStart?: () => void;
+  onPlaybackEnd?: (sounded: boolean) => void;
 }
 
 interface CurrentPosition {
@@ -116,6 +124,12 @@ const GAP_AFTER_SPEECH_MS: Record<'driving' | 'walking' | 'stationary', number> 
   stationary: 3000,
 };
 
+// Bound on one TTS synthesis inside playback. Measured synthesis runs
+// ~6 s; a call still pending at 30 s is hung, not slow, and an item
+// waiting on it would otherwise never settle — the watchdog only
+// starts once audio exists. On timeout the browser voice takes over.
+const TTS_SYNTH_TIMEOUT_MS = 30000;
+
 export const useVoice = () => {
   const [isInitialized, setIsInitialized] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -145,6 +159,15 @@ export const useVoice = () => {
   // and how long it had been playing, and the queue no longer holds it once
   // playback has started.
   const currentSpokenRef = useRef<{ topic: string; text: string; startedAt: number } | null>(null);
+  // The queue item currently in the player, with its lifecycle state.
+  // Settled exactly once — by natural completion, a watchdog advance, a
+  // skip, or a stop — so a tracked item's owner always learns whether
+  // it sounded, and never hears twice.
+  const currentPlaybackRef = useRef<{
+    gen: number;
+    sounded: boolean;
+    onEnd?: (sounded: boolean) => void;
+  } | null>(null);
   const currentPositionProviderRef = useRef<(() => CurrentPosition | null) | null>(null);
   const lastKnownModeRef = useRef<MovementModeHysteresis>('stationary');
   // Audio is only permitted after a real user gesture. This records that the
@@ -205,6 +228,15 @@ export const useVoice = () => {
   // instant the listener taps, since that tap is what permits sound.
   const pendingSpeechRef = useRef<string | null>(null);
   const speakRef = useRef<(text: string) => void>(() => {});
+  const pendingTrackedRef = useRef<{
+    text: string;
+    onPlaybackStart?: () => void;
+    onPlaybackEnd?: (sounded: boolean) => void;
+  } | null>(null);
+  const speakTrackedRef = useRef<(
+    text: string,
+    cbs: { onPlaybackStart?: () => void; onPlaybackEnd?: (sounded: boolean) => void }
+  ) => void>(() => {});
 
   useEffect(() => {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
@@ -272,6 +304,11 @@ export const useVoice = () => {
           pendingSpeechRef.current = null;
           speakRef.current(held);
         }
+        const heldTracked = pendingTrackedRef.current;
+        if (heldTracked) {
+          pendingTrackedRef.current = null;
+          speakTrackedRef.current(heldTracked.text, heldTracked);
+        }
       }).catch(() => {
         audio.muted = false;
         audio.removeAttribute('src');
@@ -283,6 +320,11 @@ export const useVoice = () => {
     if (pending) {
       pendingSpeechRef.current = null;
       speakRef.current(pending);
+    }
+    const pendingTracked = pendingTrackedRef.current;
+    if (pendingTracked) {
+      pendingTrackedRef.current = null;
+      speakTrackedRef.current(pendingTracked.text, pendingTracked);
     }
   }, []);
 
@@ -373,7 +415,10 @@ export const useVoice = () => {
   // Play a line that must finish before anything else is heard. Unlike a
   // queued story, this owns the queue: an arriving story waits its turn
   // instead of cutting the line off mid-sentence.
-  const speakPriority = useCallback((text: string) => {
+  const speakPriority = useCallback((text: string, cbs?: {
+    onPlaybackStart?: () => void;
+    onPlaybackEnd?: (sounded: boolean) => void;
+  }) => {
     const trimmed = text.trim();
     if (!trimmed) return;
 
@@ -381,6 +426,8 @@ export const useVoice = () => {
       text: trimmed,
       generatedAt: Date.now(),
       isLocationStory: false,
+      onPlaybackStart: cbs?.onPlaybackStart,
+      onPlaybackEnd: cbs?.onPlaybackEnd,
     });
 
     if (!isPlayingStoryRef.current) {
@@ -405,6 +452,33 @@ export const useVoice = () => {
 
   speakRef.current = speak;
 
+  // Speak a line whose delivery the caller must be able to CONFIRM:
+  // the callbacks report when it actually starts sounding and when it
+  // leaves the player, with whether it ever sounded at all. Used for
+  // the Q&A answer, where assuming delivery from queue movement alone
+  // once let the bridge line play over an answer that never aired.
+  // If audio is not yet unlocked, the line is held (like speak) and
+  // flushed by unlock with its callbacks intact.
+  const speakTracked = useCallback((text: string, cbs: {
+    onPlaybackStart?: () => void;
+    onPlaybackEnd?: (sounded: boolean) => void;
+  }) => {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      cbs.onPlaybackEnd?.(false);
+      return;
+    }
+
+    if (!unlockedRef.current) {
+      pendingTrackedRef.current = { text: trimmed, ...cbs };
+      return;
+    }
+
+    speakPriority(trimmed, cbs);
+  }, [speakPriority]);
+
+  speakTrackedRef.current = speakTracked;
+
   const clearWatchdog = useCallback(() => {
     if (watchdogRef.current !== null) {
       clearTimeout(watchdogRef.current);
@@ -412,8 +486,21 @@ export const useVoice = () => {
     }
   }, []);
 
+  // Settle the item currently in the player: fire its onPlaybackEnd
+  // exactly once with whether it ever sounded, and forget it. Every
+  // exit path from the player — natural end, watchdog advance, skip,
+  // stop — goes through here, so a tracked item can neither be lost
+  // silently nor reported twice.
+  const settleCurrentPlayback = useCallback(() => {
+    const pb = currentPlaybackRef.current;
+    if (!pb) return;
+    currentPlaybackRef.current = null;
+    pb.onEnd?.(pb.sounded);
+  }, []);
+
   const stop = useCallback(() => {
     playGenRef.current += 1;
+    settleCurrentPlayback();
     if (synthRef.current) {
       synthRef.current.cancel();
     }
@@ -438,7 +525,7 @@ export const useVoice = () => {
     preSynthTextRef.current = null;
     playbackStartedRef.current = false;
     clearWatchdog();
-  }, [clearWatchdog]);
+  }, [clearWatchdog, settleCurrentPlayback]);
 
   const processQueue = useCallback(() => {
     if (isProcessingQueueRef.current || sentenceQueueRef.current.length === 0) {
@@ -534,6 +621,10 @@ export const useVoice = () => {
         isPlayingStoryRef.current = false;
         clearWatchdog();
         setIsSpeaking(false);
+        // The item being abandoned still settles: if it never sounded,
+        // its owner (e.g. the Q&A cycle) must learn that now, not from
+        // watching the next item start.
+        settleCurrentPlayback();
         setTimeout(() => playStoryFromQueueRef.current(), 300);
         return;
       }
@@ -541,7 +632,7 @@ export const useVoice = () => {
     };
 
     watchdogRef.current = window.setTimeout(check, checkInterval);
-  }, [clearWatchdog]);
+  }, [clearWatchdog, settleCurrentPlayback]);
 
   // --- Freshness gate ---
 
@@ -675,7 +766,7 @@ export const useVoice = () => {
   const preSynthesizeNextRef = useRef(preSynthesizeNext);
   preSynthesizeNextRef.current = preSynthesizeNext;
 
-  const playSegmentsWithGemini = useCallback(async (fullText: string, onDone: (blocked: boolean) => void, providedUrl?: string) => {
+  const playSegmentsWithGemini = useCallback(async (fullText: string, onDone: (blocked: boolean) => void, providedUrl?: string, onAir?: () => void) => {
     let finished = false;
     const finish = (blocked: boolean) => {
       if (finished) return;
@@ -691,7 +782,7 @@ export const useVoice = () => {
       }
       console.log('[Voice] Gemini TTS fallback:', reason);
       setTtsStatus('fallback: ' + reason);
-      playSegmentsBrowser([fullText], finish);
+      playSegmentsBrowser([fullText], finish, onAir);
     };
 
     // Pre-made audio (library episode) needs no TTS model at all — skip the
@@ -716,7 +807,12 @@ export const useVoice = () => {
         storyTimingRef.current.synthCacheHit = true;
         url = providedUrl;
       } else {
-        const ttsResult = await geminiAudio.textToAudioUrl(fullText);
+        const ttsResult = await Promise.race([
+          geminiAudio.textToAudioUrl(fullText),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('TTS synthesis timed out')), TTS_SYNTH_TIMEOUT_MS)
+          ),
+        ]);
         storyTimingRef.current.synthResolvedAt = Date.now();
         storyTimingRef.current.synthCacheHit = ttsResult.cacheHit;
         url = ttsResult.url;
@@ -740,6 +836,7 @@ export const useVoice = () => {
         playbackStartedRef.current = true;
         storyTimingRef.current.onPlayingAt = Date.now();
         lastProgressAtRef.current = Date.now();
+        onAir?.();
         preSynthesizeNextRef.current();
       };
       audio.ontimeupdate = () => {
@@ -780,7 +877,7 @@ export const useVoice = () => {
   // Browser SpeechSynthesis playback — the original sentence-by-sentence path.
   // Used as a fallback when Gemini TTS is unavailable, and for short scripted
   // lines that don't justify a TTS API call.
-  const playSegmentsBrowser = useCallback((segments: string[], onDone: (blocked: boolean) => void) => {
+  const playSegmentsBrowser = useCallback((segments: string[], onDone: (blocked: boolean) => void, onAir?: () => void) => {
     const sentenceGroups = segments
       .map(seg => {
         const cleaned = cleanTextForSpeech(seg);
@@ -817,6 +914,7 @@ export const useVoice = () => {
         playbackStartedRef.current = true;
         storyTimingRef.current.onPlayingAt = Date.now();
         lastProgressAtRef.current = Date.now();
+        onAir?.();
         preSynthesizeNextRef.current();
         audioBlockedRef.current = false;
         setAudioBlocked(false);
@@ -963,6 +1061,18 @@ export const useVoice = () => {
     const gen = ++playGenRef.current;
     const fullText = item.transitionText ? `${item.transitionText} ${item.text}` : item.text;
 
+    // Lifecycle record for this dequeue. markSounded is the ONLY way
+    // `sounded` becomes true — an engine event proving audio began —
+    // and the record settles exactly once when the item leaves the
+    // player (see onDone, the watchdog, skip, and stop).
+    const playback = { gen, sounded: false, onEnd: item.onPlaybackEnd };
+    currentPlaybackRef.current = playback;
+    const markSounded = () => {
+      if (playback.sounded) return;
+      playback.sounded = true;
+      item.onPlaybackStart?.();
+    };
+
     // All playback gets Leo's real voice via Gemini TTS. Falls back to browser
     // voice if Gemini TTS is unavailable or fails.
     const useGeminiTTS = fullText.length > 0;
@@ -975,20 +1085,29 @@ export const useVoice = () => {
       setIsSpeaking(false);
 
       if (blocked) {
+        // Not an ending: the item goes back to the front of the queue
+        // to be retried once sound is allowed, and its lifecycle
+        // record goes with it — it will settle when it finally plays
+        // (or leaves) on the next dequeue. Discard this dequeue's
+        // record WITHOUT firing.
+        if (currentPlaybackRef.current === playback) {
+          currentPlaybackRef.current = null;
+        }
         storyQueueRef.current.unshift(item);
         console.log('[Voice] Audio blocked — holding this story until sound is allowed');
         return;
       }
 
+      settleCurrentPlayback();
       setTimeout(() => playStoryFromQueueRef.current(), 100);
     };
 
     if (useGeminiTTS) {
-      playSegmentsWithGemini(fullText, onDone, item.audioUrl);
+      playSegmentsWithGemini(fullText, onDone, item.audioUrl, markSounded);
     } else {
-      playSegmentsBrowser([fullText], onDone);
+      playSegmentsBrowser([fullText], onDone, markSounded);
     }
-  }, [isStillRelevant, playSegmentsBrowser, playSegmentsWithGemini, clearWatchdog]);
+  }, [isStillRelevant, playSegmentsBrowser, playSegmentsWithGemini, clearWatchdog, settleCurrentPlayback]);
 
   const playStoryFromQueueRef = useRef(playStoryFromQueue);
   playStoryFromQueueRef.current = playStoryFromQueue;
@@ -1193,6 +1312,7 @@ export const useVoice = () => {
   const skipCurrent = useCallback(() => {
     console.log('[Voice] Skip requested');
     playGenRef.current += 1;
+    settleCurrentPlayback();
     synthRef.current?.cancel();
     if (audioElRef.current) {
       audioElRef.current.pause();
@@ -1216,12 +1336,13 @@ export const useVoice = () => {
     clearWatchdog();
     setIsSpeaking(false);
     setTimeout(() => onStoryCompleteRef.current?.(), 50);
-  }, [clearWatchdog]);
+  }, [clearWatchdog, settleCurrentPlayback]);
 
   const muteForMinutes = useCallback((minutes: number) => {
     mutedUntilRef.current = Date.now() + minutes * 60_000;
     console.log(`[Voice] Muted for ${minutes} minutes`);
     playGenRef.current += 1;
+    settleCurrentPlayback();
     synthRef.current?.cancel();
     if (audioElRef.current) {
       audioElRef.current.pause();
@@ -1244,7 +1365,7 @@ export const useVoice = () => {
     playbackStartedRef.current = false;
     clearWatchdog();
     setIsSpeaking(false);
-  }, [clearWatchdog]);
+  }, [clearWatchdog, settleCurrentPlayback]);
 
   const isMuted = useCallback(() => Date.now() < mutedUntilRef.current, []);
 
@@ -1330,6 +1451,7 @@ export const useVoice = () => {
     ensureVoiceReady,
     initializeVoice,
     speak,
+    speakTracked,
     stop,
     queueStory,
     queuePriorityStory,

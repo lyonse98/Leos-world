@@ -290,15 +290,25 @@ function App() {
   // Strict Q&A serialization (Erik's model): one question + answer at a
   // time, across BOTH inputs. isProcessingQuestion is the single lock —
   // the text box and Send button already disable on it, and the Leo
-  // press already refuses on it. What changed is the lock's lifespan:
-  // it used to die 2s after the answer's text arrived (while Leo was
-  // still speaking it). Now it spans the whole answer cycle and is
-  // released by releaseQuestionLock, called from the story-start
-  // handler when the next line after the answer goes on air (the
-  // answer is complete; the tour is resuming), from the failsafe
-  // below, or at tour end. No path may leave it set — a stuck lock
-  // bricks both inputs, which is worse than any overlap it prevents.
+  // press already refuses on it. The lock spans the whole answer cycle
+  // and is released by releaseQuestionLock.
+  //
+  // The cycle is driven by CONFIRMED playback, never by queue movement
+  // (Oct 25 lost-answer fix): the answer is spoken via speakTracked,
+  // and only when the player reports the answer item has ENDED — with
+  // proof it sounded — is the bridge line queued and the tour resumed;
+  // the lock then releases when the next line goes on air. An answer
+  // that ends without ever sounding (both voice engines failed) gets
+  // an honest spoken apology and a clean release instead. The earlier
+  // design inferred completion from the next queue item starting,
+  // which cannot tell a finished answer from a dropped one — it
+  // played "Alright, let's get back to it" over an answer that never
+  // aired and released the lock as if all was well. The failsafe below
+  // remains as a backstop, and tour end releases too. No path may
+  // leave the lock set — a stuck lock bricks both inputs, which is
+  // worse than any overlap it prevents.
   const answerPhaseRef = useRef<'awaiting-answer' | 'awaiting-resume' | null>(null);
+  const answerCycleRef = useRef(0);
   const answerFailsafeRef = useRef<number | null>(null);
   const releaseQuestionLock = useCallback(() => {
     answerPhaseRef.current = null;
@@ -484,6 +494,11 @@ function App() {
     geminiService.cancelAllRequests();
     speech.stopListening();
     pttHoldRef.current = false;
+    // Retire any in-flight answer cycle BEFORE stopping the player:
+    // the stop settles the answer item, and its callback must find the
+    // cycle already gone rather than queueing a bridge into a dead tour.
+    answerCycleRef.current++;
+    releaseQuestionLock();
     voice.muteForMinutes(0);
     voice.stop();
     geolocation.stopTracking();
@@ -530,24 +545,45 @@ function App() {
       if (token !== geminiService.currentRequestToken()) return;
       if (fullAnswer.trim().length > 0) {
         voice.recordSpokenText(fullAnswer);
-        // Arm the answer cycle BEFORE speaking: the story-start
-        // handler advances the phase when the answer goes on air and
-        // releases the lock when the next line after it starts. The
-        // failsafe guarantees release even if a start signal is ever
-        // missed — the lock must not outlive its welcome.
+        // Arm the answer cycle BEFORE speaking, with the failsafe as
+        // backstop. What happens next is decided by the tracked
+        // playback callbacks below — not by watching the queue move.
         answerPhaseRef.current = 'awaiting-answer';
         if (answerFailsafeRef.current) window.clearTimeout(answerFailsafeRef.current);
         answerFailsafeRef.current = window.setTimeout(() => releaseQuestionLock(), 120_000);
-        voice.speak(fullAnswer);
-        // Bridge back into the tour so the listener isn't left hanging after
-        // the answer ends. Queue a short handoff line, then immediately kick
-        // off the next story fetch so the gap is minimal.
-        const pos = geolocation.position;
-        if (pos) {
-          voice.queueStory("Alright, let's get back to it.", undefined, undefined, undefined, 'scripted');
-          lastFetchTimeRef.current = Date.now();
-          handleIntervalUpdate(pos);
-        }
+        const cycle = ++answerCycleRef.current;
+        voice.speakTracked(fullAnswer, {
+          onPlaybackEnd: (sounded: boolean) => {
+            // Stale cycle (a newer question, a tour end) or an already
+            // settled phase (failsafe beat us): nothing to do.
+            if (cycle !== answerCycleRef.current) return;
+            if (answerPhaseRef.current !== 'awaiting-answer') return;
+            if (sounded) {
+              // The answer genuinely aired and has now ended. Only
+              // NOW queue the bridge back into the tour, and kick the
+              // next story fetch so the gap is minimal. The lock
+              // releases when the next line (bridge or story) goes on
+              // air — the answer has fully played AND the tour has
+              // resumed, per the serialization rule.
+              answerPhaseRef.current = 'awaiting-resume';
+              const pos = geolocation.position;
+              if (pos) {
+                voice.queueStory("Alright, let's get back to it.", undefined, undefined, undefined, 'scripted');
+                lastFetchTimeRef.current = Date.now();
+                handleIntervalUpdate(pos);
+              } else {
+                releaseQuestionLock();
+              }
+            } else {
+              // The answer never sounded — both engines failed under
+              // it. Say so honestly, out loud, and release cleanly;
+              // never bridge over a hole and call it an answer.
+              answerPhaseRef.current = null;
+              voice.speak("Sorry — that answer didn't come through. Ask me again.");
+              releaseQuestionLock();
+            }
+          },
+        });
       }
     } catch (error) {
       console.error('Error answering question:', error);
@@ -557,8 +593,8 @@ function App() {
     } finally {
       // Paths that never armed a cycle (stale token, empty answer,
       // generation error) end here. An armed cycle deliberately keeps
-      // the lock past this point — it ends at the story-start handler
-      // when the tour resumes, or at the failsafe.
+      // the lock past this point — it ends in the tracked playback
+      // callback when the answer's fate is known, or at the failsafe.
       if (answerPhaseRef.current === null) {
         releaseQuestionLock();
       }
@@ -926,13 +962,13 @@ function App() {
 
   useEffect(() => {
     voice.setOnStoryStart((topic: string | null) => {
-      // Answer-cycle bookkeeping for strict Q&A serialization: the
-      // first start after arming is the answer going on air; the start
-      // after that (bridge line or a story) means the answer is
-      // complete and the tour is resuming — release the question lock.
-      if (answerPhaseRef.current === 'awaiting-answer') {
-        answerPhaseRef.current = 'awaiting-resume';
-      } else if (answerPhaseRef.current === 'awaiting-resume') {
+      // Answer-cycle bookkeeping: the lock releases when the first
+      // line AFTER a confirmed answer goes on air — the bridge line or
+      // a resumed story. Starts while the phase is 'awaiting-answer'
+      // (the answer item itself dequeuing, or anything else) prove
+      // nothing about the answer and are ignored; confirmation comes
+      // from the tracked playback callback in handleUserQuestion.
+      if (answerPhaseRef.current === 'awaiting-resume') {
         releaseQuestionLock();
       }
       setHasLikedStory(false);
