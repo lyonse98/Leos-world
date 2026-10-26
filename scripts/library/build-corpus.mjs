@@ -182,7 +182,31 @@ async function runLiveTts(list, route) {
   return done;
 }
 
-if (ttsMode !== 'off' && pending.length > 0) {
+const collectBatch = argVal('collect-batch', null);
+if (collectBatch && pending.length > 0) {
+  // Attach to a batch job submitted by an earlier run (jobs live
+  // server-side; a killed or timed-out client loses nothing).
+  console.log(`[batch] collecting existing job ${collectBatch}`);
+  try {
+    const results = await pollTtsBatch(keys.geminiKey, collectBatch);
+    let ok = 0;
+    for (const entry of pending) {
+      const r = results.get(`${entry.place_key}|${entry.angle}`);
+      if (r?.bytes) { recordAudio(entry, r, 'batch', collectBatch); ok++; }
+      else {
+        entry.tts_error = r?.error || 'missing from batch output';
+        saveManifest();
+        console.error(`[batch] no audio for ${entry.place_key}|${entry.angle}: ${entry.tts_error}`);
+      }
+    }
+    console.log(`[batch] collected ${ok}/${pending.length} audio files from ${collectBatch}`);
+    const failed = pending.filter(e => !e.audio_file);
+    if (failed.length > 0) await runLiveTts(failed, 'live-after-batch-failure');
+  } catch (e) {
+    console.error(`[batch] COLLECT FAILED: ${e.message}`);
+    await runLiveTts(pending, 'live-fallback');
+  }
+} else if (ttsMode !== 'off' && pending.length > 0) {
   if (ttsMode === 'batch') {
     const items = pending.map(e => ({
       key: `${e.place_key}|${e.angle}`,

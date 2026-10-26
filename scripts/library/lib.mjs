@@ -211,7 +211,7 @@ export async function assembleFacts(app, records, seed, coords) {
   }
 
   try {
-    const features = await withTimeout(app.osmService.getNearbyFeatures(pos, null), 30000, []);
+    const features = await withTimeout(app.osmService.getNearbyFeatures(pos, null), 15000, []);
     osmContext = app.osmService.formatForPrompt(features);
     if (features.length > 0) sources.push('openstreetmap');
   } catch (e) {
@@ -386,12 +386,15 @@ export async function pollTtsBatch(geminiKey, name, { timeoutMs = 25 * 60 * 1000
     });
     if (!res.ok) throw new Error(`batch poll HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
     const json = await res.json();
-    const state = json.state || json.metadata?.state || '';
+    // State enum arrives as BATCH_STATE_* on this API surface (JOB_STATE_*
+    // in other docs) — normalize before comparing.
+    const rawState = json.state || json.metadata?.state || '';
+    const state = rawState.replace(/^(JOB|BATCH)_STATE_/, '');
     if (state !== lastState) {
-      console.log(`[batch] ${name} state: ${state}`);
+      console.log(`[batch] ${name} state: ${rawState}`);
       lastState = state;
     }
-    if (state === 'JOB_STATE_SUCCEEDED') {
+    if (state === 'SUCCEEDED') {
       const out = new Map();
       const lists = [
         json.output?.inlinedResponses?.inlinedResponses,
@@ -418,8 +421,8 @@ export async function pollTtsBatch(geminiKey, name, { timeoutMs = 25 * 60 * 1000
       }
       return out;
     }
-    if (state === 'JOB_STATE_FAILED' || state === 'JOB_STATE_CANCELLED' || state === 'JOB_STATE_EXPIRED') {
-      throw new Error(`batch job ${state}: ${JSON.stringify(json.error || json).slice(0, 300)}`);
+    if (state === 'FAILED' || state === 'CANCELLED' || state === 'EXPIRED') {
+      throw new Error(`batch job ${rawState}: ${JSON.stringify(json.error || json).slice(0, 300)}`);
     }
     await sleep(intervalMs);
   }
