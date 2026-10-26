@@ -61,7 +61,7 @@ export const SEEDS = [
   // field test exposed the miss — Erik drove the length of it and Leo
   // told its tenants instead. THE place itself: the former Naval
   // Training Center, NRHP-listed as "Naval Training Station".
-  { n: 51, name: 'Liberty Station', area: 'Point Loma, San Diego', query: 'Liberty Station, San Diego', angles: ['origin', 'event', 'people'] },
+  { n: 51, name: 'Liberty Station', area: 'Point Loma, San Diego', query: 'Liberty Station, San Diego', angles: ['origin', 'event', 'people'], coords: { lat: 32.7393, lng: -117.2135, source: 'manual pin — 2640 Historic Decatur Rd (geocoders failed it under parallel load in the v13 build; it was skipped once — never again)' } },
   // Round 2 additions (coverage audit, Erik approved Oct 25, 2026).
   { n: 52, name: 'Petco Park', area: 'East Village, San Diego', query: 'Petco Park, San Diego', angles: ['origin', 'event', 'people'] },
   { n: 53, name: 'Marine Corps Recruit Depot San Diego', area: 'Midway, San Diego', query: 'Marine Corps Recruit Depot San Diego', angles: ['origin', 'event', 'people'] },
@@ -124,7 +124,7 @@ export const SEEDS = [
   { n: 103, name: 'Cardiff Kook', area: 'Cardiff-by-the-Sea', query: 'Cardiff Kook statue, Cardiff-by-the-Sea', angles: ['origin', 'legends', 'cultural'] },
   { n: 104, name: 'Hillcrest Sign', area: 'Hillcrest, San Diego', query: 'Hillcrest sign, San Diego', angles: ['origin', 'building', 'cultural'] },
   { n: 105, name: 'Fiesta Island', area: 'Mission Bay, San Diego', query: 'Fiesta Island, San Diego', angles: ['origin', 'sports', 'cultural'] },
-  { n: 106, name: 'Unarius Academy', area: 'El Cajon', query: 'Unarius Academy, El Cajon', angles: ['origin', 'legends', 'people'] },
+  { n: 106, name: 'Unarius Academy', area: 'El Cajon', query: 'Unarius Academy, El Cajon', angles: ['origin', 'legends', 'people'], coords: { lat: 32.7956, lng: -116.9623, source: 'manual pin — 145 S Magnolia Ave, El Cajon (geocoders returned nothing in the v13 build)' } },
   { n: 107, name: 'Cowles Mountain', area: 'Mission Trails, San Diego', query: 'Cowles Mountain, San Diego', angles: ['origin', 'sports', 'surroundings'] },
   { n: 108, name: 'Potato Chip Rock', area: 'Poway', query: 'Potato Chip Rock, Mount Woodson, Poway', angles: ['origin', 'sports', 'recent'] },
   { n: 109, name: 'Galleta Meadows', area: 'Borrego Springs', query: 'Galleta Meadows sculptures, Borrego Springs', angles: ['origin', 'building', 'legends'] },
