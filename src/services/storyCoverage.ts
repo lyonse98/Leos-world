@@ -122,8 +122,10 @@ export function areaSubjectKey(lat: number, lng: number): string {
   return `area:${Math.floor(lat / CELL_DEGREES)}_${Math.floor(lng / CELL_DEGREES)}`;
 }
 
+import { normalizePlaceName } from './placeName';
+
 export function landmarkSubjectKey(name: string): string {
-  return `landmark:${name.trim().toLowerCase()}`;
+  return `landmark:${normalizePlaceName(name)}`;
 }
 
 // True when this angle was picked by rotation rather than being the canonical
@@ -209,16 +211,43 @@ class StoryCoverageService {
   // starts with a clean slate (locationTracker.reset clears it).
   private sessionLockedSubjects: Set<string> = new Set();
 
+  // Session alias groups: subject keys proven to be the SAME place under
+  // different names (a Google candidate and a registry record at the same
+  // ground, linked when the candidate pool is assembled). Locking or
+  // checking any member binds the whole group — otherwise the lockout
+  // holds only the spelling that happened to be told, and the same place
+  // walks back in under its other name. Session-scoped like the locks
+  // themselves; the links are re-derived on every candidate merge.
+  private sessionAliasGroups: Map<string, Set<string>> = new Map();
+
+  linkSubjectAliases(keyA: string, keyB: string): void {
+    if (!keyA || !keyB || keyA === keyB) return;
+    const groupA = this.sessionAliasGroups.get(keyA);
+    const groupB = this.sessionAliasGroups.get(keyB);
+    const merged = new Set<string>([keyA, keyB, ...(groupA ?? []), ...(groupB ?? [])]);
+    for (const member of merged) this.sessionAliasGroups.set(member, merged);
+  }
+
+  private aliasGroupOf(subjectKey: string): Set<string> {
+    return this.sessionAliasGroups.get(subjectKey) ?? new Set([subjectKey]);
+  }
+
   lockSubjectForSession(subjectKey: string): void {
-    this.sessionLockedSubjects.add(subjectKey);
+    for (const member of this.aliasGroupOf(subjectKey)) {
+      this.sessionLockedSubjects.add(member);
+    }
   }
 
   isSubjectLockedForSession(subjectKey: string): boolean {
-    return this.sessionLockedSubjects.has(subjectKey);
+    for (const member of this.aliasGroupOf(subjectKey)) {
+      if (this.sessionLockedSubjects.has(member)) return true;
+    }
+    return false;
   }
 
   clearSessionLocks(): void {
     this.sessionLockedSubjects.clear();
+    this.sessionAliasGroups.clear();
   }
 
   // Full wipe — every angle on every subject forgotten, in memory and in

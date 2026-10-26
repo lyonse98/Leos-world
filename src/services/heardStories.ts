@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import { normalizePlaceName, placeNamesMatch } from './placeName';
 
 // Anonymous per-device identifier. It is a random string stored in local
 // storage — no account, no email, no personal information. It exists so the
@@ -52,6 +53,11 @@ const MAX_HISTORY = 500;
 // closing the app and driving the same route again next week.
 class HeardStoriesService {
   private heardTopics: Set<string> = new Set();
+  // Subject identities (deep-normalized bare place names) extracted from
+  // every heard topic. Kept alongside the raw topics because the same
+  // place arrives under variant spellings across sources and sessions,
+  // and a subject check against raw topic strings misses every variant.
+  private heardSubjects: Set<string> = new Set();
   private hydrated = false;
   private hydrating: Promise<void> | null = null;
 
@@ -68,14 +74,14 @@ class HeardStoriesService {
   // callers ask about a place by its bare name. A bare-name lookup against
   // raw topics therefore misses every rotated telling and the place looks
   // unheard — the root of same-landmark retells. A subject counts as heard
-  // when the bare name or any of its angle variants has been told.
+  // when the bare name or any of its angle variants has been told, under
+  // any spelling variant of the name.
   hasHeardSubject(name: string): boolean {
-    const key = this.normalize(name);
+    const key = normalizePlaceName(name);
     if (key.length === 0) return false;
-    if (this.heardTopics.has(key)) return true;
-    const prefix = `${key} — `;
-    for (const topic of this.heardTopics) {
-      if (topic.startsWith(prefix)) return true;
+    if (this.heardSubjects.has(key)) return true;
+    for (const heard of this.heardSubjects) {
+      if (placeNamesMatch(heard, key)) return true;
     }
     return false;
   }
@@ -83,6 +89,8 @@ class HeardStoriesService {
   markHeard(topic: string): void {
     const key = this.normalize(topic);
     if (key.length > 0) this.heardTopics.add(key);
+    const bare = normalizePlaceName(topic.split(' — ')[0]);
+    if (bare.length > 0) this.heardSubjects.add(bare);
   }
 
   async hydrate(): Promise<void> {
@@ -143,6 +151,7 @@ class HeardStoriesService {
 
   reset(): void {
     this.heardTopics = new Set();
+    this.heardSubjects = new Set();
     this.hydrated = false;
   }
 }
