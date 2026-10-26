@@ -42,7 +42,18 @@ const headers = {
 let uploaded = 0;
 let rows = 0;
 for (const e of ready) {
-  const bucketKey = `library/${e.place_key}/${e.angle}.wav`;
+  // place_key stays canonical (the app's normalizePlaceKey output, accents and
+  // all — Postgres is fine with it), but Supabase Storage REJECTS non-ASCII
+  // object keys (InvalidKey for 'ñ', 'á', '–'), so the storage key is an
+  // ASCII-folded rendering of the same key. audio_path stores the folded key,
+  // which is all the app ever reads.
+  const asciiPlace = e.place_key
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[–—]/g, '-')
+    .replace(/&/g, 'and')
+    .replace(/[^a-z0-9 .'-]/gi, '')
+    .replace(/\s+/g, ' ');
+  const bucketKey = `library/${asciiPlace}/${e.angle}.wav`;
   const filePath = path.join(audioDir, e.audio_file);
   if (dryRun) {
     console.log(`[ingest] DRY RUN would upload ${e.audio_file} → ${bucketKey} and upsert (${e.place_key}, ${e.angle})`);
