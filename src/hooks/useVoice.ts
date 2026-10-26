@@ -228,6 +228,15 @@ export const useVoice = () => {
   // Audio is only permitted after a real user gesture. This records that the
   // engine has been woken once, so we do not waste the gesture.
   const unlockedRef = useRef<boolean>(false);
+  // Generation counter for the audio-element prime in unlock(). Every
+  // unlock() re-primes, and re-assigning the element's src ABORTS the
+  // previous prime's play() — its promise then rejects and, unguarded,
+  // the stale rejection landed AFTER the newer prime succeeded: it set
+  // unlockedRef back to false and stripped the src out from under the
+  // live prime, so a line already spoken (the tour-start welcome) sat
+  // held in pendingSpeechRef waiting for an unlock that had, on paper,
+  // already happened. Only the LATEST prime may write state or flush.
+  const primeGenRef = useRef<number>(0);
   const audioBlockedRef = useRef<boolean>(false);
   // Increments every time playback ownership changes (new story, skip, mute).
   // Callbacks from a story that no longer owns the queue check this and bail,
@@ -353,9 +362,13 @@ export const useVoice = () => {
     // a prime actually succeeds, and a banner tap genuinely re-primes.
     const audio = audioElRef.current;
     if (audio) {
+      const primeGen = ++primeGenRef.current;
       audio.muted = true;
       audio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
       audio.play().then(() => {
+        // A newer unlock() has re-primed since this attempt began; this
+        // settlement belongs to a dead prime and must not touch state.
+        if (primeGen !== primeGenRef.current) return;
         audio.pause();
         audio.currentTime = 0;
         audio.muted = false;
@@ -380,6 +393,10 @@ export const useVoice = () => {
           speakTrackedRef.current(heldTracked.text, heldTracked, { front: heldTracked.front });
         }
       }).catch(() => {
+        // Same generation guard as the success path: an aborted prime
+        // (killed by the next unlock's src assignment) must not reset
+        // the unlock a newer prime already earned, nor strip its src.
+        if (primeGen !== primeGenRef.current) return;
         audio.muted = false;
         audio.removeAttribute('src');
         unlockedRef.current = false;

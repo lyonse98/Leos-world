@@ -473,7 +473,17 @@ class GeminiService {
   private chooseTarget(position: Position, factPack: StoryFactPack, context?: string): StoryTarget {
     // Broad-to-narrow: the first story in a new neighborhood should be an
     // area overview, not a landmark deep-dive. After that, narrow to landmarks.
-    const isFirstInNeighborhood = context === 'neighborhood_intro' || context === 'initial';
+    // 'welcome_back' belongs on this list: it is an intro serve whose
+    // coverage history flipped the flavor (see getTourNarration), and its
+    // own prompt instruction demands an AREA story — "tell them something
+    // they probably do NOT know about this area yet... a fresh angle or a
+    // deeper cut". Omitting it let the flip retarget the reserved opener
+    // serve to the top landmark: the Oct 26, 2026 stationary field test
+    // opened in La Jolla Colony (an area with permanent angle coverage)
+    // and serve #2 came back as the dog park — the neighborhood welcome
+    // never existed, under a first_serve audit that still read 'welcome'.
+    // The flip may flavor the prompt; it must never retarget the serve.
+    const isFirstInNeighborhood = context === 'neighborhood_intro' || context === 'initial' || context === 'welcome_back';
 
     // Angle rotation on an already-told landmark is a dwell feature: the
     // stationary contexts are the AREA_ANGLES strings themselves. In every
@@ -849,7 +859,12 @@ class GeminiService {
     }
 
     // Detect a return visit: if the area subject key already has told angles,
-    // this is a welcome-back, not a first-time intro.
+    // this is a welcome-back, not a first-time intro. NOTE: the coverage
+    // record is permanent (not day-scoped), so in any area the listener has
+    // ever toured this flip fires on every start — it is a PROMPT flavor
+    // only. Targeting stays area-first for welcome_back (chooseTarget),
+    // because the serve is still the tour's neighborhood welcome; letting
+    // it narrow to a landmark was the Oct 26, 2026 missing-intro defect.
     let effectiveContext = context;
     if (context === 'neighborhood_intro') {
       const areaKey = areaSubjectKey(position.lat, position.lng);

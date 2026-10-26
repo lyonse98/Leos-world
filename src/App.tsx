@@ -720,6 +720,22 @@ function App() {
       return;
     }
 
+    // One fetch cycle at a time. This callback has several triggers —
+    // the kickoff effect, the GPS interval, story completion, the 8s
+    // retry — and they do not coordinate: at tour start the GPS interval
+    // kept re-entering during the first (long) generation, and each
+    // re-entry ran a full fact pack only to hit shouldTell=false behind
+    // the decision the in-flight cycle had already consumed. The Oct 26,
+    // 2026 stationary test filed two spurious text/empty diagnostics
+    // that way, plus two wasted Places/Wikipedia rounds. A skipped
+    // cycle loses nothing: the in-flight fetch queues its story (whose
+    // completion re-triggers this callback), or the interval/retry
+    // fires again once the flag clears.
+    if (isFetchingStoryRef.current) {
+      console.log('[Tour] Fetch already in flight — skipping concurrent cycle');
+      return;
+    }
+
     console.log('[Tour] Getting story for position:', position);
     setPipelineStatus('fetching landmarks');
     // This fetch's start, held LOCALLY until its own result lands —
@@ -778,6 +794,10 @@ function App() {
 
       if (epoch !== geminiService.currentRequestToken()) {
         console.log('[Tour] Story generation superseded (mic or skip) — cached, not spoken');
+        // Clear the fetch flag on this exit too: the entry guard above
+        // trusts it, and a superseded cycle never reaches the clears
+        // below — leaving it set would wedge every later fetch.
+        isFetchingStoryRef.current = false;
         return;
       }
 
@@ -1166,6 +1186,19 @@ function App() {
         return;
       }
 
+      // The analytics clock starts HERE, at the tap — it used to start
+      // after the intro was spoken (below the ensureVoiceReady await),
+      // so every "ms from tour start" quietly excluded the voice-list
+      // wait, and the opener's settle metric could not distinguish a
+      // late START from a long line: the Oct 26, 2026 field test's
+      // opener_spoken read 20.9s for a ~55-word line that takes ~20s
+      // merely to say. session_start is the tour's first event either
+      // way; stamping it at the tap makes the elapsed metrics honest.
+      const sessionId = `session_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+      sessionStorage.setItem('leo_session_id', sessionId);
+      analytics.init(sessionId);
+      analytics.track('session_start', null, 'stationary');
+
       // Speech must be requested inside this tap. The voice list is resolved
       // first: it usually loads within a frame, and waiting for it means the
       // whole opening line plays in Leo's voice instead of swapping speakers
@@ -1190,11 +1223,23 @@ function App() {
           // ears. Voice is 'local' by design (see above); a settle
           // that did not complete also files a pipeline_diag.
           try {
+            // Two edges, because the contract is about the START: the
+            // welcome must be AUDIBLE within ~1-2s of the tap. The
+            // settle edge alone (all this event used to carry) reads
+            // ~20s on a healthy start — the fresh intro lines are
+            // ~55-60 words at rate 0.95 — and the Oct 26, 2026 field
+            // test was nearly diagnosed as a 21s delay on that basis.
+            // ms_to_first_sound = settle elapsed minus the time the
+            // line itself spent sounding (info.soundedMs): the true
+            // start latency, provable from the data alone.
+            const settleElapsedMs = analytics.tourElapsedMs();
             analytics.track('opener_spoken', null, undefined, {
               voice: 'local',
               sounded: info.sounded,
               completed: info.completed,
-              ms_from_tour_start: analytics.tourElapsedMs(),
+              sounded_ms: info.soundedMs,
+              ms_from_tour_start: settleElapsedMs,
+              ms_to_first_sound: info.sounded ? settleElapsedMs - info.soundedMs : null,
             });
           } catch { /* a metric must never break the opener */ }
           if (!info.completed) {
@@ -1219,10 +1264,8 @@ function App() {
       locationTracker.reset();
       storyCache.setOnline(navigator.onLine);
 
-      const sessionId = `session_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
-      sessionStorage.setItem('leo_session_id', sessionId);
-      analytics.init(sessionId);
-      analytics.track('session_start', null, 'stationary');
+      // (sessionId + analytics.init + session_start moved up, to the tap —
+      // see the note at the top of this handler.)
 
       // These complete before GPS starts, so the first story fetch has the
       // full history. The UI is already on the tour screen by now.
