@@ -21,7 +21,11 @@ type EventType = 'session_start' | 'session_end' | 'story_played' | 'ad_played' 
   // notable transition that used to live only in the on-screen status
   // line and the console (pipeline_diag). Readable per-event through
   // the analytics_recent_events view (migration 20261026221500).
-  | 'opener_spoken' | 'question_playback' | 'question_lock_released' | 'story_playback' | 'pipeline_diag';
+  | 'opener_spoken' | 'question_playback' | 'question_lock_released' | 'story_playback' | 'pipeline_diag'
+  // The rotating pre-rendered Puck opener's settle (Oct 26, 2026):
+  // which clip played, that it was pre-rendered, and whether it
+  // completed — the runway made countable per tour.
+  | 'opener_clip';
 
 interface AnalyticsEvent {
   eventType: EventType;

@@ -10,6 +10,7 @@ import { locationTracker } from './services/locationTracker';
 import { analytics, trackDiag } from './services/analytics';
 import { placesService } from './services/placesService';
 import { getIntro } from './services/intros';
+import { pickOpener, openerAudioUrl, type PuckOpener } from './services/openers';
 import { heardStories, rotateUserKey } from './services/heardStories';
 import { tasteProfile } from './services/tasteProfile';
 import { storyCoverage, landmarkSubjectKey } from './services/storyCoverage';
@@ -229,6 +230,12 @@ function App() {
   const [lastStoryTiming, setLastStoryTiming] = useState<string>('');
   const prevStoryTimingEndRef = useRef<number | null>(null);
   const isFetchingStoryRef = useRef<boolean>(false);
+  // Set when the tour's first story (the reserved opener serve — the
+  // neighborhood welcome) has been fetched and queued. The Puck opener's
+  // extension rule reads it: if the intro still isn't queued when the
+  // primary clip ends, one long extension segment covers the remaining
+  // warm-up instead of leaving uncovered silence.
+  const firstStoryQueuedRef = useRef<boolean>(false);
 
   useEffect(() => {
     storyCache.setNetworkStatusCallback((online) => setIsOnline(online));
@@ -805,6 +812,7 @@ function App() {
         setPipelineStatus('story queued');
         fetchCycleRef.current = { startAt: fetchStartAt, readyAt: Date.now() };
         isFetchingStoryRef.current = false;
+        firstStoryQueuedRef.current = true;
         setStoriesCount(prev => prev + 1);
         setLastStorySource(result.fromLibrary ? 'library' : result.fromCache ? 'cache' : 'live');
         if (geminiError) { geminiService.clearError(); setGeminiError(null); }
@@ -1247,6 +1255,56 @@ function App() {
           }
         },
       });
+
+      // The rotating Puck opener — pre-rendered runway cover, queued
+      // immediately behind the canned welcome (Oct 26, 2026). Its job is
+      // to give the pipeline somewhere warm to happen: the kickoff fetch
+      // is already generating the neighborhood welcome in parallel, and
+      // the intro's synthesis pre-warms while this clip plays. The clip
+      // never gates generation; it covers it. Selection: fresh start →
+      // a medium primary, extended ONCE by a long segment if the intro
+      // still hasn't queued when the primary settles; resume → a short
+      // primary, never extended (brief by design). If the clip's audio
+      // can't load, playback falls back to speaking the same words in
+      // the device voice — the cover survives the failure.
+      firstStoryQueuedRef.current = false;
+      const primaryOpener = pickOpener(resume ? 'short' : 'medium');
+      if (primaryOpener) {
+        const playedThisStart: string[] = [primaryOpener.id];
+        const queueOpenerSegment = (opener: PuckOpener, isExtension: boolean) => {
+          voice.speak(opener.transcript, {
+            audioUrl: openerAudioUrl(opener),
+            onSettle: (info) => {
+              try {
+                analytics.track('opener_clip', null, undefined, {
+                  topic: opener.id,
+                  opener_id: opener.id,
+                  voice: 'gemini',
+                  source: 'prerendered',
+                  kind: opener.lengthClass,
+                  length_class: opener.lengthClass,
+                  segment: isExtension ? 'extension' : 'primary',
+                  sounded: info.sounded,
+                  completed: info.completed,
+                  engine: info.engine ?? 'none',
+                  attempts: info.attempts,
+                  sounded_ms: info.soundedMs,
+                  ms_from_tour_start: analytics.tourElapsedMs(),
+                });
+              } catch { /* a metric must never break the opener */ }
+              if (!isExtension && !resume && !firstStoryQueuedRef.current) {
+                const extension = pickOpener('long', playedThisStart);
+                if (extension) {
+                  playedThisStart.push(extension.id);
+                  queueOpenerSegment(extension, true);
+                }
+              }
+            },
+          });
+        };
+        queueOpenerSegment(primaryOpener, false);
+      }
+
       if (ambientOn) ambientAudio.start();
 
       // Flip to the tour view immediately. The intro is already playing — the

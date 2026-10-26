@@ -302,8 +302,13 @@ export const useVoice = () => {
   const backgroundedRef = useRef<boolean>(false);
   // A line requested before the first gesture is held here and spoken the
   // instant the listener taps, since that tap is what permits sound.
-  const pendingSpeechRef = useRef<{ text: string; localVoice?: boolean; onSettle?: (info: PlaybackSettle) => void } | null>(null);
-  const speakRef = useRef<(text: string, opts?: { localVoice?: boolean; onSettle?: (info: PlaybackSettle) => void }) => void>(() => {});
+  // Held lines are an ordered QUEUE, not a single slot: tour start speaks
+  // two lines back-to-back inside the tap (the canned local welcome, then
+  // the pre-rendered Puck opener), and both can land here while the prime
+  // is still resolving — a single slot would have overwritten the welcome
+  // with the opener and lost it.
+  const pendingSpeechRef = useRef<Array<{ text: string; localVoice?: boolean; audioUrl?: string; onSettle?: (info: PlaybackSettle) => void }>>([]);
+  const speakRef = useRef<(text: string, opts?: { localVoice?: boolean; audioUrl?: string; onSettle?: (info: PlaybackSettle) => void }) => void>(() => {});
   const pendingTrackedRef = useRef<{
     text: string;
     onPlaybackStart?: () => void;
@@ -383,9 +388,11 @@ export const useVoice = () => {
         // A held line must be spoken the moment the engine unlocks,
         // whoever's call made it happen.
         const held = pendingSpeechRef.current;
-        if (held) {
-          pendingSpeechRef.current = null;
-          speakRef.current(held.text, { localVoice: held.localVoice, onSettle: held.onSettle });
+        if (held.length > 0) {
+          pendingSpeechRef.current = [];
+          for (const line of held) {
+            speakRef.current(line.text, { localVoice: line.localVoice, audioUrl: line.audioUrl, onSettle: line.onSettle });
+          }
         }
         const heldTracked = pendingTrackedRef.current;
         if (heldTracked) {
@@ -404,9 +411,11 @@ export const useVoice = () => {
     }
 
     const pending = pendingSpeechRef.current;
-    if (pending) {
-      pendingSpeechRef.current = null;
-      speakRef.current(pending.text, { localVoice: pending.localVoice, onSettle: pending.onSettle });
+    if (pending.length > 0) {
+      pendingSpeechRef.current = [];
+      for (const line of pending) {
+        speakRef.current(line.text, { localVoice: line.localVoice, audioUrl: line.audioUrl, onSettle: line.onSettle });
+      }
     }
     const pendingTracked = pendingTrackedRef.current;
     if (pendingTracked) {
@@ -518,7 +527,7 @@ export const useVoice = () => {
     onPlaybackStart?: () => void;
     onPlaybackEnd?: (sounded: boolean) => void;
     onSettleDetail?: (info: PlaybackSettle) => void;
-  }, opts?: { localVoice?: boolean; front?: boolean }) => {
+  }, opts?: { localVoice?: boolean; front?: boolean; audioUrl?: string }) => {
     const trimmed = text.trim();
     if (!trimmed) return;
 
@@ -527,6 +536,7 @@ export const useVoice = () => {
       generatedAt: Date.now(),
       isLocationStory: false,
       localVoice: opts?.localVoice,
+      audioUrl: opts?.audioUrl,
       onPlaybackStart: cbs?.onPlaybackStart,
       onPlaybackEnd: cbs?.onPlaybackEnd,
       onSettleDetail: cbs?.onSettleDetail,
@@ -552,7 +562,7 @@ export const useVoice = () => {
     }
   }, []);
 
-  const speak = useCallback((text: string, opts?: { localVoice?: boolean; onSettle?: (info: PlaybackSettle) => void }) => {
+  const speak = useCallback((text: string, opts?: { localVoice?: boolean; audioUrl?: string; onSettle?: (info: PlaybackSettle) => void }) => {
     const trimmed = text.trim();
     if (!trimmed) return;
 
@@ -560,7 +570,7 @@ export const useVoice = () => {
     // and let the unlock step speak it. Dropping it here would silently lose
     // whatever the app most wanted to say.
     if (!unlockedRef.current) {
-      pendingSpeechRef.current = { text: trimmed, localVoice: opts?.localVoice, onSettle: opts?.onSettle };
+      pendingSpeechRef.current.push({ text: trimmed, localVoice: opts?.localVoice, audioUrl: opts?.audioUrl, onSettle: opts?.onSettle });
       return;
     }
 
