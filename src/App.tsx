@@ -14,7 +14,7 @@ import { getIntroEntry, introAudioUrl } from './services/intros';
 import { pickOpener, openerAudioUrl, type PuckOpener } from './services/openers';
 import { heardStories, rotateUserKey } from './services/heardStories';
 import { tasteProfile } from './services/tasteProfile';
-import { storyCoverage, landmarkSubjectKey } from './services/storyCoverage';
+import { storyCoverage, landmarkSubjectKey, LANDMARK_ANGLES, angleFromTopic } from './services/storyCoverage';
 import { latencyModel } from './services/latencyModel';
 import { calculateDistance, bearingDegrees, headingDelta } from './utils/geo';
 
@@ -444,7 +444,14 @@ function App() {
     pendingHearingRef.current.delete(storyId);
     if (info.sounded && info.completed) {
       if (rec.subjectKey?.startsWith('landmark:')) {
-        storyCoverage.settleSubjectHeard(rec.subjectKey);
+        // The angle just heard rides along (pre-publish stack
+        // Item 1): the Tier-1 per-angle lock decision counts it as
+        // spent. Rotation serves carry it directly; library serves
+        // carry it only in their topic, which angleFromTopic inverts.
+        storyCoverage.settleSubjectHeard(
+          rec.subjectKey,
+          rec.rotation?.angle ?? angleFromTopic(rec.topic)
+        );
       }
       locationTracker.recordStoryHeard(rec.topic, {
         context: rec.context,
@@ -888,14 +895,41 @@ function App() {
     // The story currently playing is NEVER cut off — it finishes, and the
     // major landmark is simply next. Only the strict Tier 1 test qualifies;
     // ordinary landmarks wait their normal turn.
+    //
+    // Scan reach (pre-publish stack Item 1, Oct 27, 2026): the fixed
+    // 150m was seconds of travel at speed — by the time the pin set,
+    // the landmark was beside or behind the car and the jump came too
+    // late to matter. The radius is now the discovery horizon
+    // expressed in meters — speed × the same adaptive horizon the
+    // fact pack projects with (current story's remainder + measured
+    // pipeline latency) — floored at 450m (inside the candidate pool's
+    // always-merged 500m walking reach) and capped at 1000m (the
+    // pool's driving merge reach; beyond it the pool itself is not
+    // populated, so a wider pin would name places the serve pipeline
+    // cannot see). The places service's radius argument is a formality
+    // — its pool already extends to these reaches; the distance filter
+    // below is the operative test.
+    //
+    // Eligibility (same item): a Tier-1 place is pinnable when it has
+    // never been heard, OR when it has been heard but an angle remains
+    // unheard and it is not session-locked (for a Tier-1 subject the
+    // lock now lands only at angle exhaustion). Erik's ruling: told
+    // almost every time it is encountered, as long as the angle is
+    // not re-used.
+    const tier1ScanRadiusM = Math.min(
+      1000,
+      Math.max(450, (position.speed ?? 0) * latencyModel.horizonS(null))
+    );
     let queueJumpTargetName: string | null = null;
     try {
-      const nearby = await placesService.getNearbyLandmarks(position, 150);
-      const tier1 = nearby.find(p =>
-        placesService.isTier1Landmark(p) &&
-        p.distance <= 150 &&
-        !heardStories.hasHeardSubject(p.name)
-      );
+      const nearby = await placesService.getNearbyLandmarks(position, tier1ScanRadiusM);
+      const tier1 = nearby.find(p => {
+        if (!placesService.isTier1Landmark(p) || p.distance > tier1ScanRadiusM) return false;
+        const key = landmarkSubjectKey(p.name);
+        if (storyCoverage.isSubjectLockedForSession(key)) return false;
+        if (!heardStories.hasHeardSubject(p.name)) return true;
+        return storyCoverage.hasFreshAngle(key, LANDMARK_ANGLES, [LANDMARK_ANGLES[0]]);
+      });
       if (tier1) {
         const currentTopic = voice.getCurrentStoryTopic();
         const currentBase = currentTopic?.split(' — ')[0].trim().toLowerCase();

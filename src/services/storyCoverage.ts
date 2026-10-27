@@ -36,6 +36,15 @@ const DAY_STATE_KEY = 'leo_day_state';
 // Cap-exempt major subjects (Tier-1 landmarks, library places). No date
 // stamp: a place does not stop being major overnight.
 const MAJOR_SUBJECTS_KEY = 'leo_major_subjects';
+// Strict Tier-1 subjects (placesService's Tier-1 test), tracked
+// separately from majors at large (pre-publish stack Item 1, Oct 27,
+// 2026): Erik's retell policy is Tier-1-specific — a Tier-1 place is
+// told again on a later encounter whenever an angle remains unheard,
+// while a curated major that is not Tier-1 keeps the place-absolute
+// session lock. No date stamp, like majors: a place does not stop
+// being Tier-1 overnight, and the set is re-derived whenever a
+// candidate pool evaluates the place anyway.
+const TIER1_SUBJECTS_KEY = 'leo_tier1_subjects';
 
 // Prominence-scaled daily cap: a MINOR subject (not Tier-1, not in the
 // library) may be told at most this many times per calendar day across
@@ -131,11 +140,31 @@ export function describeAngle(angle: string): string {
   return ANGLE_LABELS[angle] ?? angle.replace(/^(stationary|landmark)_/, '').replace(/_/g, ' ');
 }
 
+// The landmark angle a display topic encodes (pre-publish stack
+// Item 1, Oct 27, 2026): a bare topic is the canonical first telling
+// (LANDMARK_ANGLES[0]); a "<Place> — <angle label>" topic names its
+// angle through describeAngle, inverted here the same way the library
+// inverts it for lookupForTopic. The hearing funnel needs this
+// because library serves carry no rotation object — the topic is the
+// only place their angle survives.
+export function angleFromTopic(topic: string): string {
+  const sep = topic.indexOf(' — ');
+  if (sep === -1) return LANDMARK_ANGLES[0];
+  const label = topic.slice(sep + 3).trim();
+  return LANDMARK_ANGLES.find(a => describeAngle(a) === label) ?? LANDMARK_ANGLES[0];
+}
+
 export function areaSubjectKey(lat: number, lng: number): string {
   return `area:${Math.floor(lat / CELL_DEGREES)}_${Math.floor(lng / CELL_DEGREES)}`;
 }
 
 import { normalizePlaceName } from './placeName';
+// The durable heard record (pre-publish stack Item 1, Oct 27, 2026):
+// the Tier-1 per-angle lock decision at settle time needs to know
+// whether the canonical angle was already spent on this listener in
+// an earlier tour, and that truth lives in heardStories. Acyclic:
+// heardStories imports only supabase + placeName.
+import { heardStories } from './heardStories';
 
 export function landmarkSubjectKey(name: string): string {
   return `landmark:${normalizePlaceName(name)}`;
@@ -271,6 +300,25 @@ class StoryCoverageService {
   // re-derived whenever the place is evaluated anyway.
   private majorSubjects: Set<string> = new Set();
 
+  // Strict Tier-1 subjects, a subset of the majors (pre-publish stack
+  // Item 1): marked by the same candidate-pool evaluation that marks
+  // majors (markTier1Majors in gemini.ts), persisted like majors. The
+  // retell policy consults this set, NOT the majors set at large —
+  // a curated major that never passed the Tier-1 test keeps the old
+  // place-absolute lock.
+  private tier1Subjects: Set<string> = new Set();
+
+  // Landmark subjects HEARD on THIS tour (pre-publish stack Item 1):
+  // the record Erik's minor-place rule reads — one telling per minor
+  // place per tour, full stop. Tour-scoped on purpose: the session
+  // lock set above is DAY-scoped (the Oct 25 anti-restart-churn
+  // amendment), but the minor rule is stated per tour, so it gets its
+  // own record, cleared at every tour start (beginSession) and
+  // written only at a delivered settle (settleSubjectHeard) — a
+  // minor story that dies unheard does not spend the place's one
+  // telling. In-memory only: a page reload ends the tour anyway.
+  private tourHeardSubjects: Set<string> = new Set();
+
   // Subjects with a story SERVED (handed to the player) but not yet
   // settled — the in-flight half of coverage-at-hearing (fix stack
   // RC-2, Oct 27, 2026). Coverage used to be recorded at generation /
@@ -300,6 +348,13 @@ class StoryCoverageService {
         const parsed = JSON.parse(rawMajors) as unknown;
         if (Array.isArray(parsed)) {
           this.majorSubjects = new Set(parsed.filter((k): k is string => typeof k === 'string'));
+        }
+      }
+      const rawTier1 = localStorage.getItem(TIER1_SUBJECTS_KEY);
+      if (rawTier1) {
+        const parsed = JSON.parse(rawTier1) as unknown;
+        if (Array.isArray(parsed)) {
+          this.tier1Subjects = new Set(parsed.filter((k): k is string => typeof k === 'string'));
         }
       }
       const raw = localStorage.getItem(DAY_STATE_KEY);
@@ -354,6 +409,14 @@ class StoryCoverageService {
     }
   }
 
+  private saveTier1(): void {
+    try {
+      localStorage.setItem(TIER1_SUBJECTS_KEY, JSON.stringify([...this.tier1Subjects]));
+    } catch {
+      // storage unavailable — Tier-1 marks live in memory only
+    }
+  }
+
   // Day rollover, checked on entry to the day-state operations: a tour
   // left open across midnight (or a state restored from yesterday by a
   // fresh page load whose constructor ran before midnight) must not
@@ -373,6 +436,10 @@ class StoryCoverageService {
   // The only work here is the rollover check.
   beginSession(): void {
     this.syncDay();
+    // The tour-heard record is the one per-TOUR structure in this
+    // service (pre-publish stack Item 1): a new tour starts with no
+    // minor place yet told on it, whatever earlier tours today did.
+    this.tourHeardSubjects.clear();
   }
 
   private linkSubjectsInternal(keyA: string, keyB: string): void {
@@ -462,6 +529,55 @@ class StoryCoverageService {
     return false;
   }
 
+  // Tier-1 marks (pre-publish stack Item 1): set only when a
+  // candidate pool EVALUATES the place against the strict Tier-1
+  // test — the same discipline as majors (D4), never at a serve.
+  markTier1Subject(subjectKey: string): void {
+    if (!subjectKey || this.tier1Subjects.has(subjectKey)) return;
+    this.tier1Subjects.add(subjectKey);
+    this.saveTier1();
+  }
+
+  isTier1Subject(subjectKey: string): boolean {
+    for (const member of this.aliasGroupOf(subjectKey)) {
+      if (this.tier1Subjects.has(member)) return true;
+    }
+    return false;
+  }
+
+  // --- Tour-heard record + the minor retell rule (Item 1) --------------
+  // Written exclusively at a delivered settle (settleSubjectHeard),
+  // read by every serve flavor through isMinorRetellBlocked. Alias
+  // groups bind like every other subject operation: a place heard
+  // under one name is heard under its variants.
+
+  private recordTourHeard(subjectKey: string): void {
+    for (const member of this.aliasGroupOf(subjectKey)) {
+      this.tourHeardSubjects.add(member);
+    }
+  }
+
+  hasHeardThisTour(subjectKey: string): boolean {
+    for (const member of this.aliasGroupOf(subjectKey)) {
+      if (this.tourHeardSubjects.has(member)) return true;
+    }
+    return false;
+  }
+
+  // Erik's minor rule (Oct 27, 2026): a minor place — not Tier-1, not
+  // a marked major — gets ONE telling per tour, full stop. Once any
+  // angle of it has been heard on this tour, no other angle serves,
+  // from the library shelf, the ephemeral cache, the local buffer, or
+  // live selection, moving or parked. Tier-1 places are governed by
+  // the per-angle lock instead (settleSubjectHeard); marked majors
+  // keep their previous behavior (place-absolute day lock while
+  // moving, dwell revisit allowed).
+  isMinorRetellBlocked(subjectKey: string): boolean {
+    if (!subjectKey.startsWith('landmark:')) return false;
+    if (this.isMajorSubject(subjectKey) || this.isTier1Subject(subjectKey)) return false;
+    return this.hasHeardThisTour(subjectKey);
+  }
+
   isDailyCapped(subjectKey: string): boolean {
     if (this.isMajorSubject(subjectKey)) return false;
     return this.dailyTellingCount(subjectKey) >= DAILY_MINOR_CAP;
@@ -531,14 +647,47 @@ class StoryCoverageService {
    * in-flight mark. Area keys clear their in-flight mark only — area
    * stories are never locked or capped (recordDailyTelling already
    * ignores non-landmark keys; the lock is landmark doctrine too).
+   *
+   * Tier-1 per-angle lock (pre-publish stack Item 1, Oct 27, 2026):
+   * Erik's ruling — a Tier-1 place is told almost every time it is
+   * encountered, as long as the angle is not re-used. So for a Tier-1
+   * subject the session lock no longer lands at the first hearing:
+   * it lands only when NO unheard angle remains, judged against the
+   * coverage angles, the angle just heard (passed in — the funnel
+   * calls this before the tracker's recordStoryHeard writes it), and
+   * the canonical angle whenever the durable record says this
+   * listener has heard the place before. Selection independently
+   * gates Tier-1 retells on the same freshness test (resolveSubject's
+   * revisit pool), so the lock here is the second belt, not the only
+   * one. The daily count and the tour-heard record land on EVERY
+   * delivered telling, Tier-1 or not — the count is a tally, not a
+   * gate, and majors are cap-exempt anyway.
    */
-  settleSubjectHeard(subjectKey: string): void {
+  settleSubjectHeard(subjectKey: string, heardAngle?: string | null): void {
     if (!subjectKey) return;
     if (subjectKey.startsWith('landmark:')) {
-      this.lockSubjectForSession(subjectKey);
+      this.recordTourHeard(subjectKey);
       this.recordDailyTelling(subjectKey);
+      if (this.isTier1Subject(subjectKey) && this.tier1HasFreshAngle(subjectKey, heardAngle)) {
+        // Fresh angles remain: the place stays serve-eligible for a
+        // later encounter this session (and this day — the lock set
+        // is day-scoped, and leaving it unlocked is what lets a
+        // second tour today re-tell it at a new angle).
+      } else {
+        this.lockSubjectForSession(subjectKey);
+      }
     }
     this.releaseSubjectInFlight(subjectKey);
+  }
+
+  // Does a Tier-1 subject still have an angle this listener has not
+  // heard, counting the angle being settled right now as spent?
+  private tier1HasFreshAngle(subjectKey: string, heardAngle?: string | null): boolean {
+    const name = subjectKey.slice('landmark:'.length);
+    const spent: string[] = [];
+    if (heardAngle) spent.push(heardAngle);
+    if (heardStories.hasHeardSubject(name)) spent.push(LANDMARK_ANGLES[0]);
+    return this.hasFreshAngle(subjectKey, LANDMARK_ANGLES, spent);
   }
 
   // Hard wipe of the lock/alias/day state only (the diagnostics full
@@ -547,6 +696,7 @@ class StoryCoverageService {
     this.sessionLockedSubjects.clear();
     this.sessionAliasGroups.clear();
     this.inFlightSubjects.clear();
+    this.tourHeardSubjects.clear();
     this.dailyCounts = {};
     this.dayStamp = StoryCoverageService.todayStamp();
     try {
@@ -566,10 +716,12 @@ class StoryCoverageService {
     this.recent = [];
     this.clearSessionLocks();
     this.majorSubjects.clear();
+    this.tier1Subjects.clear();
     this.pendingSubjects.clear();
     try {
       localStorage.removeItem(STORAGE_KEY);
       localStorage.removeItem(MAJOR_SUBJECTS_KEY);
+      localStorage.removeItem(TIER1_SUBJECTS_KEY);
     } catch {
       // storage unavailable — the in-memory wipe still applies this session
     }

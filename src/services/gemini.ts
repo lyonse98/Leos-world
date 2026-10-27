@@ -550,11 +550,15 @@ class GeminiService {
   // Marking them as they are evaluated is what lets the topic-only
   // serve layers (which hold no candidate object) honor the exemption
   // — and lets a later library serve of the same place claim the
-  // priority queue lane (Area C).
+  // priority queue lane (Area C). The Tier-1 mark proper rides along
+  // (pre-publish stack Item 1, Oct 27, 2026): the retell policy —
+  // per-angle session lock, scan eligibility — is Tier-1-specific
+  // and reads its own set, not the majors set at large.
   private markTier1Majors(factPack: StoryFactPack): void {
     for (const place of factPack.places) {
       if (placesService.isTier1Landmark(place)) {
         storyCoverage.markMajorSubject(landmarkSubjectKey(place.name));
+        storyCoverage.markTier1Subject(landmarkSubjectKey(place.name));
       }
     }
   }
@@ -565,36 +569,45 @@ class GeminiService {
     this.markTier1Majors(factPack);
 
     // A moving-context candidate is unavailable when ANY of these hold:
-    //  - session lock: the place was already TOLD this session;
+    //  - session lock: the place was already TOLD this session (for a
+    //    Tier-1 subject the lock now lands only at angle exhaustion —
+    //    see settleSubjectHeard — so this check no longer suppresses a
+    //    Tier-1 with fresh angles; the revisit pool below is what
+    //    actually re-offers it);
     //  - pending: a story about it is already generated and waiting
     //    unplayed in the local cache — generating a second angle before
     //    the first plays is how one place fills the buffer;
     //  - daily cap: a minor subject already told DAILY_MINOR_CAP times
-    //    today across sessions (Tier-1 and library places exempt).
-    // Dwell (allowRevisit) bypasses all three: parked depth rotation is
-    // the designed exception to each.
+    //    today across sessions (Tier-1 and library places exempt);
+    //  - minor retell rule (pre-publish stack Item 1, Oct 27, 2026):
+    //    a minor place already HEARD on this tour — one telling per
+    //    minor place per tour, whatever angle remains.
+    // Dwell (allowRevisit) bypasses the first three: parked depth
+    // rotation is the designed exception to each. The minor rule is
+    // NOT bypassed — its filter is applied to the revisited pool
+    // itself below.
     const blocked = (place: NearbyPlace) => {
       if (allowRevisit) return false;
       const key = landmarkSubjectKey(place.name);
       if (storyCoverage.isSubjectLockedForSession(key)) return true;
       if (storyCoverage.isSubjectPending(key)) return true;
       if (storyCoverage.isDailyCapped(key) && !storyLibrary.hasPlace(place.name)) return true;
+      if (storyCoverage.isMinorRetellBlocked(key)) return true;
       return false;
     };
 
-    const unheard = factPack.places.filter(p => !heardStories.hasHeardSubject(p.name) && !blocked(p));
-    if (unheard.length > 0) {
-      // Bearing discipline at SELECTION (Area D, Oct 26, 2026): at
-      // driving speed with a trustworthy heading, candidates in the
-      // rear hemisphere are ineligible while ANY forward candidate
-      // exists — selection, not just the dequeue gate, must refuse to
-      // spend a story on somewhere already passed. (The dequeue gate
-      // alone let surface-street behind-me narration through: it only
-      // fired at freeway speed, at dequeue, after the story was
-      // already written and queued.) The candidate's direction string
-      // is computed against the fetch heading by the places service.
-      // Dwell (allowRevisit) is exempt — parked, "behind" is meaningless;
-      // stops and unreliable headings never reach the speed gate.
+    // Bearing discipline at SELECTION (Area D, Oct 26, 2026): at
+    // driving speed with a trustworthy heading, candidates in the
+    // rear hemisphere are ineligible while ANY forward candidate
+    // exists — selection, not just the dequeue gate, must refuse to
+    // spend a story on somewhere already passed. (The dequeue gate
+    // alone let surface-street behind-me narration through: it only
+    // fired at freeway speed, at dequeue, after the story was
+    // already written and queued.) The candidate's direction string
+    // is computed against the fetch heading by the places service.
+    // Dwell (allowRevisit) is exempt — parked, "behind" is meaningless;
+    // stops and unreliable headings never reach the speed gate.
+    const pickWithBearing = (cands: NearbyPlace[], opts?: { ignoreHeardPenalty?: boolean }) => {
       if (
         !allowRevisit &&
         position &&
@@ -603,24 +616,55 @@ class GeminiService {
         !isNaN(position.heading)
       ) {
         const BEHIND = new Set(['directly behind you', 'behind to your right', 'behind to your left']);
-        const forward = unheard.filter(p => !BEHIND.has(p.direction));
-        if (forward.length > 0 && forward.length < unheard.length) {
-          trackDiag('pipeline', 'behind-filter', `selection excluded ${unheard.length - forward.length} behind-heading candidate(s)`);
-          return pickStorySubject(forward, this.recentPrimaryTags());
+        const forward = cands.filter(p => !BEHIND.has(p.direction));
+        if (forward.length > 0 && forward.length < cands.length) {
+          trackDiag('pipeline', 'behind-filter', `selection excluded ${cands.length - forward.length} behind-heading candidate(s)`);
+          return pickStorySubject(forward, this.recentPrimaryTags(), opts);
         }
       }
-      return pickStorySubject(unheard, this.recentPrimaryTags());
+      return pickStorySubject(cands, this.recentPrimaryTags(), opts);
+    };
+
+    const unheard = factPack.places.filter(p => !heardStories.hasHeardSubject(p.name) && !blocked(p));
+    if (unheard.length > 0) {
+      return pickWithBearing(unheard);
     }
 
     if (!allowRevisit) {
-      // Moving with every nearby landmark already told this session: fall
-      // through to an area story rather than retelling a landmark at a
-      // new angle. The revisited pool below is dwell-only now.
+      // Tier-1 revisit pool (pre-publish stack Item 1, Oct 27, 2026):
+      // Erik's ruling — a Tier-1 landmark is told almost every time it
+      // is encountered, as long as the angle is not re-used. Moving
+      // used to fall straight through to an area story once every
+      // nearby landmark had been told; a Tier-1 whose angles are not
+      // all spent now re-enters here, behind every never-heard place
+      // (the unheard pool above always wins) and ahead of the area
+      // fall-through. blocked() still applies in full — pending and
+      // in-flight subjects stay refused, so a Tier-1 can never be
+      // dealt twice while one telling awaits its settle — and the
+      // freshness test is the same one the hearing funnel's lock
+      // decision uses, so pool and lock cannot disagree.
+      const tier1Revisit = factPack.places.filter(p =>
+        placesService.isTier1Landmark(p) &&
+        heardStories.hasHeardSubject(p.name) &&
+        !blocked(p) &&
+        storyCoverage.hasFreshAngle(landmarkSubjectKey(p.name), LANDMARK_ANGLES, [LANDMARK_ANGLES[0]])
+      );
+      if (tier1Revisit.length > 0) {
+        return pickWithBearing(tier1Revisit, { ignoreHeardPenalty: true });
+      }
+      // Moving with every nearby landmark told (and no Tier-1 angle
+      // left to spend): fall through to an area story rather than
+      // retelling a landmark at a new angle. The revisited pool below
+      // is dwell-only.
       return null;
     }
 
     const revisited = factPack.places.filter(p =>
-      storyCoverage.hasFreshAngle(landmarkSubjectKey(p.name), LANDMARK_ANGLES, [LANDMARK_ANGLES[0]])
+      storyCoverage.hasFreshAngle(landmarkSubjectKey(p.name), LANDMARK_ANGLES, [LANDMARK_ANGLES[0]]) &&
+      // The minor rule binds at dwell too (Item 1): parked rotation
+      // may revisit Tier-1 and major places at fresh angles, but a
+      // minor place heard on this tour is done for the tour.
+      !storyCoverage.isMinorRetellBlocked(landmarkSubjectKey(p.name))
     );
     if (revisited.length > 0) {
       return pickStorySubject(revisited, this.recentPrimaryTags(), { ignoreHeardPenalty: true });
@@ -641,10 +685,15 @@ class GeminiService {
   // rotation serves are wanted. (Tier-1 exemption rides the majors
   // registry inside isDailyCapped; the library exemption is checked
   // here, where the place name is at hand.)
+  // The minor retell rule (pre-publish stack Item 1) is checked
+  // BEFORE the dwell bypass on purpose: it is a per-tour place rule,
+  // not a movement rule — a minor place heard on this tour does not
+  // serve another angle from a shelf even while parked.
   private isTopicLockedForSession(topic: string, dwell: boolean): boolean {
-    if (dwell) return false;
     const base = this.topicBaseName(topic);
     const key = landmarkSubjectKey(base);
+    if (storyCoverage.isMinorRetellBlocked(key)) return true;
+    if (dwell) return false;
     if (storyCoverage.isSubjectLockedForSession(key)) return true;
     // In-flight counts as locked for SERVING (fix stack RC-2): a
     // story about this subject is already in the player awaiting its
@@ -1392,7 +1441,14 @@ class GeminiService {
       let libHit = storyLibrary.hasPlace(target.subject.name)
         ? await storyLibrary.lookupForPlace(
             target.subject.name,
-            (_angle, topic) => !heardStories.hasHeard(topic)
+            // Minor rule at the shelf (pre-publish stack Item 1): the
+            // target itself was vetted by resolveSubject, but the
+            // place-wide walk must not hand back a second angle of a
+            // minor place already heard this tour — the walk, not the
+            // target, is where Pass 2's displacement would re-deal it.
+            (_angle, topic) =>
+              !heardStories.hasHeard(topic) &&
+              !storyCoverage.isMinorRetellBlocked(landmarkSubjectKey(this.topicBaseName(topic)))
           )
         : null;
       if (!libHit) {
@@ -1578,7 +1634,13 @@ class GeminiService {
       let libHit = storyLibrary.hasPlace(target.subject.name)
         ? await storyLibrary.lookupForPlace(
             target.subject.name,
-            (_angle, topic) => !heardStories.hasHeard(topic)
+            // Minor rule at the shelf (pre-publish stack Item 1):
+            // never even BUFFER a second angle of a minor place heard
+            // this tour — the buffer serve would refuse it anyway,
+            // and buffering it wastes the prefetch cycle.
+            (_angle, topic) =>
+              !heardStories.hasHeard(topic) &&
+              !storyCoverage.isMinorRetellBlocked(landmarkSubjectKey(this.topicBaseName(topic)))
           )
         : null;
       if (!libHit) {

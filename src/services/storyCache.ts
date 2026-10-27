@@ -659,11 +659,16 @@ class StoryCacheService {
   // wait for the hearing, or one place queues twice back to back.
   // Skipped only while moving — parked (speed ~0), rotation serves
   // are the dwell feature and stay available.
+  // The minor retell rule (pre-publish stack Item 1, Oct 27, 2026)
+  // is the one check that does NOT take the parked exemption: one
+  // telling per minor place per tour, full stop — a buffered second
+  // angle of a heard minor stays unserved even at a standstill.
   private isLockedOutWhileMoving(story: CachedStory, position: Position): boolean {
-    const speed = position.speed ?? null;
-    if (speed !== null && speed < 1.0) return false;
     const base = story.topic.split(' — ')[0].trim();
     const key = landmarkSubjectKey(base);
+    if (storyCoverage.isMinorRetellBlocked(key)) return true;
+    const speed = position.speed ?? null;
+    if (speed !== null && speed < 1.0) return false;
     if (storyCoverage.isSubjectLockedForSession(key)) return true;
     if (storyCoverage.isSubjectInFlight(key)) return true;
     if (storyCoverage.isDailyCapped(key) && !storyLibrary.hasPlace(base)) return true;
