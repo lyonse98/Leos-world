@@ -245,9 +245,10 @@ const ready = [...byId.values()].filter(
 if (doIngest && ready.length > 0) {
   if (!keys.supabaseUrl) throw new Error('Supabase URL not found in live bundle');
   const base = keys.supabaseUrl;
+  const anon = keys.anonKey;
   const headers = {
-    apikey: <redacted>
-    Authorization: <redacted>
+    apikey: anon,
+    Authorization: `Bearer ${anon}`,
     'Content-Type': 'application/json',
   };
   let uploaded = 0;
