@@ -95,8 +95,15 @@ interface StoryTarget {
 }
 
 const MIN_REQUEST_INTERVAL_MS = 3000;
-const MAX_RETRIES = 3;
-const RETRY_BASE_DELAY_MS = 5000;
+// Honest bounded retry (fix stack RC-4, Oct 27, 2026): ONE retry,
+// spent only on a fast, non-quota, non-timeout failure — the cases a
+// retry can actually cure. RETRY_BASE_DELAY_MS is the real delay
+// between the attempts. (For years these constants claimed 3
+// retries at a 5s base delay while the loop rethrew on the first
+// failure in both catch branches — the retry did not exist.)
+const MAX_RETRIES = 1;
+const RETRY_BASE_DELAY_MS = 750;
+const RETRY_FAST_FAIL_MS = 8000;
 const REQUEST_TIMEOUT_MS = 30000;
 
 // Fail-fast bounds (Oct 25 field wedge): a story request once stalled
@@ -186,24 +193,93 @@ class GeminiService {
     this.lastRequestTime = Date.now();
   }
 
-  private async waitForSlot(): Promise<void> {
+  // Generation-lane priority (fix stack RC-4, Oct 27, 2026): the
+  // single shared lane used to be a boolean + 200ms poll — FIFO by
+  // arrival, so during a gap the route-ahead prefetcher (four
+  // sequential generations) held the lane exactly when a live serve
+  // was waiting, and a waiting live serve polled behind all of them.
+  // The lane is now an explicit priority queue: live story (0) beats
+  // Q&A (1) beats prefetch (2), FIFO within a priority. A caller
+  // already IN the lane is never preempted (a generation is
+  // deadline-bound, ≤ ~30s), but no waiter ever queues behind a
+  // lower-priority waiter again.
+  private laneWaiters: Array<{ priority: number; seq: number; resolve: () => void }> = [];
+  private laneSeq = 0;
+  private lastLaneWaitMs = 0;
+
+  private async acquireSlot(priority: number): Promise<void> {
+    if (!this.requestInProgress) {
+      this.requestInProgress = true;
+      this.lastLaneWaitMs = 0;
+      return;
+    }
     // Bounded wait: the lane's holder is itself deadline-bound (worst
     // case ~40 s for a Q&A primary + fallback), so a wait past this
     // bound means the holder is gone, not slow. Fail the call instead
     // of queueing behind a corpse forever — the callers all degrade
     // (cache, designed silence, an honest error line) rather than hang.
     const waitStartedAt = Date.now();
-    while (this.requestInProgress) {
-      if (Date.now() - waitStartedAt > SLOT_WAIT_TIMEOUT_MS) {
-        throw new Error('Gemini lane busy — a previous request never released the slot');
-      }
-      await new Promise(resolve => setTimeout(resolve, 200));
-    }
+    await new Promise<void>((resolve, reject) => {
+      const waiter = {
+        priority,
+        seq: this.laneSeq++,
+        resolve: () => { /* replaced below */ },
+      };
+      const timer = setTimeout(() => {
+        const idx = this.laneWaiters.indexOf(waiter);
+        if (idx >= 0) this.laneWaiters.splice(idx, 1);
+        reject(new Error('Gemini lane busy — a previous request never released the slot'));
+      }, SLOT_WAIT_TIMEOUT_MS);
+      waiter.resolve = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      this.laneWaiters.push(waiter);
+    });
+    this.lastLaneWaitMs = Date.now() - waitStartedAt;
     this.requestInProgress = true;
   }
 
   private releaseSlot(): void {
-    this.requestInProgress = false;
+    // Ownership transfers directly to the highest-priority waiter —
+    // the lane never goes idle while work waits, and
+    // requestInProgress stays true across the handoff so no new
+    // caller can slip into the gap.
+    if (this.laneWaiters.length === 0) {
+      this.requestInProgress = false;
+      return;
+    }
+    this.laneWaiters.sort((a, b) => a.priority - b.priority || a.seq - b.seq);
+    const next = this.laneWaiters.shift()!;
+    next.resolve();
+  }
+
+  // Attempt-level generation timing (fix stack RC-1, Oct 27, 2026):
+  // until now only SUCCESSES carried timing (story_timing merges),
+  // so a drive full of 20s timeouts looked, in the data, like a
+  // drive of slow successes. Every attempt now files one event —
+  // model, kind, attempt index, duration, outcome (ok / timeout /
+  // quota / error / lane-timeout), and the lane wait that preceded
+  // it — so the next drive can answer WHY generations time out:
+  // long attempts point at the API/connection, lane-timeout and big
+  // lane_wait_ms point at contention, quota at the wall.
+  private emitGenerationAttempt(
+    modelId: string,
+    kind: 'story' | 'answer',
+    attempt: number,
+    durationMs: number,
+    outcome: 'ok' | 'timeout' | 'quota' | 'error' | 'lane-timeout'
+  ): void {
+    try {
+      analytics.track('generation_attempt', null, undefined, {
+        model: modelId,
+        kind,
+        attempt,
+        duration_ms: Math.round(durationMs),
+        outcome,
+        lane_wait_ms: attempt === 0 ? Math.round(this.lastLaneWaitMs) : null,
+      });
+    } catch { /* a metric must never break a generation */ }
   }
 
   private isQuotaError(error: unknown): boolean {
@@ -223,7 +299,7 @@ class GeminiService {
     }
   }
 
-  private async withRetry<T>(modelId: string, fn: () => Promise<T>): Promise<T> {
+  private async withRetry<T>(modelId: string, fn: () => Promise<T>, kind: 'story' | 'answer' = 'story'): Promise<T> {
     // Circuit breaker: while this model is tripped, do not call the API at
     // all — callers degrade to cache / designed silence instead of spending
     // requests against a quota wall.
@@ -232,19 +308,34 @@ class GeminiService {
     }
     let lastError: unknown;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      const attemptStartedAt = Date.now();
       try {
         await this.enforceRateLimit();
-        return await fn();
+        const result = await fn();
+        this.emitGenerationAttempt(modelId, kind, attempt, Date.now() - attemptStartedAt, 'ok');
+        return result;
       } catch (error) {
         lastError = error;
+        const durationMs = Date.now() - attemptStartedAt;
         if (this.isQuotaError(error)) {
           // Never retry a quota error: against a per-minute wall the retry
           // lands inside the same window; against a per-day wall it is
           // pure waste. Trip the breaker for this model and degrade.
+          this.emitGenerationAttempt(modelId, kind, attempt, durationMs, 'quota');
           quotaGuard.trip('text', modelId);
           throw error;
         }
-        throw error;
+        const msg = error instanceof Error ? error.message : String(error);
+        const isTimeout =
+          msg.includes('timed out') || msg.includes('deadline') || msg.includes('stalled');
+        this.emitGenerationAttempt(modelId, kind, attempt, durationMs, isTimeout ? 'timeout' : 'error');
+        // The bounded retry (see MAX_RETRIES): spent only where it
+        // can help — a FAST ordinary failure is likely transient; a
+        // slow one has already eaten the deadline's budget, and a
+        // timeout will simply time out again inside the same serve.
+        const mayRetry = attempt < MAX_RETRIES && !isTimeout && durationMs < RETRY_FAST_FAIL_MS;
+        if (!mayRetry) throw error;
+        await new Promise(resolve => setTimeout(resolve, RETRY_BASE_DELAY_MS));
       }
     }
     throw lastError;
@@ -1512,7 +1603,8 @@ class GeminiService {
     }
 
     const text = await this.generateStory(
-      position, factPack, target, 'prefetch', 0, 0, undefined, undefined, false, versionKey
+      position, factPack, target, 'prefetch', 0, 0, undefined, undefined, false, versionKey,
+      2 // lane priority: prefetch — a live serve or a question always takes the lane first (fix stack RC-4)
     );
     return {
       text,
@@ -1533,13 +1625,19 @@ class GeminiService {
     destination: string | undefined,
     onChunk: ((text: string) => void) | undefined,
     updateTracker: boolean,
-    versionKey: string
+    versionKey: string,
+    lanePriority: number = 0
   ): Promise<string> {
     const prompt = this.buildStoryPrompt(position, factPack, target, context, depthLevel, depthCycle, destination);
     const topic = target.displayTopic;
     const shouldUpdate = updateTracker && target.kind === 'landmark' && !target.rotation;
 
-    await this.waitForSlot();
+    try {
+      await this.acquireSlot(lanePriority);
+    } catch (error) {
+      this.emitGenerationAttempt(LEO_MODEL_ID, 'story', 0, SLOT_WAIT_TIMEOUT_MS, 'lane-timeout');
+      throw error;
+    }
     try {
       if (onChunk) {
         const deadlineAt = Date.now() + GEN_DEADLINE_MS;
@@ -1657,7 +1755,12 @@ class GeminiService {
 
     const prompt = parts.join('\n\n');
 
-    await this.waitForSlot();
+    try {
+      await this.acquireSlot(1);
+    } catch (error) {
+      this.emitGenerationAttempt(LEO_QA_MODEL_ID, 'answer', 0, SLOT_WAIT_TIMEOUT_MS, 'lane-timeout');
+      throw error;
+    }
     try {
       const answer = await this.generateAnswer(prompt, LEO_QA_MODEL_ID, onChunk);
       emitTiming(LEO_QA_MODEL_ID, 'primary');
@@ -1708,7 +1811,7 @@ class GeminiService {
           }),
           Math.max(1000, deadlineAt - Date.now())
         )
-      );
+      , 'answer');
 
       let fullText = '';
       let lastChunkTime = Date.now();
@@ -1752,7 +1855,7 @@ class GeminiService {
         }),
         GEN_DEADLINE_MS
       )
-    );
+    , 'answer');
 
     return (response.text || '').trim();
   }

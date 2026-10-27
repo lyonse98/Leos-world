@@ -2,7 +2,7 @@ import { supabase } from './supabase';
 import { Position } from '../hooks/useGeolocation';
 import { BUILD_ID } from './buildId';
 
-type EventType = 'session_start' | 'session_end' | 'story_played' | 'ad_played' | 'question_asked' | 'story_rated' | 'story_timing'
+type EventType = 'session_start' | 'session_end' | 'story_played' | 'ad_played' | 'question_asked' | 'story_rated' | 'story_timing' | 'generation_attempt'
   // Observational counters for field-reported symptoms (Oct 25, 2026):
   // Q&A answer latency, quota circuit-breaker trips, audio blocks, and
   // stale-story drops. Emits are fire-and-forget and must stay that way.

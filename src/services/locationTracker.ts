@@ -51,6 +51,9 @@ class LocationTracker {
   // in shouldTellNewStory), and cleared only when a story about that
   // neighborhood is actually HEARD (recordStoryHeard).
   private pendingIntroNeighborhood: string | null = null;
+  // Pre-decision state snapshot for the RC-4 decision refund (see
+  // shouldTellNewStory / refundStoryDecision).
+  private lastDecisionSnapshot: LocationState | null = null;
   // When the current intro debt was set, and when an intro was last
   // offered for it — the chapter-break cooldown's two anchors (see
   // INTRO_REOFFER_COOLDOWN_MS). introDebtSetAt doubles as the debt's
@@ -159,7 +162,37 @@ class LocationTracker {
     return newUniqueLandmarks.length > 0;
   }
 
+  // Decision wrapper (fix stack RC-4, Oct 27, 2026): every consuming
+  // decision snapshots the pre-decision state, so a serve that then
+  // FAILS (generation timeout, empty text, deadline) can refund the
+  // decision — the old flow spent the movement decision at serve
+  // time and the next chance required another full 500m / timer
+  // cycle, which is half of the dead-cycle gap anatomy. A story
+  // actually generated clears the snapshot (updateLastStoryTopic):
+  // the decision bore fruit and stays spent.
   shouldTellNewStory(position: Position, landmarkNames: string[], neighborhood?: string | null): { shouldTell: boolean; context: string; depthLevel: number; depthCycle: number; isNeighborhoodIntro?: boolean } {
+    const prev = this.lastLocation ? { ...this.lastLocation } : null;
+    const decision = this.decideStory(position, landmarkNames, neighborhood);
+    if (decision.shouldTell) this.lastDecisionSnapshot = prev;
+    return decision;
+  }
+
+  // Restore the pre-decision state after a failed serve: movement,
+  // landmark novelty, and the stationary timer all re-fire on their
+  // original evidence at the next decision, instead of the listener
+  // owing another 500m for a story that never existed. The intro
+  // debt set by the refunded decision is NOT rolled back — the
+  // neighborhood WAS entered; the debt's own cooldown governs its
+  // retry. One-shot: a second refund without an intervening
+  // consuming decision is a no-op.
+  refundStoryDecision(): void {
+    if (!this.lastDecisionSnapshot) return;
+    this.lastLocation = this.lastDecisionSnapshot;
+    this.lastDecisionSnapshot = null;
+    console.log('[LocationTracker] Story decision refunded — the failed serve did not spend it');
+  }
+
+  private decideStory(position: Position, landmarkNames: string[], neighborhood?: string | null): { shouldTell: boolean; context: string; depthLevel: number; depthCycle: number; isNeighborhoodIntro?: boolean } {
     if (!this.lastLocation) {
       const hasNeighborhood = !!(neighborhood && neighborhood.trim().length > 0);
       this.lastLocation = { position, landmarkNames, timestamp: Date.now(), storyDepthLevel: 0, depthCycle: 0, lastNeighborhood: neighborhood ?? null, storiesInNeighborhood: 0 };
@@ -346,6 +379,9 @@ class LocationTracker {
     rotation?: { subjectKey: string; angle: string } | null
   ) {
     if (this.lastLocation) {
+      // A story was generated: the movement decision that produced
+      // it bore fruit and can no longer be refunded (RC-4).
+      this.lastDecisionSnapshot = null;
       this.lastLocation.lastStoryTopic = topic;
       this.lastLocation.lastStoryText = storyText;
 
@@ -532,6 +568,7 @@ class LocationTracker {
 
   reset() {
     this.lastLocation = null;
+    this.lastDecisionSnapshot = null;
     this.pendingIntroNeighborhood = null;
     this.introDebtSetAt = 0;
     this.lastIntroOfferAt = 0;

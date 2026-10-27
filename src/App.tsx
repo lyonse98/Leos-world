@@ -94,6 +94,13 @@ function daySkyGradient(): string {
 const RESUME_SESSION_KEY = 'leo_active_session';
 const RESUME_SESSION_TTL_MS = 30 * 60 * 1000;
 const AMBIENT_KEY = 'leo_ambient_on';
+// Q&A generation-phase failsafe bound (fix stack RC-4): the worst
+// legal generation is the lane wait (90s) plus a primary generation
+// deadline (~20s) plus the flagship fallback (~20s) plus rate-limit
+// pacing — 150s covers it with margin, and bounds the locked,
+// event-free wait the audit found (~90s slot + ~40s of holds) for
+// every failure shape, including a holder that never releases.
+const ANSWER_GENERATION_FAILSAFE_MS = 150_000;
 
 interface SavedTourSession {
   savedAt: number;
@@ -353,6 +360,10 @@ function App() {
   // taken; cleared on release).
   const questionInFlightRef = useRef(false);
   const answerCycleRef = useRef(0);
+  // Generation epoch for the Q&A generation-phase failsafe: bumped
+  // per question and again when the failsafe fires, so an answer
+  // that arrives after its cycle was retired is dropped, not spoken.
+  const answerGenerationRef = useRef(0);
   const answerFailsafeRef = useRef<number | null>(null);
   const releaseQuestionLock = useCallback((reason?: 'story-resumed' | 'failsafe' | 'answer-failed' | 'tour-ended') => {
     // Record WHY the lock released, when the release is one of the
@@ -680,6 +691,24 @@ function App() {
     // 'answer-failed' instead of releasing silently.
     let generationFailed = false;
 
+    // Generation-phase failsafe (fix stack RC-4, Oct 27, 2026): the
+    // playback failsafe below is armed only once a non-empty answer
+    // EXISTS — so a generation that hung (lane corpse, deadline
+    // chain) left the question lock held with no timer running and
+    // no event filed: the audit's residual ~90s + ~40s of locked,
+    // event-free waiting, unbounded in the worst case. This timer
+    // covers the generation itself; the playback arming replaces it
+    // (same ref) once the answer exists. Firing retires the cycle's
+    // epoch so the late answer, if it ever arrives, is dropped.
+    const genEpoch = ++answerGenerationRef.current;
+    if (answerFailsafeRef.current) window.clearTimeout(answerFailsafeRef.current);
+    answerFailsafeRef.current = window.setTimeout(() => {
+      if (answerGenerationRef.current !== genEpoch) return;
+      answerGenerationRef.current++;
+      trackDiag('text', 'answer-generation-timeout', 'answer generation exceeded its bounded wait — releasing the question lock');
+      releaseQuestionLock('failsafe');
+    }, ANSWER_GENERATION_FAILSAFE_MS);
+
     try {
       let fullAnswer = '';
       const nearby = geolocation.position
@@ -695,6 +724,14 @@ function App() {
         }
       );
       if (token !== geminiService.currentRequestToken()) return;
+      if (answerGenerationRef.current !== genEpoch || !questionInFlightRef.current) {
+        // The generation failsafe fired while this answer was still
+        // generating (or the cycle ended another way): the lock is
+        // already released — a late answer must not re-arm a dead
+        // cycle or speak over the resumed tour.
+        trackDiag('text', 'answer-late-dropped', 'answer arrived after its cycle ended — dropped');
+        return;
+      }
       if (fullAnswer.trim().length > 0) {
         voice.recordSpokenText(fullAnswer);
         // Arm the answer cycle BEFORE speaking, with the failsafe as
@@ -1060,6 +1097,15 @@ function App() {
         console.log('[Tour] Designed silence at highway speed — no story could land in the exit corridor');
       } else {
         isFetchingStoryRef.current = false;
+        // Decision refund (fix stack RC-4): this serve consumed the
+        // movement decision and produced nothing — give the decision
+        // back, so the retry the completion handler schedules in 8s
+        // re-fires on the same evidence instead of the listener owing
+        // another 500m of road for a story that never existed. (That
+        // spent-decision silence was half the dead-cycle anatomy.)
+        if (storyCache.getLastServeInfo()?.decisionConsumed) {
+          locationTracker.refundStoryDecision();
+        }
         // Story came back empty and we're online — Gemini likely failed.
         const err = geminiService.getLastError();
         const detail = err || 'no error set — shouldTell may have returned false or generateStory returned empty';
