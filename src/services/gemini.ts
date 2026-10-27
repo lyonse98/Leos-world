@@ -19,6 +19,7 @@ import { osmService } from './osmService';
 import { quotaGuard } from './quotaGuard';
 import { wikidata } from './wikidata';
 import { historicRegistry } from './historicRegistry';
+import { majorPlaces } from './majorPlaces';
 import { analytics, trackDiag } from './analytics';
 
 export interface QAContext {
@@ -353,6 +354,46 @@ class GeminiService {
       }
     } catch (error) {
       console.warn('[Gemini] Registry candidate merge failed (continuing without):', error);
+    }
+
+    // Curated major places (Area F, Oct 26, 2026): the audit-confirmed
+    // class of majors the generic sources under-rank or misname
+    // (services/majorPlaces — every pin a verified registry record).
+    // A curated entry that proves to be the same ground as a pool
+    // candidate (name match, or ≤150 m) folds into it: the names are
+    // alias-linked, and a tier1 entry marks the twin a major subject —
+    // lifting a capped registry candidate ("California Quadrangle")
+    // into the major treatment its public name (Museum of Us) earns.
+    // With no twin, the entry stands as the candidate itself. Local
+    // and synchronous, like the registry merge; fails to nothing.
+    try {
+      for (const curated of majorPlaces.candidatesAsPlaces(discovery, 1500)) {
+        const nameTwin = places.find(p => historicRegistry.namesMatch(p.name, curated.place.name));
+        const nearTwin =
+          !nameTwin && curated.place.lat !== undefined && curated.place.lng !== undefined
+            ? places.find(
+                p =>
+                  p.lat !== undefined &&
+                  p.lng !== undefined &&
+                  calculateDistance(p.lat, p.lng, curated.place.lat as number, curated.place.lng as number) <= 150
+              )
+            : undefined;
+        const twin = nameTwin ?? nearTwin;
+        if (twin) {
+          storyCoverage.linkSubjectAliases(landmarkSubjectKey(twin.name), landmarkSubjectKey(curated.place.name));
+          if (curated.tier1) {
+            storyCoverage.markMajorSubject(landmarkSubjectKey(twin.name));
+            storyCoverage.markMajorSubject(landmarkSubjectKey(curated.place.name));
+          }
+          continue;
+        }
+        if (curated.tier1) {
+          storyCoverage.markMajorSubject(landmarkSubjectKey(curated.place.name));
+        }
+        places = [...places, curated.place];
+      }
+    } catch (error) {
+      console.warn('[Gemini] Curated major-places merge failed (continuing without):', error);
     }
 
     // Wikidata verified facts for the lead subject (top place, else top

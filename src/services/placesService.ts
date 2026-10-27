@@ -1,5 +1,6 @@
 import { Position } from '../hooks/useGeolocation';
 import { trackDiag } from './analytics';
+import { findNamedArea } from './namedAreas';
 import {
   calculateDistance,
   resolveMovementMode,
@@ -541,24 +542,38 @@ class PlacesService {
     // path used the Google JS Geocoder; Nominatim's address fields map onto
     // the same AreaInfo shape. Callers cache per 100m / 5 min and dedupe
     // in-flight requests, keeping volume within Nominatim's fair-use policy.
+    let base: AreaInfo = { neighborhood: null, city: null, district: null, street: null };
     try {
       const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${position.lat}&lon=${position.lng}&zoom=18&addressdetails=1`;
       const res = await fetchWithTimeout(url, {}, REQUEST_TIMEOUT_MS);
-      if (!res.ok) return { neighborhood: null, city: null, district: null, street: null };
-      const data = await res.json();
-      const a = data?.address || {};
+      if (res.ok) {
+        const data = await res.json();
+        const a = data?.address || {};
 
-      return {
-        neighborhood: a.neighbourhood || a.suburb || null,
-        city: a.city || a.town || a.village || a.county || null,
-        district: a.state || null,
-        street: a.road || null,
-      };
+        base = {
+          neighborhood: a.neighbourhood || a.suburb || null,
+          city: a.city || a.town || a.village || a.county || null,
+          district: a.state || null,
+          street: a.road || null,
+        };
+      }
     } catch (error) {
       console.warn('[Places] Area lookup failed or timed out:', error);
       trackDiag('places', 'error', `area lookup failed: ${error instanceof Error ? error.message : String(error)}`);
-      return { neighborhood: null, city: null, district: null, street: null };
     }
+
+    // Named-area override (Area F, Oct 26, 2026): a curated district the
+    // geocoder cannot name outranks its generic answer — inside Liberty
+    // Station the area IS "Liberty Station", whatever Nominatim calls
+    // the ground. Consulted before the generic result is accepted, on
+    // success and failure alike (a failed lookup inside a named area
+    // still knows the district). City/street still come from the
+    // geocoder when it answered.
+    const named = findNamedArea(position.lat, position.lng);
+    if (named) {
+      return { ...base, neighborhood: named.name, majorArea: named.major, namedArea: named.name };
+    }
+    return base;
   }
 
   formatPlacesForPrompt(places: NearbyPlace[]): string {

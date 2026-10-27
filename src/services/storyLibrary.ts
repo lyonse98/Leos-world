@@ -207,12 +207,13 @@ class StoryLibraryService {
         for (const r of rows) {
           if (!r.place_key || anchors.has(r.place_key)) continue;
           if (typeof r.lat !== 'number' || typeof r.lng !== 'number') continue;
+          const override = ANCHOR_OVERRIDES[r.place_key];
           anchors.set(r.place_key, {
             key: r.place_key,
             name: r.place_name,
-            lat: r.lat,
-            lng: r.lng,
-            radiusM: ANCHOR_EXTENT_OVERRIDES_M[r.place_key] ?? DEFAULT_ANCHOR_RADIUS_M,
+            lat: override?.lat ?? r.lat,
+            lng: override?.lng ?? r.lng,
+            radiusM: override?.radiusM ?? DEFAULT_ANCHOR_RADIUS_M,
           });
         }
         this.placeAnchors = anchors;
@@ -288,11 +289,19 @@ export interface PlaceAnchor {
 // How far a curated place's "whole" extends for the tenant rule. A
 // single point with a modest radius is the honest shape for most
 // library places; large complexes whose tenants scatter across a
-// district get an explicit extent. Keyed by normalized place key.
+// district get an explicit extent — and, where the library's own
+// point sits at one end of the district, an explicit centroid.
+// Liberty Station is the case that forced the centroid: its library
+// point is the district's north end, and a circle there misses the
+// district's own southern tenants (the drive's THE LOT among them).
+// Keyed by normalized place key.
 const DEFAULT_ANCHOR_RADIUS_M = 400;
-const ANCHOR_EXTENT_OVERRIDES_M: Record<string, number> = {
-  'liberty station': 650,
-  'balboa park': 900,
+const ANCHOR_OVERRIDES: Record<string, { lat?: number; lng?: number; radiusM: number }> = {
+  'liberty station': { lat: 32.7265, lng: -117.2155, radiusM: 1250 },
+  // El Prado core only, per the coverage audit's fit verdict — the
+  // park's institutions inside it defer to the park's story once, on
+  // first entry; the wider park is not one circle's honest shape.
+  'balboa park': { radiusM: 700 },
 };
 
 export const storyLibrary = new StoryLibraryService();

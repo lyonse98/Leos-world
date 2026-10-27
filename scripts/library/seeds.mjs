@@ -38,7 +38,7 @@ export const SEEDS = [
   { n: 29, name: 'Julian', area: 'Julian, California', query: 'Julian, California', angles: ['origin', 'event', 'cultural'] },
   { n: 30, name: 'Palomar Observatory', area: 'Palomar Mountain', query: 'Palomar Observatory', angles: ['origin', 'people', 'role'] },
   { n: 31, name: 'Lafayette Hotel', area: 'North Park, San Diego', query: 'Lafayette Hotel, San Diego', angles: ['origin', 'recent', 'people'] },
-  { n: 32, name: 'El Cortez Hotel', area: 'Downtown San Diego', query: 'El Cortez Hotel, San Diego', angles: ['origin', 'building', 'recent'] },
+  { n: 32, name: 'El Cortez Hotel', area: 'Downtown San Diego', query: 'El Cortez Hotel, San Diego', angles: ['origin', 'building', 'recent'], coords: { lat: 32.72057, lng: -117.157944, source: 'registry — El Cortez Apartment Hotel (national+local, verified). AREA F re-pin R-1: the v13 corpus geocoded this seed to Sydney, Australia; the served rows need the same re-pin (see major-coverage-audit.md §2D-D1)' } },
   { n: 33, name: 'Villa Montezuma', area: 'Sherman Heights, San Diego', query: 'Villa Montezuma, San Diego', angles: ['origin', 'legends', 'people'] },
   { n: 34, name: 'Friendship Park', area: 'San Diego–Tijuana border', query: 'Friendship Park, San Diego', angles: ['origin', 'event', 'recent'] },
   { n: 35, name: 'Fort Rosecrans National Cemetery', area: 'Point Loma, San Diego', query: 'Fort Rosecrans National Cemetery', angles: ['origin', 'people', 'surroundings'] },
@@ -73,7 +73,7 @@ export const SEEDS = [
   { n: 59, name: 'San Diego State University', area: 'College Area, San Diego', query: 'San Diego State University', angles: ['origin', 'event', 'sports'] },
   { n: 60, name: 'LEGOLAND California', area: 'Carlsbad', query: 'LEGOLAND California, Carlsbad', angles: ['origin', 'event', 'recent'] },
   { n: 61, name: 'Berkeley Ferryboat', area: 'Embarcadero, San Diego', query: 'Berkeley ferryboat, Maritime Museum of San Diego', angles: ['origin', 'building', 'event'] },
-  { n: 62, name: 'San Diego County Administration Center', area: 'Waterfront, San Diego', query: 'San Diego County Administration Center', angles: ['origin', 'building', 'event'] },
+  { n: 62, name: 'San Diego County Administration Center', area: 'Waterfront, San Diego', query: 'San Diego County Administration Center', angles: ['origin', 'building', 'event'], coords: { lat: 32.722161, lng: -117.172042, source: 'registry — County Administration Bldg. (local, verified), 1600 Pacific Hwy. AREA F re-pin R-2: the v13 corpus pin sits ~18 km south near the border; the served rows need the same re-pin (see major-coverage-audit.md §2D-D2)' } },
   { n: 63, name: 'Encinitas Boathouses', area: 'Encinitas', query: 'Encinitas Boathouses, Encinitas, CA', angles: ['origin', 'building', 'legends'] },
   { n: 64, name: 'Old Mission Dam', area: 'Mission Trails, San Diego', query: 'Old Mission Dam, San Diego', angles: ['origin', 'building', 'surroundings'] },
   { n: 65, name: 'Rancho Guajome Adobe', area: 'Vista', query: 'Rancho Guajome Adobe, Vista, CA', angles: ['origin', 'people', 'building'] },
@@ -134,6 +134,38 @@ export const SEEDS = [
   { n: 113, name: 'Pioneer Park', area: 'Mission Hills, San Diego', query: 'Pioneer Park, Mission Hills, San Diego', angles: ['origin', 'legends', 'event'] },
   { n: 114, name: 'Munchkin Houses', area: 'La Jolla, San Diego', query: 'Munchkin Houses, Hillside Drive, La Jolla', angles: ['origin', 'legends', 'building'] },
   { n: 115, name: 'Fallen Star', area: 'UC San Diego, La Jolla', query: 'Fallen Star, UC San Diego', angles: ['origin', 'building', 'cultural'] },
+  // AREA F — major-coverage wiring (audit Oct 26, 2026;
+  // ~/workspace/leos-world/major-coverage-audit.md §2E). Entries WITH a
+  // coords block are pinned from the cited local source. Entries
+  // WITHOUT one are UNVERIFIED-pin by design: the builder geocodes the
+  // query and the pin gets an owner review before ingest — the §2D
+  // defects (seven library places served on other continents) are what
+  // unreviewed geocodes produce. NO corpus generation runs in the
+  // Area F batch; these seeds activate at the next library build.
+  { n: 116, name: 'Naval Base Point Loma', area: 'Point Loma, San Diego', query: 'Naval Base Point Loma, San Diego', angles: ['origin', 'event', 'role'] },
+  { n: 117, name: 'Naval Base San Diego', area: 'San Diego Bay', query: 'Naval Base San Diego, 32nd Street', angles: ['origin', 'event', 'role'] },
+  { n: 118, name: 'Fort Rosecrans', area: 'Point Loma, San Diego', query: 'Fort Rosecrans, Point Loma, San Diego', angles: ['origin', 'event', 'building'] },
+  { n: 119, name: 'Seaport Village', area: 'Embarcadero, San Diego', query: 'Seaport Village, San Diego', angles: ['origin', 'event', 'recent'] },
+  { n: 120, name: 'Unconditional Surrender Statue', area: 'Embarcadero, San Diego', query: 'Unconditional Surrender statue, Tuna Harbor Park, San Diego', angles: ['origin', 'event', 'people'] },
+  { n: 121, name: 'Little Italy', area: 'Little Italy, San Diego', query: 'Little Italy, San Diego', angles: ['origin', 'event', 'cultural'] },
+  { n: 122, name: 'University of San Diego', area: 'Linda Vista, San Diego', query: 'University of San Diego, Alcala Park', angles: ['origin', 'building', 'people'] },
+  { n: 123, name: 'The Rady Shell at Jacobs Park', area: 'Embarcadero, San Diego', query: 'Rady Shell at Jacobs Park, San Diego', angles: ['origin', 'building', 'music'] },
+  { n: 124, name: 'San Diego Central Library', area: 'East Village, San Diego', query: 'San Diego Central Library', angles: ['origin', 'building', 'recent'] },
+  { n: 125, name: 'San Diego Museum of Art', area: 'Balboa Park, San Diego', query: 'San Diego Museum of Art, Balboa Park', angles: ['origin', 'building', 'people'] },
+  { n: 126, name: 'San Diego Natural History Museum', area: 'Balboa Park, San Diego', query: 'San Diego Natural History Museum, Balboa Park', angles: ['origin', 'people', 'role'] },
+  { n: 127, name: 'Fleet Science Center', area: 'Balboa Park, San Diego', query: 'Fleet Science Center, Balboa Park, San Diego', angles: ['origin', 'building', 'role'] },
+  { n: 128, name: 'Old Globe Theatre', area: 'Balboa Park, San Diego', query: 'Old Globe Theatre, Balboa Park, San Diego', angles: ['origin', 'building', 'music'] },
+  { n: 129, name: 'Camp Pendleton', area: 'Camp Pendleton, Oceanside', query: 'Marine Corps Base Camp Pendleton main gate', angles: ['origin', 'event', 'role'] },
+  { n: 130, name: "Children's Pool", area: 'La Jolla, San Diego', query: "Children's Pool, La Jolla, San Diego", angles: ['origin', 'event', 'recent'] },
+  { n: 131, name: 'Museum of Us', area: 'Balboa Park, San Diego', query: 'Museum of Us, California Tower, Balboa Park', angles: ['origin', 'building', 'people'], coords: { lat: 32.731769, lng: -117.152257, source: 'registry — California Quadrangle (national, verified), Balboa Park-El Prado Area' } },
+  { n: 132, name: 'San Diego Air & Space Museum', area: 'Balboa Park, San Diego', query: 'San Diego Air & Space Museum, Ford Building, Balboa Park', angles: ['origin', 'building', 'event'], coords: { lat: 32.726122, lng: -117.154539, source: 'registry — Ford Building (national+local, verified), 2001 Pan American Pl' } },
+  { n: 133, name: 'Pilot Boat', area: 'Embarcadero, San Diego', query: 'Pilot boat, Maritime Museum of San Diego', angles: ['origin', 'event', 'role'], coords: { lat: 32.7209, lng: -117.17348, source: 'registry — PILOT (Pilot Boat) (national, verified)' } },
+  { n: 134, name: 'Cabrillo Ferry', area: 'Embarcadero, San Diego', query: 'Cabrillo ferry, Broadway Pier, San Diego', angles: ['origin', 'event', 'recent'], coords: { lat: 32.71546, lng: -117.17306, source: 'registry — CABRILLO (Ferry) (national, verified), Broadway Pier' } },
+  { n: 135, name: 'PCF 816 Swift Boat', area: 'Embarcadero, San Diego', query: 'PCF 816 Swift boat, Maritime Museum of San Diego', angles: ['origin', 'event', 'people'], coords: { lat: 32.722778, lng: -117.178333, source: 'registry — PCF 816 (patrol craft fast) (national, verified)' } },
+  { n: 136, name: 'Junipero Serra Museum', area: 'Presidio, San Diego', query: 'Junipero Serra Museum, Presidio Park, San Diego', angles: ['origin', 'building', 'people'], coords: { lat: 32.759609, lng: -117.193429, source: 'registry — Junipero Serra Museum (local, verified), 2727 Presidio Dr' } },
+  { n: 137, name: 'The Lodge at Torrey Pines', area: 'Torrey Pines, La Jolla', query: 'The Lodge at Torrey Pines', angles: ['origin', 'building', 'sports'], coords: { lat: 32.92081, lng: -117.251775, source: 'registry — Torrey Pines Lodge (national, verified), 12201 Torrey Pines Park Rd' } },
+  { n: 138, name: 'Torrey Pines Gliderport', area: 'Torrey Pines, La Jolla', query: 'Torrey Pines Gliderport, La Jolla', angles: ['origin', 'sports', 'surroundings'], coords: { lat: 32.88994, lng: -117.247084, source: 'registry — Torrey Pines Gliderport (national, APPROXIMATE grade — owner confirmation required, see audit §2C)' } },
+  { n: 139, name: 'Scripps Institution of Oceanography', area: 'La Jolla Shores, San Diego', query: 'Scripps Institution of Oceanography, La Jolla', angles: ['origin', 'people', 'role'], coords: { lat: 32.852962, lng: -117.253837, source: 'registry — Scripps Memorial Marine Biological Laboratory (national, APPROXIMATE grade — owner confirmation required, see audit §2C)' } },
 ];
 
 // Run order when the live-TTS daily cap forces prioritization: the I-5

@@ -870,13 +870,27 @@ function App() {
             result.major === true ||
             (queueJumpTargetName !== null &&
               resultBase === queueJumpTargetName.toLowerCase());
-          if (isQueueJump) {
+          // Crossing-moment right-of-way (Area F, Oct 26, 2026): a
+          // neighborhood intro IS the crossing — it introduces the area
+          // the listener has just entered, and in the normal lane it
+          // could sit in the replaceable waiting slot behind stories
+          // about the area being LEFT (the drive's Point Loma intro
+          // landed ~7 minutes after entry). Intros take the priority
+          // lane like majors: next after the current story, never
+          // displacing it, never displaced themselves.
+          const isIntroServe =
+            result.context === 'neighborhood_intro' ||
+            result.context === 'initial' ||
+            result.context === 'welcome_back';
+          if (isQueueJump || isIntroServe) {
             // Front of the waiting queue — behind nothing but any scripted
             // line already in flight, and always after the current story.
             voice.queuePriorityStory(result.story, originLat, originLng, isRoad, result.subject, result.audioUrl);
-            flashPose('pointing', 5000);
-            queueJumpLandmarkRef.current = null;
-            console.log(`[Tour] Major-landmark story queued at the front: "${result.subject}"`);
+            if (isQueueJump) {
+              flashPose('pointing', 5000);
+              queueJumpLandmarkRef.current = null;
+              console.log(`[Tour] Major-landmark story queued at the front: "${result.subject}"`);
+            }
           } else {
             voice.queueStory(result.story, originLat, originLng, isRoad, undefined, result.subject, result.audioUrl);
           }
