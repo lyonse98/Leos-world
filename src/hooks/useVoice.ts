@@ -45,6 +45,12 @@ interface StoryQueueItem {
   // A story about a truly major landmark. Priority changes the waiting
   // order only — it never interrupts the story currently playing.
   priority?: boolean;
+  // The reserved neighborhood-welcome serve (Pass 1, Oct 27, 2026). An
+  // introServe item is protected in the queue: the single-slot
+  // replacement and priority splices must not displace it before it
+  // airs, and while the opener gate is armed it is the ONLY location
+  // story allowed to start. Its settle releases the gate.
+  introServe?: boolean;
   // Pre-made audio (curated library episode): playback uses this URL
   // directly and pre-synthesis skips the item entirely — the audio
   // already exists, so no quota is ever spent on it.
@@ -156,13 +162,37 @@ const REACH_STATIONARY_M = 30;
 // minute of road already gone), so the original gate fired only there.
 // The Oct 26 drive showed the same failure at surface-street speeds —
 // stories narrated about places already passed — with no gate at all.
-// The threshold is now speed-scaled: 1500m at freeway speed, 600m from
+// The threshold is speed-scaled: 1500m at freeway speed, 600m from
 // 8 m/s, 400m from 6 m/s (driving entry), and no drop below driving
 // speeds — walking behavior is unchanged.
-const FREEWAY_SPEED_MPS = 20; // ~45 mph
+//
+// Pass 1 (Oct 27, 2026): the Oct 27 commute showed the inverse failure —
+// stories DYING ~35s into the pipeline at ~40 mph (4 stale_highway
+// drops). Two corrections. (1) The 1500m band now starts at 15 m/s
+// (~34 mph — real freeway approach speed), not 20: at 40 mph the old
+// ladder still applied the 600m surface band while a story spends
+// 270m+ of road in fetch+synthesis alone, plus queue wait and the 8s
+// driving gap. FREEWAY_SPEED_MPS stays 20 for the story_dropped source
+// NAME ('stale_highway'), so drop-source comparisons across field
+// tests stay apples-to-apples. (2) regionAnchored items are exempt
+// from the rear cut entirely (see isFarBehindAtSpeed): driving serves
+// are anchored to the area ahead, not a point — the documented intent
+// the gate was never actually honoring. The symmetric 2000m reach and
+// the 180s max age remain as outer limits for every item.
+const FREEWAY_SPEED_MPS = 20; // ~45 mph — story_dropped source naming only
+const BEHIND_FREEWAY_BAND_MPS = 15; // ~34 mph — where the 1500m band starts
 const STALE_BEHIND_FREEWAY_M = 1500;
 const STALE_BEHIND_SURFACE_M = 600;
 const STALE_BEHIND_DRIVING_M = 400;
+
+// Opener gate backstop (Pass 1, Oct 27, 2026): the gate holds landmark
+// stories until the neighborhood welcome airs. If the welcome cannot
+// be produced at all — generation keeps failing — the gate must not
+// deadlock the tour: after this long armed, it releases itself and the
+// tour proceeds with normal queueing. Three minutes is far beyond any
+// healthy opener (welcome + clip + first generation ≈ 90s), so a
+// release at the backstop is unambiguous evidence of a broken opener.
+const OPENER_GATE_TIMEOUT_MS = 180_000;
 
 // Deliberate silence between stories, by movement mode. The gap is measured
 // from the previous story's last audio frame to the next story's first. Too
@@ -247,6 +277,11 @@ export const useVoice = () => {
     attempts: number;
     isLocationStory: boolean;
     topic: string | null;
+    // The reserved neighborhood-welcome serve (Pass 1): its settle —
+    // delivered or not — is what releases the opener gate, because the
+    // gate's question ("has the welcome aired?") is answered either
+    // way once the intro has had its dequeue.
+    introServe?: boolean;
     onEnd?: (sounded: boolean) => void;
     onSettleDetail?: (info: PlaybackSettle) => void;
     // Tell geometry captured at dequeue (Area G): the item's
@@ -355,6 +390,26 @@ export const useVoice = () => {
   // diagnostics so the reason for browser voice is visible.
   const [ttsStatus, setTtsStatus] = useState<string>('idle');
   const backgroundedRef = useRef<boolean>(false);
+  // Opener gate state (Pass 1, Oct 27, 2026): armed by the app at tour
+  // start via beginOpenerGate(); while armed, playStoryFromQueue may
+  // start ONLY the introServe item (plus scripted lines, which are the
+  // welcome/clip the gate exists to protect). Released by the intro's
+  // settle, by the intro being stale-dropped, or by the timeout
+  // backstop timer — never by an ordinary story starting.
+  const openerGateRef = useRef<{ armedAt: number } | null>(null);
+  const openerGateTimerRef = useRef<number | null>(null);
+  // The queue item currently in the player, retained so a return from
+  // backgrounding can restart IT (replay/re-speak) instead of abandoning
+  // it to the watchdog. Set at dequeue; cleared at settle, and on the
+  // blocked-requeue discard (where the item returns to the queue).
+  const currentItemRef = useRef<StoryQueueItem | null>(null);
+  // Topic of the location story that was mid-play when the page last
+  // hid. If that story settles not-delivered, the app is told (via
+  // onStoryInterruptedRef) so it can release the story from the told
+  // set / session lock — a story the platform killed can be retold
+  // later in the drive instead of being lost having never been heard.
+  const backgroundedTopicRef = useRef<string | null>(null);
+  const onStoryInterruptedRef = useRef<((topic: string) => void) | null>(null);
   // A line requested before the first gesture is held here and spoken the
   // instant the listener taps, since that tap is what permits sound.
   // Held lines are an ordered QUEUE, not a single slot: tour start speaks
@@ -702,6 +757,29 @@ export const useVoice = () => {
     }
   }, []);
 
+  // Opener gate (Pass 1, Oct 27, 2026). Erik's required sequence is
+  // generic welcome → neighborhood welcome → landmarks, and on the
+  // Oct 27 commute the first audible thing was a landmark: the reserved
+  // intro serve could be displaced in the queue, consumed by a failed
+  // generation, or simply beaten to the speaker. The gate makes the
+  // order structural instead of hopeful: from tour start until the
+  // neighborhood welcome has aired, no landmark/area story may START.
+  // Release is always on the record (pipeline_diag), whatever the path.
+  const beginOpenerGate = useCallback(() => {
+    openerGateRef.current = { armedAt: Date.now() };
+  }, []);
+
+  const releaseOpenerGate = useCallback((reason: string) => {
+    if (!openerGateRef.current) return;
+    openerGateRef.current = null;
+    if (openerGateTimerRef.current !== null) {
+      clearTimeout(openerGateTimerRef.current);
+      openerGateTimerRef.current = null;
+    }
+    try { trackDiag('playback', 'opener-gate-release', reason); } catch { /* diagnostics only */ }
+    console.log(`[Voice] Opener gate released (${reason})`);
+  }, []);
+
   // Settle the item currently in the player: fire its onPlaybackEnd
   // exactly once with whether it FULLY delivered (sounded AND ran to
   // natural completion — see currentPlaybackRef), and forget it. Every
@@ -713,7 +791,25 @@ export const useVoice = () => {
     const pb = currentPlaybackRef.current;
     if (!pb) return;
     currentPlaybackRef.current = null;
+    currentItemRef.current = null;
     const delivered = pb.sounded && pb.completed;
+    // Opener gate release (Pass 1): the welcome has aired (or had its
+    // chance and failed) — landmarks may start now either way. If the
+    // intro FAILED, proceeding beats deadlocking the tour in silence.
+    if (pb.introServe) {
+      releaseOpenerGate(delivered ? 'intro-aired' : 'intro-settled-undelivered');
+    }
+    // Backgrounding release (Pass 1): a location story that was
+    // mid-play when the page hid and now settles NOT delivered was
+    // killed by the platform, not heard. Tell the app its topic so it
+    // can be released from the told set / session lock and retold
+    // later in the drive.
+    if (pb.isLocationStory && pb.topic && backgroundedTopicRef.current === pb.topic) {
+      backgroundedTopicRef.current = null;
+      if (!delivered) {
+        onStoryInterruptedRef.current?.(pb.topic);
+      }
+    }
     const settle: PlaybackSettle = {
       sounded: pb.sounded,
       completed: pb.completed,
@@ -830,6 +926,16 @@ export const useVoice = () => {
     isPlayingStoryRef.current = false;
     preSynthTextRef.current = null;
     playbackStartedRef.current = false;
+    // Tour teardown retires the opener machinery with everything else:
+    // a stopped tour must not leave a gate (or its backstop timer)
+    // armed against the next tour's first story.
+    openerGateRef.current = null;
+    if (openerGateTimerRef.current !== null) {
+      clearTimeout(openerGateTimerRef.current);
+      openerGateTimerRef.current = null;
+    }
+    currentItemRef.current = null;
+    backgroundedTopicRef.current = null;
     clearWatchdog();
   }, [clearWatchdog, settleCurrentPlayback, settleQueuedTrackedItems]);
 
@@ -994,9 +1100,12 @@ export const useVoice = () => {
 
   // How far behind the direction of travel an anchor may sit at this
   // speed before the story is stale. Infinity below driving entry —
-  // the gate simply does not exist for walking or dwell.
+  // the gate simply does not exist for walking or dwell. The freeway
+  // band starts at BEHIND_FREEWAY_BAND_MPS (15 m/s, Pass 1) rather than
+  // FREEWAY_SPEED_MPS: the distance ladder and the drop-source name
+  // are separate concerns.
   const behindThresholdM = (speed: number): number =>
-    speed >= FREEWAY_SPEED_MPS
+    speed >= BEHIND_FREEWAY_BAND_MPS
       ? STALE_BEHIND_FREEWAY_M
       : speed >= 8
         ? STALE_BEHIND_SURFACE_M
@@ -1007,8 +1116,15 @@ export const useVoice = () => {
   // True at driving speeds, with a known direction of travel, when the
   // story's anchor sits far BEHIND the listener (>90° off heading,
   // beyond the speed-scaled threshold). Conservative by design: any
-  // unknown → false.
+  // unknown → false. Region-anchored items are EXEMPT (Pass 1, Oct 27,
+  // 2026): a driving serve is anchored to the region the listener is
+  // travelling through, not to a point that can be passed — the rear
+  // cut was documented as removed for exactly these items but ran
+  // unconditionally, and at ~40 mph it killed stories ~35s into the
+  // pipeline. Their outer limits are the symmetric reach bound and the
+  // max age, both enforced in isStillRelevant.
   const isFarBehindAtSpeed = (item: StoryQueueItem, current: CurrentPosition, d: number): boolean => {
+    if (item.regionAnchored) return false;
     if (item.lat === undefined || item.lng === undefined) return false;
     if (typeof current.speed !== 'number') return false;
     const threshold = behindThresholdM(current.speed);
@@ -1034,20 +1150,20 @@ export const useVoice = () => {
       mode === 'driving' ? REACH_DRIVING_M : mode === 'walking' ? REACH_WALKING_M : REACH_STATIONARY_M;
     if (d > reach) return false;
 
-    // Behind-me exception to the exemption below: at driving speeds an
-    // anchor far behind the direction of travel (speed-scaled distance)
-    // is out of the area the listener is in — drop it rather than
-    // narrate yesterday's road. The drop itself is reported by the
-    // dequeue loop (single emit point, with tell geometry — Area G).
+    // Behind-me cut (point-anchored items only — isFarBehindAtSpeed
+    // exempts region-anchored ones): at driving speeds an anchor far
+    // behind the direction of travel (speed-scaled distance) is out of
+    // the area the listener is in — drop it rather than narrate
+    // yesterday's road. The drop itself is reported by the dequeue
+    // loop (single emit point, with tell geometry — Area G).
     if (isFarBehindAtSpeed(item, current, d)) {
       return false;
     }
 
-    // Region-anchored stories have no single spot to pass.
-    // The behind-you check is intentionally removed for driving mode: with
-    // absolute geographic framing, a story about a landmark the listener has
-    // already passed is still worth hearing — the story describes what the
-    // place IS, not where it is relative to the listener.
+    // Region-anchored stories have no single spot to pass: with
+    // absolute geographic framing, a story about the area stays worth
+    // hearing across the whole 2 km reach. They are bounded by the
+    // reach check above and the age check below — nothing else.
 
     const age = Date.now() - item.generatedAt;
     const maxAge = mode === 'driving' ? MAX_AGE_DRIVING_MS : MAX_AGE_WALKING_MS;
@@ -1491,6 +1607,10 @@ export const useVoice = () => {
       const next = storyQueueRef.current[0];
       if (isStillRelevant(next)) break;
       storyQueueRef.current.shift();
+      // If the stale item IS the reserved welcome, the gate's wait is
+      // over: a welcome that can no longer be heard must not hold the
+      // tour hostage (Pass 1 safety valve).
+      if (next.introServe) releaseOpenerGate('intro-dropped-stale');
       console.log('[Voice] Stale story dropped — no longer describes the listener\'s location');
       // The drop, on the record with tell geometry (Area G): which
       // story, how far its anchor sits, and at what bearing — relative
@@ -1519,6 +1639,32 @@ export const useVoice = () => {
           bearing_offset_deg: bearingOffset !== undefined ? Math.round(bearingOffset) : null,
         });
       } catch { /* a metric must never break the gate */ }
+    }
+
+    // Opener gate (Pass 1): until the neighborhood welcome has aired,
+    // a landmark/area story may not START. Scripted lines and the
+    // intro serve itself pass. The intro is protected at enqueue
+    // (piece 3a) so it sits ahead of any waiting landmark — holding
+    // here simply waits for it; its settle re-enters this function
+    // through the normal onDone chain. Safety valve: past the
+    // backstop, release and proceed rather than deadlock the tour —
+    // a timer guarantees the release lands even if nothing else ever
+    // calls back in.
+    const gateHead = storyQueueRef.current[0];
+    if (openerGateRef.current && gateHead && gateHead.isLocationStory && !gateHead.introServe) {
+      const armedFor = Date.now() - openerGateRef.current.armedAt;
+      if (armedFor < OPENER_GATE_TIMEOUT_MS) {
+        if (openerGateTimerRef.current === null) {
+          openerGateTimerRef.current = window.setTimeout(() => {
+            openerGateTimerRef.current = null;
+            releaseOpenerGate('timeout');
+            playStoryFromQueueRef.current();
+          }, OPENER_GATE_TIMEOUT_MS - armedFor);
+        }
+        console.log('[Voice] Opener gate: holding a landmark story until the neighborhood welcome airs');
+        return;
+      }
+      releaseOpenerGate('timeout');
     }
 
     const item = storyQueueRef.current.shift();
@@ -1671,6 +1817,7 @@ export const useVoice = () => {
       attempts: item.attempts ?? 1,
       isLocationStory: item.isLocationStory,
       topic: item.topic ?? null,
+      introServe: item.introServe === true,
       onEnd: item.onPlaybackEnd,
       onSettleDetail: item.onSettleDetail,
       storyId: item.storyId,
@@ -1682,6 +1829,10 @@ export const useVoice = () => {
       ...playGeo,
     };
     currentPlaybackRef.current = playback;
+    // Retain the item itself for the leave/return restart (Pass 1):
+    // the lifecycle record knows how the dequeue ended, but only the
+    // item can be replayed.
+    currentItemRef.current = item;
     // A tracked item (one carrying lifecycle callbacks — the Q&A
     // answer and bridge) gets honest-partial handling in both engines:
     // a mid-playback failure re-enters the attempt economy rather than
@@ -1736,6 +1887,9 @@ export const useVoice = () => {
         if (currentPlaybackRef.current === playback) {
           currentPlaybackRef.current = null;
         }
+        // The item is back to waiting, not in the player — the
+        // leave/return restart must not mistake it for a mid-play item.
+        currentItemRef.current = null;
         storyQueueRef.current.unshift(item);
         console.log('[Voice] Audio blocked — holding this story until sound is allowed');
         return;
@@ -1767,10 +1921,58 @@ export const useVoice = () => {
   const playStoryFromQueueRef = useRef(playStoryFromQueue);
   playStoryFromQueueRef.current = playStoryFromQueue;
 
-  // Coming back from another app: the platform has paused speech and the
-  // watchdog's timers were throttled while hidden, so its idea of "silence" is
-  // meaningless. Unpause, restart the clock, and pick the queue back up if the
-  // utterance was killed outright.
+  // Restart the item that was mid-play when the page hid (Pass 1,
+  // Oct 27, 2026). iOS suspends the page wholesale: timers throttle,
+  // utterances are killed, the audio element is paused — while the
+  // in-memory state still says "playing", and the old resume path
+  // merely re-armed the watchdog, which then force-advanced and
+  // dropped the half-heard story. Instead the retained item goes back
+  // to the front of the queue and replays from the start: for
+  // file-backed items the dequeue re-runs playback against the same
+  // URL (or the warm TTS cache); for browser-voice items it is a clean
+  // re-speak. The current dequeue is discarded WITHOUT settling —
+  // the same no-fire discard as the blocked-requeue path — because
+  // the item neither finished nor failed; if the replay later settles
+  // not-delivered, the backgrounding release (settleCurrentPlayback)
+  // still fires, since backgroundedTopicRef survives the restart.
+  const restartCurrentItem = useCallback((): boolean => {
+    const item = currentItemRef.current;
+    if (!item) return false;
+    playGenRef.current += 1;
+    if (currentPlaybackRef.current) currentPlaybackRef.current = null;
+    currentItemRef.current = null;
+    clearWatchdog();
+    if (synthRef.current) {
+      try { synthRef.current.cancel(); } catch { /* engine missing */ }
+    }
+    if (audioElRef.current) {
+      audioElRef.current.pause();
+      audioElRef.current.removeAttribute('src');
+    }
+    if (stallAudioRef.current) {
+      stallAudioRef.current.pause();
+      stallAudioRef.current.removeAttribute('src');
+      stallAudioRef.current = null;
+    }
+    if (ttsUrlRef.current) {
+      URL.revokeObjectURL(ttsUrlRef.current);
+      ttsUrlRef.current = null;
+    }
+    playbackStartedRef.current = false;
+    isPlayingStoryRef.current = false;
+    setIsSpeaking(false);
+    setWasInterrupted(false);
+    storyQueueRef.current.unshift(item);
+    console.log('[Voice] Restarting the item that was mid-play when the page hid');
+    playStoryFromQueueRef.current();
+    return true;
+  }, [clearWatchdog]);
+
+  // Coming back from another app: the platform has paused speech and
+  // the watchdog's timers were throttled while hidden, so its idea of
+  // "silence" is meaningless. Restart what was interrupted — promptly,
+  // with an immediate progress check rather than the watchdog's 8s of
+  // grace — and pick the queue back up if nothing was playing.
   const resumeFromBackground = useCallback(() => {
     const synth = synthRef.current;
     if (synth) {
@@ -1780,13 +1982,37 @@ export const useVoice = () => {
         // Engine missing — nothing to resume
       }
     }
-    if (audioElRef.current && audioElRef.current.src) {
-      audioElRef.current.play().catch(() => {
-        setWasInterrupted(true);
-      });
-    }
 
     if (isPlayingStoryRef.current) {
+      const item = currentItemRef.current;
+      const audio = audioElRef.current;
+      if (item && audio && audio.src && !audio.ended) {
+        // File-backed item with its source intact: try the cheap
+        // in-place resume first, then verify with an immediate
+        // progress check (~700ms) — if the element is not actually
+        // advancing, fall through to a full restart of the item.
+        audio.play().catch(() => { /* the progress check decides */ });
+        window.setTimeout(() => {
+          if (!isPlayingStoryRef.current) return;
+          const a = audioElRef.current;
+          const advancing = !!a && !!a.src && !a.paused && !a.ended;
+          const synthAlive = !!(synthRef.current?.speaking || synthRef.current?.pending);
+          if (advancing || synthAlive) {
+            startWatchdog();
+            setWasInterrupted(false);
+          } else if (!restartCurrentItem()) {
+            startWatchdog();
+            setWasInterrupted(true);
+          }
+        }, 700);
+        return;
+      }
+      if (item) {
+        // Browser-voice item (utterances never survive suspension) or
+        // a file item whose element lost its source: clean restart.
+        if (restartCurrentItem()) return;
+      }
+      // Playing with no retained item — the pre-Pass-1 behavior.
       startWatchdog();
       // Audio stays paused until the listener taps, so say so rather than
       // letting them sit in silence wondering whether the tour died.
@@ -1797,12 +2023,19 @@ export const useVoice = () => {
     if (storyQueueRef.current.length > 0) {
       playStoryFromQueueRef.current();
     }
-  }, [startWatchdog]);
+  }, [startWatchdog, restartCurrentItem]);
 
   useEffect(() => {
     const onVisibilityChange = () => {
       if (document.hidden) {
         backgroundedRef.current = true;
+        // Remember WHAT was on air as the page hid: if that story
+        // settles not-delivered, it was the platform that killed it,
+        // and it earns a release for retelling (see settle).
+        const pb = currentPlaybackRef.current;
+        if (pb?.isLocationStory && pb.topic) {
+          backgroundedTopicRef.current = pb.topic;
+        }
         return;
       }
       if (!backgroundedRef.current) return;
@@ -1813,6 +2046,79 @@ export const useVoice = () => {
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);
   }, [resumeFromBackground]);
+
+  // --- Media Session (Pass 1, Oct 27, 2026) ---
+  // Lock-screen / car-stereo controls. Before this, leaving the app
+  // (or the car's head unit) had no Leo's World presence at all: no
+  // title, no transport buttons — the driver had to unlock the phone
+  // to recover the tour. Metadata is set at tour start; the handlers
+  // wire to the same resume/pause mechanics the on-screen controls
+  // use (the tap-to-resume unlock flow and engine pause). Pure
+  // garnish by design: every call is guarded, and a platform without
+  // the API simply never sees it.
+  const pausePlaybackForMedia = useCallback(() => {
+    if (audioElRef.current && audioElRef.current.src) {
+      try { audioElRef.current.pause(); } catch { /* element gone */ }
+    }
+    if (synthRef.current) {
+      try { synthRef.current.pause(); } catch { /* engine missing */ }
+    }
+    clearWatchdog();
+    setWasInterrupted(true);
+    try {
+      if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+    } catch { /* garnish */ }
+  }, [clearWatchdog]);
+
+  const resumePlaybackForMedia = useCallback(() => {
+    unlock();
+    const audio = audioElRef.current;
+    const elementPaused = !!audio && !!audio.src && audio.paused && !audio.ended;
+    const synthPaused = !!synthRef.current?.paused;
+    if (isPlayingStoryRef.current && (elementPaused || synthPaused)) {
+      if (elementPaused) audio!.play().catch(() => setWasInterrupted(true));
+      if (synthPaused) {
+        try { synthRef.current?.resume(); } catch { /* engine missing */ }
+      }
+      setWasInterrupted(false);
+      startWatchdog();
+    } else {
+      // Nothing mid-play to unpause: mirror the tap-to-resume flow —
+      // clear the interrupted/blocked state and pick the queue up.
+      audioBlockedRef.current = false;
+      setAudioBlocked(false);
+      setWasInterrupted(false);
+      if (!isPlayingStoryRef.current && storyQueueRef.current.length > 0) {
+        playStoryFromQueueRef.current();
+      }
+    }
+    try {
+      if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+    } catch { /* garnish */ }
+  }, [unlock, startWatchdog]);
+
+  const activateMediaSession = useCallback(() => {
+    if (!('mediaSession' in navigator)) return;
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: "Leo's World",
+        artist: 'Leo — your AI tour guide',
+        album: "Leo's World",
+      });
+      navigator.mediaSession.setActionHandler('play', () => resumePlaybackForMedia());
+      navigator.mediaSession.setActionHandler('pause', () => pausePlaybackForMedia());
+    } catch { /* garnish — never break a tour start for it */ }
+  }, [resumePlaybackForMedia, pausePlaybackForMedia]);
+
+  const deactivateMediaSession = useCallback(() => {
+    if (!('mediaSession' in navigator)) return;
+    try {
+      navigator.mediaSession.setActionHandler('play', null);
+      navigator.mediaSession.setActionHandler('pause', null);
+      navigator.mediaSession.metadata = null;
+      navigator.mediaSession.playbackState = 'none';
+    } catch { /* garnish */ }
+  }, []);
 
   // A tap anywhere means a fresh gesture. Use it to wake the engine and, if
   // audio was blocked, to pick the held story back up.
@@ -1851,20 +2157,32 @@ export const useVoice = () => {
       // ahead of it because they are conversational glue for what is already
       // happening. Most importantly, the currently playing story is never
       // touched — priority only reorders what waits.
+      // Pass 1 exception: the reserved neighborhood welcome (introServe)
+      // is NEVER displaced or spliced around — it stays the first
+      // location story until it airs, and a priority serve lines up
+      // behind it. Displacing the intro was half of how a landmark
+      // beat the welcome to the speaker on Oct 27.
       for (let i = queue.length - 1; i >= 0; i--) {
-        if (queue[i].isLocationStory) queue.splice(i, 1);
+        if (queue[i].isLocationStory && !queue[i].introServe) queue.splice(i, 1);
       }
-      const firstLocationIndex = queue.findIndex(i => i.isLocationStory);
+      const firstLocationIndex = queue.findIndex(i => i.isLocationStory && !i.introServe);
       if (firstLocationIndex === -1) queue.push(item);
       else queue.splice(firstLocationIndex, 0, item);
       preSynthTextRef.current = null;
       console.log('[Voice] Priority story moved to the front of the waiting queue');
     } else if (item.isLocationStory) {
-      const waitingIndex = queue.findIndex(i => i.isLocationStory);
       const waitingCount = queue.filter(i => i.isLocationStory).length;
-      if (waitingCount >= MAX_PENDING_LOCATION_STORIES && waitingIndex !== -1) {
-        queue.splice(waitingIndex, 1);
-        console.log('[Voice] Replacing the waiting story with a fresher one');
+      if (waitingCount >= MAX_PENDING_LOCATION_STORIES) {
+        // The single waiting slot goes to the fresher story — unless
+        // every waiting location story is the protected intro, in
+        // which case the newcomer queues BEHIND it (a brief depth-2
+        // queue during the opener only) rather than replacing the
+        // welcome before it airs.
+        const replaceableIndex = queue.findIndex(i => i.isLocationStory && !i.introServe);
+        if (replaceableIndex !== -1) {
+          queue.splice(replaceableIndex, 1);
+          console.log('[Voice] Replacing the waiting story with a fresher one');
+        }
       }
       queue.push(item);
     } else {
@@ -1901,7 +2219,7 @@ export const useVoice = () => {
     kind?: 'location' | 'scripted',
     topic?: string,
     audioUrl?: string,
-    geo?: { storyId?: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number }
+    geo?: { storyId?: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; introServe?: boolean }
   ) => {
     if (Date.now() < mutedUntilRef.current) {
       console.log('[Voice] Muted — dropping queued story');
@@ -1917,6 +2235,7 @@ export const useVoice = () => {
       regionAnchored,
       isLocationStory: kind ? kind === 'location' : hasCoords,
       audioUrl,
+      introServe: geo?.introServe === true,
       storyId: geo?.storyId,
       projectedCenter: geo?.projectedCenter,
       horizonS: geo?.horizonS,
@@ -1932,7 +2251,7 @@ export const useVoice = () => {
     regionAnchored?: boolean,
     topic?: string,
     audioUrl?: string,
-    geo?: { storyId?: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number }
+    geo?: { storyId?: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; introServe?: boolean }
   ) => {
     if (Date.now() < mutedUntilRef.current) {
       console.log('[Voice] Muted — dropping priority story');
@@ -1948,6 +2267,7 @@ export const useVoice = () => {
       isLocationStory: true,
       priority: true,
       audioUrl,
+      introServe: geo?.introServe === true,
       storyId: geo?.storyId,
       projectedCenter: geo?.projectedCenter,
       horizonS: geo?.horizonS,
@@ -2133,6 +2453,13 @@ export const useVoice = () => {
     onStoryCompleteRef.current = cb;
   }, []);
 
+  // Pass 1: the app registers here to learn when a location story was
+  // killed by backgrounding (settled not-delivered after being mid-play
+  // at hide time), so it can release the story for retelling.
+  const setOnStoryInterrupted = useCallback((cb: ((topic: string) => void) | null) => {
+    onStoryInterruptedRef.current = cb;
+  }, []);
+
   const getQueueLength = useCallback(() => storyQueueRef.current.length, []);
 
   const getStoryTiming = useCallback((): StoryTiming => storyTimingRef.current, []);
@@ -2169,6 +2496,10 @@ export const useVoice = () => {
     getLastSpokenSentences,
     isPlayingStory,
     setOnStoryComplete,
+    setOnStoryInterrupted,
+    beginOpenerGate,
+    activateMediaSession,
+    deactivateMediaSession,
     getQueueLength,
     getStoryTiming,
     setCurrentPositionProvider,
