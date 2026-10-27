@@ -680,6 +680,49 @@ class GeminiService {
     return lines.join('\n');
   }
 
+  // Length hint (Pass 2, Oct 27, 2026): the persona's length doctrine
+  // says scale to the road, but the prompt carried nothing about THIS
+  // road — the model got the mode band and had to guess the density.
+  // The fact pack already knows: how many other subjects it holds and
+  // how far the next one sits (distances are from the discovery
+  // position the pack was gathered around, so on a moving tour this is
+  // the anticipated road, not the rear-view mirror). Sparse ahead →
+  // lean to the long end of the band; subjects packed close → lean
+  // short, so a longer story never eats the next landmark's turn. A
+  // hint, not a word count. Significance and deep-listening govern
+  // themselves and suppress it — their instructions are stronger and
+  // already length-aware.
+  private buildLengthHint(factPack: StoryFactPack, target: StoryTarget): string {
+    const mode = factPack.mode;
+    if (mode !== 'driving' && mode !== 'highway' && mode !== 'rural') return '';
+    if (target.significance) return '';
+    if (locationTracker.getDwellDepthLevel() !== null) return '';
+
+    const others = factPack.places.filter(p => p.name !== target.subject?.name);
+    const nextDist = others.length > 0 ? Math.min(...others.map(p => p.distance)) : null;
+    const freewayScale = mode === 'highway' || mode === 'rural';
+    const denseDist = freewayScale ? 600 : 300;
+    const sparseDist = freewayScale ? 1800 : 900;
+    const band = freewayScale ? '12-18 sentences' : '8-12 sentences';
+
+    if (others.length >= 3 || (nextDist !== null && nextDist <= denseDist)) {
+      return (
+        'LENGTH HINT — SUBJECTS ARE PACKED CLOSE HERE: several story-worthy places sit ' +
+        'within a short stretch of this road. Lean to the SHORTER end of the MODE band ' +
+        `for this one (${band}) — a tight, complete telling, so the next place gets its turn.`
+      );
+    }
+    if (others.length <= 1 || (nextDist !== null && nextDist >= sparseDist)) {
+      return (
+        'LENGTH HINT — THE ROAD AHEAD IS SPARSE: little else competes for the next ' +
+        `stretch. Lean to the LONG end of the MODE band for this one (${band}) — take ` +
+        'the room, build the scene, let the story breathe. (The honesty rule still ' +
+        'governs: a thin fact pack makes a shorter story, never a more inventive one.)'
+      );
+    }
+    return '';
+  }
+
   private buildStoryPrompt(
     position: Position,
     factPack: StoryFactPack,
@@ -825,6 +868,12 @@ class GeminiService {
     const seasonalHint = seasonal.getPromptHint();
     if (seasonalHint) parts.push(seasonalHint);
 
+    // Length hint (Pass 2): where this road sits inside the mode band —
+    // computed from the fact pack's own density, suppressed when
+    // significance or deep listening set the length themselves (below).
+    const lengthHint = this.buildLengthHint(factPack, target);
+    if (lengthHint) parts.push(lengthHint);
+
     // Significance length override (Area E, Oct 26, 2026): story
     // length follows SIGNIFICANCE as well as speed and density. The
     // v13 density doctrine thins stories where places are thick on the
@@ -840,7 +889,7 @@ class GeminiService {
       parts.push(
         'SIGNIFICANCE — MAJOR LANDMARK: this place is one of the defining landmarks of its area. ' +
           'Tell its story LONG regardless of mode, speed, or how many other places are nearby: ' +
-          '8 to 12 sentences — the full arc. What it is, how it came to be, the people and the ' +
+          '10 to 14 sentences — the full arc. What it is, how it came to be, the people and the ' +
           'conflict inside it, and why it still matters. This overrides the mode length bands ' +
           'and any instinct to keep it brief because the area is dense.'
       );
