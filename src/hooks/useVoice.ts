@@ -1371,18 +1371,35 @@ export const useVoice = () => {
       depth1WarmOrWarming = true; // banked: nothing to warm
     }
 
-    // Depth 2 (Item 3): warm the story AFTER the queued one. The
-    // player queue cannot hold it (MAX_PENDING_LOCATION_STORIES = 1
-    // by design), so the second story honestly lives in the story
-    // buffer — storyCache.peekNextBufferedStory returns the entry
-    // that would serve next, peek-only. Priority discipline: depth 2
-    // spends ONLY when depth 1 is already warm or warming (or the
-    // queue is empty, i.e. depth 1 does not exist) — the second
-    // story never competes with the first for the synthesis lane.
-    // Every stand-down above (quota trip, engine trip) already
-    // returned, so depth collapses under pressure exactly as
-    // depth 1 does today.
-    if ((depth1WarmOrWarming || !next) && presynthPos) {
+    // Depth 2 (Item 3): warm the story AFTER the queued one, in
+    // queue order (Item 7 coherence, Oct 27, 2026). The waiting
+    // queue usually holds ONE location story
+    // (MAX_PENDING_LOCATION_STORIES = 1), but a warm-head-inserted
+    // priority item sits at position 2 — and it is the item depth 2
+    // exists for: when the head drops as stale, the priority item
+    // advances early and must already be warm. So depth 2 targets
+    // storyQueue[1] first when it is a location story; only when
+    // the queue holds nothing behind the head does depth 2 reach
+    // into the story buffer (storyCache.peekNextBufferedStory —
+    // the entry that would serve next, peek-only). Priority
+    // discipline: depth 2 spends ONLY when depth 1 is already warm
+    // or warming (or the queue is empty, i.e. depth 1 does not
+    // exist) — the second story never competes with the first for
+    // the synthesis lane. Every stand-down above (quota trip,
+    // engine trip) already returned, so depth collapses under
+    // pressure exactly as depth 1 does today.
+    const second = storyQueueRef.current[1];
+    if ((depth1WarmOrWarming || !next) && second?.isLocationStory && !second.audioUrl) {
+      let staleSecond = false;
+      if (presynthPos && second.lat !== undefined && second.lng !== undefined) {
+        const dSecond = calculateDistance(presynthPos.lat, presynthPos.lng, second.lat, second.lng);
+        if (isFarBehindAtSpeed(second, presynthPos, dSecond)) staleSecond = true;
+      }
+      if (!staleSecond) {
+        const secondText = second.transitionText ? `${second.transitionText} ${second.text}` : second.text;
+        warmText(secondText, preSynthText2Ref, false);
+      }
+    } else if ((depth1WarmOrWarming || !next) && presynthPos) {
       // The peek reads lat/lng/speed only; accuracy is the one
       // Position field the player's own position type does not carry,
       // and nothing in the peek path consults it.
@@ -2392,30 +2409,81 @@ export const useVoice = () => {
     item.enqueuedAt = Date.now();
 
     if (item.priority) {
-      // A major-landmark story displaces ordinary waiting location stories
-      // and becomes the first location story in line. Scripted lines stay
-      // ahead of it because they are conversational glue for what is already
-      // happening. Most importantly, the currently playing story is never
-      // touched — priority only reorders what waits.
-      // Pass 1 exception: the reserved neighborhood welcome (introServe)
-      // is NEVER displaced or spliced around — it stays the first
-      // location story until it airs, and a priority serve lines up
-      // behind it. Displacing the intro was half of how a landmark
-      // beat the welcome to the speaker on Oct 27.
+      // Warm-head insertion (pre-publish stack Item 7, Oct 27, 2026;
+      // Erik's identification): the old rule displaced EVERY waiting
+      // location story and spliced the priority item to the head —
+      // cold. Its synthesis had never run (presynth was aimed at the
+      // previous head), so the priority story synthesized in-player
+      // while the displaced head's completed warm work was thrown
+      // away. The rule now: a priority item inserts BEHIND a warm or
+      // warming waiting head — the head keeps its slot and its warm
+      // audio, the priority item takes position 2 and is exactly
+      // what depth-2 presynth voices next (Item 3), so it is warm
+      // when it advances. A COLD head is displaced as before and
+      // the priority item takes the head. The currently playing
+      // story is never touched — priority only reorders what waits.
+      // Pass 1 exception (unchanged): the reserved neighborhood
+      // welcome (introServe) is NEVER displaced or spliced around.
+      // FIFO within the priority lane: an already-waiting priority
+      // item is never displaced by a newer one, warm or cold — the
+      // newcomer lines up behind it. Tiebreak between two warm
+      // items: arrival order — a warm priority item does not jump a
+      // warm head that was queued before it.
+      const fullTextOf = (it: StoryQueueItem) =>
+        it.transitionText ? `${it.transitionText} ${it.text}` : it.text;
+      const isWarmOrWarming = (it: StoryQueueItem): boolean => {
+        if (it.audioUrl) return true; // banked audio (library) — warm by definition
+        const ft = fullTextOf(it);
+        return warmedTextRef.current === ft || preSynthTextRef.current === ft;
+      };
+      const locEntries = queue
+        .map((q, i) => ({ q, i }))
+        .filter(x => x.q.isLocationStory && !x.q.introServe);
+      const head = locEntries[0]?.q ?? null;
+      const keep = new Set<StoryQueueItem>();
+      if (head && isWarmOrWarming(head)) keep.add(head);
+      for (const { q } of locEntries) if (q.priority) keep.add(q);
       for (let i = queue.length - 1; i >= 0; i--) {
-        if (queue[i].isLocationStory && !queue[i].introServe) {
+        const q = queue[i];
+        if (q.isLocationStory && !q.introServe && !keep.has(q)) {
           const [displaced] = queue.splice(i, 1);
           settleDisplacedItem(displaced, 'displaced-priority');
         }
       }
-      const firstLocationIndex = queue.findIndex(i => i.isLocationStory && !i.introServe);
-      if (firstLocationIndex === -1) queue.push(item);
-      else queue.splice(firstLocationIndex, 0, item);
-      preSynthTextRef.current = null;
-      // The next-item changed identity — a presynth miss filed for
-      // the old front item must not suppress the new one's (Item 3).
-      presynthMissRef.current = null;
-      console.log('[Voice] Priority story moved to the front of the waiting queue');
+      // Insert after the last kept waiting item (the warm head
+      // and/or the priority lane's FIFO run); with nothing kept,
+      // fall back to the historical slot — ahead of the first
+      // ordinary location story, behind any protected intro.
+      let insertAt = -1;
+      if (keep.size > 0) {
+        for (let i = queue.length - 1; i >= 0; i--) {
+          if (keep.has(queue[i])) { insertAt = i + 1; break; }
+        }
+      }
+      if (insertAt === -1) {
+        const firstLocationIndex = queue.findIndex(i => i.isLocationStory && !i.introServe);
+        insertAt = firstLocationIndex === -1 ? queue.length : firstLocationIndex;
+      }
+      queue.splice(insertAt, 0, item);
+      // The item took the head iff no other location story (the
+      // protected intro included) waits ahead of it in the final
+      // queue — scripted glue ahead of it does not change which
+      // story leads, so it does not count.
+      const itemIdx = queue.indexOf(item);
+      const tookHead = !queue.slice(0, itemIdx).some(q => q.isLocationStory);
+      if (tookHead) {
+        // The next-item changed identity only when the priority
+        // item actually becomes the head: the old head's presynth
+        // dedupe and any miss filed for it belong to a story that
+        // no longer leads. Behind a warm head, both stay valid.
+        preSynthTextRef.current = null;
+        presynthMissRef.current = null;
+      }
+      console.log(
+        tookHead
+          ? '[Voice] Priority story moved to the front of the waiting queue'
+          : '[Voice] Priority story inserted behind the warm waiting head'
+      );
     } else if (item.isLocationStory) {
       const waitingCount = queue.filter(i => i.isLocationStory).length;
       if (waitingCount >= MAX_PENDING_LOCATION_STORIES) {
