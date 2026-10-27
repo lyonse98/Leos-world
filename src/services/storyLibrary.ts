@@ -66,6 +66,10 @@ class StoryLibraryService {
   // may ask about the same place repeatedly (prefetch + serve). Rows are
   // cached, audio is not (see audioUrl note above). Null = known miss.
   private rowCache = new Map<string, LibraryRow | null>();
+  // Whole-place row sets, for place-wide lookup (Pass 2): every angle the
+  // library holds for one place, fetched in a single query. Null = the
+  // place is known to have no rows.
+  private placeRowsCache = new Map<string, LibraryRow[] | null>();
   // Latched when the table itself answers "not there" — until the
   // migration is applied, every lookup would 404; latch it off so the
   // serve path stays exactly as fast (and as silent) as before the
@@ -112,6 +116,84 @@ class StoryLibraryService {
     }
     if (!row) return null;
 
+    return this.toResult(row);
+  }
+
+  // Place-wide lookup (Pass 2, Oct 27, 2026): the library's episode for
+  // a place, at ANY angle the caller still considers servable. The
+  // exact-(place, angle) lookup above starved the library on real
+  // drives: selection rotates through all twelve landmark angles, but
+  // the corpus holds three per place, chosen per place — so the chosen
+  // angle and the shelved angles rarely met, and a 345-story library
+  // served twice in 57 plays. Here the place is the match and the
+  // angle is the caller's filter: rows are tried in the corpus's own
+  // angle order (LANDMARK_ANGLES), and the caller skips the angles
+  // already heard or locked at its serve layer. Deterministic — the
+  // same place in the same state yields the same episode.
+  //
+  // Deliberately NO persona-version parameter: a library row serves
+  // regardless of the live persona version (see the module header).
+  // Persona bumps retire ephemeral cache stories, never the shelf.
+  async lookupForPlace(
+    placeName: string,
+    isEligible: (angle: string, topic: string) => boolean
+  ): Promise<LibraryStoryResult | null> {
+    if (!SUPABASE_CONFIGURED || this.tableMissing) return null;
+    const placeKey = normalizePlaceKey(placeName);
+    if (!placeKey) return null;
+
+    let rows = this.placeRowsCache.get(placeKey);
+    if (rows === undefined) {
+      try {
+        const { data, error } = await supabase
+          .from('story_library')
+          .select('place_name, angle, lat, lng, story_text, audio_path')
+          .eq('place_key', placeKey)
+          .limit(50);
+        if (error) {
+          if (this.isMissingTableError(error)) {
+            this.tableMissing = true;
+            console.warn('[StoryLibrary] story_library table not present yet — library inactive this session');
+          } else {
+            console.warn('[StoryLibrary] Place lookup failed (continuing without):', error.message);
+          }
+          return null;
+        }
+        rows = (data ?? []) as LibraryRow[];
+      } catch (error) {
+        console.warn('[StoryLibrary] Place lookup threw (continuing without):', error);
+        return null;
+      }
+      this.placeRowsCache.set(placeKey, rows.length > 0 ? rows : null);
+      for (const row of rows) {
+        this.rowCache.set(`${placeKey}|${row.angle}`, row);
+      }
+    }
+    if (!rows || rows.length === 0) return null;
+
+    // The corpus's angle order: LANDMARK_ANGLES index order. An angle
+    // outside that list (none should exist) sorts last, by name, so
+    // the walk stays deterministic whatever the shelf holds.
+    const angleRank = (angle: string): number => {
+      const idx = LANDMARK_ANGLES.indexOf(angle);
+      return idx === -1 ? LANDMARK_ANGLES.length : idx;
+    };
+    const ordered = [...rows].sort(
+      (a, b) => angleRank(a.angle) - angleRank(b.angle) || a.angle.localeCompare(b.angle)
+    );
+
+    for (const row of ordered) {
+      if (!isEligible(row.angle, displayTopic(row.place_name, row.angle))) continue;
+      const result = await this.toResult(row);
+      if (result) return result;
+    }
+    return null;
+  }
+
+  // Row → servable result: download the entry's pre-made audio from
+  // the tts-audio bucket and hand out a fresh object URL (the voice
+  // layer revokes it when playback ends, so it is never reused).
+  private async toResult(row: LibraryRow): Promise<LibraryStoryResult | null> {
     // Audio: same download-then-play pattern as the shared story cache —
     // fetch the blob from the bucket and hand out an object URL.
     try {

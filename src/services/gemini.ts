@@ -983,11 +983,31 @@ class GeminiService {
       !heardStories.hasHeard(preliminaryCache.topic) &&
       !this.isTopicLockedForSession(preliminaryCache.topic, locationTracker.getDwellDepthLevel() !== null)
     ) {
-      // LIBRARY FIRST (Erik's shelf order): the preliminary topic names an
-      // exact (place, angle) — if the library holds that episode, the
-      // curated entry displaces the ephemeral cache copy. Recording mirrors
-      // the cache serve below exactly.
-      const libHit = await storyLibrary.lookupForTopic(preliminaryCache.topic);
+      // LIBRARY FIRST (Erik's shelf order): if the library holds an
+      // episode for the preliminary topic's place, the curated entry
+      // displaces the ephemeral cache copy. Recording mirrors the cache
+      // serve below exactly.
+      //
+      // Place-wide first (Pass 2, Oct 27, 2026): the exact-(place,
+      // angle) displacement this block used to require starved the
+      // shelf — selection rotates through all twelve landmark angles
+      // while the corpus holds three per place, so the cache topic's
+      // angle was rarely a shelved one. Now the place is the match:
+      // any unheard, unlocked angle the library holds for it serves.
+      // The exact-topic lookup remains as the fallback for when the
+      // place index has not primed or the place walk finds nothing.
+      let libHit =
+        prelimBase && storyLibrary.hasPlace(prelimBase)
+          ? await storyLibrary.lookupForPlace(
+              prelimBase,
+              (_angle, topic) =>
+                !heardStories.hasHeard(topic) &&
+                !this.isTopicLockedForSession(topic, locationTracker.getDwellDepthLevel() !== null)
+            )
+          : null;
+      if (!libHit) {
+        libHit = await storyLibrary.lookupForTopic(preliminaryCache.topic);
+      }
       if (
         libHit &&
         !heardStories.hasHeard(libHit.topic) &&
@@ -1141,19 +1161,35 @@ class GeminiService {
     // have no library entries by construction. Recording mirrors the cached
     // branch below (record here, rotation null in the result).
     if (!skipCache && target.kind === 'landmark' && target.subject && target.angle) {
-      const libHit = await storyLibrary.lookup(target.subject.name, target.angle);
+      // Place-wide first (Pass 2, Oct 27, 2026): the chosen angle is a
+      // coverage decision across all twelve landmark angles; the shelf
+      // holds three of them per place. Matching the place and taking
+      // its first unheard shelved angle is what makes the library the
+      // default serve for a seeded place — the exact-angle lookup
+      // remains as fallback, and recording below names the SERVED
+      // topic (libHit.topic), which for an exact hit is identical to
+      // target.displayTopic.
+      let libHit = storyLibrary.hasPlace(target.subject.name)
+        ? await storyLibrary.lookupForPlace(
+            target.subject.name,
+            (_angle, topic) => !heardStories.hasHeard(topic)
+          )
+        : null;
+      if (!libHit) {
+        libHit = await storyLibrary.lookup(target.subject.name, target.angle);
+      }
       if (libHit) {
-        console.log(`[Gemini] Library hit: "${target.displayTopic}" (${target.angle})`);
+        console.log(`[Gemini] Library hit: "${libHit.topic}" (${libHit.angle})`);
         if (onChunk) onChunk(libHit.text);
         storyCoverage.lockSubjectForSession(subjectKey);
         storyCoverage.markMajorSubject(subjectKey);
         storyCoverage.recordDailyTelling(subjectKey);
         await locationTracker.updateLastStoryTopic(
-          target.displayTopic, position, libHit.text, effectiveContext, depthLevel, versionKey
+          libHit.topic, position, libHit.text, effectiveContext, depthLevel, versionKey
         );
         return {
           text: libHit.text,
-          subject: target.displayTopic,
+          subject: libHit.topic,
           context: effectiveContext,
           mode: factPack.mode,
           rotation: null,
@@ -1239,15 +1275,31 @@ class GeminiService {
     // recorded at prefetch time — exactly like a generated prefetch, App
     // records the play via the returned rotation.
     if (target.kind === 'landmark' && target.subject && target.angle) {
-      const libHit = await storyLibrary.lookup(target.subject.name, target.angle);
+      // Place-wide first (Pass 2, Oct 27, 2026), same as the serve
+      // paths above: a prefetched library entry is the cheapest story
+      // the tour owns, and requiring the prefetcher's rotated angle to
+      // be the shelved one starved the shelf here too. The result's
+      // rotation names the angle actually SERVED, so App's play-time
+      // recording marks the spent angle truthfully.
+      let libHit = storyLibrary.hasPlace(target.subject.name)
+        ? await storyLibrary.lookupForPlace(
+            target.subject.name,
+            (_angle, topic) => !heardStories.hasHeard(topic)
+          )
+        : null;
+      if (!libHit) {
+        libHit = await storyLibrary.lookup(target.subject.name, target.angle);
+      }
       if (libHit) {
-        console.log(`[Gemini] Prefetch library hit: "${target.displayTopic}" (${target.angle})`);
+        console.log(`[Gemini] Prefetch library hit: "${libHit.topic}" (${libHit.angle})`);
         return {
           text: libHit.text,
-          subject: target.displayTopic,
+          subject: libHit.topic,
           context: 'prefetch',
           mode: factPack.mode,
-          rotation: target.rotation,
+          rotation: isRotationAngle(libHit.angle)
+            ? { subjectKey, angle: libHit.angle }
+            : null,
           audioUrl: libHit.audioUrl,
           anchorLat: libHit.lat,
           anchorLng: libHit.lng,
