@@ -2471,26 +2471,31 @@ export const useVoice = () => {
       // rule could never jump it (it removed the location stories
       // around it, and the priority item landed behind it); naive
       // insertion could, by slotting between the warm head and the
-      // answer queued behind it. Cap the slot at just behind the
-      // last such line: the priority item still jumps the ordinary
-      // location stories behind the answer, never the answer.
+      // answer queued behind it. The rule: the slot sits just
+      // behind the LAST such line — the priority item still jumps
+      // the ordinary location stories behind the answer, never
+      // the answer.
       // Follow-up 3 (same day, surfaced by Item 8's banked
-      // intros): the cap must consider the last tracked line in
-      // the WHOLE queue, not only lines below the computed slot.
-      // The first implementation scanned down from the slot — in
-      // the geometry [warm head, answer] the answer sits AT the
-      // slot, the scan never saw it, and the priority item slotted
-      // between the head and the answer anyway: the exact outcome
-      // this barrier exists to prevent, absorbed until now by the
-      // answer horizon's slack. Banked intros arrive instantly at
-      // crossing time, uncorrelated with any ask, and the sim
-      // caught the race (1 premature release in 240 questions,
-      // degraded route cell). Scan the whole queue; the cap is
-      // the last tracked line's index + 1, min'd with the slot.
+      // intros): that rule is a FLOOR on the slot, not a cap.
+      // The first implementation scanned down from the computed
+      // slot and could only move the slot EARLIER — in the
+      // geometries that matter ([warm head, answer], or a major
+      // arriving while the answer waits behind the head) the
+      // answer sits AT or AFTER the slot, the scan never engaged,
+      // and the item jumped the answer anyway; the answer
+      // horizon's slack (Item 7 follow-ups 1-2) absorbed every
+      // case the sim had produced until Item 8's banked intros —
+      // which arrive instantly at crossing time, uncorrelated
+      // with any ask — finally spent the slack (2 premature
+      // releases in 240 questions across two degraded-route
+      // seeds, bisected in the sim). Correct form: find the last
+      // tracked line in the whole queue and raise the slot behind
+      // it. When no tracked line waits, behavior is exactly the
+      // warm-head rule as shipped.
       for (let j = queue.length - 1; j >= 0; j--) {
         const q = queue[j];
         if (!q.isLocationStory && (q.onSettleDetail || q.onPlaybackEnd)) {
-          if (j + 1 < insertAt) insertAt = j + 1;
+          if (j + 1 > insertAt) insertAt = j + 1;
           break;
         }
       }
