@@ -25,7 +25,13 @@ type EventType = 'session_start' | 'session_end' | 'story_played' | 'ad_played' 
   // The rotating pre-rendered Puck opener's settle (Oct 26, 2026):
   // which clip played, that it was pre-rendered, and whether it
   // completed — the runway made countable per tour.
-  | 'opener_clip';
+  | 'opener_clip'
+  // Route breadcrumbs (Area G, Oct 26, 2026): a lightweight position
+  // sample ~every 30s while touring and at tour end, for the owner's
+  // own Bolt-panel forensics. SEALED ONLY — this kind is deliberately
+  // excluded from the analytics_recent_events view entirely; it exists
+  // solely in the owner-only raw table.
+  | 'route_breadcrumb';
 
 interface AnalyticsEvent {
   eventType: EventType;

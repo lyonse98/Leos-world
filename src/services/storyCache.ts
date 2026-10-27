@@ -9,6 +9,17 @@ import { analytics } from './analytics';
 
 export interface CachedStory {
   id: string;
+  // Per-story correlation id (Area G, Oct 26, 2026): minted at the
+  // generation / prefetch / library-serve DECISION, carried through
+  // story_played → story_playback → story_dropped → story_timing so a
+  // tell can be joined back to the decision that produced it.
+  storyId: string;
+  // The projected discovery center this story was fetched for, and the
+  // horizon used — the prediction whose error is measured at play
+  // time (Area G). Absent for stories with no projection (missed-queue
+  // replays, stationary fetches).
+  projectedCenter?: { lat: number; lng: number };
+  horizonS?: number;
   text: string;
   topic: string;
   lat: number;
@@ -79,6 +90,10 @@ const ROUTE_OFFSETS_FREWAY_M = [1200, 3500, 7000, 12000];
 const ROUTE_OFFSETS_WALKING_M = [150, 300, 500];
 
 class StoryCacheService {
+  private static mintStoryId(): string {
+    return `s_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
+  }
+
   private cache: CachedStory[] = [];
   private missedQueue: QueueEntry[] = [];
   // The first serve of a session is RESERVED for the welcome sequence:
@@ -176,7 +191,7 @@ class StoryCacheService {
     }
   }
 
-  private addToCache(entry: Omit<CachedStory, 'id'>) {
+  private addToCache(entry: Omit<CachedStory, 'id' | 'storyId'> & { storyId?: string }) {
     // A story about something already waiting to be heard is not a new story.
     // Route-ahead prefetching asks for several stories before any of them has
     // played, and coverage is only marked when a story actually reaches the
@@ -186,7 +201,11 @@ class StoryCacheService {
       return;
     }
 
-    this.cache.push({ ...entry, id: `${Date.now()}_${Math.random()}` });
+    this.cache.push({
+      ...entry,
+      id: `${Date.now()}_${Math.random()}`,
+      storyId: entry.storyId ?? StoryCacheService.mintStoryId(),
+    });
     const cap = MAX_BUFFER_DRIVING * 2;
     if (this.cache.length > cap) {
       this.cache = this.cache.slice(-cap);
@@ -222,7 +241,7 @@ class StoryCacheService {
     position: Position,
     mode: MovementModeHysteresis,
     onChunk?: (text: string) => void
-  ): Promise<{ story: string; fromCache: boolean; topic: string; subject: string; context: string; rotation: StoryRotation | null; fromLibrary: boolean; audioUrl?: string; anchorLat?: number; anchorLng?: number; major?: boolean } | null> {
+  ): Promise<{ story: string; fromCache: boolean; topic: string; subject: string; context: string; rotation: StoryRotation | null; fromLibrary: boolean; audioUrl?: string; anchorLat?: number; anchorLng?: number; major?: boolean; storyId: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number } | null> {
     this.pruneStalePrefetches(position);
     const openerServe = this.openerPending;
     // While the opener is pending the local cache is not consulted at
@@ -283,6 +302,9 @@ class StoryCacheService {
         // prefetch-chosen library items reach the queue through this
         // branch, so this is where their right-of-way is decided.
         major: cached.fromLibrary ? storyCoverage.isMajorSubject(servedKey) : false,
+        storyId: cached.storyId,
+        projectedCenter: cached.projectedCenter,
+        horizonS: cached.horizonS,
       };
       }
     }
@@ -334,6 +356,12 @@ class StoryCacheService {
           } catch { /* a metric must never break a serve */ }
         }
         const topic = result.subject || `Story at ${position.lat.toFixed(4)}, ${position.lng.toFixed(4)}`;
+        // The correlation id is minted HERE, at the serve decision
+        // (Area G), and the discovery geometry that produced this
+        // story rides with it — App and the player join on both.
+        const storyId = StoryCacheService.mintStoryId();
+        const projectedCenter = this.lastDiscoveryMeta?.projectedCenter;
+        const horizonS = this.lastDiscoveryMeta?.horizonS;
         this.addToCache({
           text: story,
           topic,
@@ -347,8 +375,11 @@ class StoryCacheService {
           regionAnchored: mode === 'driving',
           audioUrl: result.audioUrl,
           fromLibrary: result.fromLibrary,
+          storyId,
+          projectedCenter,
+          horizonS,
         });
-        return { story, fromCache: false, topic, subject: result.subject, context: result.context, rotation: result.rotation, fromLibrary: !!result.fromLibrary, audioUrl: result.audioUrl, anchorLat: result.anchorLat, anchorLng: result.anchorLng, major: result.major ?? false };
+        return { story, fromCache: false, topic, subject: result.subject, context: result.context, rotation: result.rotation, fromLibrary: !!result.fromLibrary, audioUrl: result.audioUrl, anchorLat: result.anchorLat, anchorLng: result.anchorLng, major: result.major ?? false, storyId, projectedCenter, horizonS };
       }
     } catch (error) {
       console.error('[StoryCache] Live fetch failed:', error);
@@ -401,7 +432,8 @@ class StoryCacheService {
     // Generate around the anticipated position, and anchor the cached
     // story there — serve-time distance and freshness checks then measure
     // against where the listener will be, not where they were.
-    const center = this.anticipatedCenter(position, horizonS ?? latencyModel.horizonS(null));
+    const effectiveHorizonS = horizonS ?? latencyModel.horizonS(null);
+    const center = this.anticipatedCenter(position, effectiveHorizonS);
 
     try {
       const result = await geminiService.prefetchStory(center);
@@ -419,6 +451,11 @@ class StoryCacheService {
           regionAnchored: mode === 'driving',
           audioUrl: result.audioUrl,
           fromLibrary: result.fromLibrary,
+          // Prefetch provenance (Area G): this story was fetched FOR
+          // the anticipated center under this horizon — play time
+          // measures the prediction against reality.
+          projectedCenter: { lat: center.lat, lng: center.lng },
+          horizonS: Math.round(effectiveHorizonS),
         });
         console.log('[StoryCache] Prefetched story for', center.lat.toFixed(4), center.lng.toFixed(4));
       }
@@ -451,7 +488,8 @@ class StoryCacheService {
     // the road the listener reaches when the current story ends plus
     // pipeline latency — not from the spot underfoot, which the offsets
     // alone used to measure from (double-counting "now" as "ahead").
-    const base = this.anticipatedCenter(position, horizonS ?? latencyModel.horizonS(null));
+    const effectiveHorizonS = horizonS ?? latencyModel.horizonS(null);
+    const base = this.anticipatedCenter(position, effectiveHorizonS);
 
     try {
       // Freeway speeds (>= 25 m/s ~ 56 mph) get wider offsets so the queue
@@ -488,6 +526,8 @@ class StoryCacheService {
           regionAnchored: mode === 'driving',
           audioUrl: result.audioUrl,
           fromLibrary: result.fromLibrary,
+          projectedCenter: { lat: target.lat, lng: target.lng },
+          horizonS: Math.round(effectiveHorizonS),
         });
         generated++;
         console.log(`[StoryCache] Prefetched ahead ${offset}m for ${mode}`);

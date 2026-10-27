@@ -1,6 +1,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   calculateDistance,
+  bearingDegrees,
+  headingDelta,
   resolveMovementMode,
   MovementModeHysteresis,
 } from '../utils/geo';
@@ -47,6 +49,17 @@ interface StoryQueueItem {
   // directly and pre-synthesis skips the item entirely — the audio
   // already exists, so no quota is ever spent on it.
   audioUrl?: string;
+  // Tell-geometry correlation (Area G, Oct 26, 2026): the per-story id
+  // minted at the serve/prefetch decision, the projected center the
+  // story was fetched for, and the horizon used — carried so playback
+  // and drop events can report WHERE the subject was relative to the
+  // listener and how wrong the prediction was. enqueuedAt/queueDepth
+  // are stamped by enqueue() itself.
+  storyId?: string;
+  projectedCenter?: { lat: number; lng: number };
+  horizonS?: number;
+  enqueuedAt?: number;
+  queueDepth?: number;
   // Per-item playback lifecycle, for items whose delivery must be
   // CONFIRMED rather than assumed (the Q&A answer). onPlaybackStart
   // fires when audio actually begins for this item; onPlaybackEnd
@@ -236,6 +249,22 @@ export const useVoice = () => {
     topic: string | null;
     onEnd?: (sounded: boolean) => void;
     onSettleDetail?: (info: PlaybackSettle) => void;
+    // Tell geometry captured at dequeue (Area G): the item's
+    // correlation fields plus the listener-relative measurements taken
+    // at play start. Nulls mean "not measurable" (no anchor, no
+    // position) and are simply absent from the settle event.
+    storyId?: string;
+    subjectLat?: number;
+    subjectLng?: number;
+    distanceM?: number;
+    bearingOffsetDeg?: number;
+    speedMps?: number | null;
+    headingDeg?: number | null;
+    queueDepth?: number;
+    timeInQueueS?: number;
+    toldLate?: boolean;
+    horizonS?: number;
+    predictionErrorM?: number;
   } | null>(null);
   const currentPositionProviderRef = useRef<(() => CurrentPosition | null) | null>(null);
   const lastKnownModeRef = useRef<MovementModeHysteresis>('stationary');
@@ -699,12 +728,33 @@ export const useVoice = () => {
     // settle on the record, so a cut-off is countable per event.
     if (pb.isLocationStory) {
       try {
-        analytics.track('story_playback', null, undefined, {
+        // Tell geometry rides the settle (Area G): RELATIVE geometry
+        // only — subject anchor (public place coordinates), distance,
+        // bearing offset, speed/heading, queue wait, lateness, and the
+        // prediction error of the fetch that produced the story. The
+        // listener's own coordinates are never in the payload (they
+        // exist only in the sealed table's lat/lng columns).
+        const payload: Record<string, unknown> = {
           completed: settle.completed,
           engine: settle.engine ?? 'none',
           attempts: settle.attempts,
           topic: pb.topic ?? '',
-        });
+        };
+        if (pb.storyId) payload.story_id = pb.storyId;
+        if (pb.subjectLat !== undefined && pb.subjectLng !== undefined) {
+          payload.subject_lat = pb.subjectLat;
+          payload.subject_lng = pb.subjectLng;
+        }
+        if (pb.distanceM !== undefined) payload.distance_m = Math.round(pb.distanceM);
+        if (pb.bearingOffsetDeg !== undefined) payload.bearing_offset_deg = Math.round(pb.bearingOffsetDeg);
+        if (pb.speedMps !== undefined) payload.speed_mps = pb.speedMps === null ? null : Math.round(pb.speedMps * 10) / 10;
+        if (pb.headingDeg !== undefined) payload.heading_deg = pb.headingDeg === null ? null : Math.round(pb.headingDeg);
+        if (pb.queueDepth !== undefined) payload.queue_depth = pb.queueDepth;
+        if (pb.timeInQueueS !== undefined) payload.time_in_queue_s = Math.round(pb.timeInQueueS * 10) / 10;
+        if (pb.toldLate !== undefined) payload.told_late = pb.toldLate;
+        if (pb.horizonS !== undefined) payload.horizon_s = pb.horizonS;
+        if (pb.predictionErrorM !== undefined) payload.prediction_error_m = Math.round(pb.predictionErrorM);
+        analytics.track('story_playback', null, undefined, payload);
       } catch { /* a metric must never break a settle */ }
       // Feed the adaptive look-ahead (Area D): how long stories
       // actually sound is one of its three inputs.
@@ -987,15 +1037,9 @@ export const useVoice = () => {
     // Behind-me exception to the exemption below: at driving speeds an
     // anchor far behind the direction of travel (speed-scaled distance)
     // is out of the area the listener is in — drop it rather than
-    // narrate yesterday's road. The freeway case keeps its historical
-    // source name; surface-street drops report 'stale_behind'.
+    // narrate yesterday's road. The drop itself is reported by the
+    // dequeue loop (single emit point, with tell geometry — Area G).
     if (isFarBehindAtSpeed(item, current, d)) {
-      const freeway = typeof current.speed === 'number' && current.speed >= FREEWAY_SPEED_MPS;
-      console.log(`[Voice] Dropping stale ${freeway ? 'highway' : 'behind-me'} story — anchor ${Math.round(d)}m behind at ${Math.round(current.speed ?? 0)} m/s`);
-      // Observational only: count stale drops for the daily rollup.
-      try {
-        analytics.track('story_dropped', null, undefined, { source: freeway ? 'stale_highway' : 'stale_behind', topic: item.topic ?? '' });
-      } catch { /* a metric must never break the gate */ }
       return false;
     }
 
@@ -1448,6 +1492,33 @@ export const useVoice = () => {
       if (isStillRelevant(next)) break;
       storyQueueRef.current.shift();
       console.log('[Voice] Stale story dropped — no longer describes the listener\'s location');
+      // The drop, on the record with tell geometry (Area G): which
+      // story, how far its anchor sits, and at what bearing — relative
+      // geometry only, like every geometry event. The behind-me case
+      // keeps its source names ('stale_highway' at freeway speed,
+      // 'stale_behind' below it); reach/age drops report 'stale_queue'.
+      try {
+        const pos = currentPositionProviderRef.current?.();
+        let source = 'stale_queue';
+        let distanceM: number | undefined;
+        let bearingOffset: number | undefined;
+        if (pos && next.lat !== undefined && next.lng !== undefined) {
+          distanceM = calculateDistance(pos.lat, pos.lng, next.lat, next.lng);
+          if (typeof pos.heading === 'number') {
+            bearingOffset = headingDelta(bearingDegrees(pos, { lat: next.lat, lng: next.lng }), pos.heading);
+          }
+          if (isFarBehindAtSpeed(next, pos, distanceM)) {
+            source = typeof pos.speed === 'number' && pos.speed >= FREEWAY_SPEED_MPS ? 'stale_highway' : 'stale_behind';
+          }
+        }
+        analytics.track('story_dropped', null, undefined, {
+          source,
+          topic: next.topic ?? '',
+          story_id: next.storyId ?? '',
+          distance_m: distanceM !== undefined ? Math.round(distanceM) : null,
+          bearing_offset_deg: bearingOffset !== undefined ? Math.round(bearingOffset) : null,
+        });
+      } catch { /* a metric must never break the gate */ }
     }
 
     const item = storyQueueRef.current.shift();
@@ -1561,6 +1632,36 @@ export const useVoice = () => {
     // back to the browser voice reports 'browser', because that is
     // what the listener heard — settle analytics must describe the
     // ear, not the intention.
+    // Tell geometry at play start (Area G): where the subject sits
+    // relative to the listener RIGHT NOW — the measurement the whole
+    // predictive machinery is judged by. Bearing offset is only
+    // meaningful with a trustworthy heading (driving speeds); told_late
+    // is the simple verdict: rear hemisphere (>120°) while driving.
+    // Prediction error compares the fetch's projected center against
+    // the actual position at this moment.
+    const playPos = currentPositionProviderRef.current?.();
+    let playGeo: Partial<{
+      distanceM: number; bearingOffsetDeg: number; speedMps: number | null;
+      headingDeg: number | null; toldLate: boolean; predictionErrorM: number;
+    }> = {};
+    if (playPos && item.lat !== undefined && item.lng !== undefined) {
+      const distanceM = calculateDistance(playPos.lat, playPos.lng, item.lat, item.lng);
+      const driving = typeof playPos.speed === 'number' && playPos.speed >= 6;
+      const bearingOffsetDeg = typeof playPos.heading === 'number'
+        ? headingDelta(bearingDegrees(playPos, { lat: item.lat, lng: item.lng }), playPos.heading)
+        : undefined;
+      playGeo = {
+        distanceM,
+        bearingOffsetDeg,
+        speedMps: playPos.speed,
+        headingDeg: playPos.heading,
+        toldLate: driving && bearingOffsetDeg !== undefined ? bearingOffsetDeg > 120 : undefined,
+        predictionErrorM: item.projectedCenter
+          ? calculateDistance(playPos.lat, playPos.lng, item.projectedCenter.lat, item.projectedCenter.lng)
+          : undefined,
+      };
+    }
+
     const playback = {
       gen,
       sounded: false,
@@ -1572,6 +1673,13 @@ export const useVoice = () => {
       topic: item.topic ?? null,
       onEnd: item.onPlaybackEnd,
       onSettleDetail: item.onSettleDetail,
+      storyId: item.storyId,
+      subjectLat: item.lat,
+      subjectLng: item.lng,
+      queueDepth: item.queueDepth,
+      timeInQueueS: item.enqueuedAt !== undefined ? (Date.now() - item.enqueuedAt) / 1000 : undefined,
+      horizonS: item.horizonS,
+      ...playGeo,
     };
     currentPlaybackRef.current = playback;
     // A tracked item (one carrying lifecycle callbacks — the Q&A
@@ -1732,6 +1840,10 @@ export const useVoice = () => {
 
   const enqueue = useCallback((item: StoryQueueItem) => {
     const queue = storyQueueRef.current;
+    // Tell-geometry stamps (Area G): when this item joined the queue,
+    // and how deep the queue was once it had — the settle reports the
+    // wait; until now queue time per story was invisible.
+    item.enqueuedAt = Date.now();
 
     if (item.priority) {
       // A major-landmark story displaces ordinary waiting location stories
@@ -1759,6 +1871,7 @@ export const useVoice = () => {
       queue.push(item);
     }
 
+    item.queueDepth = queue.length;
     console.log(
       `[Voice] Story queued (waiting: ${queue.length}, currently playing: ${isPlayingStoryRef.current})`
     );
@@ -1787,7 +1900,8 @@ export const useVoice = () => {
     regionAnchored?: boolean,
     kind?: 'location' | 'scripted',
     topic?: string,
-    audioUrl?: string
+    audioUrl?: string,
+    geo?: { storyId?: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number }
   ) => {
     if (Date.now() < mutedUntilRef.current) {
       console.log('[Voice] Muted — dropping queued story');
@@ -1803,6 +1917,9 @@ export const useVoice = () => {
       regionAnchored,
       isLocationStory: kind ? kind === 'location' : hasCoords,
       audioUrl,
+      storyId: geo?.storyId,
+      projectedCenter: geo?.projectedCenter,
+      horizonS: geo?.horizonS,
     });
   }, [enqueue]);
 
@@ -1814,7 +1931,8 @@ export const useVoice = () => {
     originLng?: number,
     regionAnchored?: boolean,
     topic?: string,
-    audioUrl?: string
+    audioUrl?: string,
+    geo?: { storyId?: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number }
   ) => {
     if (Date.now() < mutedUntilRef.current) {
       console.log('[Voice] Muted — dropping priority story');
@@ -1830,6 +1948,9 @@ export const useVoice = () => {
       isLocationStory: true,
       priority: true,
       audioUrl,
+      storyId: geo?.storyId,
+      projectedCenter: geo?.projectedCenter,
+      horizonS: geo?.horizonS,
     });
   }, [enqueue]);
 

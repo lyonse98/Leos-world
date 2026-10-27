@@ -15,6 +15,7 @@ import { heardStories, rotateUserKey } from './services/heardStories';
 import { tasteProfile } from './services/tasteProfile';
 import { storyCoverage, landmarkSubjectKey } from './services/storyCoverage';
 import { latencyModel } from './services/latencyModel';
+import { calculateDistance, bearingDegrees, headingDelta } from './utils/geo';
 
 import { ambientAudio } from './services/ambientAudio';
 import { storyLikes } from './services/storyLikes';
@@ -562,6 +563,15 @@ function App() {
     // cycle already gone rather than queueing a bridge into a dead tour.
     answerCycleRef.current++;
     releaseQuestionLock('tour-ended');
+    // Final route breadcrumb (Area G): the tour's last known position,
+    // sealed-only like every breadcrumb.
+    if (geolocation.position) {
+      analytics.track('route_breadcrumb', geolocation.position, geolocation.position.speed !== null && geolocation.position.speed >= 6.0 ? 'driving' : 'walking', {
+        speed_mps: geolocation.position.speed,
+        heading_deg: geolocation.position.heading,
+        final: true,
+      });
+    }
     voice.muteForMinutes(0);
     voice.stop();
     geolocation.stopTracking();
@@ -726,6 +736,11 @@ function App() {
   // served first; it expires quickly so a landmark left behind cannot
   // hijack the queue later.
   const queueJumpLandmarkRef = useRef<{ name: string; detectedAt: number } | null>(null);
+  // The most recent serve's tell-geometry identity (Area G): the
+  // correlation id and discovery geometry story_timing joins on when
+  // the story completes — captured at serve time, because by settle
+  // time later fetches have overwritten every other record of them.
+  const lastServedStoryRef = useRef<{ storyId: string; horizonS?: number; centerOffsetM: number | null } | null>(null);
 
   const handleIntervalUpdate = useCallback(async (position: Position | null) => {
     if (!position || !isTourStartedRef.current) {
@@ -843,10 +858,33 @@ function App() {
         } else {
           console.log(`[Tour] Story from ${result.fromLibrary ? 'LIBRARY' : result.fromCache ? 'CACHE' : 'LIVE'}, length: ${result.story.length}, queueing`);
 
+          // Tell geometry at QUEUE time (Area G): RELATIVE geometry —
+          // the subject's public anchor coordinates, the listener's
+          // distance and bearing offset to it, speed/heading, and the
+          // queue depth it joins. The listener's own coordinates travel
+          // only in this event's sealed position columns, never in data.
+          const anchorForGeo = { lat: result.anchorLat ?? position.lat, lng: result.anchorLng ?? position.lng };
           analytics.track('story_played', position, position.speed !== null && position.speed >= 6.0 ? 'driving' : 'walking', {
             source: result.fromLibrary ? 'library' : result.fromCache ? 'cache' : 'live',
             topic: result.topic,
+            story_id: result.storyId,
+            subject_lat: anchorForGeo.lat,
+            subject_lng: anchorForGeo.lng,
+            distance_m: Math.round(calculateDistance(position.lat, position.lng, anchorForGeo.lat, anchorForGeo.lng)),
+            bearing_offset_deg: typeof position.heading === 'number'
+              ? Math.round(headingDelta(bearingDegrees(position, anchorForGeo), position.heading))
+              : null,
+            speed_mps: position.speed === null ? null : Math.round(position.speed * 10) / 10,
+            heading_deg: position.heading === null ? null : Math.round(position.heading),
+            queue_depth: voice.getQueueLength(),
           });
+          lastServedStoryRef.current = {
+            storyId: result.storyId,
+            horizonS: result.horizonS,
+            centerOffsetM: result.projectedCenter
+              ? Math.round(calculateDistance(position.lat, position.lng, result.projectedCenter.lat, result.projectedCenter.lng))
+              : null,
+          };
 
           // Gemini now writes its own transition into the opening of each
           // story, so we queue directly — no app-side filler needed.
@@ -882,17 +920,22 @@ function App() {
             result.context === 'neighborhood_intro' ||
             result.context === 'initial' ||
             result.context === 'welcome_back';
+          const serveGeo = {
+            storyId: result.storyId,
+            projectedCenter: result.projectedCenter,
+            horizonS: result.horizonS,
+          };
           if (isQueueJump || isIntroServe) {
             // Front of the waiting queue — behind nothing but any scripted
             // line already in flight, and always after the current story.
-            voice.queuePriorityStory(result.story, originLat, originLng, isRoad, result.subject, result.audioUrl);
+            voice.queuePriorityStory(result.story, originLat, originLng, isRoad, result.subject, result.audioUrl, serveGeo);
             if (isQueueJump) {
               flashPose('pointing', 5000);
               queueJumpLandmarkRef.current = null;
               console.log(`[Tour] Major-landmark story queued at the front: "${result.subject}"`);
             }
           } else {
-            voice.queueStory(result.story, originLat, originLng, isRoad, undefined, result.subject, result.audioUrl);
+            voice.queueStory(result.story, originLat, originLng, isRoad, undefined, result.subject, result.audioUrl, serveGeo);
           }
         }
 
@@ -942,6 +985,24 @@ function App() {
   const isProcessingQuestionRef = useRef(isProcessingQuestion);
   isProcessingQuestionRef.current = isProcessingQuestion;
 
+  // Route breadcrumbs (Area G, Oct 26, 2026): a lightweight position
+  // sample ~every 30s while touring. The position rides the sealed
+  // lat/lng columns like every event; the kind is EXCLUDED from the
+  // analytics_recent_events view by design — these exist for the
+  // owner's own Bolt-panel forensics (route shape vs. tell geometry).
+  useEffect(() => {
+    if (!isTourStarted) return;
+    const timer = setInterval(() => {
+      const pos = positionRef.current;
+      if (!pos) return;
+      analytics.track('route_breadcrumb', pos, pos.speed !== null && pos.speed >= 6.0 ? 'driving' : 'walking', {
+        speed_mps: pos.speed,
+        heading_deg: pos.heading,
+      });
+    }, 30_000);
+    return () => clearInterval(timer);
+  }, [isTourStarted]);
+
   useEffect(() => {
     voice.setOnStoryComplete(() => {
       const pos = positionRef.current;
@@ -987,6 +1048,12 @@ function App() {
           cacheHit,
           gapS: gapS ? parseFloat(gapS) : null,
           model: LEO_MODEL_ID,
+          // The tell-geometry join (Area G): which story this timing
+          // belongs to, the horizon its fetch aimed with, and how far
+          // ahead of the fetch position its discovery center sat.
+          story_id: lastServedStoryRef.current?.storyId ?? '',
+          horizon_s: lastServedStoryRef.current?.horizonS ?? null,
+          center_offset_m: lastServedStoryRef.current?.centerOffsetM ?? null,
         });
       }
       // Feed the adaptive look-ahead (Area D): this story's fetch+text
