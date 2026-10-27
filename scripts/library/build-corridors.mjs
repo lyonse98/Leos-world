@@ -83,16 +83,25 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // its paragraph opens onto the bigger story it belongs to (the bay,
 // the canyon system, the border, the Navy's presence, the park).
 // Direction-aware: what is ahead and on the driver's side, never a
-// rear-view narration. Highway band: 12–18 sentences. The honesty
-// contract is the library's own: facts come from the fact blocks
-// below or they do not appear.
+// rear-view narration. LENGTH IS SIZED BY THE ROAD (Erik's sizing
+// rule, Oct 27, 2026): the story fills ~85-90% of this segment's
+// traversal at its design speed — corridorTargetSentences() in the
+// dataset is the rule as code. The honesty contract is the
+// library's own: facts come from the fact blocks below or they do
+// not appear.
 function buildCorridorPrompt(segment, areaFacts) {
   const parts = [];
+  const targetSentences = app.corridorTargetSentences(segment);
+  const traversalMin = (segment.lengthKm * 1000) / app.designSpeedMps(segment) / 60;
+  const driveLine =
+    segment.fromName === segment.toName
+      ? `The drive: the stretch of freeway through ${segment.fromName}, about ${segment.lengthKm} km of freeway.`
+      : `The drive: from ${segment.fromName} to ${segment.toName}, about ${segment.lengthKm} km of freeway.`;
   parts.push(
     [
       'MODE: highway',
       `Freeway: ${segment.freeway}, ${segment.direction}`,
-      `The drive: from ${segment.fromName} to ${segment.toName}, about ${segment.lengthKm} km of freeway.`,
+      driveLine,
       `Areas the drive passes, IN ORDER: ${segment.areas.map(a => a.name).join(', ')}.`,
     ].join('\n')
   );
@@ -109,7 +118,7 @@ function buildCorridorPrompt(segment, areaFacts) {
       'not a list of exits and not a point story about a single landmark. ' +
       'Speak of what is ahead of the driver and around them now — never narrate what is already behind them. ' +
       'Where the drive climbs, crosses, or opens a view, say so; the road itself is the narrator\'s stage. ' +
-      'LENGTH: 12 to 18 sentences — the long arc. Depth from the facts at hand, never from invention.'
+      `LENGTH: about ${targetSentences} sentences — this stretch takes roughly ${traversalMin.toFixed(1)} minutes to drive at free-flow speed, and the story should fill most of that drive, finishing just before the road hands off to the next stretch. Depth from the facts at hand, never from invention.`
   );
   return parts.join('\n\n');
 }
@@ -141,6 +150,7 @@ for (const segment of segments) {
     lat: mid.lat,
     lng: mid.lng,
     coord_source: 'segment polyline midpoint (hand-laid, Item 6 Part A)',
+    target_sentences: app.corridorTargetSentences(segment),
     story_text: text,
     audio_file: null,
     persona_version: app.LEO_PERSONA_VERSION,

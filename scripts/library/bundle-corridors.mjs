@@ -33,7 +33,7 @@ const entry = [
   `export { wikipedia } from ${JSON.stringify(path.join(repoRoot, 'src/services/wikipedia.ts'))};`,
   `export { wikidata } from ${JSON.stringify(path.join(repoRoot, 'src/services/wikidata.ts'))};`,
   `export { osmService } from ${JSON.stringify(path.join(repoRoot, 'src/services/osmService.ts'))};`,
-  `export { CORRIDOR_SEGMENTS } from ${JSON.stringify(path.join(repoRoot, 'src/data/corridors.ts'))};`,
+  `export { CORRIDOR_SEGMENTS, corridorTargetSentences, designSpeedMps } from ${JSON.stringify(path.join(repoRoot, 'src/data/corridors.ts'))};`,
 ].join('\n');
 
 writeFileSync(entryPath, entry);
