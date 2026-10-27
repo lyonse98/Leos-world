@@ -761,12 +761,15 @@ function App() {
         // behind the WAITING stories too (it carries no front flag
         // — they were promised first), and warm-head insertion made
         // a two-deep waiting queue normal. The horizon spans all of
-        // it: on-air remainder + every waiting location story. The
-        // sim caught the shortfall as premature releases the same
-        // day Item 7 landed; the rule is now stated in one place
-        // (useVoice.getWaitingLocationStoriesRemainingS).
-        const waitingRemainingS = voice.getWaitingLocationStoriesRemainingS();
-        armAnswerFailsafe(answerFailsafeMs(fullAnswer) + (onAirRemainingS + waitingRemainingS) * 1000);
+        // it: on-air remainder + every waiting location story's
+        // telling + the deliberate inter-story gap before each of
+        // them (the player's own pacing table, by speed bucket).
+        // The sim caught the shortfall as premature releases the
+        // same day Item 7 landed; the rule is now stated in one
+        // place (useVoice.getWaitingLocationStoriesRemainingS).
+        const waiting = voice.getWaitingLocationStoriesRemainingS();
+        const gapPerStoryS = (geolocation.position?.speed ?? 0) >= 5.5 ? 8 : (geolocation.position?.speed ?? 0) > 0.5 ? 4 : 3;
+        armAnswerFailsafe(answerFailsafeMs(fullAnswer) + (onAirRemainingS + waiting.totalS + waiting.count * gapPerStoryS) * 1000);
         const cycle = ++answerCycleRef.current;
         voice.speakTracked(fullAnswer, {
           onSettleDetail: (info) => {

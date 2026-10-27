@@ -2464,6 +2464,23 @@ export const useVoice = () => {
         const firstLocationIndex = queue.findIndex(i => i.isLocationStory && !i.introServe);
         insertAt = firstLocationIndex === -1 ? queue.length : firstLocationIndex;
       }
+      // Conversational barrier (Item 7 follow-up, Oct 27, 2026): a
+      // tracked scripted line already waiting — the Q&A answer
+      // above all — was promised to the listener before this story
+      // arrived, and it must not be jumped. The old displacement
+      // rule could never jump it (it removed the location stories
+      // around it, and the priority item landed behind it); naive
+      // insertion could, by slotting between the warm head and the
+      // answer queued behind it. Cap the slot at just behind the
+      // last such line: the priority item still jumps the ordinary
+      // location stories behind the answer, never the answer.
+      for (let j = insertAt - 1; j >= 0; j--) {
+        const q = queue[j];
+        if (!q.isLocationStory && (q.onSettleDetail || q.onPlaybackEnd)) {
+          if (j + 1 < insertAt) insertAt = j + 1;
+          break;
+        }
+      }
       queue.splice(insertAt, 0, item);
       // The item took the head iff no other location story (the
       // protected intro included) waits ahead of it in the final
@@ -2777,14 +2794,16 @@ export const useVoice = () => {
   // durable rule, stated once: the answer's horizon spans
   // EVERYTHING that will sound before it — on-air remainder plus
   // every waiting location story's estimated telling.
-  const getWaitingLocationStoriesRemainingS = useCallback((): number => {
-    let total = 0;
+  const getWaitingLocationStoriesRemainingS = useCallback((): { totalS: number; count: number } => {
+    let totalS = 0;
+    let count = 0;
     for (const item of storyQueueRef.current) {
       if (!item.isLocationStory) continue;
       const full = item.transitionText ? `${item.transitionText} ${item.text}` : item.text;
-      total += estimateSpeechDurationS(full);
+      totalS += estimateSpeechDurationS(full);
+      count++;
     }
-    return total;
+    return { totalS, count };
   }, []);
 
   // Median-timed presynth readiness (pre-publish stack Item 3,
