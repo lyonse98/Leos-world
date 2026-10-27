@@ -151,6 +151,44 @@ for (const area of areas) {
       console.warn(`[neighborhoods] ${area.id}: deep-mode retry failed: ${e.message}`);
     }
   }
+  // Tier-3 fallback (added after the v1 run, same day): geosearch —
+  // even at deep radius — flaked to ZERO for 16 of 106 areas on
+  // generation day, including Pacific Beach, University City, and
+  // Clairemont, whose articles plainly exist. The builder knows
+  // the area's NAME, which the runtime service does not get to use:
+  // search Wikipedia by name and take the best-matching article's
+  // extract. Same source, same honesty contract — retrieval by
+  // name instead of by radius. Runs only when both geosearch
+  // tiers found nothing, so it never displaces a working pack.
+  if (!facts.sources.includes('wikipedia')) {
+    try {
+      const q = encodeURIComponent(`${area.name} San Diego`);
+      const sres = await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${q}&srlimit=3&format=json`, { signal: AbortSignal.timeout(20_000) });
+      const sjson = await sres.json();
+      // Relevance guard: the top hit for an ambiguous name can be
+      // the CITY article ("University City" → "San Diego") — a
+      // city story wearing a neighborhood welcome's clothes is
+      // worse than an honest thin flag. Take the first result
+      // whose title actually names the area; else stay thin.
+      const wanted = area.name.toLowerCase().replace(/-/g, ' ');
+      const title = (sjson?.query?.search ?? [])
+        .map(r => r.title)
+        .find(t => t.toLowerCase().replace(/-/g, ' ').includes(wanted));
+      if (title) {
+        const tres = await fetch(`https://en.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&titles=${encodeURIComponent(title)}&format=json`, { signal: AbortSignal.timeout(20_000) });
+        const tjson = await tres.json();
+        const page = Object.values(tjson?.query?.pages ?? {})[0];
+        const extract = (page?.extract ?? '').trim();
+        if (extract.length > 400) {
+          facts.wikiContext = [facts.wikiContext, `Wikipedia — ${title}:\n${extract.slice(0, 6000)}`].filter(Boolean).join('\n');
+          facts.sources.push('wikipedia');
+          console.log(`[neighborhoods] ${area.id}: name-search Wikipedia fallback found "${title}" (${extract.length} chars)`);
+        }
+      }
+    } catch (e) {
+      console.warn(`[neighborhoods] ${area.id}: name-search fallback failed: ${e.message}`);
+    }
+  }
   console.log(`[neighborhoods] ${area.id} · ${area.name}: facts ${facts.sources.join('+') || 'NONE'}`);
   const prompt = buildIntroPrompt(area, facts);
   const text = await generateText(ai, app, prompt);
