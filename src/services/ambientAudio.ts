@@ -11,6 +11,8 @@
 // browser player does not run on mobile at all. This fills the same role —
 // something pleasant in the quiet stretches — without depending on anything.
 
+import { trackDiag } from './analytics';
+
 const NORMAL_LEVEL = 0.11;
 const DUCKED_LEVEL = 0.012;
 const RAMP_SECONDS = 0.8;
@@ -103,7 +105,13 @@ class AmbientAudioService {
 
   start(): void {
     const ctx = this.ensureContext();
-    if (!ctx) return;
+    if (!ctx) {
+      // The bed is part of the sonic floor (Area A, Oct 26, 2026): its
+      // failure used to be indistinguishable from the toggle being off.
+      // On the record now, like every other floor failure.
+      trackDiag('playback', 'ambient-unavailable', 'AudioContext could not be created — ambient bed silent');
+      return;
+    }
 
     if (!this.master) {
       this.master = this.buildGraph(ctx);
@@ -111,7 +119,15 @@ class AmbientAudioService {
 
     // Called from a tap, so this is the moment the platform lets us make sound.
     if (ctx.state === 'suspended') {
-      ctx.resume().catch(() => {});
+      ctx.resume()
+        .then(() => {
+          if (ctx.state !== 'running') {
+            trackDiag('playback', 'ambient-suspended', `ambient context still ${ctx.state} after resume — bed silent`);
+          }
+        })
+        .catch((error) => {
+          trackDiag('playback', 'ambient-resume-failed', error);
+        });
     }
 
     this.running = true;
@@ -136,7 +152,9 @@ class AmbientAudioService {
   resumeIfNeeded(): void {
     if (!this.running || !this.ctx) return;
     if (this.ctx.state === 'suspended') {
-      this.ctx.resume().catch(() => {});
+      this.ctx.resume().catch((error) => {
+        trackDiag('playback', 'ambient-resume-failed', error);
+      });
     }
   }
 

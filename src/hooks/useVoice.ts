@@ -233,6 +233,18 @@ export const useVoice = () => {
   // Audio is only permitted after a real user gesture. This records that the
   // engine has been woken once, so we do not waste the gesture.
   const unlockedRef = useRef<boolean>(false);
+  // Latched forever once ANY prime (or any real playback) has succeeded:
+  // the platform's unlock, once earned, is not lost — but a later prime
+  // attempt can still REJECT (its play() lands outside a user-activation
+  // window), and the old catch path wrote that rejection back into
+  // unlockedRef, un-latching a good unlock. On the Oct 26, 2026 test
+  // drive that is how whole tours lost their sonic floor: tour start
+  // primes inside the tap, awaits the voice list (~2s), primes AGAIN —
+  // the second prime's rejection cleared the first prime's unlock, the
+  // welcome and opener sat held in pendingSpeechRef forever (no further
+  // tap ever came in a moving car), and every story burned its three
+  // attempts against a still-locked element. Once earned, never revoked.
+  const everUnlockedRef = useRef<boolean>(false);
   // Generation counter for the audio-element prime in unlock(). Every
   // unlock() re-primes, and re-assigning the element's src ABORTS the
   // previous prime's play() — its promise then rejects and, unguarded,
@@ -352,6 +364,37 @@ export const useVoice = () => {
   // SpeechSynthesis hands back a paused engine, and HTMLAudioElement refuses
   // to play at all. A single silent prime on the audio element satisfies the
   // autoplay policy so Gemini TTS can use it later without being blocked.
+  // Speak everything being held for the unlock, in order, with callbacks
+  // intact. Called from every path that establishes or re-asserts the
+  // unlock: a prime landing, a later unlock() call, and — the self-healing
+  // path — any playback that PROVES the element is unlocked by sounding.
+  const flushHeldLines = useCallback(() => {
+    const held = pendingSpeechRef.current;
+    if (held.length > 0) {
+      pendingSpeechRef.current = [];
+      for (const line of held) {
+        speakRef.current(line.text, { localVoice: line.localVoice, audioUrl: line.audioUrl, onSettle: line.onSettle });
+      }
+    }
+    const heldTracked = pendingTrackedRef.current;
+    if (heldTracked) {
+      pendingTrackedRef.current = null;
+      speakTrackedRef.current(heldTracked.text, heldTracked, { front: heldTracked.front });
+    }
+  }, []);
+
+  // Playback that actually sounded IS an unlock, whatever the prime
+  // bookkeeping believes: latch it and flush anything still held, so a
+  // tour whose primes all missed still gets its welcome and opener the
+  // moment the first story proves the speaker works (Area A, Oct 26,
+  // 2026: on the test drive the primes never landed, the held welcome
+  // and opener never fired, and no opener event existed for any tour).
+  const markProvenUnlock = useCallback(() => {
+    everUnlockedRef.current = true;
+    unlockedRef.current = true;
+    flushHeldLines();
+  }, [flushHeldLines]);
+
   const unlock = useCallback(() => {
     // Resume the speech synth in case the platform paused it while
     // backgrounded — needed on every call, latched or not.
@@ -360,16 +403,25 @@ export const useVoice = () => {
       try { synth.resume(); } catch { /* engine missing */ }
     }
 
-    // Prime the HTMLAudioElement inside this gesture so Safari/DuckDuckGo
-    // allow future programmatic plays for Gemini TTS audio. This runs on
-    // EVERY unlock call, not just the first. The old latch made the
-    // "your browser muted Leo" banner a dead end: the first prime could
-    // miss the tap's activation window (one await before it is enough),
-    // the latch set anyway, every later banner tap early-returned
-    // without re-priming, and each queued story's play() rejected in
-    // turn — the banner flashing off as a story was attempted and back
-    // on as it was blocked and dropped. Now the latch is set only when
-    // a prime actually succeeds, and a banner tap genuinely re-primes.
+    // Once an unlock has been EARNED (a prime landed, or real audio
+    // sounded), never prime again: the element stays unlocked for the
+    // session, and a fresh prime can only do harm — its src assignment
+    // churns the very element stories play on, and its rejection (the
+    // call landing outside a user-activation window — tour start primes
+    // in the tap, awaits the voice list for up to 2s, then primes AGAIN)
+    // used to write unlockedRef back to false, un-latching the earned
+    // unlock and stranding every held line for the rest of the tour.
+    // Before the first earned unlock, priming still runs on EVERY call:
+    // the old first-prime latch made the "your browser muted Leo" banner
+    // a dead end (a prime that missed the activation window latched
+    // anyway, and later banner taps early-returned without re-priming),
+    // so the latch below is set only by a prime that actually succeeds.
+    if (everUnlockedRef.current) {
+      unlockedRef.current = true;
+      flushHeldLines();
+      return;
+    }
+
     const audio = audioElRef.current;
     if (audio) {
       const primeGen = ++primeGenRef.current;
@@ -383,6 +435,7 @@ export const useVoice = () => {
         audio.currentTime = 0;
         audio.muted = false;
         audio.removeAttribute('src');
+        everUnlockedRef.current = true;
         unlockedRef.current = true;
         // The prime just landed — NOW any line being held can actually
         // be heard. Flush it here, not only in unlock(): the tour-start
@@ -392,18 +445,7 @@ export const useVoice = () => {
         // possibly no tap ever — so the welcome simply never sounded.
         // A held line must be spoken the moment the engine unlocks,
         // whoever's call made it happen.
-        const held = pendingSpeechRef.current;
-        if (held.length > 0) {
-          pendingSpeechRef.current = [];
-          for (const line of held) {
-            speakRef.current(line.text, { localVoice: line.localVoice, audioUrl: line.audioUrl, onSettle: line.onSettle });
-          }
-        }
-        const heldTracked = pendingTrackedRef.current;
-        if (heldTracked) {
-          pendingTrackedRef.current = null;
-          speakTrackedRef.current(heldTracked.text, heldTracked, { front: heldTracked.front });
-        }
+        flushHeldLines();
       }).catch(() => {
         // Same generation guard as the success path: an aborted prime
         // (killed by the next unlock's src assignment) must not reset
@@ -411,23 +453,15 @@ export const useVoice = () => {
         if (primeGen !== primeGenRef.current) return;
         audio.muted = false;
         audio.removeAttribute('src');
-        unlockedRef.current = false;
+        // A failed prime proves only that THIS attempt failed. It must
+        // never revoke an unlock an earlier prime — or real playback —
+        // already earned.
+        if (!everUnlockedRef.current) unlockedRef.current = false;
       });
     }
 
-    const pending = pendingSpeechRef.current;
-    if (pending.length > 0) {
-      pendingSpeechRef.current = [];
-      for (const line of pending) {
-        speakRef.current(line.text, { localVoice: line.localVoice, audioUrl: line.audioUrl, onSettle: line.onSettle });
-      }
-    }
-    const pendingTracked = pendingTrackedRef.current;
-    if (pendingTracked) {
-      pendingTrackedRef.current = null;
-      speakTrackedRef.current(pendingTracked.text, pendingTracked, { front: pendingTracked.front });
-    }
-  }, []);
+    flushHeldLines();
+  }, [flushHeldLines]);
 
   const initializeVoice = useCallback(() => {
     if (!synthRef.current) return false;
@@ -1144,6 +1178,10 @@ export const useVoice = () => {
         playbackStartedRef.current = true;
         storyTimingRef.current.onPlayingAt = Date.now();
         lastProgressAtRef.current = Date.now();
+        // Sound coming out of the element is proof of unlock — latch it
+        // and flush any lines still held for one (the welcome/opener
+        // recovery path; see markProvenUnlock).
+        markProvenUnlock();
         fadeBridge(); // duck a playing stall phrase out under the story's start
         onAir?.('gemini');
         preSynthesizeNextRef.current();
@@ -1181,7 +1219,7 @@ export const useVoice = () => {
       console.error('[Voice] Gemini TTS failed:', error);
       fallbackToBrowser('API error: ' + (error instanceof Error ? error.message : String(error)));
     }
-  }, [startWatchdog]);
+  }, [startWatchdog, markProvenUnlock]);
 
   // Browser SpeechSynthesis playback — the original sentence-by-sentence path.
   // Used as a fallback when Gemini TTS is unavailable, and for short scripted
@@ -1244,6 +1282,9 @@ export const useVoice = () => {
         playbackStartedRef.current = true;
         storyTimingRef.current.onPlayingAt = Date.now();
         lastProgressAtRef.current = Date.now();
+        // The browser voice sounding is also proof of unlock (see
+        // markProvenUnlock) — held lines flush behind this one.
+        markProvenUnlock();
         onAir?.('browser');
         preSynthesizeNextRef.current();
         audioBlockedRef.current = false;
@@ -1296,7 +1337,7 @@ export const useVoice = () => {
     };
 
     advanceTo(0);
-  }, [dispatchSpeech, startWatchdog]);
+  }, [dispatchSpeech, startWatchdog, markProvenUnlock]);
 
   const playStoryFromQueue = useCallback(() => {
     if (isPlayingStoryRef.current) return;
