@@ -7,6 +7,7 @@ import {
 import { tasteProfile } from '../services/tasteProfile';
 import { geminiAudio, TTS_MODEL } from '../services/geminiAudio';
 import { quotaGuard } from '../services/quotaGuard';
+import { audioHealth } from '../services/audioHealth';
 import { analytics, trackDiag } from '../services/analytics';
 import { pickStallPhrase, stallPhraseAudioUrl } from '../services/stallPhrases';
 
@@ -637,6 +638,17 @@ export const useVoice = () => {
     }
 
     if (!unlockedRef.current) {
+      // The held slot holds ONE tracked line. Replacing it must settle
+      // the line it displaces (terminal guarantee): a held Q&A answer
+      // overwritten by a later tracked line used to vanish exactly like
+      // a queue-cleared one — its owner waiting on callbacks that would
+      // never fire.
+      const displaced = pendingTrackedRef.current;
+      if (displaced) {
+        const info: PlaybackSettle = { sounded: false, completed: false, engine: null, attempts: 0, soundedMs: 0 };
+        displaced.onSettleDetail?.(info);
+        displaced.onPlaybackEnd?.(false);
+      }
       pendingTrackedRef.current = { text: trimmed, ...cbs, front: opts?.front };
       return;
     }
@@ -691,9 +703,47 @@ export const useVoice = () => {
     pb.onEnd?.(delivered);
   }, []);
 
+  // Settle everything that will never reach the player because the
+  // queue is being torn down — the terminal guarantee (Area B, Oct 26,
+  // 2026). settleCurrentPlayback covers the item IN the player; items
+  // still WAITING, and lines still HELD for the unlock, used to be
+  // discarded silently when stop()/skip/mute cleared the queue. That
+  // is how the test drive's Q&A answer vanished without a trace:
+  // generated in 4.1s, handed to a tracked slot that never dequeued,
+  // then the tour ended and the queue clear dropped it — no
+  // question_playback (its settle never fired) and no observable lock
+  // release. Now every tracked item settles exactly once on EVERY
+  // exit: played, exhausted, or torn down.
+  const settleQueuedTrackedItems = useCallback(() => {
+    const undelivered: PlaybackSettle = {
+      sounded: false, completed: false, engine: null, attempts: 0, soundedMs: 0,
+    };
+    for (const item of storyQueueRef.current) {
+      if (!item.onPlaybackEnd && !item.onSettleDetail) continue;
+      const info: PlaybackSettle = { ...undelivered, attempts: item.attempts ?? 0 };
+      item.onSettleDetail?.(info);
+      item.onPlaybackEnd?.(false);
+    }
+    const heldTracked = pendingTrackedRef.current;
+    if (heldTracked) {
+      pendingTrackedRef.current = null;
+      heldTracked.onSettleDetail?.(undelivered);
+      heldTracked.onPlaybackEnd?.(false);
+    }
+    // Held scripted lines carrying a settle (the tour-start welcome and
+    // opener) settle too: torn down before the unlock is still a
+    // terminal state, and the opener audit must be able to see it.
+    const heldLines = pendingSpeechRef.current;
+    pendingSpeechRef.current = [];
+    for (const line of heldLines) {
+      line.onSettle?.(undelivered);
+    }
+  }, []);
+
   const stop = useCallback(() => {
     playGenRef.current += 1;
     settleCurrentPlayback();
+    settleQueuedTrackedItems();
     if (synthRef.current) {
       synthRef.current.cancel();
     }
@@ -718,7 +768,7 @@ export const useVoice = () => {
     preSynthTextRef.current = null;
     playbackStartedRef.current = false;
     clearWatchdog();
-  }, [clearWatchdog, settleCurrentPlayback]);
+  }, [clearWatchdog, settleCurrentPlayback, settleQueuedTrackedItems]);
 
   const processQueue = useCallback(() => {
     if (isProcessingQueueRef.current || sentenceQueueRef.current.length === 0) {
@@ -940,6 +990,11 @@ export const useVoice = () => {
   const preSynthesizeNext = useCallback(() => {
     // Circuit breaker: no pre-synthesis while the TTS lane is tripped.
     if (quotaGuard.isTripped('tts', TTS_MODEL)) return;
+    // Storm economy (Area B): while playback itself is failing, warming
+    // live audio spends quota on sound the speaker currently cannot
+    // play. Banked items never reach this path (they skip below), so
+    // pausing here costs the tour nothing it could have heard.
+    if (audioHealth.preferBanked()) return;
     if (!geminiAudio.hasModel()) {
       try { geminiAudio.initialize(); } catch { return; }
     }
@@ -1202,12 +1257,14 @@ export const useVoice = () => {
       audio.onerror = () => {
         playbackStartedRef.current = false;
         console.error('[Voice] Audio playback error');
+        audioHealth.recordFailure();
         fallbackToBrowser('audio error');
       };
 
       setTtsStatus('gemini');
       await audio.play().catch((playError: unknown) => {
         playbackStartedRef.current = false;
+        audioHealth.recordFailure();
         markAudioBlocked(
           playError instanceof DOMException && playError.name === 'NotAllowedError'
             ? 'blocked'
@@ -1310,11 +1367,13 @@ export const useVoice = () => {
       utterance.onerror = (event) => {
         playbackStartedRef.current = false;
         if (event.error === 'not-allowed') {
+          audioHealth.recordFailure();
           markAudioBlocked('blocked');
           finish(true);
           return;
         }
         if (event.error !== 'interrupted' && event.error !== 'canceled') {
+          audioHealth.recordFailure();
           console.error('Story speech error:', event);
         }
         if (tracked) {
@@ -1333,7 +1392,10 @@ export const useVoice = () => {
       // No blind retry in the queue chain: a sentence whose start is
       // merely late must not be duplicated (see dispatchSpeech), and
       // one that never starts enters the attempt economy via onBlocked.
-      dispatchSpeech(utterance, () => started, () => finish(true), false);
+      dispatchSpeech(utterance, () => started, () => {
+        audioHealth.recordFailure();
+        finish(true);
+      }, false);
     };
 
     advanceTo(0);
@@ -1484,6 +1546,8 @@ export const useVoice = () => {
       playback.sounded = true;
       playback.engine = engine;
       playback.soundedAt = Date.now();
+      // Sound happened: the audio-health failure streak ends here.
+      audioHealth.recordSuccess();
       item.onPlaybackStart?.();
     };
 
@@ -1499,7 +1563,15 @@ export const useVoice = () => {
       setIsSpeaking(false);
 
       if (blocked) {
-        if ((item.attempts ?? 0) >= MAX_PLAYBACK_ATTEMPTS) {
+        // Storm economy (Area B, Oct 26, 2026): while the audio-health
+        // breaker is open, one attempt is all an item gets — in the
+        // drive's failure storm the 3-attempt economy meant a doomed
+        // story held the queue's single waiting slot through minutes of
+        // retries while banked material waited. Surrender fast, free
+        // the queue immediately, let the next item (preferably banked)
+        // try the speaker instead.
+        const maxAttempts = audioHealth.preferBanked() ? 1 : MAX_PLAYBACK_ATTEMPTS;
+        if ((item.attempts ?? 0) >= maxAttempts) {
           // Retry bound hit: this line cannot be heard right now, and
           // requeuing it forever was the Oct 26 fallback loop — the same
           // item re-attempted (and re-spoken) on every fetch trigger.
@@ -1757,6 +1829,7 @@ export const useVoice = () => {
     console.log('[Voice] Skip requested');
     playGenRef.current += 1;
     settleCurrentPlayback();
+    settleQueuedTrackedItems();
     synthRef.current?.cancel();
     if (audioElRef.current) {
       audioElRef.current.pause();
@@ -1785,13 +1858,14 @@ export const useVoice = () => {
     clearWatchdog();
     setIsSpeaking(false);
     setTimeout(() => onStoryCompleteRef.current?.(), 50);
-  }, [clearWatchdog, settleCurrentPlayback]);
+  }, [clearWatchdog, settleCurrentPlayback, settleQueuedTrackedItems]);
 
   const muteForMinutes = useCallback((minutes: number) => {
     mutedUntilRef.current = Date.now() + minutes * 60_000;
     console.log(`[Voice] Muted for ${minutes} minutes`);
     playGenRef.current += 1;
     settleCurrentPlayback();
+    settleQueuedTrackedItems();
     synthRef.current?.cancel();
     if (audioElRef.current) {
       audioElRef.current.pause();
@@ -1819,7 +1893,7 @@ export const useVoice = () => {
     playbackStartedRef.current = false;
     clearWatchdog();
     setIsSpeaking(false);
-  }, [clearWatchdog, settleCurrentPlayback]);
+  }, [clearWatchdog, settleCurrentPlayback, settleQueuedTrackedItems]);
 
   const isMuted = useCallback(() => Date.now() < mutedUntilRef.current, []);
 

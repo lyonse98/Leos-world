@@ -338,18 +338,23 @@ function App() {
   const questionInFlightRef = useRef(false);
   const answerCycleRef = useRef(0);
   const answerFailsafeRef = useRef<number | null>(null);
-  const releaseQuestionLock = useCallback((reason?: 'story-resumed' | 'failsafe' | 'answer-failed') => {
+  const releaseQuestionLock = useCallback((reason?: 'story-resumed' | 'failsafe' | 'answer-failed' | 'tour-ended') => {
     // Record WHY the lock released, when the release is one of the
-    // three meaningful exits (Oct 26, 2026): a mid-answer release was
+    // meaningful exits (Oct 26, 2026): a mid-answer release was
     // only diagnosable while it was happening on Erik's screen; as an
     // event it is provable after the fact. Gated on a question
-    // actually being in flight — releases with no question (tour end,
-    // defensive cleanups) and releases outside the three named
-    // reasons (the no-position edge) stay silent, so the event means
-    // something. questionInFlightRef mirrors the lock for exactly
-    // this gate: set where the lock is taken in submitQuestion,
-    // cleared here, so the finally-path release (cycle never armed,
-    // phase already null) still records its reason.
+    // actually being in flight — releases with no question and
+    // releases outside the named reasons (the no-position edge) stay
+    // silent, so the event means something. 'tour-ended' joined the
+    // named reasons with the Area B terminal guarantee: the drive's
+    // vanished answer exited through tour end, which released
+    // silently by design and left neither question_playback nor
+    // question_lock_released — an unobservable exit is
+    // indistinguishable from a lost one. questionInFlightRef mirrors
+    // the lock for exactly this gate: set where the lock is taken in
+    // submitQuestion, cleared here, so the finally-path release
+    // (cycle never armed, phase already null) still records its
+    // reason.
     if (reason && questionInFlightRef.current) {
       try {
         analytics.track('question_lock_released', null, undefined, { reason });
@@ -555,7 +560,7 @@ function App() {
     // the stop settles the answer item, and its callback must find the
     // cycle already gone rather than queueing a bridge into a dead tour.
     answerCycleRef.current++;
-    releaseQuestionLock();
+    releaseQuestionLock('tour-ended');
     voice.muteForMinutes(0);
     voice.stop();
     geolocation.stopTracking();
