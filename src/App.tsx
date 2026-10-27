@@ -745,7 +745,19 @@ function App() {
         // backstop. What happens next is decided by the tracked
         // playback callbacks below — not by watching the queue move.
         answerPhaseRef.current = 'awaiting-answer';
-        armAnswerFailsafe(answerFailsafeMs(fullAnswer));
+        // The horizon must also cover the story ON AIR: the answer
+        // cannot sound until it finishes, and that wait is known and
+        // healthy, not a hang (pre-publish stack Item 5 follow-up,
+        // Oct 27, 2026). The latency length floor makes on-air
+        // stories longer exactly when the pipeline is slow, and the
+        // unadjusted horizon could fire mid-wait — releasing the
+        // question lock under a still-queued answer, the precise
+        // serialization break the sim's degraded+storm cell caught
+        // (one premature release in 24 runs). The hang protection is
+        // unchanged: the horizon is still bounded, just honest about
+        // the wait it has to span.
+        const onAirRemainingS = voice.getCurrentStoryRemainingS() ?? 0;
+        armAnswerFailsafe(answerFailsafeMs(fullAnswer) + onAirRemainingS * 1000);
         const cycle = ++answerCycleRef.current;
         voice.speakTracked(fullAnswer, {
           onSettleDetail: (info) => {
