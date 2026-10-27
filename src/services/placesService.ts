@@ -52,6 +52,12 @@ export interface AreaInfo {
   city: string | null;
   district: string | null;
   street: string | null;
+  // Set when the position falls inside a named-area override whose
+  // district is itself a major (Area F's anchor table): area stories
+  // here earn the major length band (Area E).
+  majorArea?: boolean;
+  // The named-area override that claimed this position, when one did.
+  namedArea?: string;
 }
 
 const API_KEY = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';

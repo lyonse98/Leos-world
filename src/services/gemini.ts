@@ -76,6 +76,11 @@ interface StoryTarget {
   // library for THIS angle. Null when no angle applies; the library
   // holds no entries for those.
   angle: string | null;
+  // Significance (Area E, Oct 26, 2026): a Tier-1 / marked-major
+  // landmark, or an area inside a major named district. Threaded into
+  // buildStoryPrompt, where it overrides the length bands — story
+  // length follows SIGNIFICANCE as well as speed and density.
+  significance?: 'major-landmark' | 'major-area';
 }
 
 const MIN_REQUEST_INTERVAL_MS = 3000;
@@ -545,6 +550,12 @@ class GeminiService {
       );
 
       const isRotation = isRotationAngle(angle);
+      const subjectPlace = factPack.places.find(p => p.name === subject.name);
+      const significance =
+        (subjectPlace !== undefined && placesService.isTier1Landmark(subjectPlace)) ||
+        storyCoverage.isMajorSubject(subjectKey)
+          ? ('major-landmark' as const)
+          : undefined;
 
       return {
         kind: 'landmark',
@@ -553,6 +564,7 @@ class GeminiService {
         areaName: '',
         displayTopic: isRotation && angle ? `${subject.name} — ${describeAngle(angle)}` : subject.name,
         angle,
+        significance,
       };
     }
 
@@ -564,6 +576,7 @@ class GeminiService {
       areaName,
       displayTopic: `${areaName} — ${describeAngle(rotation.angle)}`,
       angle: rotation.angle,
+      significance: factPack.areaInfo.majorArea ? ('major-area' as const) : undefined,
     };
   }
 
@@ -770,6 +783,35 @@ class GeminiService {
 
     const seasonalHint = seasonal.getPromptHint();
     if (seasonalHint) parts.push(seasonalHint);
+
+    // Significance length override (Area E, Oct 26, 2026): story
+    // length follows SIGNIFICANCE as well as speed and density. The
+    // v13 density doctrine thins stories where places are thick on the
+    // ground — right for ordinary stops, wrong for the places a drive
+    // is ABOUT: on the Oct 26 drive, Mission Bay, San Diego Bay and
+    // Liberty Station all got ordinary-density tellings. A major now
+    // takes its long band regardless of density or mode. Interaction
+    // with the missed-landmark rule: NONE — that rule governs whether
+    // a landmark is told at all and always wins; significance only
+    // sets how long a told major runs. If the deep-listening block
+    // below also applies, it asks for even more — follow the longer.
+    if (target.significance === 'major-landmark') {
+      parts.push(
+        'SIGNIFICANCE — MAJOR LANDMARK: this place is one of the defining landmarks of its area. ' +
+          'Tell its story LONG regardless of mode, speed, or how many other places are nearby: ' +
+          '8 to 12 sentences — the full arc. What it is, how it came to be, the people and the ' +
+          'conflict inside it, and why it still matters. This overrides the mode length bands ' +
+          'and any instinct to keep it brief because the area is dense.'
+      );
+    } else if (target.significance === 'major-area') {
+      parts.push(
+        'SIGNIFICANCE — MAJOR AREA: this district is one of the defining places of the city, ' +
+          'not an ordinary neighborhood stop. Tell its story LONG: 10 to 14 sentences — what ' +
+          'this place is, how it came to be, the era that shaped it, and what it means now. ' +
+          'This overrides the mode length bands and any instinct to keep it brief because ' +
+          'the area is dense.'
+      );
+    }
 
     const dwellLevel = locationTracker.getDwellDepthLevel();
     if (dwellLevel !== null) {
