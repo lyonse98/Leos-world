@@ -3,6 +3,7 @@ import { calculateDistance, offsetPositionByHeading, MovementModeHysteresis } fr
 import { geminiService, StoryRotation } from './gemini';
 import { storyCoverage, landmarkSubjectKey } from './storyCoverage';
 import { storyLibrary } from './storyLibrary';
+import { heardStories } from './heardStories';
 import { analytics } from './analytics';
 
 export interface CachedStory {
@@ -211,7 +212,7 @@ class StoryCacheService {
     position: Position,
     mode: MovementModeHysteresis,
     onChunk?: (text: string) => void
-  ): Promise<{ story: string; fromCache: boolean; topic: string; subject: string; context: string; rotation: StoryRotation | null; fromLibrary: boolean; audioUrl?: string; anchorLat?: number; anchorLng?: number } | null> {
+  ): Promise<{ story: string; fromCache: boolean; topic: string; subject: string; context: string; rotation: StoryRotation | null; fromLibrary: boolean; audioUrl?: string; anchorLat?: number; anchorLng?: number; major?: boolean } | null> {
     this.pruneStalePrefetches(position);
     const openerServe = this.openerPending;
     // While the opener is pending the local cache is not consulted at
@@ -219,6 +220,23 @@ class StoryCacheService {
     // the openerPending note). After the opener, serves are unchanged.
     const cached = openerServe ? null : this.findNearestUnplayedCache(position);
     if (cached) {
+      const servedKey = cached.rotation?.subjectKey ?? landmarkSubjectKey(cached.topic.split(' — ')[0].trim());
+      // Tenant guard (Area C, Oct 26, 2026): a buffered story about a
+      // tenant of an untold curated major does not serve from the
+      // buffer either — the serve falls through to the live path,
+      // whose tenant redirect tells the whole place first. A cached
+      // subject that is itself a major is never deferred.
+      const tenantAnchor = storyLibrary.containingMajorAnchor(
+        cached.lat, cached.lng, cached.topic.split(' — ')[0].trim()
+      );
+      const tenantDeferred =
+        tenantAnchor !== null &&
+        !storyCoverage.isMajorSubject(servedKey) &&
+        !storyCoverage.isSubjectLockedForSession(landmarkSubjectKey(tenantAnchor.name)) &&
+        !heardStories.hasHeardSubject(tenantAnchor.name);
+      if (tenantDeferred) {
+        console.log(`[StoryCache] Tenant serve deferred — "${cached.topic}" waits for whole place "${tenantAnchor!.name}"`);
+      } else {
       cached.played = true;
       this.notifyCacheChange();
       this.refreshPendingSubjects();
@@ -233,7 +251,6 @@ class StoryCacheService {
       const speed = position.speed ?? null;
       const moving = !(speed !== null && speed < 1.0);
       if (moving) {
-        const servedKey = cached.rotation?.subjectKey ?? landmarkSubjectKey(cached.topic.split(' — ')[0].trim());
         if (servedKey.startsWith('landmark:')) {
           storyCoverage.lockSubjectForSession(servedKey);
           if (!cached.rotation) storyCoverage.recordDailyTelling(servedKey);
@@ -252,7 +269,12 @@ class StoryCacheService {
         audioUrl: cached.audioUrl,
         anchorLat: cached.fromLibrary ? cached.lat : undefined,
         anchorLng: cached.fromLibrary ? cached.lng : undefined,
+        // A banked major claims the priority lane at serve (Area C):
+        // prefetch-chosen library items reach the queue through this
+        // branch, so this is where their right-of-way is decided.
+        major: cached.fromLibrary ? storyCoverage.isMajorSubject(servedKey) : false,
       };
+      }
     }
 
     if (!this.isOnline) {
@@ -302,7 +324,7 @@ class StoryCacheService {
           audioUrl: result.audioUrl,
           fromLibrary: result.fromLibrary,
         });
-        return { story, fromCache: false, topic, subject: result.subject, context: result.context, rotation: result.rotation, fromLibrary: !!result.fromLibrary, audioUrl: result.audioUrl, anchorLat: result.anchorLat, anchorLng: result.anchorLng };
+        return { story, fromCache: false, topic, subject: result.subject, context: result.context, rotation: result.rotation, fromLibrary: !!result.fromLibrary, audioUrl: result.audioUrl, anchorLat: result.anchorLat, anchorLng: result.anchorLng, major: result.major ?? false };
       }
     } catch (error) {
       console.error('[StoryCache] Live fetch failed:', error);

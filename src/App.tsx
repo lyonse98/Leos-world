@@ -856,9 +856,19 @@ function App() {
           const originLat = result.anchorLat ?? position.lat;
           const originLng = result.anchorLng ?? position.lng;
           const resultBase = (result.subject || result.topic).split(' — ')[0].trim().toLowerCase();
+          // Right-of-way (Area C, Oct 26, 2026): a serve the pipeline
+          // has marked major — a Tier-1 landmark or a marked major
+          // subject, INCLUDING library serves — takes the priority lane
+          // identically to a live detection. The name-match path below
+          // only fired within 150m of a fresh pool check in the same
+          // cycle, which is how the drive's library SeaWorld serve
+          // queued in the normal lane, sat in the single replaceable
+          // waiting slot, and was displaced by fresher minor stories
+          // until it never played at all.
           const isQueueJump =
-            queueJumpTargetName !== null &&
-            resultBase === queueJumpTargetName.toLowerCase();
+            result.major === true ||
+            (queueJumpTargetName !== null &&
+              resultBase === queueJumpTargetName.toLowerCase());
           if (isQueueJump) {
             // Front of the waiting queue — behind nothing but any scripted
             // line already in flight, and always after the current story.

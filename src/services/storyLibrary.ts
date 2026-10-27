@@ -1,5 +1,6 @@
 import { supabase, SUPABASE_CONFIGURED } from './supabase';
 import { LANDMARK_ANGLES, describeAngle } from './storyCoverage';
+import { calculateDistance } from '../utils/geo';
 
 // The curated library — "recorded episodes" in story_library.
 //
@@ -191,16 +192,30 @@ class StoryLibraryService {
       try {
         const { data, error } = await supabase
           .from('story_library')
-          .select('place_key')
+          .select('place_key, place_name, lat, lng')
           .limit(1000);
         if (error) {
           if (this.isMissingTableError(error)) this.tableMissing = true;
           return; // leave unprimed; a later call may retry
         }
-        const keys = new Set<string>(
-          (data ?? []).map(r => (r as { place_key: string }).place_key).filter(Boolean)
-        );
+        const rows = (data ?? []) as Array<{ place_key: string; place_name: string; lat: number; lng: number }>;
+        const keys = new Set<string>(rows.map(r => r.place_key).filter(Boolean));
         this.placeIndex = keys;
+        // Anchors: one representative point per place (every angle of a
+        // place shares its coordinates), for the tenant rule below.
+        const anchors = new Map<string, PlaceAnchor>();
+        for (const r of rows) {
+          if (!r.place_key || anchors.has(r.place_key)) continue;
+          if (typeof r.lat !== 'number' || typeof r.lng !== 'number') continue;
+          anchors.set(r.place_key, {
+            key: r.place_key,
+            name: r.place_name,
+            lat: r.lat,
+            lng: r.lng,
+            radiusM: ANCHOR_EXTENT_OVERRIDES_M[r.place_key] ?? DEFAULT_ANCHOR_RADIUS_M,
+          });
+        }
+        this.placeAnchors = anchors;
         try {
           localStorage.setItem(LIBRARY_PLACES_KEY, JSON.stringify([...keys]));
         } catch {
@@ -215,6 +230,69 @@ class StoryLibraryService {
     })();
     return this.placeIndexPromise;
   }
+
+  // --- Tenant rule (Area C, Oct 26, 2026) --------------------------------
+  // Majors have right-of-way at every serve layer: the WHOLE place
+  // outranks its tenants. When a candidate sits inside a curated major
+  // place's extent and that place has not been told this session, the
+  // place's own story goes first; the tenant becomes eligible again
+  // once the place is served or locked. The drive's case: Liberty
+  // Station reached the listener as "THE LOT Liberty Station" — a
+  // tenant — while the district itself was never told.
+  //
+  // Anchors come from the library itself: the curated corpus IS the
+  // set of wholes. A candidate defers when it lies within an anchor's
+  // radius AND (it is not itself a library place — a Google/registry
+  // tenant — OR its name is kin to the anchor's ("THE LOT Liberty
+  // Station" carries its parent's name) OR the anchor's extent is
+  // strictly larger than its own (a district containing a venue).
+  // A candidate that is itself Tier-1 is guarded at the call sites,
+  // which never defer a Tier-1 subject.
+  private placeAnchors: Map<string, PlaceAnchor> | null = null;
+
+  containingMajorAnchor(lat: number, lng: number, candidateName: string): PlaceAnchor | null {
+    if (!this.placeAnchors || this.placeAnchors.size === 0) return null;
+    const candidateKey = normalizePlaceKey(candidateName);
+    const candidateIsLibrary = this.placeIndex?.has(candidateKey) ?? false;
+    const candidateAnchor = candidateKey ? this.placeAnchors.get(candidateKey) : undefined;
+
+    let best: PlaceAnchor | null = null;
+    let bestDistance = Infinity;
+    for (const anchor of this.placeAnchors.values()) {
+      if (anchor.key === candidateKey) continue;
+      const d = calculateDistance(lat, lng, anchor.lat, anchor.lng);
+      if (d > anchor.radiusM) continue;
+      if (candidateIsLibrary) {
+        const kin =
+          candidateKey.includes(anchor.key) || anchor.key.includes(candidateKey);
+        const larger = candidateAnchor ? anchor.radiusM > candidateAnchor.radiusM : false;
+        if (!kin && !larger) continue;
+      }
+      if (d < bestDistance) {
+        best = anchor;
+        bestDistance = d;
+      }
+    }
+    return best;
+  }
 }
+
+export interface PlaceAnchor {
+  key: string;
+  name: string;
+  lat: number;
+  lng: number;
+  radiusM: number;
+}
+
+// How far a curated place's "whole" extends for the tenant rule. A
+// single point with a modest radius is the honest shape for most
+// library places; large complexes whose tenants scatter across a
+// district get an explicit extent. Keyed by normalized place key.
+const DEFAULT_ANCHOR_RADIUS_M = 400;
+const ANCHOR_EXTENT_OVERRIDES_M: Record<string, number> = {
+  'liberty station': 650,
+  'balboa park': 900,
+};
 
 export const storyLibrary = new StoryLibraryService();

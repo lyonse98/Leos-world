@@ -19,7 +19,7 @@ import { osmService } from './osmService';
 import { quotaGuard } from './quotaGuard';
 import { wikidata } from './wikidata';
 import { historicRegistry } from './historicRegistry';
-import { analytics } from './analytics';
+import { analytics, trackDiag } from './analytics';
 
 export interface QAContext {
   lastSpokenSentences: string;
@@ -58,6 +58,10 @@ export interface NarrationResult {
   anchorLat?: number;
   anchorLng?: number;
   fromLibrary?: boolean;
+  // The served subject is a major (Tier-1 landmark / marked major
+  // subject) — the app gives such serves the priority queue lane
+  // identically whatever their source (Area C, Oct 26, 2026).
+  major?: boolean;
 }
 
 const EMPTY_NARRATION: NarrationResult = { text: '', subject: '', context: '', mode: 'walking', rotation: null };
@@ -386,17 +390,23 @@ class GeminiService {
     return `${LEO_PERSONA_VERSION}|${LEO_MODEL_ID}|${factPackHash}`;
   }
 
-  private resolveSubject(factPack: StoryFactPack, allowRevisit: boolean = false): StorySubject | null {
-    if (factPack.places.length === 0) return null;
-
-    // Tier-1 places in the pool are majors — cap-exempt by definition.
-    // Marking them as they are evaluated is what lets the topic-only
-    // serve layers (which hold no candidate object) honor the exemption.
+  // Tier-1 places in the pool are majors — cap-exempt by definition.
+  // Marking them as they are evaluated is what lets the topic-only
+  // serve layers (which hold no candidate object) honor the exemption
+  // — and lets a later library serve of the same place claim the
+  // priority queue lane (Area C).
+  private markTier1Majors(factPack: StoryFactPack): void {
     for (const place of factPack.places) {
       if (placesService.isTier1Landmark(place)) {
         storyCoverage.markMajorSubject(landmarkSubjectKey(place.name));
       }
     }
+  }
+
+  private resolveSubject(factPack: StoryFactPack, allowRevisit: boolean = false): StorySubject | null {
+    if (factPack.places.length === 0) return null;
+
+    this.markTier1Majors(factPack);
 
     // A moving-context candidate is unavailable when ANY of these hold:
     //  - session lock: the place was already TOLD this session;
@@ -795,11 +805,37 @@ class GeminiService {
     const introContext = decision.context === 'initial' || decision.context === 'neighborhood_intro';
     const cacheServeBlocked = introContext || opts?.requireWelcomeStory === true;
 
+    // Majors are marked before any serve decision (Area C): the
+    // preliminary serves below hold topics, not candidate objects, and
+    // the major-subject mark is how a library serve of a Tier-1 place
+    // claims its right-of-way. The library index primes here too, so
+    // the tenant rule's anchors exist before the first serve decision.
+    this.markTier1Majors(factPack);
+    await storyLibrary.primePlaceIndex();
+
+    // Tenant rule (Area C, Oct 26, 2026): a preliminary topic that is a
+    // TENANT of an untold curated major must not serve — the whole
+    // place goes first, via the redirect on the main path below. The
+    // containment test uses the listener's position: a preliminary hit
+    // is by construction within ~100m, well inside anchor tolerance.
+    // A tenant that is itself a major is never suppressed.
+    const prelimBase = preliminaryCache ? this.topicBaseName(preliminaryCache.topic) : null;
+    const prelimAnchor = prelimBase
+      ? storyLibrary.containingMajorAnchor(position.lat, position.lng, prelimBase)
+      : null;
+    const tenantBlocked =
+      prelimAnchor !== null &&
+      prelimBase !== null &&
+      !storyCoverage.isMajorSubject(landmarkSubjectKey(prelimBase)) &&
+      !storyCoverage.isSubjectLockedForSession(landmarkSubjectKey(prelimAnchor.name)) &&
+      !heardStories.hasHeardSubject(prelimAnchor.name);
+
     // If the preliminary cache found an unheard story, serve it right away.
     // Session lockout applies too: a cached angle-variant of a landmark
     // already told this session is a retell, not a cache hit.
     if (
       !cacheServeBlocked &&
+      !tenantBlocked &&
       preliminaryCache &&
       !heardStories.hasHeard(preliminaryCache.topic) &&
       !this.isTopicLockedForSession(preliminaryCache.topic, locationTracker.getDwellDepthLevel() !== null)
@@ -824,7 +860,7 @@ class GeminiService {
         await locationTracker.updateLastStoryTopic(
           libHit.topic, position, libHit.text, 'cache_hit', 0, versionKey
         );
-        return { text: libHit.text, subject: libHit.topic, context: 'cache_hit', mode: factPack.mode, rotation: null, audioUrl: libHit.audioUrl, anchorLat: libHit.lat, anchorLng: libHit.lng, fromLibrary: true };
+        return { text: libHit.text, subject: libHit.topic, context: 'cache_hit', mode: factPack.mode, rotation: null, audioUrl: libHit.audioUrl, anchorLat: libHit.lat, anchorLng: libHit.lng, fromLibrary: true, major: storyCoverage.isMajorSubject(libKey) };
       }
       console.log(`[Gemini] Parallel cache hit for "${preliminaryCache.topic}" (${Math.round(preliminaryCache.distanceM)}m away)`);
       const versionKey = this.storyVersionKey(this.factPackHash(factPack));
@@ -835,7 +871,7 @@ class GeminiService {
       await locationTracker.updateLastStoryTopic(
         preliminaryCache.topic, position, preliminaryCache.storyText, 'cache_hit', 0, versionKey
       );
-      return { text: preliminaryCache.storyText, subject: preliminaryCache.topic, context: 'cache_hit', mode: factPack.mode, rotation: null };
+      return { text: preliminaryCache.storyText, subject: preliminaryCache.topic, context: 'cache_hit', mode: factPack.mode, rotation: null, major: storyCoverage.isMajorSubject(prelimKey) };
     }
 
     const { shouldTell, context, depthLevel, depthCycle } = decision;
@@ -893,6 +929,68 @@ class GeminiService {
       target.kind === 'landmark' && target.subject
         ? landmarkSubjectKey(target.subject.name)
         : areaSubjectKey(position.lat, position.lng);
+    const targetPlace =
+      target.kind === 'landmark' && target.subject
+        ? factPack.places.find(p => p.name === target.subject!.name)
+        : undefined;
+
+    // Tenant redirect (Area C, Oct 26, 2026): the chosen subject sits
+    // inside a curated major place that has not been told this session —
+    // serve the WHOLE PLACE's library story first (Liberty Station, not
+    // its movie theater). The tenant stays eligible from the next cycle:
+    // serving the place locks it, which lifts the redirect. Guards: a
+    // subject that is itself Tier-1 or a marked major is never deferred,
+    // and if the place has no untold library angle the tenant serves
+    // as-is rather than not at all.
+    if (
+      target.kind === 'landmark' &&
+      target.subject &&
+      targetPlace?.lat !== undefined &&
+      targetPlace?.lng !== undefined &&
+      !placesService.isTier1Landmark(targetPlace) &&
+      !storyCoverage.isMajorSubject(subjectKey)
+    ) {
+      const anchor = storyLibrary.containingMajorAnchor(targetPlace.lat, targetPlace.lng, target.subject.name);
+      if (anchor) {
+        const anchorKey = landmarkSubjectKey(anchor.name);
+        if (
+          !storyCoverage.isSubjectLockedForSession(anchorKey) &&
+          !storyCoverage.isDailyCapped(anchorKey) &&
+          !heardStories.hasHeardSubject(anchor.name)
+        ) {
+          const anchorAngle = storyCoverage.nextAngle(
+            anchorKey,
+            LANDMARK_ANGLES,
+            heardStories.hasHeardSubject(anchor.name) ? [LANDMARK_ANGLES[0]] : []
+          );
+          const anchorHit = anchorAngle ? await storyLibrary.lookup(anchor.name, anchorAngle) : null;
+          if (anchorHit) {
+            console.log(`[Gemini] Tenant redirect: "${target.subject.name}" deferred — whole place "${anchor.name}" serves first`);
+            trackDiag('pipeline', 'tenant-redirect', `"${target.subject.name}" deferred to whole place "${anchor.name}"`);
+            if (onChunk) onChunk(anchorHit.text);
+            storyCoverage.lockSubjectForSession(anchorKey);
+            storyCoverage.markMajorSubject(anchorKey);
+            storyCoverage.recordDailyTelling(anchorKey);
+            await locationTracker.updateLastStoryTopic(
+              anchorHit.topic, position, anchorHit.text, effectiveContext, depthLevel, versionKey
+            );
+            return {
+              text: anchorHit.text,
+              subject: anchorHit.topic,
+              context: effectiveContext,
+              mode: factPack.mode,
+              rotation: null,
+              audioUrl: anchorHit.audioUrl,
+              anchorLat: anchorHit.lat,
+              anchorLng: anchorHit.lng,
+              fromLibrary: true,
+              major: true,
+            };
+          }
+        }
+      }
+    }
+
     const toldAngles = storyCoverage.getToldAngles(subjectKey);
     // LIBRARY FIRST (Erik's shelf order): for the exact (place, angle) just
     // chosen, a curated library entry beats both the ephemeral cache and a
@@ -920,6 +1018,7 @@ class GeminiService {
           anchorLat: libHit.lat,
           anchorLng: libHit.lng,
           fromLibrary: true,
+          major: storyCoverage.isMajorSubject(subjectKey) || (targetPlace ? placesService.isTier1Landmark(targetPlace) : false),
         };
       }
     }
@@ -944,7 +1043,7 @@ class GeminiService {
       await locationTracker.updateLastStoryTopic(
         cached.topic, position, cached.storyText, effectiveContext, depthLevel, versionKey
       );
-      return { text: cached.storyText, subject: cached.topic, context: effectiveContext, mode: factPack.mode, rotation: null };
+      return { text: cached.storyText, subject: cached.topic, context: effectiveContext, mode: factPack.mode, rotation: null, major: storyCoverage.isMajorSubject(servedKey) };
     }
     if (cached) {
       console.log(`[Gemini] Cached story for "${cached.topic}" already heard — generating a fresh one`);
@@ -970,6 +1069,10 @@ class GeminiService {
       context: effectiveContext,
       mode: factPack.mode,
       rotation: target.rotation,
+      major:
+        target.kind === 'landmark' && target.subject
+          ? storyCoverage.isMajorSubject(subjectKey) || (targetPlace ? placesService.isTier1Landmark(targetPlace) : false)
+          : false,
     };
   }
 
