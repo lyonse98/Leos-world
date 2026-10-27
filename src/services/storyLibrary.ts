@@ -119,6 +119,19 @@ class StoryLibraryService {
     return this.toResult(row);
   }
 
+  // Corridor lookup (pre-publish stack Item 6, Oct 27, 2026): the
+  // banked story for one freeway segment-direction, keyed exactly
+  // like the place corpus — (normalizePlaceKey(displayName),
+  // 'corridor') — so the corridor bank is the same shelf, the same
+  // ingestion, and the same serve mechanics as the 345 place
+  // stories. The display names live in src/data/corridors.ts; the
+  // serve layer (gemini.ts) matches position → segment and asks
+  // here by name. One story per (segment, direction) in v1 — no
+  // angle rotation.
+  async lookupCorridor(displayName: string): Promise<LibraryStoryResult | null> {
+    return this.lookup(displayName, 'corridor');
+  }
+
   // Place-wide lookup (Pass 2, Oct 27, 2026): the library's episode for
   // a place, at ANY angle the caller still considers servable. The
   // exact-(place, angle) lookup above starved the library on real

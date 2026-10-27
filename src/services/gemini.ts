@@ -10,6 +10,9 @@ import { pickStorySubject, StorySubject } from './relevance';
 import { tasteProfile } from './tasteProfile';
 import { deriveTags, isInterestTag } from './storyTags';
 import { storyCoverage, AREA_ANGLES, LANDMARK_ANGLES, describeAngle, describeArea, areaSubjectKey, landmarkSubjectKey, isRotationAngle } from './storyCoverage';
+// Highway Corridor Library (Item 6): segment matching for the
+// banked freeway narration — see src/data/corridors.ts.
+import { matchCorridor } from '../data/corridors';
 import { driveArc } from './driveArc';
 import { resolveMovementMode, MovementModeHysteresis, calculateDistance } from '../utils/geo';
 import { hashString } from '../utils/hash';
@@ -1392,6 +1395,55 @@ class GeminiService {
         preliminaryCache.topic, position, preliminaryCache.storyText, 'cache_hit', 0, versionKey
       );
       return { text: preliminaryCache.storyText, subject: preliminaryCache.topic, context: 'cache_hit', mode: factPack.mode, rotation: null, major: storyCoverage.isMajorSubject(prelimKey) };
+    }
+
+    // Highway Corridor Library (pre-publish stack Item 6, Oct 27,
+    // 2026): at freeway speed inside a banked segment, the corridor
+    // story is the PRIMARY highway serve — it displaces the live
+    // path entirely (the fix stack's region-anchored generation
+    // below becomes the fallback for unbanked road, designed
+    // silence the last resort). Placement is deliberate:
+    //  - AFTER the preliminary/library serves: a warm banked POINT
+    //    story (a Tier-1 episode already on the shelf) still wins —
+    //    Erik's highway Tier-1 rule is "priority path when warm",
+    //    and those serves are exactly the warm path.
+    //  - BEFORE the decision gate and target selection: the
+    //    corridor serve is banked material, and banked serves have
+    //    never waited on the movement decision (the preliminary
+    //    serves above are the precedent). It also answers Item 2's
+    //    starved cycles on freeways instantly.
+    //  - cacheServeBlocked keeps it out of the opener and owed
+    //    intros: a corridor story is never a tour's first story and
+    //    never substitutes for a neighborhood welcome.
+    // Coverage is the hearing funnel's, via the in-flight mark here
+    // and the settle in App: one telling per (segment, direction)
+    // per tour, enforced by the tour-heard record (the settle takes
+    // no session lock for corridor subjects — see storyCoverage).
+    // Chaining is positional: when this story ends, the completion
+    // cycle re-matches at the new position, and the NEXT segment's
+    // story — untold this tour — is what matches.
+    if (!cacheServeBlocked && (position.speed ?? 0) >= 15) {
+      const corridorMatch = matchCorridor(position);
+      if (corridorMatch) {
+        const corridorKey = landmarkSubjectKey(corridorMatch.segment.displayName);
+        if (
+          !storyCoverage.hasHeardThisTour(corridorKey) &&
+          !storyCoverage.isSubjectInFlight(corridorKey)
+        ) {
+          const corridorHit = await storyLibrary.lookupCorridor(corridorMatch.segment.displayName);
+          if (corridorHit) {
+            console.log(`[Gemini] Corridor hit: "${corridorHit.topic}" (${corridorMatch.segment.id})`);
+            const versionKey = this.storyVersionKey(this.factPackHash(factPack));
+            if (onChunk) onChunk(corridorHit.text);
+            storyCoverage.markSubjectInFlight(corridorKey);
+            await locationTracker.updateLastStoryTopic(
+              corridorHit.topic, position, corridorHit.text, 'cache_hit', 0, versionKey
+            );
+            trackDiag('pipeline', 'corridor-serve', `${corridorMatch.segment.id} matched ${Math.round(corridorMatch.distanceM)}m off its polyline`);
+            return { text: corridorHit.text, subject: corridorHit.topic, context: 'corridor', mode: factPack.mode, rotation: null, audioUrl: corridorHit.audioUrl, anchorLat: corridorHit.lat, anchorLng: corridorHit.lng, fromLibrary: true, major: true };
+          }
+        }
+      }
     }
 
     const { shouldTell, context, depthLevel, depthCycle } = decision;

@@ -46,6 +46,16 @@ const MAJOR_SUBJECTS_KEY = 'leo_major_subjects';
 // candidate pool evaluates the place anyway.
 const TIER1_SUBJECTS_KEY = 'leo_tier1_subjects';
 
+// Corridor subject keys (Item 6): banked freeway segment stories
+// record coverage through the same hearing funnel as every story,
+// but their retell rule is per-TOUR (the tour-heard record), never
+// the day-scoped session lock — see settleSubjectHeard. Built with
+// landmarkSubjectKey itself so the normalization can never drift
+// from the keys the funnel actually produces.
+const CORRIDOR_SUBJECT_KEYS = new Set(
+  CORRIDOR_SEGMENTS.map(s => landmarkSubjectKey(s.displayName))
+);
+
 // Prominence-scaled daily cap: a MINOR subject (not Tier-1, not in the
 // library) may be told at most this many times per calendar day across
 // all sessions. Majors are exempt; area stories are the fall-through
@@ -165,6 +175,10 @@ import { normalizePlaceName } from './placeName';
 // an earlier tour, and that truth lives in heardStories. Acyclic:
 // heardStories imports only supabase + placeName.
 import { heardStories } from './heardStories';
+// Corridor subjects (pre-publish stack Item 6, Oct 27, 2026): the
+// segment display names, keyed as landmark subjects. The dataset is
+// a pure data module — no cycle.
+import { CORRIDOR_SEGMENTS } from '../data/corridors';
 
 export function landmarkSubjectKey(name: string): string {
   return `landmark:${normalizePlaceName(name)}`;
@@ -668,7 +682,17 @@ class StoryCoverageService {
     if (subjectKey.startsWith('landmark:')) {
       this.recordTourHeard(subjectKey);
       this.recordDailyTelling(subjectKey);
-      if (this.isTier1Subject(subjectKey) && this.tier1HasFreshAngle(subjectKey, heardAngle)) {
+      if (CORRIDOR_SUBJECT_KEYS.has(subjectKey)) {
+        // Corridor stories (Item 6) take NO session lock: Erik's
+        // rule is one telling per (segment, direction) PER TOUR,
+        // and the tour-heard record just written is the whole of
+        // it. The day-scoped lock would also suppress the segment
+        // on a second tour today — a new tour is a new telling
+        // context, and the reverse direction home is a different
+        // subject anyway. The alias-group check is unnecessary
+        // here: corridor display names are unique by construction
+        // and never alias with place names.
+      } else if (this.isTier1Subject(subjectKey) && this.tier1HasFreshAngle(subjectKey, heardAngle)) {
         // Fresh angles remain: the place stays serve-eligible for a
         // later encounter this session (and this day — the lock set
         // is day-scoped, and leaving it unlocked is what lets a
