@@ -2474,7 +2474,20 @@ export const useVoice = () => {
       // answer queued behind it. Cap the slot at just behind the
       // last such line: the priority item still jumps the ordinary
       // location stories behind the answer, never the answer.
-      for (let j = insertAt - 1; j >= 0; j--) {
+      // Follow-up 3 (same day, surfaced by Item 8's banked
+      // intros): the cap must consider the last tracked line in
+      // the WHOLE queue, not only lines below the computed slot.
+      // The first implementation scanned down from the slot — in
+      // the geometry [warm head, answer] the answer sits AT the
+      // slot, the scan never saw it, and the priority item slotted
+      // between the head and the answer anyway: the exact outcome
+      // this barrier exists to prevent, absorbed until now by the
+      // answer horizon's slack. Banked intros arrive instantly at
+      // crossing time, uncorrelated with any ask, and the sim
+      // caught the race (1 premature release in 240 questions,
+      // degraded route cell). Scan the whole queue; the cap is
+      // the last tracked line's index + 1, min'd with the slot.
+      for (let j = queue.length - 1; j >= 0; j--) {
         const q = queue[j];
         if (!q.isLocationStory && (q.onSettleDetail || q.onPlaybackEnd)) {
           if (j + 1 < insertAt) insertAt = j + 1;
