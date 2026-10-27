@@ -1241,6 +1241,34 @@ class GeminiService {
         'expires is direction and approach, never description.'
     );
 
+    // Portal rule (pre-publish stack Item 9, Oct 27, 2026 — the
+    // PROMPT half of the v14 portal doctrine; Erik's ruling: a
+    // microhistory is a portal, not a dead end. The SCORING half —
+    // connection potential in candidate ranking — is deliberately
+    // NOT in this stack: selection/scoring changes wait for the
+    // post-retest stack, by the same ruling that scoped this item
+    // to what does not move the pipeline under test). Applies to
+    // minor landmark subjects only: a major landmark IS the bigger
+    // story, and an area story already is the wider frame. The
+    // connection may be inferred — links need not be verified
+    // (Erik's ruling); the honesty contract is untouched: hard
+    // factual claims still come only from the fact pack, about the
+    // subject AND about whatever it opens onto. Folded into the
+    // unpublished leo-v14 prompt behavior (no version bump).
+    if (target.kind === 'landmark' && target.significance !== 'major-landmark') {
+      parts.push(
+        'PORTAL RULE — A SMALL SUBJECT OPENS ONTO A BIGGER STORY: this subject is a minor place, and its story ' +
+          'must not end at its own walls. Connect it outward — to the neighborhood around it, to a major landmark ' +
+          'nearby, to the larger history of this area or of this drive — and end the telling turned outward, ' +
+          'toward that bigger story. The connection may be thematic: a shared era, a shared founder or benefactor, ' +
+          'the same water, road, faith, industry, or argument running through both places — you may draw that link ' +
+          'yourself; it does not need to be spelled out in the facts. But the link is the ONLY thing you may ' +
+          'infer: every hard factual claim, about this subject and about the bigger story alike, still comes ' +
+          'only from the facts provided. A church, a dog park, a restaurant, a small historic house — told as a ' +
+          'portal, it makes the listener love the whole town more; told as a stopping point, it is a dead end.'
+      );
+    }
+
     return parts.join('\n\n');
   }
 
