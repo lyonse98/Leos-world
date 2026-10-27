@@ -16,6 +16,10 @@ import { quotaGuard } from '../services/quotaGuard';
 import { audioHealth } from '../services/audioHealth';
 import { latencyModel } from '../services/latencyModel';
 import { analytics, trackDiag } from '../services/analytics';
+// Depth-2 presynth peek (pre-publish stack Item 3): the buffered
+// next-next story lives in storyCache. Acyclic — storyCache imports
+// gemini/locationTracker/etc., never this hook.
+import { storyCache } from '../services/storyCache';
 import { pickStallPhrase, stallPhraseAudioUrl } from '../services/stallPhrases';
 
 interface StoryQueueItem {
@@ -318,6 +322,21 @@ export const useVoice = () => {
   // Tracks the text currently being pre-synthesized so we don't kick off
   // duplicate TTS calls for the same story.
   const preSynthTextRef = useRef<string | null>(null);
+  // Presynth depth 2 + readiness (pre-publish stack Item 3, Oct 27,
+  // 2026): the depth-2 text has its OWN dedupe slot (one text per
+  // depth — sharing the depth-1 slot would let the two depths starve
+  // each other's dedupe); warmedTextRef records the text whose
+  // depth-1 synthesis actually RESOLVED, which is what "warm" means
+  // for the readiness check (a fired-but-failed presynth is not
+  // warm); presynthMissRef dedupes the miss diagnostic + escalation
+  // to once per next-item text.
+  const preSynthText2Ref = useRef<string | null>(null);
+  const warmedTextRef = useRef<string | null>(null);
+  const presynthMissRef = useRef<string | null>(null);
+  // The readiness check is defined late in the hook (it needs
+  // getCurrentStoryRemainingS) but runs from the watchdog — the ref
+  // bridge is the same pattern as preSynthesizeNextRef.
+  const checkPresynthReadinessRef = useRef<(() => void) | null>(null);
   // True only while audio is actually coming out of the speaker — set in
   // onplaying/onstart, cleared on end/error/stop. Gates pre-synthesis so we
   // don't warm the TTS cache while the engine is still loading or blocked.
@@ -1032,6 +1051,8 @@ export const useVoice = () => {
     storyQueueRef.current = [];
     isPlayingStoryRef.current = false;
     preSynthTextRef.current = null;
+    preSynthText2Ref.current = null;
+    presynthMissRef.current = null;
     playbackStartedRef.current = false;
     // Tour teardown retires the opener machinery with everything else:
     // a stopped tour must not leave a gate (or its backstop timer)
@@ -1140,6 +1161,11 @@ export const useVoice = () => {
         // the welcome cut off). A queued utterance is progress too.
         lastProgressAtRef.current = now;
       }
+
+      // Presynth readiness (pre-publish stack Item 3): the watchdog's
+      // 2s tick is the player's heartbeat — the natural place to
+      // notice the next story's audio will not be warm in time.
+      checkPresynthReadinessRef.current?.();
 
       if (now - lastProgressAtRef.current > maxSilence) {
         console.warn('[Voice] Watchdog: playback position frozen for 8s, forcing queue advance');
@@ -1291,39 +1317,92 @@ export const useVoice = () => {
     }
     if (!geminiAudio.hasModel()) return;
 
-    const next = storyQueueRef.current[0];
-    if (!next) return;
-
-    // Library stories arrive with their audio already made — never spend
-    // synthesis quota warming them.
-    if (next.audioUrl) return;
-
-    // Don't spend synthesis (quota) on a story the behind-me staleness
-    // gate will drop at dequeue — a far-behind next story is exactly
-    // the one most likely never to air.
     const presynthPos = currentPositionProviderRef.current?.();
-    if (presynthPos && next.lat !== undefined && next.lng !== undefined) {
-      const dNext = calculateDistance(presynthPos.lat, presynthPos.lng, next.lat, next.lng);
-      if (isFarBehindAtSpeed(next, presynthPos, dNext)) {
-        console.log('[Voice] Skipping pre-synthesis — next story is stale behind-me content');
-        return;
+
+    // One warming path for both depths (pre-publish stack Item 3):
+    // dedupe by text per depth, record warmth on resolve, and clear
+    // the dedupe slot when a synthesis FAILS so a later trigger may
+    // retry it (previously a failed depth-1 presynth could never be
+    // re-attempted for that text — the readiness check below exists
+    // precisely for that hole).
+    const warmText = (fullText: string, slot: { current: string | null }, isDepth1: boolean) => {
+      if (!fullText || fullText.trim().length === 0) return;
+      if (slot.current === fullText) return;
+      slot.current = fullText;
+      console.log(`[Voice] Pre-synthesizing ${isDepth1 ? 'next' : 'depth-2'} story audio`);
+      geminiAudio.textToAudioUrl(fullText).then((result) => {
+        if (isDepth1) warmedTextRef.current = fullText;
+        if (result.cacheHit) {
+          console.log('[Voice] Pre-synthesis was a cache hit — already warm');
+        }
+      }).catch(() => {
+        // Best-effort — a failed pre-synthesis just means the story
+        // synthesizes on demand as before. The slot clears so the
+        // failure is retryable rather than latched.
+        if (slot.current === fullText) slot.current = null;
+      });
+    };
+
+    const next = storyQueueRef.current[0];
+    let depth1WarmOrWarming = false;
+    if (next && !next.audioUrl) {
+      // Library stories arrive with their audio already made — never
+      // spend synthesis quota warming them. (audioUrl set = banked =
+      // already warm by definition; it also satisfies depth 2's
+      // priority rule below.)
+      // Don't spend synthesis (quota) on a story the behind-me
+      // staleness gate will drop at dequeue — a far-behind next story
+      // is exactly the one most likely never to air.
+      let stale = false;
+      if (presynthPos && next.lat !== undefined && next.lng !== undefined) {
+        const dNext = calculateDistance(presynthPos.lat, presynthPos.lng, next.lat, next.lng);
+        if (isFarBehindAtSpeed(next, presynthPos, dNext)) {
+          console.log('[Voice] Skipping pre-synthesis — next story is stale behind-me content');
+          stale = true;
+        }
       }
+      if (!stale) {
+        const fullText = next.transitionText ? `${next.transitionText} ${next.text}` : next.text;
+        warmText(fullText, preSynthTextRef, true);
+        depth1WarmOrWarming =
+          warmedTextRef.current === fullText || preSynthTextRef.current === fullText;
+      }
+    } else if (next?.audioUrl) {
+      depth1WarmOrWarming = true; // banked: nothing to warm
     }
 
-    const fullText = next.transitionText ? `${next.transitionText} ${next.text}` : next.text;
-    if (!fullText || fullText.trim().length === 0) return;
-    if (preSynthTextRef.current === fullText) return;
-    preSynthTextRef.current = fullText;
-
-    geminiAudio.textToAudioUrl(fullText).then((result) => {
-      if (result.cacheHit) {
-        console.log('[Voice] Pre-synthesis was a cache hit — already warm');
+    // Depth 2 (Item 3): warm the story AFTER the queued one. The
+    // player queue cannot hold it (MAX_PENDING_LOCATION_STORIES = 1
+    // by design), so the second story honestly lives in the story
+    // buffer — storyCache.peekNextBufferedStory returns the entry
+    // that would serve next, peek-only. Priority discipline: depth 2
+    // spends ONLY when depth 1 is already warm or warming (or the
+    // queue is empty, i.e. depth 1 does not exist) — the second
+    // story never competes with the first for the synthesis lane.
+    // Every stand-down above (quota trip, engine trip) already
+    // returned, so depth collapses under pressure exactly as
+    // depth 1 does today.
+    if ((depth1WarmOrWarming || !next) && presynthPos) {
+      // The peek reads lat/lng/speed only; accuracy is the one
+      // Position field the player's own position type does not carry,
+      // and nothing in the peek path consults it.
+      const peek = storyCache.peekNextBufferedStory(
+        { lat: presynthPos.lat, lng: presynthPos.lng, speed: presynthPos.speed, heading: presynthPos.heading, accuracy: 0 },
+        next?.storyId
+      );
+      if (peek && !peek.audioUrl) {
+        const pseudoItem = {
+          text: peek.text,
+          lat: peek.lat,
+          lng: peek.lng,
+          regionAnchored: peek.regionAnchored,
+        } as StoryQueueItem;
+        const dPeek = calculateDistance(presynthPos.lat, presynthPos.lng, peek.lat, peek.lng);
+        if (!isFarBehindAtSpeed(pseudoItem, presynthPos, dPeek)) {
+          warmText(peek.text, preSynthText2Ref, false);
+        }
       }
-    }).catch(() => {
-      // Best-effort — a failed pre-synthesis just means the next story
-      // synthesizes on demand as before.
-    });
-    console.log('[Voice] Pre-synthesizing next story audio');
+    }
   }, []);
 
   const preSynthesizeNextRef = useRef(preSynthesizeNext);
@@ -2333,6 +2412,9 @@ export const useVoice = () => {
       if (firstLocationIndex === -1) queue.push(item);
       else queue.splice(firstLocationIndex, 0, item);
       preSynthTextRef.current = null;
+      // The next-item changed identity — a presynth miss filed for
+      // the old front item must not suppress the new one's (Item 3).
+      presynthMissRef.current = null;
       console.log('[Voice] Priority story moved to the front of the waiting queue');
     } else if (item.isLocationStory) {
       const waitingCount = queue.filter(i => i.isLocationStory).length;
@@ -2504,6 +2586,8 @@ export const useVoice = () => {
     streamBufferRef.current = '';
     isProcessingQueueRef.current = false;
     preSynthTextRef.current = null;
+    preSynthText2Ref.current = null;
+    presynthMissRef.current = null;
     playbackStartedRef.current = false;
     clearWatchdog();
     setIsSpeaking(false);
@@ -2540,6 +2624,8 @@ export const useVoice = () => {
     streamBufferRef.current = '';
     isProcessingQueueRef.current = false;
     preSynthTextRef.current = null;
+    preSynthText2Ref.current = null;
+    presynthMissRef.current = null;
     playbackStartedRef.current = false;
     clearWatchdog();
     setIsSpeaking(false);
@@ -2609,6 +2695,42 @@ export const useVoice = () => {
     const elapsedS = (Date.now() - current.startedAt) / 1000;
     return Math.max(0, totalEstS - elapsedS);
   }, []);
+
+  // Median-timed presynth readiness (pre-publish stack Item 3,
+  // Oct 27, 2026): Erik's concern was that presynth fires but lands
+  // late, and nothing noticed. The deadline is the latency model's
+  // rolling SYNTH median — the same measurement discipline as the
+  // discovery horizon: when the story on air has less time left than
+  // a typical synthesis takes, the next story's audio must already
+  // be warm, or the handoff will gap. Warm means: banked (audioUrl),
+  // its synthesis resolved (warmedTextRef), or its synthesis in
+  // flight (preSynthTextRef — a cache-hit resolution is near-instant
+  // and a live one was started at queue time, the earliest honest
+  // moment). A miss is filed ONCE per next-item (presynth_miss) and
+  // escalated by re-firing the presynth — cheap because the re-fire
+  // dedupes per depth and stands down under any trip. Runs from the
+  // watchdog's 2s tick while a story plays.
+  const checkPresynthReadiness = useCallback((): void => {
+    if (!isPlayingStoryRef.current) return;
+    const next = storyQueueRef.current[0];
+    if (!next || next.audioUrl) return;
+    const nextText = next.transitionText ? `${next.transitionText} ${next.text}` : next.text;
+    if (!nextText || nextText.trim().length === 0) return;
+    if (warmedTextRef.current === nextText || preSynthTextRef.current === nextText) return;
+    const remainingS = getCurrentStoryRemainingS();
+    if (remainingS === null) return;
+    const medianSynthS = latencyModel.medians().synthS;
+    if (remainingS >= medianSynthS) return;
+    if (presynthMissRef.current === nextText) return;
+    presynthMissRef.current = nextText;
+    trackDiag(
+      'playback',
+      'presynth-miss',
+      `next story audio not warm with ${remainingS.toFixed(1)}s left on air (median synth ${medianSynthS.toFixed(1)}s)`
+    );
+    preSynthesizeNextRef.current();
+  }, [getCurrentStoryRemainingS]);
+  checkPresynthReadinessRef.current = checkPresynthReadiness;
 
   // The subject of the story on air, or null. Used to tell whether a second
   // tap on the same thumb refers to the same story or a new one.

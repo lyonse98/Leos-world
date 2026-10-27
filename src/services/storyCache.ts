@@ -755,6 +755,37 @@ class StoryCacheService {
     return null;
   }
 
+  // Presynth depth 2 (pre-publish stack Item 3, Oct 27, 2026): the
+  // buffered story that would serve NEXT after the one already
+  // queued — the honest "second story" in this architecture, since
+  // the player queue holds at most one waiting location story by
+  // design (useVoice MAX_PENDING_LOCATION_STORIES). PEEK semantics:
+  // the same serve window and lockout discipline as a real serve
+  // (findNearestUnplayedCache's online path), but nothing is marked
+  // played and no in-flight mark lands — the entry stays fully
+  // servable, and the serve path re-validates it when its turn
+  // comes. A story already served into the player is marked played
+  // at serve time, so it can never be the peek; the storyId
+  // exclusion is belt-and-braces for a serve whose marking has not
+  // landed yet. The offline fallback is deliberately not mirrored:
+  // depth-2 warming exists to make the NORMAL next serve instant.
+  peekNextBufferedStory(position: Position, excludeStoryId?: string): CachedStory | null {
+    let nearest: CachedStory | null = null;
+    let minDistance = Infinity;
+    for (const story of this.cache) {
+      if (story.played) continue;
+      if (excludeStoryId && story.storyId === excludeStoryId) continue;
+      if (this.isLockedOutWhileMoving(story, position)) continue;
+      const d = this.distance(position, { lat: story.lat, lng: story.lng });
+      if (d > this.serveWindowM(position, story)) continue;
+      if (d < minDistance) {
+        minDistance = d;
+        nearest = story;
+      }
+    }
+    return nearest;
+  }
+
   private pruneMissedQueue() {
     const now = Date.now();
     this.missedQueue = this.missedQueue.filter(
