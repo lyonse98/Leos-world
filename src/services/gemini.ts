@@ -1249,23 +1249,34 @@ class GeminiService {
     // post-retest stack, by the same ruling that scoped this item
     // to what does not move the pipeline under test). Applies to
     // minor landmark subjects only: a major landmark IS the bigger
-    // story, and an area story already is the wider frame. The
-    // connection may be inferred — links need not be verified
-    // (Erik's ruling); the honesty contract is untouched: hard
-    // factual claims still come only from the fact pack, about the
-    // subject AND about whatever it opens onto. Folded into the
-    // unpublished leo-v14 prompt behavior (no version bump).
+    // story, and an area story already is the wider frame.
+    // CONNECTION GROUNDING (Erik's refinement, Oct 27, 2026 —
+    // supersedes his broader Oct 26 inference license): a
+    // connection must be SOURCE-GROUNDED — basis in the fact pack,
+    // in published local history/lore supplied with it, or in
+    // sourced local opinion/discussion supplied with it (Reddit
+    // and local media count as opinion sources, per the v14
+    // Reddit ruling). A connection with no basis in any provided
+    // source is prohibited; free invention is out, even for links.
+    // "Use sources to assume — just don't completely make up.
+    // Build trust." The honesty contract for hard facts is
+    // unchanged. Folded into the unpublished leo-v14 prompt
+    // behavior (no version bump).
     if (target.kind === 'landmark' && target.significance !== 'major-landmark') {
       parts.push(
         'PORTAL RULE — A SMALL SUBJECT OPENS ONTO A BIGGER STORY: this subject is a minor place, and its story ' +
           'must not end at its own walls. Connect it outward — to the neighborhood around it, to a major landmark ' +
           'nearby, to the larger history of this area or of this drive — and end the telling turned outward, ' +
           'toward that bigger story. The connection may be thematic: a shared era, a shared founder or benefactor, ' +
-          'the same water, road, faith, industry, or argument running through both places — you may draw that link ' +
-          'yourself; it does not need to be spelled out in the facts. But the link is the ONLY thing you may ' +
-          'infer: every hard factual claim, about this subject and about the bigger story alike, still comes ' +
-          'only from the facts provided. A church, a dog park, a restaurant, a small historic house — told as a ' +
-          'portal, it makes the listener love the whole town more; told as a stopping point, it is a dead end.'
+          'the same water, road, faith, industry, or argument running through both places. BUT the connection ' +
+          'must be GROUNDED in the material provided: build it from the facts above, from published local ' +
+          'history or lore included there, or from sourced local opinion and discussion included there — never ' +
+          'from nothing. If you cannot ground a connection in the supplied sources, do not invent one: a ' +
+          'smaller true connection beats a beautiful fabricated one, and a story with no honest outward link ' +
+          'is better than a story with a made-up one. Every hard factual claim, about this subject and about ' +
+          'the bigger story alike, still comes only from the facts provided. A church, a dog park, a restaurant, ' +
+          'a small historic house — told as a portal, it makes the listener love the whole town more; told as a ' +
+          'stopping point, it is a dead end.'
       );
     }
 
