@@ -1280,10 +1280,11 @@ export const useVoice = () => {
   const preSynthesizeNext = useCallback(() => {
     // Circuit breaker: no pre-synthesis while the TTS lane is tripped.
     if (quotaGuard.isTripped('tts', TTS_MODEL)) return;
-    // Storm economy (Area B): while playback itself is failing, warming
-    // live audio spends quota on sound the speaker currently cannot
-    // play. Banked items never reach this path (they skip below), so
-    // pausing here costs the tour nothing it could have heard.
+    // Storm economy (Area B): while the GEMINI engine is tripped,
+    // warming live audio spends quota on sound that engine currently
+    // cannot play (preferBanked() is the Gemini-engine trip, fix
+    // stack RC-6). Banked items never reach this path (they skip
+    // below), so pausing here costs the tour nothing it could hear.
     if (audioHealth.preferBanked()) return;
     if (!geminiAudio.hasModel()) {
       try { geminiAudio.initialize(); } catch { return; }
@@ -1555,14 +1556,14 @@ export const useVoice = () => {
       audio.onerror = () => {
         playbackStartedRef.current = false;
         console.error('[Voice] Audio playback error');
-        audioHealth.recordFailure();
+        audioHealth.recordFailure('gemini');
         fallbackToBrowser('audio error');
       };
 
       setTtsStatus('gemini');
       await audio.play().catch((playError: unknown) => {
         playbackStartedRef.current = false;
-        audioHealth.recordFailure();
+        audioHealth.recordFailure('gemini');
         markAudioBlocked(
           playError instanceof DOMException && playError.name === 'NotAllowedError'
             ? 'blocked'
@@ -1665,13 +1666,13 @@ export const useVoice = () => {
       utterance.onerror = (event) => {
         playbackStartedRef.current = false;
         if (event.error === 'not-allowed') {
-          audioHealth.recordFailure();
+          audioHealth.recordFailure('browser');
           markAudioBlocked('blocked');
           finish(true);
           return;
         }
         if (event.error !== 'interrupted' && event.error !== 'canceled') {
-          audioHealth.recordFailure();
+          audioHealth.recordFailure('browser');
           console.error('Story speech error:', event);
         }
         if (tracked) {
@@ -1691,7 +1692,7 @@ export const useVoice = () => {
       // merely late must not be duplicated (see dispatchSpeech), and
       // one that never starts enters the attempt economy via onBlocked.
       dispatchSpeech(utterance, () => started, () => {
-        audioHealth.recordFailure();
+        audioHealth.recordFailure('browser');
         finish(true);
       }, false);
     };
@@ -1956,8 +1957,10 @@ export const useVoice = () => {
       playback.sounded = true;
       playback.engine = engine;
       playback.soundedAt = Date.now();
-      // Sound happened: the audio-health failure streak ends here.
-      audioHealth.recordSuccess();
+      // Sound happened: THIS engine's audio-health failure streak
+      // ends here (per-engine streaks, fix stack RC-6 — a browser
+      // success must not clear a Gemini storm, or vice versa).
+      audioHealth.recordSuccess(engine);
       item.onPlaybackStart?.();
     };
 
@@ -1980,7 +1983,7 @@ export const useVoice = () => {
         // retries while banked material waited. Surrender fast, free
         // the queue immediately, let the next item (preferably banked)
         // try the speaker instead.
-        const maxAttempts = audioHealth.preferBanked() ? 1 : MAX_PLAYBACK_ATTEMPTS;
+        const maxAttempts = audioHealth.anyTripped() ? 1 : MAX_PLAYBACK_ATTEMPTS;
         if ((item.attempts ?? 0) >= maxAttempts) {
           // Retry bound hit: this line cannot be heard right now, and
           // requeuing it forever was the Oct 26 fallback loop — the same

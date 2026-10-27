@@ -11,6 +11,7 @@ import { hashString } from '../utils/hash';
 import { supabase, SUPABASE_CONFIGURED } from './supabase';
 import { quotaGuard } from './quotaGuard';
 import { applyPronunciation } from './pronunciation';
+import { audioHealth } from './audioHealth';
 
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY;
 
@@ -214,6 +215,15 @@ class GeminiAudioService {
     // spend a request against the quota wall.
     if (quotaGuard.isTripped('tts', TTS_MODEL)) {
       throw new Error('TTS quota cooldown active — skipping synthesis');
+    }
+
+    // Playback breaker (fix stack RC-6): while the GEMINI playback
+    // engine is tripped, synthesis spends quota warming audio that
+    // engine currently cannot play — fail fast so callers ride the
+    // cache or the fallback voice. (Per-engine: a browser-voice
+    // storm does not pause Gemini synthesis.)
+    if (audioHealth.isEngineTripped('gemini')) {
+      throw new Error('Gemini playback breaker open — skipping synthesis');
     }
 
     // Pronunciation lexicon: respell known local-name traps in the payload

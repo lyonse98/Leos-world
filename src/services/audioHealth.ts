@@ -18,60 +18,115 @@
 // entries with pre-made audio, cached stories) is untouched by the
 // economy change beyond that same single-attempt rule: it remains the
 // fastest available sound, which is the point — fail FAST toward it.
+//
+// PER-ENGINE STREAKS (fix stack RC-6, Oct 27, 2026): the streak used
+// to be global — Gemini TTS failures tripped the browser-voice lane
+// and vice versa, so one sick engine poisoned the healthy fallback
+// that was supposed to carry the tour. Each engine now keeps its own
+// streak, ladder, and cooldown:
+//   - preferBanked() means specifically "the GEMINI engine is
+//     tripped" — the serve layer's signal to stop spending live
+//     generations whose audio cannot sound, and serve banked.
+//   - anyTripped() is the player-economy signal (one attempt per
+//     item while ANY engine is in a storm).
 
 import { trackDiag } from './analytics';
+
+export type AudioEngine = 'gemini' | 'browser';
 
 const TRIP_THRESHOLD = 3;
 const BASE_COOLDOWN_MS = 90_000;
 const MAX_COOLDOWN_MS = 600_000;
 const LADDER_WINDOW_MS = 3 * 3_600_000; // trips within 3h escalate, like quotaGuard
 
-let consecutiveFailures = 0;
-let trippedUntil = 0;
-let tripTimes: number[] = [];
-let recoveryNoted = true;
+interface EngineState {
+  failures: number;
+  trippedUntil: number;
+  tripTimes: number[];
+  recoveryNoted: boolean;
+}
+
+const freshState = (): EngineState => ({
+  failures: 0,
+  trippedUntil: 0,
+  tripTimes: [],
+  recoveryNoted: true,
+});
+
+const engines: Record<AudioEngine, EngineState> = {
+  gemini: freshState(),
+  browser: freshState(),
+};
+
+function observeRecovery(engine: AudioEngine): void {
+  const s = engines[engine];
+  const now = Date.now();
+  if (s.trippedUntil > 0 && now >= s.trippedUntil && !s.recoveryNoted) {
+    s.recoveryNoted = true;
+    s.failures = 0;
+    trackDiag('playback', 'audio-breaker-recovered', `${engine} audio-health cooldown elapsed — normal attempt economy restored for that engine`);
+  }
+}
+
+function engineTripped(engine: AudioEngine): boolean {
+  observeRecovery(engine);
+  return Date.now() < engines[engine].trippedUntil;
+}
 
 export const audioHealth = {
-  /** One playback failure on any engine. Successes reset the streak. */
-  recordFailure(): void {
-    consecutiveFailures++;
+  /** One playback failure on ONE engine. That engine's successes reset its streak. */
+  recordFailure(engine: AudioEngine): void {
+    const s = engines[engine];
+    s.failures++;
     const now = Date.now();
-    if (consecutiveFailures < TRIP_THRESHOLD || now < trippedUntil) return;
-    tripTimes = tripTimes.filter(t => now - t < LADDER_WINDOW_MS);
-    tripTimes.push(now);
+    if (s.failures < TRIP_THRESHOLD || now < s.trippedUntil) return;
+    s.tripTimes = s.tripTimes.filter(t => now - t < LADDER_WINDOW_MS);
+    s.tripTimes.push(now);
     const cooldown = Math.min(
-      BASE_COOLDOWN_MS * 2 ** (tripTimes.length - 1),
+      BASE_COOLDOWN_MS * 2 ** (s.tripTimes.length - 1),
       MAX_COOLDOWN_MS
     );
-    trippedUntil = now + cooldown;
-    recoveryNoted = false;
+    s.trippedUntil = now + cooldown;
+    s.recoveryNoted = false;
     trackDiag(
       'playback',
       'audio-breaker-trip',
-      `${TRIP_THRESHOLD}+ consecutive playback failures — storm economy for ${Math.round(cooldown / 1000)}s (one attempt per item, live pre-synthesis paused)`
+      `${engine}: ${TRIP_THRESHOLD}+ consecutive playback failures — that engine's storm economy for ${Math.round(cooldown / 1000)}s (the other engine is unaffected)`
     );
   },
 
-  /** Audio demonstrably sounded — the failure streak is over. */
-  recordSuccess(): void {
-    consecutiveFailures = 0;
+  /** Audio demonstrably sounded on this engine — its failure streak is over. */
+  recordSuccess(engine: AudioEngine): void {
+    engines[engine].failures = 0;
+  },
+
+  /** True while a specific engine's breaker is open. */
+  isEngineTripped(engine: AudioEngine): boolean {
+    return engineTripped(engine);
+  },
+
+  /** True while ANY engine's breaker is open (player attempt economy). */
+  anyTripped(): boolean {
+    return engineTripped('gemini') || engineTripped('browser');
   },
 
   /**
-   * True while the storm economy applies. Recovery is observed (once)
-   * by the first check that finds the cooldown elapsed, like quotaGuard.
+   * True while the GEMINI playback engine is tripped — the serve
+   * layer's signal to prefer banked material over live generation
+   * (a live story's audio would have to sound through the tripped
+   * engine). Browser-engine trouble does NOT set this: the device
+   * voice failing says nothing about Gemini TTS.
    */
   preferBanked(): boolean {
-    const now = Date.now();
-    if (trippedUntil > 0 && now >= trippedUntil && !recoveryNoted) {
-      recoveryNoted = true;
-      consecutiveFailures = 0;
-      trackDiag('playback', 'audio-breaker-recovered', 'audio-health cooldown elapsed — normal attempt economy restored');
-    }
-    return now < trippedUntil;
+    return engineTripped('gemini');
   },
 
-  remainingMs(): number {
-    return Math.max(0, trippedUntil - Date.now());
+  remainingMs(engine?: AudioEngine): number {
+    if (engine) return Math.max(0, engines[engine].trippedUntil - Date.now());
+    return Math.max(
+      0,
+      engines.gemini.trippedUntil - Date.now(),
+      engines.browser.trippedUntil - Date.now()
+    );
   },
 };

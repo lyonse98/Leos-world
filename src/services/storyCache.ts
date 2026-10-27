@@ -1,5 +1,5 @@
 import { Position } from '../hooks/useGeolocation';
-import { calculateDistance, offsetPositionByHeading, MovementModeHysteresis } from '../utils/geo';
+import { calculateDistance, offsetPositionByHeading, MovementModeHysteresis, storyReachM, estimateSpeechDurationS } from '../utils/geo';
 import { geminiService, StoryRotation } from './gemini';
 import { storyCoverage, landmarkSubjectKey } from './storyCoverage';
 import { storyLibrary } from './storyLibrary';
@@ -7,6 +7,7 @@ import { heardStories } from './heardStories';
 import { latencyModel } from './latencyModel';
 import { analytics } from './analytics';
 import { locationTracker } from './locationTracker';
+import { audioHealth } from './audioHealth';
 
 export interface CachedStory {
   id: string;
@@ -61,7 +62,6 @@ interface PrefetchTarget {
 
 const MAX_BUFFER_WALKING = 20;
 const MAX_BUFFER_DRIVING = 60;
-const CACHE_DISTANCE_THRESHOLD_M = 100;
 const QUEUE_MAX_AGE_MS = 10 * 60 * 1000;
 const TARGET_TTL_MS = 10 * 60 * 1000;
 const TARGET_DEDUPE_M = 400;
@@ -164,11 +164,26 @@ class StoryCacheService {
     this.onMissedQueueChange = cb;
   }
 
+  // The serve window for one cached story (fix stack RC-6): how far
+  // from its anchor the story may be served — the distance the
+  // listener covers DURING its telling, from the same duration×speed
+  // reach the player applies (utils/geo). The old flat 100m window
+  // contradicted the prefetch anchors (800–12,000m ahead): stories
+  // were generated for spots the serve window then refused until the
+  // listener was nearly on top of them, often after freshness had
+  // expired. One geometry now governs fetch, serve, and prune.
+  private serveWindowM(position: Position, story: CachedStory): number {
+    const speed = position.speed ?? 0;
+    const mode: MovementModeHysteresis =
+      speed >= 5.5 ? 'driving' : speed > 0.5 ? 'walking' : 'stationary';
+    return storyReachM(mode, speed, estimateSpeechDurationS(story.text));
+  }
+
   // True when a story is already sitting in the buffer near this position and
   // can play with no wait. Used to decide whether a latency bridge is needed.
   hasReadyStory(position: Position): boolean {
     return this.cache.some(
-      s => !s.played && this.distance(position, { lat: s.lat, lng: s.lng }) <= CACHE_DISTANCE_THRESHOLD_M
+      s => !s.played && this.distance(position, { lat: s.lat, lng: s.lng }) <= this.serveWindowM(position, s)
     );
   }
 
@@ -252,10 +267,10 @@ class StoryCacheService {
       if (s.played) return true;
       const age = now - s.generatedAt;
       if (age < STALE_PREFETCH_MS) return true;
-      // A story still close to the listener stays, even if old — it's relevant
-      // to where they are right now.
+      // A story still inside its serve window stays, even if old —
+      // it's relevant to where they are right now.
       const d = this.distance(position, { lat: s.lat, lng: s.lng });
-      if (d <= CACHE_DISTANCE_THRESHOLD_M) return true;
+      if (d <= this.serveWindowM(position, s)) return true;
       return false;
     });
     if (this.cache.length !== before) {
@@ -487,6 +502,11 @@ class StoryCacheService {
 
   async prefetchForPosition(position: Position, mode: MovementModeHysteresis, horizonS?: number): Promise<void> {
     if (!this.isOnline || this.isPrefetching) return;
+    // Storm pause (fix stack RC-6): while the Gemini playback engine
+    // is tripped, prefetching spends generation and synthesis on
+    // audio that engine currently cannot play — pause until it
+    // recovers; banked material already in the buffer still serves.
+    if (audioHealth.preferBanked()) return;
     // Trigger at 60% capacity so the buffer starts refilling well before it's
     // empty — this is what keeps at least one story queued during fast driving.
     const triggerThreshold = Math.floor(this.maxBuffer(mode) * 0.6);
@@ -504,7 +524,12 @@ class StoryCacheService {
     // Generate around the anticipated position, and anchor the cached
     // story there — serve-time distance and freshness checks then measure
     // against where the listener will be, not where they were.
-    const effectiveHorizonS = horizonS ?? latencyModel.horizonS(null);
+    // Re-anchored to story END (fix stack RC-6): the horizon also
+    // carries a typical story's own duration (the latency model's
+    // measured median), so the anchor centers where the listener
+    // will be when the prefetched story FINISHES — the moment its
+    // geometry is judged — not merely when it starts.
+    const effectiveHorizonS = (horizonS ?? latencyModel.horizonS(null)) + latencyModel.medians().storyS;
     const center = this.anticipatedCenter(position, effectiveHorizonS);
 
     try {
@@ -543,6 +568,8 @@ class StoryCacheService {
   // stories were already paid for and written before the bars dropped.
   async prefetchRouteAhead(position: Position, mode: MovementModeHysteresis, horizonS?: number): Promise<number> {
     if (!this.isOnline || this.isPrefetchingAhead) return 0;
+    // Storm pause (fix stack RC-6): see prefetchForPosition.
+    if (audioHealth.preferBanked()) return 0;
     const triggerThreshold = Math.floor(this.maxBuffer(mode) * 0.6);
     if (this.unplayedCount() >= triggerThreshold) return 0;
 
@@ -560,7 +587,9 @@ class StoryCacheService {
     // the road the listener reaches when the current story ends plus
     // pipeline latency — not from the spot underfoot, which the offsets
     // alone used to measure from (double-counting "now" as "ahead").
-    const effectiveHorizonS = horizonS ?? latencyModel.horizonS(null);
+    // The base horizon is re-anchored to story END like the radial
+    // prefetch (fix stack RC-6): + one median story duration.
+    const effectiveHorizonS = (horizonS ?? latencyModel.horizonS(null)) + latencyModel.medians().storyS;
     const base = this.anticipatedCenter(position, effectiveHorizonS);
 
     try {
@@ -666,13 +695,17 @@ class StoryCacheService {
       if (story.played) continue;
       if (this.isLockedOutWhileMoving(story, position)) continue;
       const d = this.distance(position, { lat: story.lat, lng: story.lng });
+      // Each story carries its own serve window (fix stack RC-6):
+      // the nearest story INSIDE its window wins — a nearer story
+      // outside its own window is not servable at all.
+      if (d > this.serveWindowM(position, story)) continue;
       if (d < minDistance) {
         minDistance = d;
         nearest = story;
       }
     }
 
-    if (nearest && minDistance <= CACHE_DISTANCE_THRESHOLD_M) {
+    if (nearest) {
       return nearest;
     }
 

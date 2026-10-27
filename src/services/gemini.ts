@@ -23,6 +23,7 @@ import { historicRegistry } from './historicRegistry';
 import { majorPlaces } from './majorPlaces';
 import { analytics, trackDiag } from './analytics';
 import { latencyModel } from './latencyModel';
+import { audioHealth } from './audioHealth';
 
 export interface QAContext {
   lastSpokenSentences: string;
@@ -1444,6 +1445,22 @@ class GeminiService {
     }
     if (cached) {
       console.log(`[Gemini] Cached story for "${cached.topic}" already heard — generating a fresh one`);
+    }
+
+    // preferBanked made real (fix stack RC-6, Oct 27, 2026): while
+    // the Gemini PLAYBACK engine is tripped, a live generation's
+    // audio cannot sound through it — the telling would fall back
+    // to the device voice mid-storm or die in the attempt economy,
+    // and the generation spend is wasted either way. Banked serves
+    // (library/cache above) still serve; the live branch declines
+    // WITHOUT consuming the decision, so the app refunds it and the
+    // next cycle retries when the engine recovers or banked
+    // material appears. (preferBanked() used to exist only as a
+    // player-side economy flag — nothing at the serve layer read
+    // it, so "prefer banked" preferred nothing.)
+    if (audioHealth.preferBanked()) {
+      trackDiag('pipeline', 'live-skipped-breaker', 'Gemini playback engine tripped — banked serves only this cycle, live generation declined');
+      return { ...EMPTY_NARRATION, context: effectiveContext, mode: factPack.mode, decisionConsumed: false };
     }
 
     // Highway doctrine (fix stack item 9, Oct 27, 2026): at freeway
