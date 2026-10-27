@@ -11,9 +11,13 @@
 // v13 before the ruling and is replaced through the swap in
 // ~/workspace/leos-world/v14-library-swap.md) from free fact
 // sources only: Wikipedia + OSM + Wikidata +
-// the historic registry, sampled at each neighborhood anchor along
-// the segment — the same sources, assembled the same way, as the
-// 345-story place corpus (lib.mjs assembleFacts). Audio: one Gemini
+// the historic registry. Fact assembly is corridor-facts.mjs: the
+// per-area packs the place corpus uses (lib.mjs assembleFacts),
+// PLUS deep-mode retry, polyline sampling along the segment's own
+// line, inheritance from library subjects the drive passes, a
+// registry buffer pass, and a tier-3 name-search fallback — the
+// upgrade that fixes the v1 bank's 10 zero-fact segments (see
+// ~/workspace/leos-world/corridor-fact-fix-report.md). Audio: one Gemini
 // Batch API TTS job per run; live synthesis is the fallback with the
 // shared hard stop (85/day — Erik's interactive quota is 100/day on
 // the same key and the builder never spends the last of it).
@@ -34,10 +38,11 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   loadKeys, makeTextClient, loadRegistry,
-  assembleFacts, generateText, liveTts, submitTtsBatch, pollTtsBatch,
+  generateText, liveTts, submitTtsBatch, pollTtsBatch,
   ensureWav, wavDurationSec, liveTtsCount, bumpLiveTtsCount, LIVE_DAILY_STOP,
   TTS_MODEL, TTS_VOICE,
 } from './lib.mjs';
+import { assembleCorridorFacts, loadLibrarySubjects } from './corridor-facts.mjs';
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(scriptDir, '..', '..');
@@ -62,6 +67,13 @@ if (app.LEO_PERSONA_VERSION !== 'leo-v14') {
 const keys = await loadKeys();
 const ai = makeTextClient(keys.geminiKey);
 const records = loadRegistry(repoRoot);
+// Stage-C inheritance pool for corridor-facts.mjs: the banked place
+// subjects (the 345) with their recorded fact sources.
+const placeManifestPath =
+  process.env.LEO_PLACE_MANIFEST ||
+  path.join(homedir(), 'workspace/leos-world/library-corpus-v13/manifest.json');
+const librarySubjects = loadLibrarySubjects(placeManifestPath);
+console.log(`[corridors] ${librarySubjects.length} library subjects loaded for fact inheritance`);
 
 const selectedIds = argVal('segments', null)?.split(',').filter(Boolean) ?? null;
 const segments = app.CORRIDOR_SEGMENTS.filter(s => !selectedIds || selectedIds.includes(s.id));
@@ -145,14 +157,16 @@ for (const segment of segments) {
     console.log(`[corridors] ${segment.id}: text exists (${entry.story_text.length} chars), skipping`);
     continue;
   }
-  const areaFacts = [];
-  const allSources = new Set();
-  for (const area of segment.areas) {
-    const facts = await assembleFacts(app, records, { name: area.name }, { lat: area.lat, lng: area.lng });
-    facts.sources.forEach(s => allSources.add(s));
-    areaFacts.push({ area, facts });
-    console.log(`[corridors] ${segment.id} · ${area.name}: facts ${facts.sources.join('+') || 'NONE'}`);
-  }
+  // Upgraded assembly (corridor-facts.mjs): per-area packs plus
+  // deep-mode retry, polyline sampling, library-subject
+  // inheritance, the registry buffer, and the tier-3 name-search
+  // fallback. areaFacts keeps the { area, facts } shape the prompt
+  // builder below already consumes; supplements arrive as extra
+  // entries. factDetail is the per-stage account, kept on the
+  // manifest entry so any bank can be audited after the fact.
+  const { areaFacts, sources: allSources, detail: factDetail } = await assembleCorridorFacts(
+    app, records, segment, librarySubjects
+  );
   const prompt = buildCorridorPrompt(segment, areaFacts);
   const text = await generateText(ai, app, prompt);
   const mid = segment.polyline[Math.floor(segment.polyline.length / 2)];
@@ -172,6 +186,7 @@ for (const segment of segments) {
     tts_model: TTS_MODEL,
     voice: TTS_VOICE,
     fact_sources: [...allSources],
+    fact_stages: factDetail,
     // WOW/thin gate (Erik's ruling, Oct 27, 2026 — harmonized
     // with the neighborhood rule): a segment whose assembled pack
     // has neither Wikipedia nor the registry cannot support a
