@@ -9,7 +9,7 @@ import { storyCache, CachedStory } from './services/storyCache';
 import { locationTracker } from './services/locationTracker';
 import { analytics, trackDiag } from './services/analytics';
 import { placesService } from './services/placesService';
-import { getIntro } from './services/intros';
+import { getIntroEntry, introAudioUrl } from './services/intros';
 import { pickOpener, openerAudioUrl, type PuckOpener } from './services/openers';
 import { heardStories, rotateUserKey } from './services/heardStories';
 import { tasteProfile } from './services/tasteProfile';
@@ -574,6 +574,7 @@ function App() {
     }
     voice.muteForMinutes(0);
     voice.stop();
+    voice.deactivateMediaSession();
     geolocation.stopTracking();
     localStorage.removeItem(RESUME_SESSION_KEY);
     setResumableSession(null);
@@ -924,6 +925,11 @@ function App() {
             storyId: result.storyId,
             projectedCenter: result.projectedCenter,
             horizonS: result.horizonS,
+            // Pass 1 (Oct 27, 2026): intro serves — the tour opener AND
+            // mid-tour neighborhood chapter breaks — are marked so the
+            // player protects them in the queue (no single-slot
+            // replacement, no priority splice) until they air.
+            introServe: isIntroServe,
           };
           if (isQueueJump || isIntroServe) {
             // Front of the waiting queue — behind nothing but any scripted
@@ -1257,6 +1263,17 @@ function App() {
   }, [voice, handleIntervalUpdate]);
 
   useEffect(() => {
+    // Pass 1 (Oct 27, 2026): a location story that was mid-play when
+    // the page hid and then settled unheard was killed by the
+    // platform, not listened to — release it so it can be retold
+    // later in the drive instead of being locked away as "told".
+    voice.setOnStoryInterrupted((topic: string) => {
+      locationTracker.releaseInterruptedStory(topic);
+      trackDiag('playback', 'story-released-backgrounded', `released "${topic}" for retelling after backgrounding cut it off`);
+    });
+  }, [voice]);
+
+  useEffect(() => {
     voice.setCurrentPositionProvider(() => {
       const pos = geolocation.position;
       if (!pos) return null;
@@ -1314,25 +1331,32 @@ function App() {
       // first: it usually loads within a frame, and waiting for it means the
       // whole opening line plays in Leo's voice instead of swapping speakers
       // mid-sentence when the list finally arrives.
-      const intro = getIntro(resume);
+      const introEntry = getIntroEntry(resume);
+      const intro = introEntry.text;
+      const introClipUrl = introAudioUrl(introEntry);
       await voice.ensureVoiceReady();
       voice.unlock();
-      // The canned opener is local-voice by design: it must sound
-      // immediately, while the Gemini pipeline for the neighborhood
-      // intro and stories warms up behind it — no synthesis wait, no
-      // quota, no TTS-cache dependence. (Oct 26 field regression: sent
-      // through Gemini like everything else, the fixed intro texts hit
-      // the poisoned TTS cache and the welcome fell to the fallback
-      // path or vanished entirely.)
+      // The canned opener is PRE-RENDERED Puck (Pass 1, Oct 27, 2026):
+      // every intro variant has a stored clip (INTRO_CLIPS in
+      // intros.ts, built by scripts/library/build-intros.mjs through
+      // the same Batch path as the opener clips), so the welcome
+      // sounds at the tap with zero synthesis wait and zero quota —
+      // it is the warm-up buffer while the first Gemini live story
+      // (the neighborhood welcome) generates behind it. If the clip
+      // fails to load or play, playback falls back to the device
+      // voice speaking the same words — the cover survives the
+      // failure; a variant with no clip at all speaks locally.
       voice.speak(intro, {
-        localVoice: true,
+        ...(introClipUrl ? { audioUrl: introClipUrl } : { localVoice: true }),
         onSettle: (info) => {
           // The canned welcome's settle, on the record (Oct 26,
           // 2026): until now first_serve proved the welcome STORY
           // served first, but the greeting line itself had no event —
           // its three field failures were provable only by Erik's
-          // ears. Voice is 'local' by design (see above); a settle
-          // that did not complete also files a pipeline_diag.
+          // ears. Voice reports what actually sounded ('prerendered'
+          // for the stored Puck clip, 'local' for the device-voice
+          // fallback); a settle that did not complete also files a
+          // pipeline_diag.
           try {
             // Two edges, because the contract is about the START: the
             // welcome must be AUDIBLE within ~1-2s of the tap. The
@@ -1345,7 +1369,7 @@ function App() {
             // start latency, provable from the data alone.
             const settleElapsedMs = analytics.tourElapsedMs();
             analytics.track('opener_spoken', null, undefined, {
-              voice: 'local',
+              voice: introClipUrl ? 'prerendered' : 'local',
               sounded: info.sounded,
               completed: info.completed,
               sounded_ms: info.soundedMs,
@@ -1423,6 +1447,14 @@ function App() {
       }
       storyCache.armOpener();
       locationTracker.reset();
+      // Opener gate (Pass 1, Oct 27, 2026): from here until the
+      // neighborhood welcome airs, the player may not START a
+      // landmark/area story — welcome → neighborhood → landmarks is
+      // structural now, not a race the intro has to win.
+      voice.beginOpenerGate();
+      // Media Session (Pass 1): lock-screen / car-stereo presence and
+      // transport controls for the tour.
+      voice.activateMediaSession();
       storyCache.setOnline(navigator.onLine);
 
       // (sessionId + analytics.init + session_start moved up, to the tap —
