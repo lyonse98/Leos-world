@@ -1554,6 +1554,50 @@ class GeminiService {
       }
     }
 
+    // Neighborhood library (pre-publish stack Item 8, Oct 27,
+    // 2026): banked welcome stories — one pre-rendered intro per
+    // neighborhood (leo-v13 most-compelling-story format), shelved
+    // like the place library. When this serve IS a first-visit
+    // intro — context initial/neighborhood_intro, the welcome_back
+    // flip above did NOT fire (prior coverage means the live
+    // fresh-angle telling is the right serve), and no forced refill
+    // has re-purposed the cycle — the bank is checked before any
+    // live generation. A hit serves the banked intro with its
+    // audio, carrying the SAME rotation identity a live area serve
+    // carries (chooseAreaStory: the geo-keyed area subject + a real
+    // rotation angle) and the live intro topic shape, so the
+    // hearing funnel records it exactly as a live welcome — the
+    // intro debt clears at hearing, the area gains its coverage,
+    // and a return visit flips to a live welcome_back that never
+    // re-serves the banked orientation. A miss (unbanked area)
+    // falls through to live generation untouched. The opener gate
+    // is unaffected: the serve still waits in the player for
+    // greeting + opener order like every intro serve, and banked
+    // audio makes it warm by definition under Item 7's insertion
+    // rule (it may take a cold head; it never jumps a warm one).
+    if (
+      !forcedRefill &&
+      (context === 'initial' || context === 'neighborhood_intro') &&
+      effectiveContext !== 'welcome_back'
+    ) {
+      const { rotation: areaRotation, areaName } = this.chooseAreaStory(position, factPack);
+      if (storyCoverage.getToldAngles(areaRotation.subjectKey).length === 0) {
+        const bankHit = await storyLibrary.lookupNeighborhood(areaName);
+        if (bankHit) {
+          const bankTopic = `${areaName} — ${describeAngle(areaRotation.angle)}`;
+          console.log(`[Gemini] Neighborhood bank hit: "${bankTopic}"`);
+          const versionKey = this.storyVersionKey(this.factPackHash(factPack));
+          if (onChunk) onChunk(bankHit.text);
+          storyCoverage.markSubjectInFlight(areaRotation.subjectKey);
+          await locationTracker.updateLastStoryTopic(
+            bankTopic, position, bankHit.text, 'cache_hit', 0, versionKey
+          );
+          trackDiag('pipeline', 'neighborhood-bank-hit', areaName);
+          return { text: bankHit.text, subject: bankTopic, context, mode: factPack.mode, rotation: areaRotation, audioUrl: bankHit.audioUrl, anchorLat: bankHit.lat, anchorLng: bankHit.lng, fromLibrary: true, major: false };
+        }
+      }
+    }
+
     await storyLibrary.primePlaceIndex();
     const target = this.chooseTarget(position, factPack, effectiveContext);
     console.log(

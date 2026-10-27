@@ -56,6 +56,11 @@ export function normalizePlaceKey(name: string): string {
 }
 
 function displayTopic(placeName: string, angle: string): string {
+  // Neighborhood-bank rows (Item 8) key on the bare area name: the
+  // serve re-topics to the live intro shape ("<Area> — <angle
+  // label>") at the serve site, and no other path may ever present
+  // an intro row under an angle-flavored topic.
+  if (angle === 'neighborhood_intro') return placeName;
   return angle === LANDMARK_ANGLES[0]
     ? placeName
     : `${placeName} — ${describeAngle(angle)}`;
@@ -132,6 +137,18 @@ class StoryLibraryService {
     return this.lookup(displayName, 'corridor');
   }
 
+  // Neighborhood bank (pre-publish stack Item 8, Oct 27, 2026): the
+  // pre-rendered welcome intro for one neighborhood, keyed
+  // (normalizePlaceKey(areaName), 'neighborhood_intro') — one intro
+  // per area, generated offline in the leo-v13 most-compelling-story
+  // format. The gemini serve checks this bank before live intro
+  // generation for first-visit intro contexts; see the branch there
+  // for the eligibility doctrine (no prior coverage — a return visit
+  // is a live welcome_back, never the banked orientation).
+  async lookupNeighborhood(areaName: string): Promise<LibraryStoryResult | null> {
+    return this.lookup(areaName, 'neighborhood_intro');
+  }
+
   // Place-wide lookup (Pass 2, Oct 27, 2026): the library's episode for
   // a place, at ANY angle the caller still considers servable. The
   // exact-(place, angle) lookup above starved the library on real
@@ -196,6 +213,11 @@ class StoryLibraryService {
     );
 
     for (const row of ordered) {
+      // Neighborhood-bank rows (Item 8) share names with places by
+      // design (Balboa Park is both an area and a place) — a place
+      // walk must NEVER serve a welcome intro as a place story.
+      // Intros serve only through lookupNeighborhood.
+      if (row.angle === 'neighborhood_intro') continue;
       if (!isEligible(row.angle, displayTopic(row.place_name, row.angle))) continue;
       const result = await this.toResult(row);
       if (result) return result;
