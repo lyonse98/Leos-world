@@ -454,6 +454,11 @@ class StoryCoverageService {
     // service (pre-publish stack Item 1): a new tour starts with no
     // minor place yet told on it, whatever earlier tours today did.
     this.tourHeardSubjects.clear();
+    // Corridor triggers are per-tour too (Item 6 refinement): a
+    // segment triggered on the drive out is not triggered on the
+    // drive home — the return direction is a different segment
+    // anyway, and this direction must earn its own observation.
+    this.corridorTriggered.clear();
   }
 
   private linkSubjectsInternal(keyA: string, keyB: string): void {
@@ -576,6 +581,28 @@ class StoryCoverageService {
       if (this.tourHeardSubjects.has(member)) return true;
     }
     return false;
+  }
+
+  // Corridor triggers (Item 6 traffic handoff, Erik's refinement,
+  // Oct 27, 2026): the ≥15 m/s highway gate governs corridor
+  // TRIGGERING — a segment's banked story may first serve only when
+  // a serve cycle observes the driver inside the segment at gate
+  // speed. Once triggered, the segment stays serve-eligible for the
+  // rest of the traversal even if traffic collapses the speed: the
+  // story narrates where the driver still is, and Erik's free-flow
+  // sizing (the story ends ~10% early at design speed) is exactly
+  // what makes a slow traversal's remainder somebody else's job.
+  // Chaining is NOT grandfathered: the next segment needs its own
+  // trigger observation. Per-tour and in-memory, like the
+  // tour-heard record; keyed by segment id.
+  private corridorTriggered = new Set<string>();
+
+  markCorridorTriggered(segmentId: string): void {
+    this.corridorTriggered.add(segmentId);
+  }
+
+  isCorridorTriggered(segmentId: string): boolean {
+    return this.corridorTriggered.has(segmentId);
   }
 
   // Erik's minor rule (Oct 27, 2026): a minor place — not Tier-1, not
@@ -721,6 +748,7 @@ class StoryCoverageService {
     this.sessionAliasGroups.clear();
     this.inFlightSubjects.clear();
     this.tourHeardSubjects.clear();
+    this.corridorTriggered.clear();
     this.dailyCounts = {};
     this.dayStamp = StoryCoverageService.todayStamp();
     try {

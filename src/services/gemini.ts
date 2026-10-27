@@ -1446,11 +1446,32 @@ class GeminiService {
     // Chaining is positional: when this story ends, the completion
     // cycle re-matches at the new position, and the NEXT segment's
     // story — untold this tour — is what matches.
-    if (!cacheServeBlocked && (position.speed ?? 0) >= 15) {
+    //
+    // TRAFFIC HANDOFF (Erik's refinement, Oct 27, 2026): the
+    // ≥15 m/s gate governs TRIGGERING and CHAINING, not continued
+    // eligibility. A cycle that observes the driver inside a
+    // segment at gate speed marks the segment triggered; from then
+    // on, the segment's story remains serve-eligible while the
+    // driver is inside it even if traffic collapses the speed — it
+    // narrates where they still are. The NEXT segment still needs
+    // its own at-speed observation to chain. A driver who ENTERS a
+    // segment already in traffic never triggers it: the ordinary
+    // driving machinery (live serves, the Item 2 ladder) covers
+    // that traversal, which is the design — at traffic speeds
+    // latency × speed is landable again. And when a corridor story
+    // ends before its segment does (free-flow sizing in slow
+    // traffic), the remainder is likewise the normal machinery's:
+    // this branch simply stops matching a segment whose story is
+    // tour-heard, and the cycles below proceed as usual.
+    if (!cacheServeBlocked) {
       const corridorMatch = matchCorridor(position);
       if (corridorMatch) {
+        const atGateSpeed = (position.speed ?? 0) >= 15;
+        if (atGateSpeed) storyCoverage.markCorridorTriggered(corridorMatch.segment.id);
+        const corridorEligible = atGateSpeed || storyCoverage.isCorridorTriggered(corridorMatch.segment.id);
         const corridorKey = landmarkSubjectKey(corridorMatch.segment.displayName);
         if (
+          corridorEligible &&
           !storyCoverage.hasHeardThisTour(corridorKey) &&
           !storyCoverage.isSubjectInFlight(corridorKey)
         ) {
