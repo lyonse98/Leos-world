@@ -87,6 +87,20 @@ export interface NarrationResult {
 
 const EMPTY_NARRATION: NarrationResult = { text: '', subject: '', context: '', mode: 'walking', rotation: null };
 
+// Latency-adaptive length floor (pre-publish stack Item 5, Oct 27,
+// 2026). LATENCY_BASELINE_S is the pipeline latency the ruled length
+// bands were tuned around — identically latencyModel's healthy
+// fallbacks (6s fetch + 6s synth), which is also what the model
+// reports before any measurement lands, so a cold tour sees NO lift
+// until real samples say the pipeline is slow; no pessimistic default
+// is invented. SENTENCE_RUNWAY_S is the speaking time one more
+// sentence buys (~100 chars at Leo's ~13 chars/sec) — the lift asks
+// for roughly one sentence of story per sentence of excess latency,
+// so the story on air covers the measured cost of producing the
+// next one.
+const LATENCY_BASELINE_S = 12;
+const SENTENCE_RUNWAY_S = 7.5;
+
 interface StoryTarget {
   kind: 'landmark' | 'area';
   subject: StorySubject | null;
@@ -889,6 +903,78 @@ class GeminiService {
     return '';
   }
 
+  // The story's length band, resolved in one place (extracted from
+  // buildStoryPrompt, pre-publish stack Item 5, Oct 27, 2026).
+  //
+  // BASE RESOLUTION (fix stack D5) — the precedence, stated once and
+  // applied by construction. The band starts as the mode band and
+  // every applicable floor combines by element-wise MAX, NEVER a
+  // replacement:
+  //   mode band        walking 3–5 · driving 8–12 · highway 12–18
+  //                    (rural rides the highway band)
+  //   significance     10–14 (major landmark or major area)
+  //   intro            10–12 (tour opener / neighborhood intro /
+  //                    welcome-back — a FLOOR-raising exemption)
+  //   deep listening   10–16 (dwell)
+  // (Pass 2's significance text REPLACED the mode band, so a highway
+  // major came out at 10–14 — shorter than an ordinary highway
+  // story's 12–18. Under MAX, a highway major runs 12–18, a driving
+  // major 10–14.)
+  //
+  // LATENCY LIFT (Item 5, Erik approved Oct 27, 2026): afterwards,
+  // and only afterwards, the FLOOR rises with the measured pipeline
+  // latency (latencyModel's rolling fetch+synth medians — the same
+  // measurements that drive the discovery horizon). When generation
+  // is slow, the story being written must run longer, because its
+  // speaking time is the runway in which the NEXT story gets made;
+  // when the pipeline is fast, the band sits at its ruled values.
+  // Floor only: the lift never exceeds the band's own width, so the
+  // floor may rise toward but never past the band's natural max —
+  // the model is always asked for a length inside the ruled band,
+  // just at its long end when latency demands. Field calibration:
+  // the degraded Oct 26-27 pipeline (~33s median round trip) earns
+  // +3 sentences; a ~60s pipeline saturates the band.
+  private resolveLengthBand(
+    factPack: StoryFactPack,
+    target: StoryTarget,
+    context: string
+  ): { lengthLo: number; lengthHi: number; latencyLift: number } {
+    const MODE_BANDS: Record<string, readonly [number, number]> = {
+      walking: [3, 5],
+      driving: [8, 12],
+      highway: [12, 18],
+      rural: [12, 18],
+    };
+    const modeBand = MODE_BANDS[factPack.mode] ?? [8, 12];
+    let lengthLo = modeBand[0];
+    let lengthHi = modeBand[1];
+    const isIntroContext =
+      context === 'initial' || context === 'neighborhood_intro' || context === 'welcome_back';
+    if (isIntroContext) {
+      lengthLo = Math.max(lengthLo, 10);
+      lengthHi = Math.max(lengthHi, 12);
+    }
+    if (target.significance) {
+      lengthLo = Math.max(lengthLo, 10);
+      lengthHi = Math.max(lengthHi, 14);
+    }
+    if (locationTracker.getDwellDepthLevel() !== null) {
+      lengthLo = Math.max(lengthLo, 10);
+      lengthHi = Math.max(lengthHi, 16);
+    }
+    const med = latencyModel.medians();
+    const pipelineS = med.fetchTextS + med.synthS;
+    let latencyLift = 0;
+    if (pipelineS > LATENCY_BASELINE_S) {
+      latencyLift = Math.min(
+        Math.ceil((pipelineS - LATENCY_BASELINE_S) / SENTENCE_RUNWAY_S),
+        lengthHi - lengthLo
+      );
+    }
+    lengthLo += latencyLift;
+    return { lengthLo, lengthHi, latencyLift };
+  }
+
   private buildStoryPrompt(
     position: Position,
     factPack: StoryFactPack,
@@ -1048,11 +1134,22 @@ class GeminiService {
     const seasonalHint = seasonal.getPromptHint();
     if (seasonalHint) parts.push(seasonalHint);
 
+    // The length band resolves BEFORE the hint (pre-publish stack
+    // Item 5): the latency lift is part of the band, and the hint
+    // must know whether it applies. The resolution itself — mode
+    // band, D5 MAX combination, latency lift — lives in
+    // resolveLengthBand.
+    const { lengthLo, lengthHi, latencyLift } = this.resolveLengthBand(factPack, target, context);
+
     // Length hint (Pass 2): where this road sits inside the mode band —
     // computed from the fact pack's own density, suppressed when
     // significance or deep listening set the length themselves (below).
+    // Item 5 adds one more suppression: under a latency lift the
+    // hint's within-band lean (it argues for the short or long end of
+    // the NATURAL band) could contradict the raised floor, so the
+    // floor speaks alone.
     const lengthHint = this.buildLengthHint(factPack, target);
-    if (lengthHint) parts.push(lengthHint);
+    if (lengthHint && latencyLift === 0) parts.push(lengthHint);
 
     // Significance length (Area E, Oct 26, 2026): story length
     // follows SIGNIFICANCE as well as speed and density. The v13
@@ -1063,49 +1160,8 @@ class GeminiService {
     // takes its long band regardless of density. Interaction with the
     // missed-landmark rule: NONE — that rule governs whether a
     // landmark is told at all and always wins; significance only sets
-    // how long a told major runs.
-    //
-    // LENGTH RESOLUTION (fix stack D5, Oct 27, 2026) — the precedence,
-    // stated once and applied by construction. The final band is the
-    // element-wise MAX of every applicable band, NEVER a replacement:
-    //   mode band        walking 3–5 · driving 8–12 · highway 12–18
-    //                    (rural rides the highway band)
-    //   significance     10–14 (major landmark or major area)
-    //   intro            10–12 (tour opener / neighborhood intro /
-    //                    welcome-back — a FLOOR-raising exemption)
-    //   deep listening   10–16 (dwell)
-    // Pass 2's significance text REPLACED the mode band ("10 to 14
-    // sentences... overrides the mode length bands"), so a highway
-    // major came out at 10–14 — SHORTER than an ordinary highway
-    // story's 12–18. Under MAX, a highway major runs 12–18, a driving
-    // major 10–14, a walking major 10–14. Intro vs significance: the
-    // intro band is a floor, not a cap — an intro takes
-    // max(intro, significance) = 10–14 for a major area; significance
-    // never shortens an intro below its floor, and the intro
-    // exemption never shortens a major below its significance band.
-    const MODE_BANDS: Record<string, readonly [number, number]> = {
-      walking: [3, 5],
-      driving: [8, 12],
-      highway: [12, 18],
-      rural: [12, 18],
-    };
-    const modeBand = MODE_BANDS[factPack.mode] ?? [8, 12];
-    let lengthLo = modeBand[0];
-    let lengthHi = modeBand[1];
-    const isIntroContext =
-      context === 'initial' || context === 'neighborhood_intro' || context === 'welcome_back';
-    if (isIntroContext) {
-      lengthLo = Math.max(lengthLo, 10);
-      lengthHi = Math.max(lengthHi, 12);
-    }
-    if (target.significance) {
-      lengthLo = Math.max(lengthLo, 10);
-      lengthHi = Math.max(lengthHi, 14);
-    }
-    if (locationTracker.getDwellDepthLevel() !== null) {
-      lengthLo = Math.max(lengthLo, 10);
-      lengthHi = Math.max(lengthHi, 16);
-    }
+    // how long a told major runs. The band printed below already
+    // carries the D5 MAX combination AND the Item 5 latency lift.
     if (target.significance === 'major-landmark') {
       parts.push(
         'SIGNIFICANCE — MAJOR LANDMARK: this place is one of the defining landmarks of its area. ' +
@@ -1121,6 +1177,22 @@ class GeminiService {
           'this place is, how it came to be, the era that shaped it, and what it means now. ' +
           'That band already includes the mode band (combined by MAX, never replaced), so never ' +
           'keep it brief because the area is dense.'
+      );
+    }
+
+    // Latency floor, spoken (Item 5): for targets WITHOUT a
+    // significance block — the blocks above already print the lifted
+    // band — the raised minimum needs its own sentence, or nothing in
+    // the prompt tells the model the floor moved. (The persona's mode
+    // bands state the natural ranges; this block is the measured
+    // exception for THIS story, and it only ever raises the minimum.)
+    if (latencyLift > 0 && !target.significance) {
+      parts.push(
+        `LENGTH FLOOR — SLOW PIPELINE: story production is running slow right now, so this ` +
+          `telling must run at least ${lengthLo} sentences (up to ${lengthHi}). The extra length is ` +
+          'runway: while this story plays, the next one is being made. Stay on THIS subject and ' +
+          'go deeper — the scene, the people, the detail — never pad, never invent. The honesty ' +
+          'rule still governs: depth from the facts at hand, not from imagination.'
       );
     }
 
