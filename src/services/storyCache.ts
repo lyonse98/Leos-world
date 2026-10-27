@@ -140,6 +140,18 @@ class StoryCacheService {
     return this.lastDiscoveryMeta;
   }
 
+  // Outcome flags of the most recent tryGetStoryForPosition call
+  // (fix stack RC-4/item 9): decisionConsumed — the tracker's
+  // movement decision was spent by the serve (a failed serve with
+  // this set earns the app a decision refund); designedSilence — an
+  // empty result that is the highway doctrine working as designed,
+  // not a failure. Reset at the start of every serve call.
+  private lastServeInfo: { decisionConsumed: boolean; designedSilence: boolean } | null = null;
+
+  getLastServeInfo(): { decisionConsumed: boolean; designedSilence: boolean } | null {
+    return this.lastServeInfo;
+  }
+
   setNetworkStatusCallback(cb: (online: boolean) => void) {
     this.onNetworkStatusChange = cb;
   }
@@ -256,7 +268,8 @@ class StoryCacheService {
     position: Position,
     mode: MovementModeHysteresis,
     onChunk?: (text: string) => void
-  ): Promise<{ story: string; fromCache: boolean; topic: string; subject: string; context: string; rotation: StoryRotation | null; fromLibrary: boolean; audioUrl?: string; anchorLat?: number; anchorLng?: number; major?: boolean; storyId: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number } | null> {
+  ): Promise<{ story: string; fromCache: boolean; topic: string; subject: string; context: string; rotation: StoryRotation | null; fromLibrary: boolean; audioUrl?: string; anchorLat?: number; anchorLng?: number; major?: boolean; storyId: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; generatedAt: number } | null> {
+    this.lastServeInfo = { decisionConsumed: false, designedSilence: false };
     this.pruneStalePrefetches(position);
     const openerServe = this.openerPending;
     // While the opener is pending the local cache is not consulted at
@@ -339,6 +352,10 @@ class StoryCacheService {
         storyId: cached.storyId,
         projectedCenter: cached.projectedCenter,
         horizonS: cached.horizonS,
+        // The story's true generation time (fix stack RC-3): the
+        // player's freshness age measures from HERE, not from the
+        // moment the serve happened to dequeue it.
+        generatedAt: cached.generatedAt,
       };
       }
     }
@@ -370,6 +387,14 @@ class StoryCacheService {
         discoveryPosition,
         introContextReplay: openerServe ? this.openerIntroContext : null,
       });
+      // Serve-outcome flags for the app's fetch cycle (fix stack
+      // RC-4/item 9): whether the tracker's movement decision was
+      // consumed by this serve, and whether an empty result is
+      // DESIGNED silence (highway doctrine) rather than a failure.
+      this.lastServeInfo = {
+        decisionConsumed: result.decisionConsumed === true,
+        designedSilence: result.designedSilence === true,
+      };
       console.log('[StoryCache] getTourNarration returned:', { textLen: result.text?.length || 0, subject: result.subject, mode: result.mode });
       // Snapshot the reserved serve's intro decision (Pass 1) — taken
       // even when the text came back empty, because an empty text is
@@ -408,6 +433,7 @@ class StoryCacheService {
         const storyId = StoryCacheService.mintStoryId();
         const projectedCenter = this.lastDiscoveryMeta?.projectedCenter;
         const horizonS = this.lastDiscoveryMeta?.horizonS;
+        const generatedAt = Date.now();
         this.addToCache({
           text: story,
           topic,
@@ -415,7 +441,7 @@ class StoryCacheService {
           rotation: result.rotation,
           lat: result.anchorLat ?? position.lat,
           lng: result.anchorLng ?? position.lng,
-          generatedAt: Date.now(),
+          generatedAt,
           played: true,
           mode,
           regionAnchored: mode === 'driving',
@@ -425,7 +451,7 @@ class StoryCacheService {
           projectedCenter,
           horizonS,
         });
-        return { story, fromCache: false, topic, subject: result.subject, context: result.context, rotation: result.rotation, fromLibrary: !!result.fromLibrary, audioUrl: result.audioUrl, anchorLat: result.anchorLat, anchorLng: result.anchorLng, major: result.major ?? false, storyId, projectedCenter, horizonS };
+        return { story, fromCache: false, topic, subject: result.subject, context: result.context, rotation: result.rotation, fromLibrary: !!result.fromLibrary, audioUrl: result.audioUrl, anchorLat: result.anchorLat, anchorLng: result.anchorLng, major: result.major ?? false, storyId, projectedCenter, horizonS, generatedAt };
       }
     } catch (error) {
       console.error('[StoryCache] Live fetch failed:', error);

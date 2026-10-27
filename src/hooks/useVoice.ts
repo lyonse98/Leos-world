@@ -5,6 +5,10 @@ import {
   headingDelta,
   resolveMovementMode,
   MovementModeHysteresis,
+  estimateSpeechDurationS,
+  storyReachM,
+  storyBehindM,
+  storyMaxAgeS,
 } from '../utils/geo';
 import { tasteProfile } from '../services/tasteProfile';
 import { geminiAudio, TTS_MODEL } from '../services/geminiAudio';
@@ -142,18 +146,6 @@ function selectPreferredVoice(voices: SpeechSynthesisVoice[]): SpeechSynthesisVo
   // fillers, ads, catch-up) always append — they are deliberate and short.
   const MAX_PENDING_LOCATION_STORIES = 1;
 
-// A buffered story that has outlived its moment by this much is dropped
-// rather than narrated about a place the listener has long since passed.
-const MAX_AGE_DRIVING_MS = 180_000;
-const MAX_AGE_WALKING_MS = 180_000;
-
-// How far a story may be from the listener and still be worth playing.
-// Driving reach is generous — with absolute framing, a story about a landmark
-// the listener has passed is still worth hearing.
-const REACH_DRIVING_M = 2000;
-const REACH_WALKING_M = 100;
-const REACH_STATIONARY_M = 30;
-
 // Behind-me staleness gate (Erik field report, Oct 24; generalized by
 // Area D, Oct 26, 2026): the behind-you exemption is right at walking
 // and dwell — absolute framing keeps a passed landmark worth hearing
@@ -162,28 +154,19 @@ const REACH_STATIONARY_M = 30;
 // minute of road already gone), so the original gate fired only there.
 // The Oct 26 drive showed the same failure at surface-street speeds —
 // stories narrated about places already passed — with no gate at all.
-// The threshold is speed-scaled: 1500m at freeway speed, 600m from
-// 8 m/s, 400m from 6 m/s (driving entry), and no drop below driving
-// speeds — walking behavior is unchanged.
+// Pass 1 started the 1500m band at 15 m/s and exempted region-anchored
+// items from the rear cut entirely.
 //
-// Pass 1 (Oct 27, 2026): the Oct 27 commute showed the inverse failure —
-// stories DYING ~35s into the pipeline at ~40 mph (4 stale_highway
-// drops). Two corrections. (1) The 1500m band now starts at 15 m/s
-// (~34 mph — real freeway approach speed), not 20: at 40 mph the old
-// ladder still applied the 600m surface band while a story spends
-// 270m+ of road in fetch+synthesis alone, plus queue wait and the 8s
-// driving gap. FREEWAY_SPEED_MPS stays 20 for the story_dropped source
-// NAME ('stale_highway'), so drop-source comparisons across field
-// tests stay apples-to-apples. (2) regionAnchored items are exempt
-// from the rear cut entirely (see isFarBehindAtSpeed): driving serves
-// are anchored to the area ahead, not a point — the documented intent
-// the gate was never actually honoring. The symmetric 2000m reach and
-// the 180s max age remain as outer limits for every item.
+// Fix stack (RC-3, Oct 27, 2026): the gate's CONSTANTS are gone. Reach,
+// max age, and the behind band are computed per item in utils/geo
+// (storyReachM / storyMaxAgeS / storyBehindM), scaled by the item's
+// estimated duration × the listener's speed — the fixed numbers were
+// sized for short stories, and Pass 2's 75–110s highway tellings died
+// against them mid-pipeline. The 15 m/s freeway band start and the
+// region-anchor exemption survive inside the helpers. FREEWAY_SPEED_MPS
+// stays 20 for the story_dropped source NAME ('stale_highway'), so
+// drop-source comparisons across field tests stay apples-to-apples.
 const FREEWAY_SPEED_MPS = 20; // ~45 mph — story_dropped source naming only
-const BEHIND_FREEWAY_BAND_MPS = 15; // ~34 mph — where the 1500m band starts
-const STALE_BEHIND_FREEWAY_M = 1500;
-const STALE_BEHIND_SURFACE_M = 600;
-const STALE_BEHIND_DRIVING_M = 400;
 
 // Opener gate backstop (Pass 1, Oct 27, 2026): the gate holds landmark
 // stories until the neighborhood welcome airs. If the welcome cannot
@@ -895,6 +878,29 @@ export const useVoice = () => {
         if (pb.toldLate !== undefined) payload.told_late = pb.toldLate;
         if (pb.horizonS !== undefined) payload.horizon_s = pb.horizonS;
         if (pb.predictionErrorM !== undefined) payload.prediction_error_m = Math.round(pb.predictionErrorM);
+        // Exit-corridor readiness (fix stack item 9, Oct 27, 2026):
+        // told_late judges the story at its START (rear hemisphere
+        // while driving). This judges it at its END: where the subject
+        // sits relative to the listener when the telling finishes,
+        // and whether it is still inside the duration×speed reach —
+        // the measure the highway doctrine (banked/region material
+        // over cold generation that cannot land) is tuned against.
+        // Only for stories that actually sounded.
+        if (pb.sounded && pb.subjectLat !== undefined && pb.subjectLng !== undefined) {
+          const endPos = currentPositionProviderRef.current?.();
+          if (endPos) {
+            const endDistM = calculateDistance(endPos.lat, endPos.lng, pb.subjectLat, pb.subjectLng);
+            payload.end_distance_m = Math.round(endDistM);
+            if (typeof endPos.heading === 'number') {
+              payload.end_bearing_offset_deg = Math.round(
+                headingDelta(bearingDegrees(endPos, { lat: pb.subjectLat, lng: pb.subjectLng }), endPos.heading)
+              );
+            }
+            const endMode = resolveMovementMode(endPos.speed, lastKnownModeRef.current);
+            payload.corridor_ok =
+              endDistM <= storyReachM(endMode, endPos.speed ?? 0, Math.max(10, settle.soundedMs / 1000));
+          }
+        }
         analytics.track('story_playback', null, undefined, payload);
       } catch { /* a metric must never break a settle */ }
       // Feed the adaptive look-ahead (Area D): how long stories
@@ -1163,36 +1169,21 @@ export const useVoice = () => {
     return null;
   };
 
-  // How far behind the direction of travel an anchor may sit at this
-  // speed before the story is stale. Infinity below driving entry —
-  // the gate simply does not exist for walking or dwell. The freeway
-  // band starts at BEHIND_FREEWAY_BAND_MPS (15 m/s, Pass 1) rather than
-  // FREEWAY_SPEED_MPS: the distance ladder and the drop-source name
-  // are separate concerns.
-  const behindThresholdM = (speed: number): number =>
-    speed >= BEHIND_FREEWAY_BAND_MPS
-      ? STALE_BEHIND_FREEWAY_M
-      : speed >= 8
-        ? STALE_BEHIND_SURFACE_M
-        : speed >= 6
-          ? STALE_BEHIND_DRIVING_M
-          : Number.POSITIVE_INFINITY;
-
   // True at driving speeds, with a known direction of travel, when the
   // story's anchor sits far BEHIND the listener (>90° off heading,
-  // beyond the speed-scaled threshold). Conservative by design: any
-  // unknown → false. Region-anchored items are EXEMPT (Pass 1, Oct 27,
-  // 2026): a driving serve is anchored to the region the listener is
-  // travelling through, not to a point that can be passed — the rear
-  // cut was documented as removed for exactly these items but ran
-  // unconditionally, and at ~40 mph it killed stories ~35s into the
-  // pipeline. Their outer limits are the symmetric reach bound and the
-  // max age, both enforced in isStillRelevant.
+  // beyond the duration×speed threshold from utils/geo storyBehindM).
+  // Conservative by design: any unknown → false. Region-anchored items
+  // are EXEMPT (Pass 1, Oct 27, 2026): a driving serve is anchored to
+  // the region the listener is travelling through, not to a point that
+  // can be passed — the rear cut was documented as removed for exactly
+  // these items but ran unconditionally, and at ~40 mph it killed
+  // stories ~35s into the pipeline. Their outer limits are the reach
+  // bound and the max age, both enforced in isStillRelevant.
   const isFarBehindAtSpeed = (item: StoryQueueItem, current: CurrentPosition, d: number): boolean => {
     if (item.regionAnchored) return false;
     if (item.lat === undefined || item.lng === undefined) return false;
     if (typeof current.speed !== 'number') return false;
-    const threshold = behindThresholdM(current.speed);
+    const threshold = storyBehindM(current.speed, estimateSpeechDurationS(item.text));
     if (!Number.isFinite(threshold) || d <= threshold) return false;
     const heading = resolveTravelHeading(current);
     if (heading === null) return false;
@@ -1210,29 +1201,36 @@ export const useVoice = () => {
     const mode = resolveMovementMode(current.speed, lastKnownModeRef.current);
     lastKnownModeRef.current = mode;
 
+    // Duration×speed geometry (fix stack RC-3): every bound below is
+    // scaled by THIS item's estimated telling length — a 100-second
+    // highway story is still describing the listener's road when a
+    // 30-second story about the same anchor would be stale. And
+    // item.generatedAt is now the story's true generation time
+    // (threaded from the serve, not re-stamped at enqueue), so the
+    // age bound measures generation age, never queue wait alone.
+    const durationS = estimateSpeechDurationS(item.text);
+    const speed = current.speed ?? 0;
+
     const d = calculateDistance(current.lat, current.lng, item.lat, item.lng);
-    const reach =
-      mode === 'driving' ? REACH_DRIVING_M : mode === 'walking' ? REACH_WALKING_M : REACH_STATIONARY_M;
-    if (d > reach) return false;
+    if (d > storyReachM(mode, speed, durationS)) return false;
 
     // Behind-me cut (point-anchored items only — isFarBehindAtSpeed
     // exempts region-anchored ones): at driving speeds an anchor far
-    // behind the direction of travel (speed-scaled distance) is out of
-    // the area the listener is in — drop it rather than narrate
-    // yesterday's road. The drop itself is reported by the dequeue
-    // loop (single emit point, with tell geometry — Area G).
+    // behind the direction of travel is out of the area the listener
+    // is in — drop it rather than narrate yesterday's road. The drop
+    // itself is reported by the dequeue loop (single emit point, with
+    // tell geometry — Area G).
     if (isFarBehindAtSpeed(item, current, d)) {
       return false;
     }
 
     // Region-anchored stories have no single spot to pass: with
     // absolute geographic framing, a story about the area stays worth
-    // hearing across the whole 2 km reach. They are bounded by the
-    // reach check above and the age check below — nothing else.
+    // hearing across the whole reach. They are bounded by the reach
+    // check above and the age check below — nothing else.
 
     const age = Date.now() - item.generatedAt;
-    const maxAge = mode === 'driving' ? MAX_AGE_DRIVING_MS : MAX_AGE_WALKING_MS;
-    if (age > maxAge) return false;
+    if (age > storyMaxAgeS(durationS) * 1000) return false;
 
     return true;
   }, []);
@@ -2342,7 +2340,7 @@ export const useVoice = () => {
     kind?: 'location' | 'scripted',
     topic?: string,
     audioUrl?: string,
-    geo?: { storyId?: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; introServe?: boolean; onSettleDetail?: (info: PlaybackSettle) => void }
+    geo?: { storyId?: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; introServe?: boolean; onSettleDetail?: (info: PlaybackSettle) => void; generatedAt?: number }
   ) => {
     if (Date.now() < mutedUntilRef.current) {
       console.log('[Voice] Muted — dropping queued story');
@@ -2354,7 +2352,11 @@ export const useVoice = () => {
       topic,
       lat: originLat,
       lng: originLng,
-      generatedAt: Date.now(),
+      // Honest age (fix stack RC-3): the story's GENERATION time as
+      // reported by the serve — the freshness gate's age bound used
+      // to be stamped here, at enqueue, so it measured queue wait
+      // only and a story generated a full telling ago looked newborn.
+      generatedAt: geo?.generatedAt ?? Date.now(),
       regionAnchored,
       isLocationStory: kind ? kind === 'location' : hasCoords,
       audioUrl,
@@ -2375,7 +2377,7 @@ export const useVoice = () => {
     regionAnchored?: boolean,
     topic?: string,
     audioUrl?: string,
-    geo?: { storyId?: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; introServe?: boolean; onSettleDetail?: (info: PlaybackSettle) => void }
+    geo?: { storyId?: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; introServe?: boolean; onSettleDetail?: (info: PlaybackSettle) => void; generatedAt?: number }
   ) => {
     if (Date.now() < mutedUntilRef.current) {
       console.log('[Voice] Muted — dropping priority story');
@@ -2386,7 +2388,7 @@ export const useVoice = () => {
       topic,
       lat: originLat,
       lng: originLng,
-      generatedAt: Date.now(),
+      generatedAt: geo?.generatedAt ?? Date.now(),
       regionAnchored,
       isLocationStory: true,
       priority: true,

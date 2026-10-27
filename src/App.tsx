@@ -1013,6 +1013,10 @@ function App() {
             // this exact item resolves its coverage — heard, or
             // released unheard — exactly once, on every exit path.
             onSettleDetail: (info: PlaybackSettle) => settleHearing(result.storyId, info),
+            // Honest generation time (fix stack RC-3): the player's
+            // freshness age measures from the story's generation,
+            // not from this enqueue.
+            generatedAt: result.generatedAt,
           };
           registerHearing({
             storyId: result.storyId,
@@ -1044,6 +1048,16 @@ function App() {
         trackDiag('pipeline', 'offline', 'offline — no cached story available');
         isFetchingStoryRef.current = false;
         console.log('[Tour] Offline - no cached story available, queued position');
+      } else if (storyCache.getLastServeInfo()?.designedSilence) {
+        // Highway doctrine (fix stack item 9): at freeway pace the
+        // serve deliberately returned nothing — the subject exits
+        // the corridor before a cold generation could land, and no
+        // region story generated either. Silence WAS the serve: no
+        // error state, no failure diagnostic, and no decision refund
+        // (the decision was spent on a deliberate answer).
+        setPipelineStatus('highway — designed silence');
+        isFetchingStoryRef.current = false;
+        console.log('[Tour] Designed silence at highway speed — no story could land in the exit corridor');
       } else {
         isFetchingStoryRef.current = false;
         // Story came back empty and we're online — Gemini likely failed.

@@ -22,6 +22,7 @@ import { wikidata } from './wikidata';
 import { historicRegistry } from './historicRegistry';
 import { majorPlaces } from './majorPlaces';
 import { analytics, trackDiag } from './analytics';
+import { latencyModel } from './latencyModel';
 
 export interface QAContext {
   lastSpokenSentences: string;
@@ -64,6 +65,14 @@ export interface NarrationResult {
   // subject) — the app gives such serves the priority queue lane
   // identically whatever their source (Area C, Oct 26, 2026).
   major?: boolean;
+  // Fix stack (RC-4 / item 9, Oct 27, 2026): whether this serve
+  // consumed the tracker's movement decision (a FAILED serve with
+  // this set earns the app a decision refund, so the next chance
+  // doesn't need another 500m), and whether an empty result is
+  // DESIGNED silence under the highway doctrine rather than a
+  // failure. Absent = false.
+  decisionConsumed?: boolean;
+  designedSilence?: boolean;
 }
 
 const EMPTY_NARRATION: NarrationResult = { text: '', subject: '', context: '', mode: 'walking', rotation: null };
@@ -142,9 +151,9 @@ const MOVEMENT_CONTEXTS: Record<string, string> = {
   new_location_and_landmarks: 'You are somewhere new AND the landmarks have changed. Tell the best story about the new landmarks ahead.',
   new_landmarks: 'New landmarks have come into range. Tell the best story about these new landmarks.',
   moved: "You've moved. Tell the best story about what's here now.",
-  initial: 'FIRST STORY OF THE TOUR: Welcome the listener, and name the city and neighborhood. Then make this intro a STORY, not a preamble: tell one of the most compelling true stories of this neighborhood — what this place is about and how it got that way, the story a local would tell a friend first to explain where they are. Set the scene like the opening of a podcast episode: orient them, ground them, make them want to keep listening. This intro is exempt from the mode length caps — take up to 8-10 sentences if the neighborhood earns it. Tell a NEIGHBORHOOD story, not a specific landmark story — landmarks get their own turns starting with the next stop.',
+  initial: 'FIRST STORY OF THE TOUR: Welcome the listener, and name the city and neighborhood. Then make this intro a STORY, not a preamble: tell one of the most compelling true stories of this neighborhood — what this place is about and how it got that way, the story a local would tell a friend first to explain where they are. Set the scene like the opening of a podcast episode: orient them, ground them, make them want to keep listening. This intro is exempt from the mode length caps — take 10-12 sentences if the neighborhood earns it (the intro band: a floor-raising exemption, combined with any significance band by MAX, never a replacement). Tell a NEIGHBORHOOD story, not a specific landmark story — landmarks get their own turns starting with the next stop.',
   prefetch: 'Tell the best story about what is here now.',
-  neighborhood_intro: 'NEIGHBORHOOD INTRO: The listener just entered a new neighborhood, and this intro is not a preamble — it IS a story. Tell one of the most compelling true stories of this neighborhood: what this place is about and how it got that way. If this listener has heard an intro to this neighborhood before, tell a DIFFERENT defining story — rotate to a fresh angle on the place rather than repeating the orientation they already know. This intro is exempt from the mode length caps — take up to 8-10 sentences if the neighborhood earns it. Make it complete on its own: do not bolt a separate landmark story onto the end of it. Landmarks here get their own turns after this.',
+  neighborhood_intro: 'NEIGHBORHOOD INTRO: The listener just entered a new neighborhood, and this intro is not a preamble — it IS a story. Tell one of the most compelling true stories of this neighborhood: what this place is about and how it got that way. If this listener has heard an intro to this neighborhood before, tell a DIFFERENT defining story — rotate to a fresh angle on the place rather than repeating the orientation they already know. This intro is exempt from the mode length caps — take 10-12 sentences if the neighborhood earns it (the intro band: a floor-raising exemption, combined with any significance band by MAX, never a replacement). Make it complete on its own: do not bolt a separate landmark story onto the end of it. Landmarks here get their own turns after this.',
   welcome_back: 'WELCOME BACK: The listener has been to this neighborhood before on a previous tour. Acknowledge their return briefly — "welcome back to [area]" or similar — then tell them something they probably do NOT know about this area yet. Skip the basic orientation; they have heard it before. Go straight to a fresh angle or a deeper cut.'
 };
 
@@ -895,32 +904,73 @@ class GeminiService {
     const lengthHint = this.buildLengthHint(factPack, target);
     if (lengthHint) parts.push(lengthHint);
 
-    // Significance length override (Area E, Oct 26, 2026): story
-    // length follows SIGNIFICANCE as well as speed and density. The
-    // v13 density doctrine thins stories where places are thick on the
+    // Significance length (Area E, Oct 26, 2026): story length
+    // follows SIGNIFICANCE as well as speed and density. The v13
+    // density doctrine thins stories where places are thick on the
     // ground — right for ordinary stops, wrong for the places a drive
     // is ABOUT: on the Oct 26 drive, Mission Bay, San Diego Bay and
     // Liberty Station all got ordinary-density tellings. A major now
-    // takes its long band regardless of density or mode. Interaction
-    // with the missed-landmark rule: NONE — that rule governs whether
-    // a landmark is told at all and always wins; significance only
-    // sets how long a told major runs. If the deep-listening block
-    // below also applies, it asks for even more — follow the longer.
+    // takes its long band regardless of density. Interaction with the
+    // missed-landmark rule: NONE — that rule governs whether a
+    // landmark is told at all and always wins; significance only sets
+    // how long a told major runs.
+    //
+    // LENGTH RESOLUTION (fix stack D5, Oct 27, 2026) — the precedence,
+    // stated once and applied by construction. The final band is the
+    // element-wise MAX of every applicable band, NEVER a replacement:
+    //   mode band        walking 3–5 · driving 8–12 · highway 12–18
+    //                    (rural rides the highway band)
+    //   significance     10–14 (major landmark or major area)
+    //   intro            10–12 (tour opener / neighborhood intro /
+    //                    welcome-back — a FLOOR-raising exemption)
+    //   deep listening   10–16 (dwell)
+    // Pass 2's significance text REPLACED the mode band ("10 to 14
+    // sentences... overrides the mode length bands"), so a highway
+    // major came out at 10–14 — SHORTER than an ordinary highway
+    // story's 12–18. Under MAX, a highway major runs 12–18, a driving
+    // major 10–14, a walking major 10–14. Intro vs significance: the
+    // intro band is a floor, not a cap — an intro takes
+    // max(intro, significance) = 10–14 for a major area; significance
+    // never shortens an intro below its floor, and the intro
+    // exemption never shortens a major below its significance band.
+    const MODE_BANDS: Record<string, readonly [number, number]> = {
+      walking: [3, 5],
+      driving: [8, 12],
+      highway: [12, 18],
+      rural: [12, 18],
+    };
+    const modeBand = MODE_BANDS[factPack.mode] ?? [8, 12];
+    let lengthLo = modeBand[0];
+    let lengthHi = modeBand[1];
+    const isIntroContext =
+      context === 'initial' || context === 'neighborhood_intro' || context === 'welcome_back';
+    if (isIntroContext) {
+      lengthLo = Math.max(lengthLo, 10);
+      lengthHi = Math.max(lengthHi, 12);
+    }
+    if (target.significance) {
+      lengthLo = Math.max(lengthLo, 10);
+      lengthHi = Math.max(lengthHi, 14);
+    }
+    if (locationTracker.getDwellDepthLevel() !== null) {
+      lengthLo = Math.max(lengthLo, 10);
+      lengthHi = Math.max(lengthHi, 16);
+    }
     if (target.significance === 'major-landmark') {
       parts.push(
         'SIGNIFICANCE — MAJOR LANDMARK: this place is one of the defining landmarks of its area. ' +
-          'Tell its story LONG regardless of mode, speed, or how many other places are nearby: ' +
-          '10 to 14 sentences — the full arc. What it is, how it came to be, the people and the ' +
-          'conflict inside it, and why it still matters. This overrides the mode length bands ' +
-          'and any instinct to keep it brief because the area is dense.'
+          'Tell its story LONG regardless of speed, or how many other places are nearby: ' +
+          `${lengthLo} to ${lengthHi} sentences — the full arc. What it is, how it came to be, the people and the ` +
+          'conflict inside it, and why it still matters. That band already includes the mode band ' +
+          '(combined by MAX, never replaced), so never keep it brief because the area is dense.'
       );
     } else if (target.significance === 'major-area') {
       parts.push(
         'SIGNIFICANCE — MAJOR AREA: this district is one of the defining places of the city, ' +
-          'not an ordinary neighborhood stop. Tell its story LONG: 10 to 14 sentences — what ' +
+          `not an ordinary neighborhood stop. Tell its story LONG: ${lengthLo} to ${lengthHi} sentences — what ` +
           'this place is, how it came to be, the era that shaped it, and what it means now. ' +
-          'This overrides the mode length bands and any instinct to keep it brief because ' +
-          'the area is dense.'
+          'That band already includes the mode band (combined by MAX, never replaced), so never ' +
+          'keep it brief because the area is dense.'
       );
     }
 
@@ -1129,7 +1179,7 @@ class GeminiService {
 
     if (!shouldTell) {
       console.log('[Gemini] shouldTell=false — returning empty. context:', context);
-      return { ...EMPTY_NARRATION, context, mode: factPack.mode };
+      return { ...EMPTY_NARRATION, context, mode: factPack.mode, decisionConsumed: false };
     }
 
     // Detect a return visit: if the area subject key already has told angles,
@@ -1305,6 +1355,62 @@ class GeminiService {
       console.log(`[Gemini] Cached story for "${cached.topic}" already heard — generating a fresh one`);
     }
 
+    // Highway doctrine (fix stack item 9, Oct 27, 2026): at freeway
+    // pace (≥15 m/s), a COLD live generation aimed at a point
+    // landmark the listener will already have blown past before the
+    // story can finish is spend that cannot land — the generation
+    // latency on a degraded connection (this drive's own measured
+    // median, via latencyModel) covers more road than the subject
+    // has left ahead. Prefer region-anchored material instead: an
+    // area story describes the region being crossed, not a point,
+    // and lands at any exit. If no area story generates either, the
+    // honest serve is DESIGNED SILENCE — flagged as such so the app
+    // reports neither an error nor a refundable failure. Banked
+    // serves (library/cache above) never reach this check: they
+    // cost no generation time and start now.
+    if (
+      (position.speed ?? 0) >= 15 &&
+      target.kind === 'landmark' &&
+      targetPlace?.lat !== undefined &&
+      targetPlace?.lng !== undefined
+    ) {
+      const subjectDistM = calculateDistance(position.lat, position.lng, targetPlace.lat, targetPlace.lng);
+      const latencyS = latencyModel.latencyS();
+      if (subjectDistM < (position.speed ?? 0) * latencyS - 400) {
+        trackDiag(
+          'pipeline',
+          'highway-corridor-skip',
+          `"${target.subject?.name}" exits the exit corridor before a live telling could land (${Math.round(subjectDistM)}m ahead, latency ${latencyS.toFixed(1)}s at ${Math.round((position.speed ?? 0) * 2.237)} mph) — region material instead`
+        );
+        const { rotation: areaRotation, areaName } = this.chooseAreaStory(position, factPack);
+        const areaTarget: StoryTarget = {
+          kind: 'area',
+          subject: null,
+          rotation: areaRotation,
+          areaName,
+          displayTopic: `${areaName} — ${describeAngle(areaRotation.angle)}`,
+          angle: areaRotation.angle,
+          significance: factPack.areaInfo.majorArea ? 'major-area' : undefined,
+        };
+        const areaText = await this.generateStory(
+          position, factPack, areaTarget, effectiveContext, depthLevel, depthCycle, destination, onChunk, true, versionKey
+        );
+        if (areaText && areaText.trim().length > 0) {
+          locationTracker.commitDepthAdvance();
+          return {
+            text: areaText,
+            subject: areaTarget.displayTopic,
+            context: effectiveContext,
+            mode: factPack.mode,
+            rotation: areaTarget.rotation,
+            major: areaTarget.significance === 'major-area',
+            decisionConsumed: true,
+          };
+        }
+        return { ...EMPTY_NARRATION, context: effectiveContext, mode: factPack.mode, decisionConsumed: true, designedSilence: true };
+      }
+    }
+
     const text = await this.generateStory(
       position, factPack, target, effectiveContext, depthLevel, depthCycle, destination, onChunk, true, versionKey
     );
@@ -1330,6 +1436,7 @@ class GeminiService {
         target.kind === 'landmark' && target.subject
           ? storyCoverage.isMajorSubject(subjectKey) || (targetPlace ? placesService.isTier1Landmark(targetPlace) : false)
           : false,
+      decisionConsumed: true,
     };
   }
 

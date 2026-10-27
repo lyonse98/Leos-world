@@ -99,6 +99,63 @@ export function headingDelta(a: number, b: number): number {
   return d > 180 ? 360 - d : d;
 }
 
+// --- Story geometry (fix stack RC-3, Oct 27, 2026) -------------------
+// The freshness geometry used to be fixed constants (2000m reach,
+// 180s max age, a speed-only behind ladder) sized for the SHORT
+// stories of an earlier persona. Pass 2's length bands tell 75–110s
+// highway stories; a gate sized for 40s stories measured against them
+// drops stories that are still mid-telling — and because coverage
+// was spent at generation (RC-2), every such drop burned the subject.
+// The gates now scale with the two quantities that actually decide
+// whether a story still describes the listener's road: how long the
+// story runs, and how fast the listener is covering ground during it.
+
+// Leo speaks ~13 chars/sec (the same rate the Q&A failsafe sizes
+// from). Estimates only — they steer gates, never content.
+export function estimateSpeechDurationS(text: string): number {
+  return Math.min(300, Math.max(5, text.length / 13));
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v));
+}
+
+// How far a story's anchor may be from the listener at story START
+// and still be worth telling. Driving reach grows with the distance
+// the listener will cover DURING the story: a place that far ahead
+// (or, by symmetry of the telling window, recently passed) is inside
+// the story's moment. Floors preserve today's behavior for short
+// stories; caps keep a glitchy speed from licensing cross-town tales.
+export function storyReachM(
+  mode: MovementModeHysteresis,
+  speedMps: number,
+  durationS: number
+): number {
+  if (mode === 'driving') return clamp(1000 + speedMps * durationS, 2000, 8000);
+  if (mode === 'walking') return clamp(100 + speedMps * durationS, 150, 600);
+  return clamp(30 + durationS, 60, 240);
+}
+
+// How far BEHIND the direction of travel an anchor may sit at story
+// start before the story is stale. The historical speed ladder
+// (1500m freeway / 600m surface / 400m driving entry) is the floor;
+// a long story raises the band by the distance covered during the
+// telling (×0.6 — the place only needs to stay inside the telling
+// window, not at its center). Infinity below driving entry: the
+// gate does not exist for walking or dwell.
+export function storyBehindM(speedMps: number, durationS: number): number {
+  if (speedMps < 6) return Number.POSITIVE_INFINITY;
+  const ladder = speedMps >= 15 ? 1500 : speedMps >= 8 ? 600 : 400;
+  return Math.min(4000, Math.max(ladder, speedMps * durationS * 0.6));
+}
+
+// How old a generated story may be at dequeue. A story's useful life
+// scales with its own length: generation + queue wait may reasonably
+// consume ~1.5 tellings of the story being told.
+export function storyMaxAgeS(durationS: number): number {
+  return clamp(90 + durationS * 1.5, 180, 600);
+}
+
 // Project a point forward along a heading — used to aim story lookups and
 // prefetches at the road ahead instead of the spot underfoot.
 export function offsetPositionByHeading(
