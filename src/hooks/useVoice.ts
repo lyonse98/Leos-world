@@ -643,20 +643,57 @@ export const useVoice = () => {
     const synth = synthRef.current;
     if (!synth) return;
 
+    // Ended flag (fix stack RC-5): if the utterance ends or errors
+    // before a never-began check fires, the check stands down — the
+    // utterance's own handlers already settled this attempt, and the
+    // timer's markAudioBlocked double-counted one failure as two
+    // audio_blocked events (different kinds, same attempt). The
+    // caller's handlers are wrapped, not replaced.
+    let ended = false;
+    const prevOnEnd = utterance.onend;
+    const prevOnError = utterance.onerror;
+    utterance.onend = (event) => {
+      ended = true;
+      if (prevOnEnd) prevOnEnd.call(utterance, event);
+    };
+    utterance.onerror = (event) => {
+      ended = true;
+      if (prevOnError) prevOnError.call(utterance, event);
+    };
+
+    const declareBlocked = () => {
+      console.warn('[Voice] Speech never began — audio appears to be blocked');
+      markAudioBlocked('error');
+      onBlocked?.();
+    };
+
     const attempt = (mayRetry: boolean) => {
       synth.resume();
       synth.speak(utterance);
 
       window.setTimeout(() => {
-        if (hasStarted()) return;
+        if (hasStarted() || ended) return;
         if (mayRetry && allowRetry) {
           console.log('[Voice] Speech did not begin — retrying once');
           attempt(false);
           return;
         }
-        console.warn('[Voice] Speech never began — audio appears to be blocked');
-        markAudioBlocked('error');
-        onBlocked?.();
+        // Never-began verdict (fix stack RC-5): the old check
+        // convicted on !hasStarted() alone — but a start can be
+        // merely LATE, which the watchdog already knows: an engine
+        // reporting speaking/pending is working, not blocked. A busy
+        // engine earns ONE recheck (+3s); only an idle engine — or a
+        // still-silent one at the recheck — is declared blocked.
+        // Detector and watchdog now read the same evidence the same
+        // way, so audio_blocked means failure, not slowness.
+        if (synth.speaking || synth.pending) {
+          window.setTimeout(() => {
+            if (hasStarted() || ended) return;
+            declareBlocked();
+          }, 3000);
+          return;
+        }
+        declareBlocked();
       }, 3000);
     };
 
@@ -1743,11 +1780,6 @@ export const useVoice = () => {
       return;
     }
 
-    // Every dequeue is one playback attempt, whatever exit it takes.
-    // The blocked path below requeues the item, and this count is what
-    // keeps that retry economy finite.
-    item.attempts = (item.attempts ?? 0) + 1;
-
     // Deliberate gap: location stories wait for a minimum silence after the
     // previous story ended. Scripted lines (intros, fillers, Q&A answers) and
     // the first story of a tour play immediately — there's no previous speech
@@ -1876,6 +1908,15 @@ export const useVoice = () => {
           : undefined,
       };
     }
+
+    // Attempts count at the first PLAYBACK attempt (fix stack RC-5),
+    // not at dequeue: the gap-pacing deferral above unshifts the item
+    // and returns without playing anything, and counting there burned
+    // the bounded attempt economy on silence — items exhausted their
+    // attempts in pacing waits and settled as failures without ever
+    // being tried. From this line the item WILL be attempted; the
+    // blocked path's requeue economy counts from here.
+    item.attempts = (item.attempts ?? 0) + 1;
 
     const playback = {
       gen,

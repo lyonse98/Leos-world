@@ -1537,7 +1537,14 @@ function App() {
             // start latency, provable from the data alone.
             const settleElapsedMs = analytics.tourElapsedMs();
             analytics.track('opener_spoken', null, undefined, {
-              voice: introClipUrl ? 'prerendered' : 'local',
+              // The engine that ACTUALLY sounded (fix stack D3): this
+              // used to be derived from whether a clip URL existed —
+              // so a clip that failed and fell back to the device
+              // voice still reported 'prerendered'. The settle knows
+              // the truth: 'gemini' means the stored Puck clip (or
+              // Gemini TTS) reached the ear, 'browser' the device
+              // voice, null that nothing sounded at all.
+              voice: info.engine === 'gemini' ? 'prerendered' : info.engine === 'browser' ? 'local' : 'none',
               sounded: info.sounded,
               completed: info.completed,
               sounded_ms: info.soundedMs,
