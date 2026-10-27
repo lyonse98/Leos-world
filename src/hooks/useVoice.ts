@@ -873,11 +873,30 @@ export const useVoice = () => {
   // question_playback (its settle never fired) and no observable lock
   // release. Now every tracked item settles exactly once on EVERY
   // exit: played, exhausted, or torn down.
-  const settleQueuedTrackedItems = useCallback(() => {
+  //
+  // Fix stack (RC-2 invariant, Oct 27, 2026): a WAITING location story
+  // torn down here also emits its story_dropped terminal record, so
+  // every story_played the app emitted reaches exactly one terminal
+  // record (story_playback or story_dropped) — teardown used to be
+  // the silent third outcome. The origin names the exit so a drop is
+  // attributable: tour end, skip flush, or mute flush.
+  const settleQueuedTrackedItems = useCallback((origin: string = 'teardown') => {
     const undelivered: PlaybackSettle = {
       sounded: false, completed: false, engine: null, attempts: 0, soundedMs: 0,
     };
     for (const item of storyQueueRef.current) {
+      if (item.isLocationStory) {
+        try {
+          analytics.track('story_dropped', null, undefined, {
+            source: origin,
+            topic: item.topic ?? '',
+            story_id: item.storyId ?? '',
+            distance_m: null,
+            bearing_offset_deg: null,
+          });
+        } catch { /* a metric must never break a teardown */ }
+        if (item.introServe) releaseOpenerGate('intro-dropped-teardown');
+      }
       if (!item.onPlaybackEnd && !item.onSettleDetail) continue;
       const info: PlaybackSettle = { ...undelivered, attempts: item.attempts ?? 0 };
       item.onSettleDetail?.(info);
@@ -902,7 +921,7 @@ export const useVoice = () => {
   const stop = useCallback(() => {
     playGenRef.current += 1;
     settleCurrentPlayback();
-    settleQueuedTrackedItems();
+    settleQueuedTrackedItems('tour-ended');
     if (synthRef.current) {
       synthRef.current.cancel();
     }
@@ -1639,6 +1658,18 @@ export const useVoice = () => {
           bearing_offset_deg: bearingOffset !== undefined ? Math.round(bearingOffset) : null,
         });
       } catch { /* a metric must never break the gate */ }
+      // The drop is also a SETTLE for the item's owner (fix stack
+      // RC-2): a tracked item dropped here must resolve its callbacks
+      // undelivered, or its owner's bookkeeping (the app's hearing
+      // funnel, the Q&A cycle) waits forever on a story that has
+      // already reached its terminal record above.
+      if (next.onPlaybackEnd || next.onSettleDetail) {
+        const info: PlaybackSettle = {
+          sounded: false, completed: false, engine: null, attempts: next.attempts ?? 0, soundedMs: 0,
+        };
+        next.onSettleDetail?.(info);
+        next.onPlaybackEnd?.(false);
+      }
     }
 
     // Opener gate (Pass 1): until the neighborhood welcome has aired,
@@ -2144,6 +2175,35 @@ export const useVoice = () => {
     };
   }, [unlock]);
 
+  // Displacement is a terminal outcome, and it is LOUD (fix stack
+  // RC-2): a waiting location story spliced out by a priority serve
+  // or a fresher story used to vanish with no event and no settle —
+  // its story_played had no terminal record and its owner never
+  // learned its fate. Now it emits story_dropped with the reason and
+  // settles its callbacks undelivered, exactly like a teardown, so
+  // the invariant holds on this exit too: every story_played reaches
+  // exactly one terminal record.
+  const settleDisplacedItem = (item: StoryQueueItem, reason: string) => {
+    if (item.isLocationStory) {
+      try {
+        analytics.track('story_dropped', null, undefined, {
+          source: reason,
+          topic: item.topic ?? '',
+          story_id: item.storyId ?? '',
+          distance_m: null,
+          bearing_offset_deg: null,
+        });
+      } catch { /* a metric must never break the queue */ }
+    }
+    if (item.onPlaybackEnd || item.onSettleDetail) {
+      const info: PlaybackSettle = {
+        sounded: false, completed: false, engine: null, attempts: item.attempts ?? 0, soundedMs: 0,
+      };
+      item.onSettleDetail?.(info);
+      item.onPlaybackEnd?.(false);
+    }
+  };
+
   const enqueue = useCallback((item: StoryQueueItem) => {
     const queue = storyQueueRef.current;
     // Tell-geometry stamps (Area G): when this item joined the queue,
@@ -2163,7 +2223,10 @@ export const useVoice = () => {
       // behind it. Displacing the intro was half of how a landmark
       // beat the welcome to the speaker on Oct 27.
       for (let i = queue.length - 1; i >= 0; i--) {
-        if (queue[i].isLocationStory && !queue[i].introServe) queue.splice(i, 1);
+        if (queue[i].isLocationStory && !queue[i].introServe) {
+          const [displaced] = queue.splice(i, 1);
+          settleDisplacedItem(displaced, 'displaced-priority');
+        }
       }
       const firstLocationIndex = queue.findIndex(i => i.isLocationStory && !i.introServe);
       if (firstLocationIndex === -1) queue.push(item);
@@ -2180,7 +2243,8 @@ export const useVoice = () => {
         // welcome before it airs.
         const replaceableIndex = queue.findIndex(i => i.isLocationStory && !i.introServe);
         if (replaceableIndex !== -1) {
-          queue.splice(replaceableIndex, 1);
+          const [displaced] = queue.splice(replaceableIndex, 1);
+          settleDisplacedItem(displaced, 'displaced-fresher');
           console.log('[Voice] Replacing the waiting story with a fresher one');
         }
       }
@@ -2219,7 +2283,7 @@ export const useVoice = () => {
     kind?: 'location' | 'scripted',
     topic?: string,
     audioUrl?: string,
-    geo?: { storyId?: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; introServe?: boolean }
+    geo?: { storyId?: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; introServe?: boolean; onSettleDetail?: (info: PlaybackSettle) => void }
   ) => {
     if (Date.now() < mutedUntilRef.current) {
       console.log('[Voice] Muted — dropping queued story');
@@ -2239,6 +2303,7 @@ export const useVoice = () => {
       storyId: geo?.storyId,
       projectedCenter: geo?.projectedCenter,
       horizonS: geo?.horizonS,
+      onSettleDetail: geo?.onSettleDetail,
     });
   }, [enqueue]);
 
@@ -2251,7 +2316,7 @@ export const useVoice = () => {
     regionAnchored?: boolean,
     topic?: string,
     audioUrl?: string,
-    geo?: { storyId?: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; introServe?: boolean }
+    geo?: { storyId?: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; introServe?: boolean; onSettleDetail?: (info: PlaybackSettle) => void }
   ) => {
     if (Date.now() < mutedUntilRef.current) {
       console.log('[Voice] Muted — dropping priority story');
@@ -2271,6 +2336,7 @@ export const useVoice = () => {
       storyId: geo?.storyId,
       projectedCenter: geo?.projectedCenter,
       horizonS: geo?.horizonS,
+      onSettleDetail: geo?.onSettleDetail,
     });
   }, [enqueue]);
 
@@ -2308,7 +2374,7 @@ export const useVoice = () => {
     console.log('[Voice] Skip requested');
     playGenRef.current += 1;
     settleCurrentPlayback();
-    settleQueuedTrackedItems();
+    settleQueuedTrackedItems('skip-flush');
     synthRef.current?.cancel();
     if (audioElRef.current) {
       audioElRef.current.pause();
@@ -2344,7 +2410,7 @@ export const useVoice = () => {
     console.log(`[Voice] Muted for ${minutes} minutes`);
     playGenRef.current += 1;
     settleCurrentPlayback();
-    settleQueuedTrackedItems();
+    settleQueuedTrackedItems('mute-flush');
     synthRef.current?.cancel();
     if (audioElRef.current) {
       audioElRef.current.pause();

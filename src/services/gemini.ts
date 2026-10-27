@@ -545,6 +545,12 @@ class GeminiService {
     const base = this.topicBaseName(topic);
     const key = landmarkSubjectKey(base);
     if (storyCoverage.isSubjectLockedForSession(key)) return true;
+    // In-flight counts as locked for SERVING (fix stack RC-2): a
+    // story about this subject is already in the player awaiting its
+    // settle, so dealing its next angle from a cache branch now would
+    // queue two tellings of one place back to back. The lock itself
+    // lands only when the in-flight story is heard.
+    if (storyCoverage.isSubjectInFlight(key)) return true;
     if (storyCoverage.isDailyCapped(key) && !storyLibrary.hasPlace(base)) return true;
     return false;
   }
@@ -1081,9 +1087,13 @@ class GeminiService {
         const versionKey = this.storyVersionKey(this.factPackHash(factPack));
         if (onChunk) onChunk(libHit.text);
         const libKey = landmarkSubjectKey(this.topicBaseName(libHit.topic));
-        storyCoverage.lockSubjectForSession(libKey);
-        storyCoverage.markMajorSubject(libKey);
-        storyCoverage.recordDailyTelling(libKey);
+        // Coverage at hearing (fix stack RC-2/D4): the serve marks
+        // the subject in-flight only. The session lock and daily
+        // count land when the story is HEARD (App's settle funnel →
+        // storyCoverage.settleSubjectHeard), and major status is NOT
+        // marked here — it comes from the place rules (Tier-1
+        // evaluation, curated lists), never from the serve flavor.
+        storyCoverage.markSubjectInFlight(libKey);
         await locationTracker.updateLastStoryTopic(
           libHit.topic, position, libHit.text, 'cache_hit', 0, versionKey
         );
@@ -1093,8 +1103,9 @@ class GeminiService {
       const versionKey = this.storyVersionKey(this.factPackHash(factPack));
       if (onChunk) onChunk(preliminaryCache.storyText);
       const prelimKey = landmarkSubjectKey(this.topicBaseName(preliminaryCache.topic));
-      storyCoverage.lockSubjectForSession(prelimKey);
-      storyCoverage.recordDailyTelling(prelimKey);
+      // Coverage at hearing (fix stack RC-2): in-flight only — the
+      // lock and count land at the delivered settle (App funnel).
+      storyCoverage.markSubjectInFlight(prelimKey);
       await locationTracker.updateLastStoryTopic(
         preliminaryCache.topic, position, preliminaryCache.storyText, 'cache_hit', 0, versionKey
       );
@@ -1195,9 +1206,11 @@ class GeminiService {
             console.log(`[Gemini] Tenant redirect: "${target.subject.name}" deferred — whole place "${anchor.name}" serves first`);
             trackDiag('pipeline', 'tenant-redirect', `"${target.subject.name}" deferred to whole place "${anchor.name}"`);
             if (onChunk) onChunk(anchorHit.text);
-            storyCoverage.lockSubjectForSession(anchorKey);
-            storyCoverage.markMajorSubject(anchorKey);
-            storyCoverage.recordDailyTelling(anchorKey);
+            // Coverage at hearing (fix stack RC-2/D4): in-flight
+            // only; the anchor's major status rides the result from
+            // the curated-anchor place rule (major: true below), not
+            // from a serve-time coverage mark.
+            storyCoverage.markSubjectInFlight(anchorKey);
             await locationTracker.updateLastStoryTopic(
               anchorHit.topic, position, anchorHit.text, effectiveContext, depthLevel, versionKey
             );
@@ -1222,8 +1235,9 @@ class GeminiService {
     // LIBRARY FIRST (Erik's shelf order): for the exact (place, angle) just
     // chosen, a curated library entry beats both the ephemeral cache and a
     // live generation. Intros stay personal (skipCache), and area stories
-    // have no library entries by construction. Recording mirrors the cached
-    // branch below (record here, rotation null in the result).
+    // have no library entries by construction. Coverage mirrors the cached
+    // branch below (in-flight here, rotation null in the result; the
+    // hearing record lands at the app's settle funnel).
     if (!skipCache && target.kind === 'landmark' && target.subject && target.angle) {
       // Place-wide first (Pass 2, Oct 27, 2026): the chosen angle is a
       // coverage decision across all twelve landmark angles; the shelf
@@ -1245,9 +1259,9 @@ class GeminiService {
       if (libHit) {
         console.log(`[Gemini] Library hit: "${libHit.topic}" (${libHit.angle})`);
         if (onChunk) onChunk(libHit.text);
-        storyCoverage.lockSubjectForSession(subjectKey);
-        storyCoverage.markMajorSubject(subjectKey);
-        storyCoverage.recordDailyTelling(subjectKey);
+        // Coverage at hearing (fix stack RC-2/D4): in-flight only —
+        // no lock, no count, and no major mark from a serve.
+        storyCoverage.markSubjectInFlight(subjectKey);
         await locationTracker.updateLastStoryTopic(
           libHit.topic, position, libHit.text, effectiveContext, depthLevel, versionKey
         );
@@ -1271,18 +1285,17 @@ class GeminiService {
     if (cached && !heardStories.hasHeard(cached.topic) && !this.isTopicLockedForSession(cached.topic, effectiveContext.startsWith('stationary_'))) {
       console.log(`[Gemini] Using ${cached.source} story for "${cached.topic}" (${Math.round(cached.distanceM)}m away)`);
       if (onChunk) onChunk(cached.storyText);
-      // Lock the SERVED story's subject — the fix for the within-session
-      // retell pile-up. This block used to lock only the generation
-      // TARGET's key (and only when the target was a landmark): once a
-      // place counted as "heard", the target resolved to an area story,
-      // yet this serve kept dealing that place's next angle from the
-      // shared cache — the serve checked the lock every time and marked
-      // it never, so the subject-level guard never engaged and the
-      // place was told angle after angle in a single moving session.
-      // The story actually told is the one that locks (and counts).
+      // Mark the SERVED story's subject in-flight — the within-session
+      // retell pile-up guard in its hearing-era form (fix stack RC-2).
+      // The pile-up fix this block carries used to lock the served
+      // subject at serve time; now the serve marks it in-flight
+      // (isTopicLockedForSession and selection both refuse in-flight
+      // subjects, so the next angle cannot be dealt while this one
+      // awaits its settle), and the LOCK itself lands when the story
+      // is heard, via the app's settle funnel. The story actually
+      // told is still the one that counts — it just counts at hearing.
       const servedKey = landmarkSubjectKey(this.topicBaseName(cached.topic));
-      storyCoverage.lockSubjectForSession(servedKey);
-      storyCoverage.recordDailyTelling(servedKey);
+      storyCoverage.markSubjectInFlight(servedKey);
       await locationTracker.updateLastStoryTopic(
         cached.topic, position, cached.storyText, effectiveContext, depthLevel, versionKey
       );
@@ -1299,11 +1312,12 @@ class GeminiService {
     if (text && text.trim().length > 0) {
       locationTracker.commitDepthAdvance();
       if (target.kind === 'landmark') {
-        storyCoverage.lockSubjectForSession(subjectKey);
-        // Canonical tellings count here; rotation tellings count at
-        // play time through App's recordRotationStory funnel — every
-        // telling exactly once.
-        if (!target.rotation) storyCoverage.recordDailyTelling(subjectKey);
+        // Coverage at hearing (fix stack RC-2): generation marks the
+        // subject in-flight only — canonical and rotation tellings
+        // alike count exactly once, at the delivered settle, through
+        // the app's hearing funnel. A generation that never reaches
+        // the listener's ears burns nothing.
+        storyCoverage.markSubjectInFlight(subjectKey);
       }
     }
     return {
@@ -1336,8 +1350,9 @@ class GeminiService {
     const toldAngles = storyCoverage.getToldAngles(subjectKey);
     // Library first here too: a prefetched library entry carries its audio
     // with it, so the play-time serve spends no synthesis quota. Nothing is
-    // recorded at prefetch time — exactly like a generated prefetch, App
-    // records the play via the returned rotation.
+    // recorded at prefetch time — exactly like a generated prefetch, the
+    // hearing is recorded at the delivered settle via the app's funnel,
+    // keyed by the returned rotation.
     if (target.kind === 'landmark' && target.subject && target.angle) {
       // Place-wide first (Pass 2, Oct 27, 2026), same as the serve
       // paths above: a prefetched library entry is the cheapest story

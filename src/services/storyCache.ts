@@ -285,21 +285,24 @@ class StoryCacheService {
       cached.played = true;
       this.notifyCacheChange();
       this.refreshPendingSubjects();
-      // A local serve is a telling, so it marks what it tells — this
-      // layer used to only CHECK the lock, and since prefetched stories
-      // are recorded nowhere at generation, a session could serve the
-      // same place from the buffer all day with the lock set staying
-      // empty. While moving, serving a landmark locks its subject and
-      // counts toward the daily tally (rotation stories count later,
-      // at play, through App's recordRotationStory funnel; library
-      // serves also mark the place major/cap-exempt).
+      // A local serve marks its subject IN-FLIGHT (fix stack RC-2):
+      // coverage — session lock, daily tally, heard record, angle
+      // coverage — is recorded when the story is HEARD, at the
+      // player's delivered settle, through the app's hearing funnel.
+      // The in-flight mark is what keeps this layer honest meanwhile:
+      // a second buffered angle of the same place cannot serve while
+      // the first awaits its settle (isLockedOutWhileMoving checks
+      // in-flight), which preserves the old serve-time lock's
+      // pile-up protection without burning coverage on stories that
+      // go on to die unheard in the player. Moving only, as the old
+      // marks were — parked serves keep the dwell rotation freedom.
+      // Library serves no longer mark the place major (D4): major
+      // status comes from the place rules, not the serve flavor.
       const speed = position.speed ?? null;
       const moving = !(speed !== null && speed < 1.0);
       if (moving) {
         if (servedKey.startsWith('landmark:')) {
-          storyCoverage.lockSubjectForSession(servedKey);
-          if (!cached.rotation) storyCoverage.recordDailyTelling(servedKey);
-          if (cached.fromLibrary) storyCoverage.markMajorSubject(servedKey);
+          storyCoverage.markSubjectInFlight(servedKey);
         }
       }
       if (onChunk) onChunk(cached.text);
@@ -581,14 +584,18 @@ class StoryCacheService {
   // Session landmark lockout at the serve layer: a locally cached
   // angle-variant of a landmark already told this session is a retell,
   // and so is a story about a minor subject that has hit the daily
-  // telling cap. Skipped only while moving — parked (speed ~0),
-  // rotation serves are the dwell feature and stay available.
+  // telling cap. A subject with a story in the player awaiting its
+  // settle is locked out too (fix stack RC-2): its next angle must
+  // wait for the hearing, or one place queues twice back to back.
+  // Skipped only while moving — parked (speed ~0), rotation serves
+  // are the dwell feature and stay available.
   private isLockedOutWhileMoving(story: CachedStory, position: Position): boolean {
     const speed = position.speed ?? null;
     if (speed !== null && speed < 1.0) return false;
     const base = story.topic.split(' — ')[0].trim();
     const key = landmarkSubjectKey(base);
     if (storyCoverage.isSubjectLockedForSession(key)) return true;
+    if (storyCoverage.isSubjectInFlight(key)) return true;
     if (storyCoverage.isDailyCapped(key) && !storyLibrary.hasPlace(base)) return true;
     return false;
   }

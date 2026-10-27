@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Eye, EyeOff, Play, MapPin, Wifi, WifiOff, Download, Clock, Compass, VolumeX, Moon, XCircle, Share2, Music, Send, Heart, AlertTriangle, Mic, Smartphone } from 'lucide-react';
-import { useVoice, StoryTiming } from './hooks/useVoice';
+import { useVoice, StoryTiming, PlaybackSettle } from './hooks/useVoice';
 import { useGeolocation, Position } from './hooks/useGeolocation';
 import { useSpeechRecognition } from './hooks/useSpeechRecognition';
 import { useWakeLock } from './hooks/useWakeLock';
-import { geminiService } from './services/gemini';
+import { geminiService, StoryRotation } from './services/gemini';
 import { storyCache, CachedStory } from './services/storyCache';
 import { locationTracker } from './services/locationTracker';
 import { driveArc } from './services/driveArc';
@@ -97,6 +97,19 @@ const AMBIENT_KEY = 'leo_ambient_on';
 
 interface SavedTourSession {
   savedAt: number;
+}
+
+// One served story awaiting its hearing verdict (fix stack RC-2).
+// Registered when a story is queued; resolved exactly once by the
+// player's settle callback attached to that queue item.
+interface HearingRecord {
+  storyId: string;
+  topic: string;
+  context: string;
+  rotation: StoryRotation | null;
+  storyText: string;
+  position?: Position;
+  subjectKey: string | null;
 }
 
 function App() {
@@ -383,6 +396,66 @@ function App() {
   // it 2.5× headroom plus a minute, floor 3 minutes, cap 15.
   const answerFailsafeMs = (text: string) =>
     Math.min(900_000, Math.max(180_000, (text.length / 13) * 2500 + 60_000));
+
+  // Hearing funnel (fix stack RC-2, Oct 27, 2026): coverage is
+  // recorded when a story is HEARD, not when it is generated or
+  // queued. Every location story queued from a serve is registered
+  // here and carries an onSettleDetail callback into the player;
+  // the player's settle guarantee (played, exhausted, displaced,
+  // dropped, or torn down — every exit settles exactly once) resolves
+  // the record exactly once:
+  //  - DELIVERED (sounded AND completed): the session lock + daily
+  //    count land (storyCoverage.settleSubjectHeard) and the tracker
+  //    records the hearing (intro-debt payment, told set / drive
+  //    arc, angle coverage, durable heard record).
+  //  - NOT delivered, on ANY exit: the subject's in-flight mark is
+  //    released and NOTHING is recorded — the story can be served
+  //    again later in the drive as if it had never been generated.
+  // This generalizes Pass 1's backgrounding-only release to every
+  // non-delivered path, which is the central RC-2 fix: coverage is
+  // spent at hearing, never at generation.
+  const pendingHearingRef = useRef(new Map<string, HearingRecord>());
+  const hearingSubjectKeyFor = (
+    topic: string,
+    rotation: StoryRotation | null
+  ): string | null =>
+    rotation?.subjectKey ??
+    (topic ? landmarkSubjectKey(topic.split(' — ')[0].trim()) : null);
+  const registerHearing = (rec: HearingRecord) => {
+    pendingHearingRef.current.set(rec.storyId, rec);
+    if (rec.subjectKey?.startsWith('landmark:')) {
+      storyCoverage.markSubjectInFlight(rec.subjectKey);
+    }
+  };
+  const settleHearing = (storyId: string, info: PlaybackSettle) => {
+    const rec = pendingHearingRef.current.get(storyId);
+    if (!rec) return;
+    pendingHearingRef.current.delete(storyId);
+    if (info.sounded && info.completed) {
+      if (rec.subjectKey?.startsWith('landmark:')) {
+        storyCoverage.settleSubjectHeard(rec.subjectKey);
+      }
+      locationTracker.recordStoryHeard(rec.topic, {
+        context: rec.context,
+        rotation: rec.rotation,
+        position: rec.position,
+        storyText: rec.storyText,
+      });
+    } else if (rec.subjectKey) {
+      storyCoverage.releaseSubjectInFlight(rec.subjectKey);
+    }
+  };
+  // A story that was served (and marked in-flight by a serve path)
+  // but will NOT be queued — superseded by the mic, or fetched while
+  // a push-to-talk question owns the audio: release the in-flight
+  // mark so the subject is not stranded for the rest of the session.
+  const discardServedStory = (
+    topic: string,
+    rotation: StoryRotation | null
+  ) => {
+    const key = hearingSubjectKeyFor(topic, rotation);
+    if (key) storyCoverage.releaseSubjectInFlight(key);
+  };
 
   const submitQuestion = (raw: string): boolean => {
     const question = raw.trim();
@@ -824,6 +897,10 @@ function App() {
 
       if (epoch !== geminiService.currentRequestToken()) {
         console.log('[Tour] Story generation superseded (mic or skip) — cached, not spoken');
+        // The serve marked its subject in-flight; the story will not
+        // be queued, so no settle will ever resolve it — release the
+        // mark here or the subject is stranded for the session.
+        if (result) discardServedStory(result.topic, result.rotation);
         // Clear the fetch flag on this exit too: the entry guard above
         // trusts it, and a superseded cycle never reaches the clears
         // below — leaving it set would wedge every later fetch.
@@ -840,13 +917,12 @@ function App() {
         setLastStorySource(result.fromLibrary ? 'library' : result.fromCache ? 'cache' : 'live');
         if (geminiError) { geminiService.clearError(); setGeminiError(null); }
 
-        // A rotation story has now actually reached the listener, so this angle
-        // on this subject is spent. Recorded here, at the moment it plays,
-        // rather than when it was generated — a story written for a road the
-        // listener never drove must not count as heard.
-        if (result.rotation) {
-          locationTracker.recordRotationStory(result.rotation, result.topic, position, result.story);
-        }
+        // Coverage — rotation angles included — is NOT recorded
+        // here (fix stack RC-2): reaching the queue is not reaching
+        // the listener. The hearing funnel below registers the story,
+        // and its angle, lock, count, and heard record land only when
+        // the player settles it DELIVERED. A story written for a road
+        // the listener never drove down counts for nothing.
 
         // Feeds the "what you just told them" context Leo gets when answering a
         // question, so his answers can refer back to the story in progress.
@@ -855,7 +931,9 @@ function App() {
         if (pttHoldRef.current) {
           // A push-to-talk question owns the audio right now. The fetched
           // story is dropped, not queued — the next cycle refetches, and
-          // the shared caches make that cheap.
+          // the shared caches make that cheap. Its in-flight mark is
+          // released with it (no queue, no settle, no coverage).
+          discardServedStory(result.topic, result.rotation);
           console.log('[Tour] Story fetched but not queued — push-to-talk question in progress');
         } else {
           console.log(`[Tour] Story from ${result.fromLibrary ? 'LIBRARY' : result.fromCache ? 'CACHE' : 'LIVE'}, length: ${result.story.length}, queueing`);
@@ -931,7 +1009,20 @@ function App() {
             // player protects them in the queue (no single-slot
             // replacement, no priority splice) until they air.
             introServe: isIntroServe,
+            // Hearing funnel (fix stack RC-2): the player's settle for
+            // this exact item resolves its coverage — heard, or
+            // released unheard — exactly once, on every exit path.
+            onSettleDetail: (info: PlaybackSettle) => settleHearing(result.storyId, info),
           };
+          registerHearing({
+            storyId: result.storyId,
+            topic: result.topic,
+            context: result.context,
+            rotation: result.rotation,
+            storyText: result.story,
+            position,
+            subjectKey: hearingSubjectKeyFor(result.topic, result.rotation),
+          });
           if (isQueueJump || isIntroServe) {
             // Front of the waiting queue — behind nothing but any scripted
             // line already in flight, and always after the current story.
@@ -1188,14 +1279,21 @@ function App() {
         if (unplayed.length > 0) {
           const intro = "Got some stories I couldn't share earlier while we lost signal. Let me catch you up.";
           voice.queueStory(intro);
-          // Catch-up is a deliberate replay of stories missed in the dead zone,
-          // so these are queued as scripted lines — they keep their order and
+          // Catch-up is a deliberate replay of stories missed in the dead zone.
+          // The stories keep their order and — queued without coordinates —
           // are not subject to the live freshness gate. The session lockout
           // still applies WITHIN the batch: two buffered angles of the same
           // place must not both replay back to back, and a place told
-          // earlier this session stays told. Each queued landmark locks
-          // its subject as it goes (moving only — parked catch-up keeps
-          // the dwell rotation freedom).
+          // earlier this session stays told.
+          //
+          // Fix stack (RC-2): the batch no longer locks and counts at
+          // queue time. The stories stay scripted-kind (deliberate
+          // lines are never single-slot-replaced or spliced, so the
+          // batch survives intact) but now carry the hearing funnel's
+          // settle callback like every other serve: the batch checks
+          // lock + in-flight as it goes (moving only — parked
+          // catch-up keeps the dwell rotation freedom), and the
+          // coverage itself lands when each story is actually heard.
           const speed = geolocation.position?.speed ?? null;
           const moving = !(speed !== null && speed < 1.0);
           let queuedCount = 0;
@@ -1205,12 +1303,21 @@ function App() {
               ?? landmarkSubjectKey(story.topic.split(' — ')[0].trim());
             if (moving && subjectKey.startsWith('landmark:')) {
               if (storyCoverage.isSubjectLockedForSession(subjectKey)) continue;
-              storyCoverage.lockSubjectForSession(subjectKey);
-              // Counted here (all angles): catch-up plays bypass the
-              // recordRotationStory funnel other rotation plays use.
-              storyCoverage.recordDailyTelling(subjectKey);
+              if (storyCoverage.isSubjectInFlight(subjectKey)) continue;
             }
-            voice.queueStory(story.text);
+            registerHearing({
+              storyId: story.storyId,
+              topic: story.topic,
+              context: 'catch_up',
+              rotation: story.rotation,
+              storyText: story.text,
+              position: geolocation.position ?? undefined,
+              subjectKey,
+            });
+            voice.queueStory(story.text, undefined, undefined, undefined, 'scripted', story.topic, undefined, {
+              storyId: story.storyId,
+              onSettleDetail: (info: PlaybackSettle) => settleHearing(story.storyId, info),
+            });
             queuedCount++;
           }
           storyCache.refreshPendingSubjects();

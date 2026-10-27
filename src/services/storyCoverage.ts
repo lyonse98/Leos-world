@@ -263,11 +263,28 @@ class StoryCoverageService {
   private dayStamp: string = StoryCoverageService.todayStamp();
 
   // Subjects exempt from the daily cap because they are majors: Tier-1
-  // landmarks (marked when a candidate pool evaluates them) and library
-  // places (marked on a library serve). Unlike the day state this set
-  // does not expire — a place does not stop being major overnight; it
-  // is re-derived whenever the place is evaluated or served anyway.
+  // landmarks and curated major places (marked when a candidate pool
+  // EVALUATES them — fact-pack assembly, curated-list merge — never
+  // merely because a serve happened to come from the library; fix
+  // stack D4, Oct 27, 2026). Unlike the day state this set does not
+  // expire — a place does not stop being major overnight; it is
+  // re-derived whenever the place is evaluated anyway.
   private majorSubjects: Set<string> = new Set();
+
+  // Subjects with a story SERVED (handed to the player) but not yet
+  // settled — the in-flight half of coverage-at-hearing (fix stack
+  // RC-2, Oct 27, 2026). Coverage used to be recorded at generation /
+  // queue time, so every story that later died — stale drop, timeout,
+  // displacement, teardown — had already burned its subject for the
+  // session and the day. Now the serve only marks the subject
+  // in-flight (a generation/selection guard, like pendingSubjects);
+  // the lock, the daily count, and the heard record land exclusively
+  // in settleSubjectHeard, which the app calls from the player's
+  // settle callback when a story is actually HEARD (sounded AND
+  // completed). A non-delivered settle releases the in-flight mark
+  // and records nothing. In-memory only: a page reload kills the
+  // served story with the page, so there is nothing to persist.
+  private inFlightSubjects: Set<string> = new Set();
 
   private static todayStamp(): string {
     const d = new Date();
@@ -471,8 +488,57 @@ class StoryCoverageService {
   isSubjectPending(subjectKey: string): boolean {
     for (const member of this.aliasGroupOf(subjectKey)) {
       if (this.pendingSubjects.has(member)) return true;
+      // A subject with a story in the player (served, awaiting its
+      // settle) is pending for generation purposes exactly like a
+      // buffered one: generating a second angle before the first is
+      // heard is how one place fills the buffer.
+      if (this.inFlightSubjects.has(member)) return true;
     }
     return false;
+  }
+
+  // --- In-flight subjects (served, not yet heard) ---------------------------
+  // See the inFlightSubjects declaration for the doctrine. Alias-group
+  // aware like every other subject operation: a serve under either
+  // name binds the place.
+
+  markSubjectInFlight(subjectKey: string): void {
+    if (!subjectKey) return;
+    for (const member of this.aliasGroupOf(subjectKey)) {
+      this.inFlightSubjects.add(member);
+    }
+  }
+
+  releaseSubjectInFlight(subjectKey: string): void {
+    if (!subjectKey) return;
+    for (const member of this.aliasGroupOf(subjectKey)) {
+      this.inFlightSubjects.delete(member);
+    }
+  }
+
+  isSubjectInFlight(subjectKey: string): boolean {
+    for (const member of this.aliasGroupOf(subjectKey)) {
+      if (this.inFlightSubjects.has(member)) return true;
+    }
+    return false;
+  }
+
+  /**
+   * THE hearing record for coverage (fix stack RC-2): called exactly
+   * once per served story, from the player's settle, and only when
+   * the story was delivered (sounded AND completed). Applies the
+   * session lock and the daily telling count, and clears the
+   * in-flight mark. Area keys clear their in-flight mark only — area
+   * stories are never locked or capped (recordDailyTelling already
+   * ignores non-landmark keys; the lock is landmark doctrine too).
+   */
+  settleSubjectHeard(subjectKey: string): void {
+    if (!subjectKey) return;
+    if (subjectKey.startsWith('landmark:')) {
+      this.lockSubjectForSession(subjectKey);
+      this.recordDailyTelling(subjectKey);
+    }
+    this.releaseSubjectInFlight(subjectKey);
   }
 
   // Hard wipe of the lock/alias/day state only (the diagnostics full
@@ -480,6 +546,7 @@ class StoryCoverageService {
   clearSessionLocks(): void {
     this.sessionLockedSubjects.clear();
     this.sessionAliasGroups.clear();
+    this.inFlightSubjects.clear();
     this.dailyCounts = {};
     this.dayStamp = StoryCoverageService.todayStamp();
     try {

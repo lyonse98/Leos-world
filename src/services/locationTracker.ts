@@ -29,14 +29,16 @@ class LocationTracker {
   private lastKnownMode: MovementModeHysteresis = 'stationary';
   private storiesToldCount = 0;
   // The neighborhood whose welcome intro has been DETECTED but not yet
-  // GENERATED (Pass 1, Oct 27, 2026). A neighborhood transition is
+  // HEARD (Pass 1, Oct 27, 2026; hearing semantics from the fix stack,
+  // Oct 27, 2026). A neighborhood transition is
   // recorded in lastNeighborhood the moment shouldTellNewStory sees
   // it — if the serve that detected it then fails, redirects, or is
   // pre-empted, the welcome used to be silently consumed and never
   // fired. The debt survives here instead: it is set on every
   // transition (tour start included), re-offered by later decisions
-  // for the same neighborhood, and cleared only when a story is
-  // actually generated with an intro context (updateLastStoryTopic).
+  // for the same neighborhood (bounded by the chapter-break cooldown
+  // in shouldTellNewStory), and cleared only when a story about that
+  // neighborhood is actually HEARD (recordStoryHeard).
   private pendingIntroNeighborhood: string | null = null;
   // Where and when the listener last settled in one spot. Drives the
   // dwell-triggered deep cuts: stand somewhere long enough and Leo stops
@@ -275,6 +277,19 @@ class LocationTracker {
     return this.lastLocation?.storiesInNeighborhood ?? 0;
   }
 
+  // Generation/serve-time note (fix stack RC-2, Oct 27, 2026): a
+  // story EXISTS — it was generated or served from a shelf — and the
+  // prompt-continuity state (last topic/text, recent texts) plus the
+  // shared-store publication update here. Coverage does NOT: until
+  // this fix the same method also cleared the intro debt, marked the
+  // angle told, wrote the durable heard record, and counted the
+  // telling — all at generation time, so every story that later died
+  // unheard (drop, timeout, displacement, teardown) had already
+  // burned its subject. Those effects live in recordStoryHeard now
+  // and fire only on a delivered settle. Publication stays here on
+  // purpose: a generated story is a valid story for the NEXT listener
+  // whether or not this one hears it — coverage is personal, the
+  // shelf is shared.
   async updateLastStoryTopic(
     topic: string,
     position: Position,
@@ -282,27 +297,14 @@ class LocationTracker {
     context?: string,
     depthLevel?: number,
     versionKey?: string,
-    // Set when the story took a rotation angle — on an area, or on a landmark
-    // told a second time from a new angle. Which angle was spent is recorded
-    // here rather than at generation time so a story that never reached the
-    // listener does not count as heard.
+    // Set when the story took a rotation angle — carried only so the
+    // shared-store save below is tagged with the angle it covered.
+    // The angle is marked TOLD in recordStoryHeard, at hearing.
     rotation?: { subjectKey: string; angle: string } | null
   ) {
     if (this.lastLocation) {
-      // An intro-context story was actually generated: the owed
-      // neighborhood welcome (tour start or chapter break) is paid.
-      // Generation is the consumption point — a decision alone never
-      // clears the debt, which is what lets failed serves re-offer.
-      if (context === 'initial' || context === 'neighborhood_intro' || context === 'welcome_back') {
-        this.pendingIntroNeighborhood = null;
-      }
       this.lastLocation.lastStoryTopic = topic;
       this.lastLocation.lastStoryText = storyText;
-      this.toldStories.add(topic.toLowerCase());
-
-      if (rotation) {
-        storyCoverage.markTold(rotation.subjectKey, rotation.angle);
-      }
 
       if (storyText && storyText.trim().length > 0) {
         this.recentStoryTexts.push(storyText.trim());
@@ -311,20 +313,7 @@ class LocationTracker {
         }
       }
 
-      this.storiesToldCount++;
       this.saveToStorage();
-
-      // Durable record of what this listener has heard, so the same story is
-      // never told to them twice — across tours, not just within one.
-      if (storyText && storyText.trim().length > 0) {
-        heardStories.record({
-          sessionId: this.sessionId,
-          topic,
-          storyText,
-          lat: position.lat,
-          lng: position.lng,
-        });
-      }
 
       // Publish to the shared store so the next person at this spot gets it
       // free. Every story is cached — canonical and rotation alike — tagged
@@ -348,32 +337,74 @@ class LocationTracker {
     }
   }
 
+  // THE hearing record (fix stack RC-2 + D1/D6, Oct 27, 2026): called
+  // by the app exactly once per served story, from the player's
+  // settle callback, and only when the story was DELIVERED (sounded
+  // AND completed). Everything that used to be recorded at generation
+  // or queue time lands here instead:
+  //  - the owed neighborhood welcome is PAID (the D1 fix: the debt
+  //    used to clear only inside updateLastStoryTopic's intro-context
+  //    branch, which live intros — area targets — never reached, so
+  //    the debt survived its own welcome and re-offered forever; a
+  //    topic match also pays it, so any serve flavor of the owed
+  //    neighborhood's story counts);
+  //  - the topic joins the told set the drive arc and the prompt's
+  //    do-not-repeat list derive from (D6: the arc can no longer
+  //    callback to a story the listener never heard);
+  //  - a rotation's angle is marked told (markTold);
+  //  - the durable heard record is written (heardStories), so the
+  //    story is never told to this listener twice, across tours.
+  // The session lock + daily count half lives in
+  // storyCoverage.settleSubjectHeard, called alongside this.
+  recordStoryHeard(
+    topic: string,
+    opts: {
+      context?: string;
+      rotation?: { subjectKey: string; angle: string } | null;
+      position?: Position;
+      storyText?: string;
+    }
+  ): void {
+    if (!topic) return;
+
+    if (this.pendingIntroNeighborhood) {
+      const pending = this.pendingIntroNeighborhood.toLowerCase();
+      const topicBase = topic.split(' — ')[0].trim().toLowerCase();
+      const introContext =
+        opts.context === 'initial' ||
+        opts.context === 'neighborhood_intro' ||
+        opts.context === 'welcome_back';
+      if (introContext || topicBase === pending || topicBase.includes(pending)) {
+        this.pendingIntroNeighborhood = null;
+      }
+    }
+
+    this.toldStories.add(topic.toLowerCase());
+    this.storiesToldCount++;
+    this.saveToStorage();
+
+    if (opts.rotation) {
+      storyCoverage.markTold(opts.rotation.subjectKey, opts.rotation.angle);
+      console.log(`[StoryCoverage] Covered "${opts.rotation.angle}" on ${opts.rotation.subjectKey}`);
+    }
+
+    if (opts.position && opts.storyText && opts.storyText.trim().length > 0) {
+      heardStories.record({
+        sessionId: this.sessionId,
+        topic,
+        storyText: opts.storyText,
+        lat: opts.position.lat,
+        lng: opts.position.lng,
+      });
+    }
+  }
+
   getLastStoryTopic(): string | undefined {
     return this.lastLocation?.lastStoryTopic;
   }
 
   getLastStoryText(): string | undefined {
     return this.lastLocation?.lastStoryText;
-  }
-
-  // A rotation story has reached the listener, so this angle on this subject is
-  // now spent. Routed through the same bookkeeping as any other story — they
-  // did hear it, and Leo should remember telling it — but with the rotation
-  // set, which marks coverage and keeps it out of the shared store.
-  recordRotationStory(
-    rotation: { subjectKey: string; angle: string },
-    topic: string,
-    position: Position,
-    storyText: string
-  ): void {
-    void this.updateLastStoryTopic(topic, position, storyText, undefined, undefined, undefined, rotation);
-    // Rotation plays are the one telling funnel App records directly,
-    // so the daily tally hooks in here too (landmark keys only —
-    // recordDailyTelling ignores area keys). The gemini serve paths
-    // count their own non-rotation tellings; between the two funnels
-    // every telling is counted exactly once.
-    storyCoverage.recordDailyTelling(rotation.subjectKey);
-    console.log(`[StoryCoverage] Covered "${rotation.angle}" on ${rotation.subjectKey}`);
   }
 
   hasAlreadyToldStory(topic: string): boolean {
