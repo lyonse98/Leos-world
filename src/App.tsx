@@ -7,6 +7,7 @@ import { useWakeLock } from './hooks/useWakeLock';
 import { geminiService } from './services/gemini';
 import { storyCache, CachedStory } from './services/storyCache';
 import { locationTracker } from './services/locationTracker';
+import { driveArc } from './services/driveArc';
 import { analytics, trackDiag } from './services/analytics';
 import { placesService } from './services/placesService';
 import { getIntroEntry, introAudioUrl } from './services/intros';
@@ -1447,6 +1448,10 @@ function App() {
       }
       storyCache.armOpener();
       locationTracker.reset();
+      // Drive arc (Pass 2, Oct 27, 2026): a new tour is a new arc —
+      // the route/subject memory the prompt's connective layer reads
+      // starts empty, alongside the tracker it derives from.
+      driveArc.reset();
       // Opener gate (Pass 1, Oct 27, 2026): from here until the
       // neighborhood welcome airs, the player may not START a
       // landmark/area story — welcome → neighborhood → landmarks is

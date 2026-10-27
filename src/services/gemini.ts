@@ -10,6 +10,7 @@ import { pickStorySubject, StorySubject } from './relevance';
 import { tasteProfile } from './tasteProfile';
 import { deriveTags, isInterestTag } from './storyTags';
 import { storyCoverage, AREA_ANGLES, LANDMARK_ANGLES, describeAngle, describeArea, areaSubjectKey, landmarkSubjectKey, isRotationAngle } from './storyCoverage';
+import { driveArc } from './driveArc';
 import { resolveMovementMode, MovementModeHysteresis, calculateDistance } from '../utils/geo';
 import { hashString } from '../utils/hash';
 import { LEO_MODEL_ID, LEO_QA_MODEL_ID, LEO_QA_MAX_OUTPUT_TOKENS, LEO_PERSONA_VERSION, LEO_SYSTEM_INSTRUCTION } from './leoPersona';
@@ -740,6 +741,13 @@ class GeminiService {
     const weaveCallback = locationTracker.shouldWeaveCallback();
     const storiesToldCount = locationTracker.getStoriesToldCount();
 
+    // Drive arc (Pass 2): note where this story is being told, so the
+    // arc block below can place the NEXT one. Prompt assembly is the
+    // one moment every generated story passes through with its
+    // neighborhood resolved; cache/library serves are counted by the
+    // arc from the tracker's told record instead.
+    driveArc.noteNeighborhood(factPack.areaInfo.neighborhood);
+
     const parts: string[] = [];
 
     parts.push(this.buildFactPackBlock(position, factPack));
@@ -836,7 +844,7 @@ class GeminiService {
 
     if (recentStoryTexts.length > 0) {
       parts.push(
-        `STORIES ALREADY TOLD THIS TOUR (context only — do NOT retell, do NOT force a connection):\n${recentStoryTexts
+        `STORIES ALREADY TOLD THIS TOUR (context only — do NOT retell):\n${recentStoryTexts
           .map((s, i) => `${i + 1}. "${s.slice(0, MAX_RECENT_STORY_CHARS)}"`)
           .join('\n')}`
       );
@@ -857,6 +865,13 @@ class GeminiService {
         `CALLBACK INVITATION: You have told ${storiesToldCount} stories this tour. If a genuine thread connects two or more of them, surface it in one line woven into this story. If none exists, skip it.`
       );
     }
+
+    // Drive arc (Pass 2): the session's shape — route, subjects,
+    // angles, themes — with the connect-when-natural instruction.
+    // Empty until the tour has a past; the block itself caps the
+    // connective tissue at a sentence or two.
+    const arcBlock = driveArc.buildPromptBlock();
+    if (arcBlock) parts.push(arcBlock);
 
     const tasteBlock = this.buildTasteBlock();
     if (tasteBlock) parts.push(tasteBlock);
