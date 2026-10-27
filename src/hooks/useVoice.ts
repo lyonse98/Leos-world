@@ -398,6 +398,15 @@ export const useVoice = () => {
   // backstop timer — never by an ordinary story starting.
   const openerGateRef = useRef<{ armedAt: number } | null>(null);
   const openerGateTimerRef = useRef<number | null>(null);
+  // T6 order guard (fix stack, Oct 27, 2026): latched the moment an
+  // introServe item is dequeued into the player. Held welcome/opener
+  // lines belong BEFORE the neighborhood intro; once the intro has
+  // started they must never flush after it (the sim-proven hole:
+  // primes never land, the intro sounds through the element, the
+  // flush fires late and the welcome talks over the intro's tail).
+  // flushHeldLines settles held lines undelivered instead once this
+  // is set. Reset at every gate-begin (a new tour's opener).
+  const introStartedRef = useRef<boolean>(false);
   // The queue item currently in the player, retained so a return from
   // backgrounding can restart IT (replay/re-speak) instead of abandoning
   // it to the watchdog. Set at dequeue; cleared at settle, and on the
@@ -465,8 +474,27 @@ export const useVoice = () => {
     const held = pendingSpeechRef.current;
     if (held.length > 0) {
       pendingSpeechRef.current = [];
-      for (const line of held) {
-        speakRef.current(line.text, { localVoice: line.localVoice, audioUrl: line.audioUrl, onSettle: line.onSettle });
+      if (introStartedRef.current) {
+        // Order guard (fix stack, sim hole T6): the neighborhood
+        // intro has already started, so these held welcome/opener
+        // lines can no longer take their place in the sequence —
+        // speaking them now would put the welcome AFTER the intro it
+        // exists to precede. Settle them undelivered instead: their
+        // owners record an honest no-sound, and nothing held can
+        // ever flush late again.
+        const undelivered: PlaybackSettle = {
+          sounded: false, completed: false, engine: null, attempts: 0, soundedMs: 0,
+        };
+        for (const line of held) {
+          line.onSettle?.(undelivered);
+        }
+        try {
+          trackDiag('playback', 'opener-order-guard', `${held.length} held opener line(s) suppressed — the intro had already started`);
+        } catch { /* diagnostics only */ }
+      } else {
+        for (const line of held) {
+          speakRef.current(line.text, { localVoice: line.localVoice, audioUrl: line.audioUrl, onSettle: line.onSettle });
+        }
       }
     }
     const heldTracked = pendingTrackedRef.current;
@@ -767,6 +795,23 @@ export const useVoice = () => {
   // Release is always on the record (pipeline_diag), whatever the path.
   const beginOpenerGate = useCallback(() => {
     openerGateRef.current = { armedAt: Date.now() };
+    introStartedRef.current = false;
+    // Backstop armed HERE, at gate-begin (fix stack D2, Oct 27,
+    // 2026). Pass 1 armed this timer lazily inside playStoryFromQueue
+    // — only when a landmark head happened to reach the gate check —
+    // so in the locked state the audit reproduced (intro blocked and
+    // requeued, nothing else ever dequeuing) the timer was never
+    // armed at all and the gate could hold landmarks hostage far
+    // past its own backstop. The release now lands at the backstop
+    // whatever the queue does.
+    if (openerGateTimerRef.current !== null) {
+      clearTimeout(openerGateTimerRef.current);
+    }
+    openerGateTimerRef.current = window.setTimeout(() => {
+      openerGateTimerRef.current = null;
+      releaseOpenerGate('timeout');
+      playStoryFromQueueRef.current();
+    }, OPENER_GATE_TIMEOUT_MS);
   }, []);
 
   const releaseOpenerGate = useCallback((reason: string) => {
@@ -949,6 +994,7 @@ export const useVoice = () => {
     // a stopped tour must not leave a gate (or its backstop timer)
     // armed against the next tour's first story.
     openerGateRef.current = null;
+    introStartedRef.current = false;
     if (openerGateTimerRef.current !== null) {
       clearTimeout(openerGateTimerRef.current);
       openerGateTimerRef.current = null;
@@ -1678,20 +1724,14 @@ export const useVoice = () => {
     // (piece 3a) so it sits ahead of any waiting landmark — holding
     // here simply waits for it; its settle re-enters this function
     // through the normal onDone chain. Safety valve: past the
-    // backstop, release and proceed rather than deadlock the tour —
-    // a timer guarantees the release lands even if nothing else ever
-    // calls back in.
+    // backstop, release and proceed rather than deadlock the tour.
+    // The backstop timer itself is armed at gate-begin (fix stack
+    // D2) — this check remains only as the in-band fast path for a
+    // dequeue that happens to land past the deadline first.
     const gateHead = storyQueueRef.current[0];
     if (openerGateRef.current && gateHead && gateHead.isLocationStory && !gateHead.introServe) {
       const armedFor = Date.now() - openerGateRef.current.armedAt;
       if (armedFor < OPENER_GATE_TIMEOUT_MS) {
-        if (openerGateTimerRef.current === null) {
-          openerGateTimerRef.current = window.setTimeout(() => {
-            openerGateTimerRef.current = null;
-            releaseOpenerGate('timeout');
-            playStoryFromQueueRef.current();
-          }, OPENER_GATE_TIMEOUT_MS - armedFor);
-        }
         console.log('[Voice] Opener gate: holding a landmark story until the neighborhood welcome airs');
         return;
       }
@@ -1860,6 +1900,9 @@ export const useVoice = () => {
       ...playGeo,
     };
     currentPlaybackRef.current = playback;
+    // T6 order guard latch (fix stack): the intro has STARTED — held
+    // welcome/opener lines may no longer flush behind it.
+    if (item.introServe) introStartedRef.current = true;
     // Retain the item itself for the leave/return restart (Pass 1):
     // the lifecycle record knows how the dequeue ended, but only the
     // item can be replayed.
@@ -1923,6 +1966,22 @@ export const useVoice = () => {
         currentItemRef.current = null;
         storyQueueRef.current.unshift(item);
         console.log('[Voice] Audio blocked — holding this story until sound is allowed');
+        // Re-enter the player on a timer (fix stack D2): the blocked
+        // exit produces no settle, and until now nothing guaranteed
+        // another dequeue — in the locked state the item (the intro,
+        // in the field failure) sat requeued forever, its attempts
+        // never exhausted, its settle never fired, and the opener
+        // gate's release — which rides the intro's settle — never
+        // landed. The retry is generation-guarded like the gap timer:
+        // a skip/stop/mute that moves ownership cancels it, and the
+        // bounded attempt economy above guarantees the item settles
+        // within a few cycles instead of blacking out the gate.
+        const retryGen = playGenRef.current;
+        window.setTimeout(() => {
+          if (retryGen !== playGenRef.current) return;
+          if (isPlayingStoryRef.current) return;
+          playStoryFromQueueRef.current();
+        }, 1500);
         return;
       }
 

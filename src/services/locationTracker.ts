@@ -21,6 +21,17 @@ interface LocationState {
 // How far the listener may drift and still count as settled in one spot.
 const DWELL_MOVE_THRESHOLD_M = 60;
 
+// Chapter-break cooldown (fix stack, Oct 27, 2026): Pass 1's design
+// for the owed-welcome debt referenced a 180s cooldown protecting
+// regular stories after an intro topic change — it existed nowhere
+// in code, so the re-offer branch pre-empted EVERY later decision
+// while a debt was pending, and a debt that could not clear (D1)
+// starved landmarks for whole tours. Implemented here: after an
+// intro is offered (the transition serve itself, or a re-offer), the
+// debt cannot pre-empt another decision for this long. A failed
+// intro serve costs one chapter break, not the tour.
+const INTRO_REOFFER_COOLDOWN_MS = 180_000;
+
 class LocationTracker {
   private lastLocation: LocationState | null = null;
   private toldStories: Set<string> = new Set();
@@ -40,6 +51,25 @@ class LocationTracker {
   // in shouldTellNewStory), and cleared only when a story about that
   // neighborhood is actually HEARD (recordStoryHeard).
   private pendingIntroNeighborhood: string | null = null;
+  // When the current intro debt was set, and when an intro was last
+  // offered for it — the chapter-break cooldown's two anchors (see
+  // INTRO_REOFFER_COOLDOWN_MS). introDebtSetAt doubles as the debt's
+  // epoch: storyCache scopes its cache bypass to one attempt per
+  // epoch (getPendingIntroEpoch).
+  private introDebtSetAt = 0;
+  private lastIntroOfferAt = 0;
+
+  private setPendingIntro(neighborhood: string): void {
+    if (this.pendingIntroNeighborhood !== neighborhood) {
+      this.pendingIntroNeighborhood = neighborhood;
+      this.introDebtSetAt = Date.now();
+    }
+  }
+
+  // The current debt's epoch (0 when no welcome is owed).
+  getPendingIntroEpoch(): number {
+    return this.pendingIntroNeighborhood ? this.introDebtSetAt : 0;
+  }
   // Where and when the listener last settled in one spot. Drives the
   // dwell-triggered deep cuts: stand somewhere long enough and Leo stops
   // giving you the quick hits and starts giving you the full story.
@@ -133,7 +163,10 @@ class LocationTracker {
     if (!this.lastLocation) {
       const hasNeighborhood = !!(neighborhood && neighborhood.trim().length > 0);
       this.lastLocation = { position, landmarkNames, timestamp: Date.now(), storyDepthLevel: 0, depthCycle: 0, lastNeighborhood: neighborhood ?? null, storiesInNeighborhood: 0 };
-      if (hasNeighborhood && neighborhood) this.pendingIntroNeighborhood = neighborhood;
+      if (hasNeighborhood && neighborhood) {
+        this.setPendingIntro(neighborhood);
+        this.lastIntroOfferAt = Date.now();
+      }
       // First story of the tour: if we know the neighborhood, lead with a brief
       // situating intro before diving into landmarks. Otherwise start normally.
       return { shouldTell: true, context: hasNeighborhood ? 'neighborhood_intro' : 'initial', depthLevel: 0, depthCycle: 0, isNeighborhoodIntro: hasNeighborhood };
@@ -166,21 +199,30 @@ class LocationTracker {
       // The chapter break is owed from this moment (Pass 1): if this
       // serve's welcome never gets generated, later decisions re-offer
       // it instead of the transition having been silently consumed.
-      if (currentNeighborhood) this.pendingIntroNeighborhood = currentNeighborhood;
+      if (currentNeighborhood) {
+        this.setPendingIntro(currentNeighborhood);
+        this.lastIntroOfferAt = Date.now();
+      }
       return { shouldTell: true, context: 'neighborhood_intro', depthLevel: 0, depthCycle: 0, isNeighborhoodIntro: true };
     }
 
     // Chapter-break re-offer (Pass 1, Oct 27, 2026): the transition was
     // recorded on an earlier call but its welcome was never generated
     // (failed serve, redirect, pre-emption). The listener is still in
-    // that neighborhood — offer the welcome again.
+    // that neighborhood — offer the welcome again. Cooldown (fix
+    // stack): the re-offer may fire only once the chapter-break
+    // cooldown has elapsed since the debt was set / last offered —
+    // until then the decision falls through to landmarks and timers,
+    // so one failed welcome cannot pre-empt the whole tour.
     if (
       this.pendingIntroNeighborhood &&
       currentNeighborhood &&
       prevNeighborhood &&
       currentNeighborhood.toLowerCase() === this.pendingIntroNeighborhood.toLowerCase() &&
-      prevNeighborhood.toLowerCase() === currentNeighborhood.toLowerCase()
+      prevNeighborhood.toLowerCase() === currentNeighborhood.toLowerCase() &&
+      Date.now() - Math.max(this.introDebtSetAt, this.lastIntroOfferAt) >= INTRO_REOFFER_COOLDOWN_MS
     ) {
+      this.lastIntroOfferAt = Date.now();
       this.lastLocation = {
         position,
         landmarkNames,
@@ -202,7 +244,8 @@ class LocationTracker {
       // neighborhood welcome is still the owed first story — fire it
       // now rather than letting the start area go unwelcomed.
       if (this.storiesToldCount === 0) {
-        this.pendingIntroNeighborhood = currentNeighborhood;
+        this.setPendingIntro(currentNeighborhood);
+        this.lastIntroOfferAt = Date.now();
         this.lastLocation.position = position;
         this.lastLocation.timestamp = Date.now();
         return { shouldTell: true, context: 'neighborhood_intro', depthLevel: 0, depthCycle: 0, isNeighborhoodIntro: true };
@@ -490,6 +533,8 @@ class LocationTracker {
   reset() {
     this.lastLocation = null;
     this.pendingIntroNeighborhood = null;
+    this.introDebtSetAt = 0;
+    this.lastIntroOfferAt = 0;
     this.dwellAnchor = null;
     // Day-scoped lockout: a tour restart does NOT clear today's
     // landmark locks, aliases, or telling counts (see storyCoverage).

@@ -117,6 +117,10 @@ class StoryCacheService {
   // opener serve actually returns a story, and on arm/reset.
   private openerIntroContext: string | null = null;
   private prefetchTargets: PrefetchTarget[] = [];
+  // The intro-debt epoch whose cache bypass has been spent (fix
+  // stack — see tryGetStoryForPosition). 0 = no bypass spent; real
+  // epochs are Date.now() timestamps from the tracker.
+  private lastIntroBypassEpoch = 0;
   private isPrefetching = false;
   private isPrefetchingAhead = false;
   private isOnline = true;
@@ -262,7 +266,18 @@ class StoryCacheService {
     // welcome is owed (a chapter break) — a buffered story must not
     // take the serve on which the welcome is due, or the new
     // neighborhood gets entered without ever being introduced.
-    const introOwed = !openerServe && locationTracker.hasPendingNeighborhoodIntro();
+    // Fix stack (Oct 27, 2026): the bypass is scoped to the FIRST
+    // serve attempt of each debt (keyed by the tracker's debt epoch).
+    // Pass 1 bypassed on EVERY serve while a welcome was owed; with a
+    // debt that could not clear (D1), one stuck welcome disabled the
+    // local cache for whole tours. One bypass per debt keeps the
+    // welcome's serve fresh without mortgaging the buffer.
+    const introEpoch = locationTracker.getPendingIntroEpoch();
+    const introOwed =
+      !openerServe &&
+      locationTracker.hasPendingNeighborhoodIntro() &&
+      this.lastIntroBypassEpoch !== introEpoch;
+    if (introOwed) this.lastIntroBypassEpoch = introEpoch;
     const cached = openerServe || introOwed ? null : this.findNearestUnplayedCache(position);
     if (cached) {
       const servedKey = cached.rotation?.subjectKey ?? landmarkSubjectKey(cached.topic.split(' — ')[0].trim());
@@ -700,6 +715,7 @@ class StoryCacheService {
     this.cache = [];
     this.openerPending = true;
     this.openerIntroContext = null;
+    this.lastIntroBypassEpoch = 0;
     this.missedQueue = [];
     this.prefetchTargets = [];
     this.lastFetchPosition = null;
