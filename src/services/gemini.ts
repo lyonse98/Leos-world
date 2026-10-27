@@ -74,6 +74,15 @@ export interface NarrationResult {
   // failure. Absent = false.
   decisionConsumed?: boolean;
   designedSilence?: boolean;
+  // Never-starve ladder (pre-publish stack Item 2, Oct 27, 2026):
+  // whether this serve actually attempted a live generation, and —
+  // when the text comes back EMPTY — which rung of the ladder the
+  // cycle stopped on. The app reads them to tell paced emptiness
+  // (decision declined, but the player is busy) from STARVED
+  // emptiness (idle player, nothing attempted): only the second is
+  // a defect, and it is telemetered by reason ('starved-cycle').
+  generationAttempted?: boolean;
+  emptyReason?: string;
 }
 
 const EMPTY_NARRATION: NarrationResult = { text: '', subject: '', context: '', mode: 'walking', rotation: null };
@@ -1140,7 +1149,17 @@ class GeminiService {
     position: Position,
     destination?: string,
     onChunk?: (text: string) => void,
-    opts?: { requireWelcomeStory?: boolean; discoveryPosition?: Position; introContextReplay?: string | null }
+    opts?: {
+      requireWelcomeStory?: boolean;
+      discoveryPosition?: Position;
+      introContextReplay?: string | null;
+      // Never-starve ladder (pre-publish stack Item 2): the app sets
+      // this when the player queue is empty AND nothing is playing —
+      // the one state where a tracker "not yet" may not end the
+      // cycle, because nothing else will fill the silence. See the
+      // forced-refill branch in the main path below.
+      queueStarved?: boolean;
+    }
   ): Promise<NarrationResult> {
     if (!this.ai) {
       return { ...EMPTY_NARRATION, text: "Hey, AI's still loading up. Give me just a second." };
@@ -1318,9 +1337,32 @@ class GeminiService {
       factPack.areaInfo.neighborhood
     );
 
+    // Never-starve refill (pre-publish stack Item 2, Oct 27, 2026):
+    // Erik's doctrine — "something should always be trying to be
+    // told, so Gemini text/TTS is the only holdup, never the
+    // decider." When the app reports the player idle with an EMPTY
+    // queue, pacing has nothing left to pace: the tracker's "not
+    // yet" (today only ever a no_change decline while a story was
+    // recently heard or playing — audit F-6) must not end the cycle.
+    // The decision is forced to the movement rung and the cycle
+    // proceeds to normal target selection (landmark → Tier-1 revisit
+    // → area), which attempts a generation from the fact pack at
+    // hand. requireWelcomeStory is exempt: the opener's cycle may
+    // not deal a landmark as the tour's first story (the RC-7
+    // shape), and opener pacing belongs to the welcome machinery.
+    // The forced decision is a real decision: the result carries
+    // decisionConsumed from the target outcome exactly as a
+    // tracker-yes serve would, so a failed forced serve earns the
+    // same refund consideration, no more, no less.
+    let forcedRefill = false;
     if (!shouldTell) {
-      console.log('[Gemini] shouldTell=false — returning empty. context:', context);
-      return { ...EMPTY_NARRATION, context, mode: factPack.mode, decisionConsumed: false };
+      if (opts?.queueStarved && !opts?.requireWelcomeStory) {
+        forcedRefill = true;
+        trackDiag('pipeline', 'starved-refill', `tracker declined (${context}); queue empty and player idle — forced to the movement rung`);
+      } else {
+        console.log('[Gemini] shouldTell=false — returning empty. context:', context);
+        return { ...EMPTY_NARRATION, context, mode: factPack.mode, decisionConsumed: false, emptyReason: 'should-tell' };
+      }
     }
 
     // Detect a return visit: if the area subject key already has told angles,
@@ -1331,6 +1373,10 @@ class GeminiService {
     // because the serve is still the tour's neighborhood welcome; letting
     // it narrow to a landmark was the Oct 26, 2026 missing-intro defect.
     let effectiveContext = context;
+    // A forced refill runs as a movement story (Item 2): the MOVEMENT
+    // prompt context is the honest one — the car IS moving; only the
+    // tracker's pacing said wait.
+    if (forcedRefill) effectiveContext = 'moved';
     if (context === 'neighborhood_intro') {
       const areaKey = areaSubjectKey(position.lat, position.lng);
       const hasPriorCoverage = storyCoverage.getToldAngles(areaKey).length > 0;
@@ -1503,6 +1549,14 @@ class GeminiService {
       console.log(`[Gemini] Cached story for "${cached.topic}" already heard — generating a fresh one`);
     }
 
+    // Never-starve bookkeeping (Item 2): flips true the moment this
+    // serve actually attempts a live generation, so the app can
+    // distinguish an attempted-but-failed cycle (Gemini is the
+    // holdup — acceptable) from a cycle that ended having attempted
+    // nothing while the queue sat empty (starvation — telemetered
+    // by reason at the app layer).
+    let generationAttempted = false;
+
     // preferBanked made real (fix stack RC-6, Oct 27, 2026): while
     // the Gemini PLAYBACK engine is tripped, a live generation's
     // audio cannot sound through it — the telling would fall back
@@ -1516,7 +1570,7 @@ class GeminiService {
     // it, so "prefer banked" preferred nothing.)
     if (audioHealth.preferBanked()) {
       trackDiag('pipeline', 'live-skipped-breaker', 'Gemini playback engine tripped — banked serves only this cycle, live generation declined');
-      return { ...EMPTY_NARRATION, context: effectiveContext, mode: factPack.mode, decisionConsumed: false };
+      return { ...EMPTY_NARRATION, context: effectiveContext, mode: factPack.mode, decisionConsumed: false, emptyReason: 'breaker-banked-only' };
     }
 
     // Highway doctrine (fix stack item 9, Oct 27, 2026): at freeway
@@ -1556,6 +1610,7 @@ class GeminiService {
           angle: areaRotation.angle,
           significance: factPack.areaInfo.majorArea ? 'major-area' : undefined,
         };
+        generationAttempted = true;
         const areaText = await this.generateStory(
           position, factPack, areaTarget, effectiveContext, depthLevel, depthCycle, destination, onChunk, true, versionKey
         );
@@ -1569,12 +1624,18 @@ class GeminiService {
             rotation: areaTarget.rotation,
             major: areaTarget.significance === 'major-area',
             decisionConsumed: true,
+            generationAttempted: true,
           };
         }
-        return { ...EMPTY_NARRATION, context: effectiveContext, mode: factPack.mode, decisionConsumed: true, designedSilence: true };
+        // The area generation was ATTEMPTED and came back empty —
+        // designed silence stands (Item 2 does not retry the
+        // corridor), and generationAttempted keeps the app from
+        // counting this cycle as starved.
+        return { ...EMPTY_NARRATION, context: effectiveContext, mode: factPack.mode, decisionConsumed: true, designedSilence: true, generationAttempted: true };
       }
     }
 
+    generationAttempted = true;
     const text = await this.generateStory(
       position, factPack, target, effectiveContext, depthLevel, depthCycle, destination, onChunk, true, versionKey
     );
@@ -1601,6 +1662,11 @@ class GeminiService {
           ? storyCoverage.isMajorSubject(subjectKey) || (targetPlace ? placesService.isTier1Landmark(targetPlace) : false)
           : false,
       decisionConsumed: true,
+      // An attempted generation that returned empty is Gemini being
+      // the holdup (Item 2's acceptable case) — the reason tag keeps
+      // it distinct from a never-attempted cycle in telemetry.
+      generationAttempted,
+      emptyReason: text && text.trim().length > 0 ? undefined : 'generation-empty',
     };
   }
 

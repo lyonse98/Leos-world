@@ -146,9 +146,23 @@ class StoryCacheService {
   // this set earns the app a decision refund); designedSilence — an
   // empty result that is the highway doctrine working as designed,
   // not a failure. Reset at the start of every serve call.
-  private lastServeInfo: { decisionConsumed: boolean; designedSilence: boolean } | null = null;
+  // generationAttempted / emptyReason ride along (pre-publish stack
+  // Item 2): the app's starved-cycle diagnostic reads them to tell
+  // an attempted-but-empty cycle (Gemini was the holdup) from one
+  // that ended having attempted nothing while the queue sat empty.
+  private lastServeInfo: {
+    decisionConsumed: boolean;
+    designedSilence: boolean;
+    generationAttempted: boolean;
+    emptyReason: string | null;
+  } | null = null;
 
-  getLastServeInfo(): { decisionConsumed: boolean; designedSilence: boolean } | null {
+  getLastServeInfo(): {
+    decisionConsumed: boolean;
+    designedSilence: boolean;
+    generationAttempted: boolean;
+    emptyReason: string | null;
+  } | null {
     return this.lastServeInfo;
   }
 
@@ -282,9 +296,13 @@ class StoryCacheService {
   async tryGetStoryForPosition(
     position: Position,
     mode: MovementModeHysteresis,
-    onChunk?: (text: string) => void
+    onChunk?: (text: string) => void,
+    // Never-starve ladder (pre-publish stack Item 2): the app passes
+    // queueStarved when the player is idle with an empty queue; it
+    // threads into the gemini serve, where it arms the forced refill.
+    opts?: { queueStarved?: boolean }
   ): Promise<{ story: string; fromCache: boolean; topic: string; subject: string; context: string; rotation: StoryRotation | null; fromLibrary: boolean; audioUrl?: string; anchorLat?: number; anchorLng?: number; major?: boolean; storyId: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; generatedAt: number } | null> {
-    this.lastServeInfo = { decisionConsumed: false, designedSilence: false };
+    this.lastServeInfo = { decisionConsumed: false, designedSilence: false, generationAttempted: false, emptyReason: null };
     this.pruneStalePrefetches(position);
     const openerServe = this.openerPending;
     // While the opener is pending the local cache is not consulted at
@@ -401,14 +419,19 @@ class StoryCacheService {
         requireWelcomeStory: openerServe,
         discoveryPosition,
         introContextReplay: openerServe ? this.openerIntroContext : null,
+        queueStarved: opts?.queueStarved === true,
       });
       // Serve-outcome flags for the app's fetch cycle (fix stack
       // RC-4/item 9): whether the tracker's movement decision was
       // consumed by this serve, and whether an empty result is
       // DESIGNED silence (highway doctrine) rather than a failure.
+      // Item 2 adds the attempt record the starved-cycle diagnostic
+      // reads.
       this.lastServeInfo = {
         decisionConsumed: result.decisionConsumed === true,
         designedSilence: result.designedSilence === true,
+        generationAttempted: result.generationAttempted === true,
+        emptyReason: result.emptyReason ?? null,
       };
       console.log('[StoryCache] getTourNarration returned:', { textLen: result.text?.length || 0, subject: result.subject, mode: result.mode });
       // Snapshot the reserved serve's intro decision (Pass 1) — taken

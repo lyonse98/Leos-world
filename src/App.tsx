@@ -962,7 +962,12 @@ function App() {
 
     try {
       setPipelineStatus('requesting story');
-      const result = await storyCache.tryGetStoryForPosition(position, position.speed !== null && position.speed >= 6.0 ? 'driving' : 'walking');
+      // Never-starve input (pre-publish stack Item 2, Oct 27, 2026):
+      // the serve is told whether the player is idle with an EMPTY
+      // waiting queue — the one state where a pacing decline may not
+      // end the cycle, because nothing else is coming to fill it.
+      const queueStarved = voice.getQueueLength() === 0 && !voice.isPlayingStory();
+      const result = await storyCache.tryGetStoryForPosition(position, position.speed !== null && position.speed >= 6.0 ? 'driving' : 'walking', undefined, { queueStarved });
 
       if (bridgeTimer !== null) clearTimeout(bridgeTimer);
 
@@ -1131,6 +1136,19 @@ function App() {
         console.log('[Tour] Designed silence at highway speed — no story could land in the exit corridor');
       } else {
         isFetchingStoryRef.current = false;
+        // Never-starve visibility (pre-publish stack Item 2): this
+        // cycle ended online with no story, and the serve's attempt
+        // record says no generation was attempted, while the queue
+        // was empty and the player idle — that is starvation, the
+        // decider-caused silence Erik's doctrine forbids, and it is
+        // filed BY REASON so the retest can count what remains. (An
+        // attempted-but-empty cycle — generationAttempted set — is
+        // Gemini being the holdup, which the doctrine accepts; the
+        // text diagnostic below already covers it.)
+        const serveInfo = storyCache.getLastServeInfo();
+        if (queueStarved && serveInfo && !serveInfo.generationAttempted && !serveInfo.designedSilence) {
+          trackDiag('pipeline', 'starved-cycle', `cycle ended empty with no generation attempted (${serveInfo.emptyReason ?? 'unclassified'})`);
+        }
         // Decision refund (fix stack RC-4): this serve consumed the
         // movement decision and produced nothing — give the decision
         // back, so the retry the completion handler schedules in 8s
