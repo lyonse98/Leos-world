@@ -14,6 +14,7 @@ import { pickOpener, openerAudioUrl, type PuckOpener } from './services/openers'
 import { heardStories, rotateUserKey } from './services/heardStories';
 import { tasteProfile } from './services/tasteProfile';
 import { storyCoverage, landmarkSubjectKey } from './services/storyCoverage';
+import { latencyModel } from './services/latencyModel';
 
 import { ambientAudio } from './services/ambientAudio';
 import { storyLikes } from './services/storyLikes';
@@ -974,6 +975,9 @@ function App() {
           model: LEO_MODEL_ID,
         });
       }
+      // Feed the adaptive look-ahead (Area D): this story's fetch+text
+      // time joins the rolling median that aims the next discovery.
+      if (fetchTextS) latencyModel.recordFetchText(parseFloat(fetchTextS));
       prevStoryTimingEndRef.current = voiceTiming.playbackEndAt ?? speechEndNow;
       fetchCycleRef.current = null;
 
@@ -1047,7 +1051,7 @@ function App() {
     if (isTourStarted || !geolocation.position || !isOnline) return;
     if (Date.now() - landingWarmupAtRef.current < 60_000) return;
     landingWarmupAtRef.current = Date.now();
-    storyCache.prefetchForPosition(geolocation.position, geolocation.movementMode).catch(() => {});
+    storyCache.prefetchForPosition(geolocation.position, geolocation.movementMode, latencyModel.horizonS(null)).catch(() => {});
   }, [isTourStarted, geolocation.position, geolocation.movementMode, isOnline]);
 
   useEffect(() => {
@@ -1061,10 +1065,13 @@ function App() {
       setPrefetching(true);
       try {
         // Stock the road ahead while there is signal — this is what keeps Leo
-        // talking through dead zones on a long drive.
-        const generated = await storyCache.prefetchRouteAhead(geolocation.position, geolocation.movementMode);
+        // talking through dead zones on a long drive. The road is measured
+        // from the adaptive center (Area D): where the listener will be
+        // when the story now playing ends, plus measured pipeline latency.
+        const horizonS = latencyModel.horizonS(voiceRef.current.getCurrentStoryRemainingS());
+        const generated = await storyCache.prefetchRouteAhead(geolocation.position, geolocation.movementMode, horizonS);
         if (generated === 0) {
-          await storyCache.prefetchForPosition(geolocation.position, geolocation.movementMode);
+          await storyCache.prefetchForPosition(geolocation.position, geolocation.movementMode, horizonS);
         }
       } catch (error) {
         console.error('[Prefetch] Error:', error);

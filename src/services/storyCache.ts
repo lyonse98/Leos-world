@@ -4,6 +4,7 @@ import { geminiService, StoryRotation } from './gemini';
 import { storyCoverage, landmarkSubjectKey } from './storyCoverage';
 import { storyLibrary } from './storyLibrary';
 import { heardStories } from './heardStories';
+import { latencyModel } from './latencyModel';
 import { analytics } from './analytics';
 
 export interface CachedStory {
@@ -99,6 +100,15 @@ class StoryCacheService {
   private onNetworkStatusChange?: (online: boolean) => void;
   private onCacheChange?: (cache: CachedStory[]) => void;
   private onMissedQueueChange?: (count: number) => void;
+  // The discovery geometry of the most recent live fetch (Area D):
+  // which horizon was used and how far ahead of the fetch position the
+  // discovery center sat. Read by the app for story_timing's geometry
+  // fields (Area G) — the tuning record for the adaptive horizon.
+  private lastDiscoveryMeta: { horizonS: number; centerOffsetM: number; projectedCenter: { lat: number; lng: number } } | null = null;
+
+  getLastDiscoveryMeta(): { horizonS: number; centerOffsetM: number; projectedCenter: { lat: number; lng: number } } | null {
+    return this.lastDiscoveryMeta;
+  }
 
   setNetworkStatusCallback(cb: (online: boolean) => void) {
     this.onNetworkStatusChange = cb;
@@ -286,8 +296,22 @@ class StoryCacheService {
 
     try {
       console.log('[StoryCache] Calling getTourNarration for', position.lat.toFixed(5), position.lng.toFixed(5));
+      // Adaptive discovery geometry (Area D, Oct 26, 2026): while
+      // driving, the fact pack is gathered around where the listener
+      // will BE when this story speaks — current story remaining +
+      // measured fetch/synth latency — not around the spot underfoot.
+      // The serve itself (tracker, anchors, area) still keys off the
+      // real position; only discovery projects.
+      const horizonS = latencyModel.horizonS(null);
+      const discoveryPosition = mode === 'driving' ? this.anticipatedCenter(position, horizonS) : position;
+      this.lastDiscoveryMeta = {
+        horizonS: Math.round(horizonS),
+        centerOffsetM: Math.round(this.distance(position, discoveryPosition)),
+        projectedCenter: { lat: discoveryPosition.lat, lng: discoveryPosition.lng },
+      };
       const result = await geminiService.getTourNarration(position, undefined, onChunk, {
         requireWelcomeStory: openerServe,
+        discoveryPosition,
       });
       console.log('[StoryCache] getTourNarration returned:', { textLen: result.text?.length || 0, subject: result.subject, mode: result.mode });
       const story = result.text;
@@ -336,25 +360,29 @@ class StoryCacheService {
   }
 
   // Predictive radial: where the radial prefetch should be centered — the
-  // position the listener is ANTICIPATED to reach, projected along their
-  // heading by ~90 seconds of travel. The radial machinery itself is
-  // unchanged; only its center moves. At low speed the projection shrinks
-  // toward zero and the center converges on the current position, so no
-  // mode switching is needed. The distance is capped so a stale or
-  // glitchy heading can't throw the center across town.
-  private anticipatedCenter(position: Position): Position {
-    const LOOKAHEAD_S = 90;
-    const MAX_PROJECTION_M = 2500;
+  // position the listener is ANTICIPATED to reach when the story being
+  // fetched would actually speak, projected along their heading by the
+  // adaptive horizon (Area D, Oct 26, 2026): the current story's
+  // remaining time plus the rolling median of measured fetch+synth
+  // latency, replacing the fixed ~90s this used to hard-code. On the
+  // Oct 26 drive the fixed horizon aimed discovery at where the
+  // listener WAS applying for the job; with 40–60s of cell latency the
+  // story landed beside or behind them. At low speed the projection
+  // shrinks toward zero and the center converges on the current
+  // position, so no mode switching is needed. The distance is capped
+  // so a stale or glitchy heading can't throw the center across town.
+  private anticipatedCenter(position: Position, horizonS: number): Position {
+    const MAX_PROJECTION_M = 4000;
     const speed = position.speed ?? 0;
     const heading = position.heading;
     if (heading === null || isNaN(heading) || speed < 1.5) return position;
-    const distance = Math.min(speed * LOOKAHEAD_S, MAX_PROJECTION_M);
+    const distance = Math.min(speed * horizonS, MAX_PROJECTION_M);
     if (distance < 50) return position;
     const projected = offsetPositionByHeading(position, heading, distance);
     return { ...position, lat: projected.lat, lng: projected.lng };
   }
 
-  async prefetchForPosition(position: Position, mode: MovementModeHysteresis): Promise<void> {
+  async prefetchForPosition(position: Position, mode: MovementModeHysteresis, horizonS?: number): Promise<void> {
     if (!this.isOnline || this.isPrefetching) return;
     // Trigger at 60% capacity so the buffer starts refilling well before it's
     // empty — this is what keeps at least one story queued during fast driving.
@@ -373,7 +401,7 @@ class StoryCacheService {
     // Generate around the anticipated position, and anchor the cached
     // story there — serve-time distance and freshness checks then measure
     // against where the listener will be, not where they were.
-    const center = this.anticipatedCenter(position);
+    const center = this.anticipatedCenter(position, horizonS ?? latencyModel.horizonS(null));
 
     try {
       const result = await geminiService.prefetchStory(center);
@@ -404,7 +432,7 @@ class StoryCacheService {
   // Stocks the buffer with stories for the road AHEAD, while there is still
   // signal. This is what lets Leo keep talking through a dead zone: the
   // stories were already paid for and written before the bars dropped.
-  async prefetchRouteAhead(position: Position, mode: MovementModeHysteresis): Promise<number> {
+  async prefetchRouteAhead(position: Position, mode: MovementModeHysteresis, horizonS?: number): Promise<number> {
     if (!this.isOnline || this.isPrefetchingAhead) return 0;
     const triggerThreshold = Math.floor(this.maxBuffer(mode) * 0.6);
     if (this.unplayedCount() >= triggerThreshold) return 0;
@@ -419,6 +447,12 @@ class StoryCacheService {
     this.prunePrefetchTargets();
     let generated = 0;
 
+    // The radial offsets now start from the ADAPTIVE center (Area D):
+    // the road the listener reaches when the current story ends plus
+    // pipeline latency — not from the spot underfoot, which the offsets
+    // alone used to measure from (double-counting "now" as "ahead").
+    const base = this.anticipatedCenter(position, horizonS ?? latencyModel.horizonS(null));
+
     try {
       // Freeway speeds (>= 25 m/s ~ 56 mph) get wider offsets so the queue
       // stays full when the listener is covering ground fast.
@@ -431,7 +465,7 @@ class StoryCacheService {
         if (!this.isOnline) break;
         if (this.unplayedCount() >= this.maxBuffer(mode)) break;
 
-        const target = offsetPositionByHeading(position, position.heading as number, offset);
+        const target = offsetPositionByHeading(base, position.heading as number, offset);
 
         if (this.wasTargetPrefetched(target)) continue;
 

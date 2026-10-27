@@ -8,6 +8,7 @@ import { tasteProfile } from '../services/tasteProfile';
 import { geminiAudio, TTS_MODEL } from '../services/geminiAudio';
 import { quotaGuard } from '../services/quotaGuard';
 import { audioHealth } from '../services/audioHealth';
+import { latencyModel } from '../services/latencyModel';
 import { analytics, trackDiag } from '../services/analytics';
 import { pickStallPhrase, stallPhraseAudioUrl } from '../services/stallPhrases';
 
@@ -134,14 +135,21 @@ const REACH_DRIVING_M = 2000;
 const REACH_WALKING_M = 100;
 const REACH_STATIONARY_M = 30;
 
-// Freeway staleness gate (Erik field report, Oct 24): the behind-you exemption
-// above is right at city speeds — absolute framing keeps a passed landmark
-// worth hearing. At freeway speed it breaks down: a story can air up to the
-// full 2 km reach BEHIND the listener, over a minute of road already gone,
-// and it lands as out-of-area. So at freeway speed only, an anchor far behind
-// the direction of travel is stale and the story is dropped instead.
+// Behind-me staleness gate (Erik field report, Oct 24; generalized by
+// Area D, Oct 26, 2026): the behind-you exemption is right at walking
+// and dwell — absolute framing keeps a passed landmark worth hearing
+// when you are barely moving. At freeway speed it broke down first (a
+// story airing up to the full 2 km reach BEHIND the listener, over a
+// minute of road already gone), so the original gate fired only there.
+// The Oct 26 drive showed the same failure at surface-street speeds —
+// stories narrated about places already passed — with no gate at all.
+// The threshold is now speed-scaled: 1500m at freeway speed, 600m from
+// 8 m/s, 400m from 6 m/s (driving entry), and no drop below driving
+// speeds — walking behavior is unchanged.
 const FREEWAY_SPEED_MPS = 20; // ~45 mph
 const STALE_BEHIND_FREEWAY_M = 1500;
+const STALE_BEHIND_SURFACE_M = 600;
+const STALE_BEHIND_DRIVING_M = 400;
 
 // Deliberate silence between stories, by movement mode. The gap is measured
 // from the previous story's last audio frame to the next story's first. Too
@@ -698,6 +706,11 @@ export const useVoice = () => {
           topic: pb.topic ?? '',
         });
       } catch { /* a metric must never break a settle */ }
+      // Feed the adaptive look-ahead (Area D): how long stories
+      // actually sound is one of its three inputs.
+      if (settle.sounded && settle.soundedMs > 0) {
+        latencyModel.recordStoryDuration(settle.soundedMs / 1000);
+      }
     }
     pb.onSettleDetail?.(settle);
     pb.onEnd?.(delivered);
@@ -929,13 +942,27 @@ export const useVoice = () => {
     return null;
   };
 
-  // True only at freeway speed, with a known direction of travel, when the
-  // story's anchor sits far BEHIND the listener (>90° off heading, beyond
-  // STALE_BEHIND_FREEWAY_M). Conservative by design: any unknown → false.
-  const isFarBehindAtFreeway = (item: StoryQueueItem, current: CurrentPosition, d: number): boolean => {
+  // How far behind the direction of travel an anchor may sit at this
+  // speed before the story is stale. Infinity below driving entry —
+  // the gate simply does not exist for walking or dwell.
+  const behindThresholdM = (speed: number): number =>
+    speed >= FREEWAY_SPEED_MPS
+      ? STALE_BEHIND_FREEWAY_M
+      : speed >= 8
+        ? STALE_BEHIND_SURFACE_M
+        : speed >= 6
+          ? STALE_BEHIND_DRIVING_M
+          : Number.POSITIVE_INFINITY;
+
+  // True at driving speeds, with a known direction of travel, when the
+  // story's anchor sits far BEHIND the listener (>90° off heading,
+  // beyond the speed-scaled threshold). Conservative by design: any
+  // unknown → false.
+  const isFarBehindAtSpeed = (item: StoryQueueItem, current: CurrentPosition, d: number): boolean => {
     if (item.lat === undefined || item.lng === undefined) return false;
-    if (typeof current.speed !== 'number' || current.speed < FREEWAY_SPEED_MPS) return false;
-    if (d <= STALE_BEHIND_FREEWAY_M) return false;
+    if (typeof current.speed !== 'number') return false;
+    const threshold = behindThresholdM(current.speed);
+    if (!Number.isFinite(threshold) || d <= threshold) return false;
     const heading = resolveTravelHeading(current);
     if (heading === null) return false;
     const dLng = (item.lng - current.lng) * Math.cos((current.lat * Math.PI) / 180);
@@ -957,14 +984,17 @@ export const useVoice = () => {
       mode === 'driving' ? REACH_DRIVING_M : mode === 'walking' ? REACH_WALKING_M : REACH_STATIONARY_M;
     if (d > reach) return false;
 
-    // Freeway exception to the behind-you exemption below: at freeway speed
-    // an anchor far behind the direction of travel is out of the area the
-    // listener is in — drop it rather than narrate yesterday's road.
-    if (isFarBehindAtFreeway(item, current, d)) {
-      console.log(`[Voice] Dropping stale highway story — anchor ${Math.round(d)}m behind at freeway speed`);
+    // Behind-me exception to the exemption below: at driving speeds an
+    // anchor far behind the direction of travel (speed-scaled distance)
+    // is out of the area the listener is in — drop it rather than
+    // narrate yesterday's road. The freeway case keeps its historical
+    // source name; surface-street drops report 'stale_behind'.
+    if (isFarBehindAtSpeed(item, current, d)) {
+      const freeway = typeof current.speed === 'number' && current.speed >= FREEWAY_SPEED_MPS;
+      console.log(`[Voice] Dropping stale ${freeway ? 'highway' : 'behind-me'} story — anchor ${Math.round(d)}m behind at ${Math.round(current.speed ?? 0)} m/s`);
       // Observational only: count stale drops for the daily rollup.
       try {
-        analytics.track('story_dropped', null, undefined, { source: 'stale_highway', topic: item.topic ?? '' });
+        analytics.track('story_dropped', null, undefined, { source: freeway ? 'stale_highway' : 'stale_behind', topic: item.topic ?? '' });
       } catch { /* a metric must never break the gate */ }
       return false;
     }
@@ -1007,14 +1037,14 @@ export const useVoice = () => {
     // synthesis quota warming them.
     if (next.audioUrl) return;
 
-    // Don't spend synthesis (quota) on a story the freeway staleness gate
-    // will drop at dequeue — at highway speed a far-behind next story is
-    // exactly the one most likely never to air.
+    // Don't spend synthesis (quota) on a story the behind-me staleness
+    // gate will drop at dequeue — a far-behind next story is exactly
+    // the one most likely never to air.
     const presynthPos = currentPositionProviderRef.current?.();
     if (presynthPos && next.lat !== undefined && next.lng !== undefined) {
       const dNext = calculateDistance(presynthPos.lat, presynthPos.lng, next.lat, next.lng);
-      if (isFarBehindAtFreeway(next, presynthPos, dNext)) {
-        console.log('[Voice] Skipping pre-synthesis — next story is stale highway content');
+      if (isFarBehindAtSpeed(next, presynthPos, dNext)) {
+        console.log('[Voice] Skipping pre-synthesis — next story is stale behind-me content');
         return;
       }
     }
@@ -1212,6 +1242,14 @@ export const useVoice = () => {
         ]);
         storyTimingRef.current.synthResolvedAt = Date.now();
         storyTimingRef.current.synthCacheHit = ttsResult.cacheHit;
+        // Feed the adaptive look-ahead (Area D): real synthesis time is
+        // one of its inputs. Cache hits are not synthesis — skip them,
+        // or the median would claim the pipeline is instant.
+        if (!ttsResult.cacheHit && storyTimingRef.current.synthRequestAt) {
+          latencyModel.recordSynth(
+            (storyTimingRef.current.synthResolvedAt - storyTimingRef.current.synthRequestAt) / 1000
+          );
+        }
         url = ttsResult.url;
       }
       const audio = audioElRef.current;
@@ -1947,6 +1985,19 @@ export const useVoice = () => {
     return (Date.now() - current.startedAt) / 1000;
   }, []);
 
+  // Estimated seconds until the story on air finishes — the adaptive
+  // look-ahead's "current story remaining" input (Area D). Leo speaks
+  // ~13 chars/sec (the same rate the Q&A failsafe sizes from); the
+  // estimate only steers geometry, so roughness is fine. Null when
+  // nothing is on air.
+  const getCurrentStoryRemainingS = useCallback((): number | null => {
+    const current = currentSpokenRef.current;
+    if (!current || !current.text) return null;
+    const totalEstS = current.text.length / 13;
+    const elapsedS = (Date.now() - current.startedAt) / 1000;
+    return Math.max(0, totalEstS - elapsedS);
+  }, []);
+
   // The subject of the story on air, or null. Used to tell whether a second
   // tap on the same thumb refers to the same story or a new one.
   const getCurrentStoryTopic = useCallback((): string | null => {
@@ -1991,6 +2042,7 @@ export const useVoice = () => {
     recordSpokenText,
     rateCurrentStory,
     getCurrentStorySeconds,
+    getCurrentStoryRemainingS,
     getCurrentStoryTopic,
     setOnStoryStart,
     getLastSpokenSentences,

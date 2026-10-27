@@ -253,13 +253,21 @@ class GeminiService {
     return 'driving';
   }
 
-  async gatherFactPack(position: Position): Promise<StoryFactPack> {
+  async gatherFactPack(position: Position, discoveryPosition?: Position): Promise<StoryFactPack> {
     let places: NearbyPlace[] = [];
     let areaInfo: AreaInfo = { neighborhood: null, city: null, district: null, street: null };
     let wikiContext = '';
     let osmContext = '';
     let wikiTopTitle = '';
     const deepMode = locationTracker.getDwellDepthLevel() !== null;
+    // Discovery geometry (Area D, Oct 26, 2026): PLACES discovery runs
+    // around the projected center — where the listener will be when
+    // this story speaks — so candidates enter the pipeline while still
+    // AHEAD. Area identity, Wikipedia and OSM enrichment stay at the
+    // real position: they describe where the listener IS, and the
+    // tracker keys neighborhood crossings off them. The places service
+    // still adds its own small heading look-ahead on top.
+    const discovery = discoveryPosition ?? position;
     try {
       // Bounded: on a half-dead connection any one of these sources can
       // hang far longer than a story is worth. On timeout the pack
@@ -267,7 +275,7 @@ class GeminiService {
       // still warm in the background for the next fetch).
       const [placesResult, areaResult, wikiResult, osmResult] = await this.withTimeout(
         Promise.all([
-          placesService.getNearbyLandmarks(position, 100),
+          placesService.getNearbyLandmarks(discovery, 100),
           placesService.getAreaInfo(position),
           wikipedia.getNearbyArticles(position, deepMode),
           osmService.getNearbyFeatures(position, position.speed),
@@ -295,7 +303,7 @@ class GeminiService {
     // dataset lookup — synchronous, no network; wrapped so it can
     // never break the pack.
     try {
-      const registryCandidates = historicRegistry.candidatesAsPlaces(position, 500);
+      const registryCandidates = historicRegistry.candidatesAsPlaces(discovery, 500);
       const extras: NearbyPlace[] = [];
       for (const rc of registryCandidates) {
         // Same place under a matching name: the Google entry carries
@@ -403,7 +411,7 @@ class GeminiService {
     }
   }
 
-  private resolveSubject(factPack: StoryFactPack, allowRevisit: boolean = false): StorySubject | null {
+  private resolveSubject(factPack: StoryFactPack, allowRevisit: boolean = false, position?: Position): StorySubject | null {
     if (factPack.places.length === 0) return null;
 
     this.markTier1Majors(factPack);
@@ -427,7 +435,34 @@ class GeminiService {
     };
 
     const unheard = factPack.places.filter(p => !heardStories.hasHeardSubject(p.name) && !blocked(p));
-    if (unheard.length > 0) return pickStorySubject(unheard, this.recentPrimaryTags());
+    if (unheard.length > 0) {
+      // Bearing discipline at SELECTION (Area D, Oct 26, 2026): at
+      // driving speed with a trustworthy heading, candidates in the
+      // rear hemisphere are ineligible while ANY forward candidate
+      // exists — selection, not just the dequeue gate, must refuse to
+      // spend a story on somewhere already passed. (The dequeue gate
+      // alone let surface-street behind-me narration through: it only
+      // fired at freeway speed, at dequeue, after the story was
+      // already written and queued.) The candidate's direction string
+      // is computed against the fetch heading by the places service.
+      // Dwell (allowRevisit) is exempt — parked, "behind" is meaningless;
+      // stops and unreliable headings never reach the speed gate.
+      if (
+        !allowRevisit &&
+        position &&
+        (position.speed ?? 0) >= 6 &&
+        position.heading !== null &&
+        !isNaN(position.heading)
+      ) {
+        const BEHIND = new Set(['directly behind you', 'behind to your right', 'behind to your left']);
+        const forward = unheard.filter(p => !BEHIND.has(p.direction));
+        if (forward.length > 0 && forward.length < unheard.length) {
+          trackDiag('pipeline', 'behind-filter', `selection excluded ${unheard.length - forward.length} behind-heading candidate(s)`);
+          return pickStorySubject(forward, this.recentPrimaryTags());
+        }
+      }
+      return pickStorySubject(unheard, this.recentPrimaryTags());
+    }
 
     if (!allowRevisit) {
       // Moving with every nearby landmark already told this session: fall
@@ -499,7 +534,7 @@ class GeminiService {
     // stationary contexts are the AREA_ANGLES strings themselves. In every
     // moving context the session lockout applies instead.
     const allowRevisit = !!context && context.startsWith('stationary_');
-    const subject = isFirstInNeighborhood ? null : this.resolveSubject(factPack, allowRevisit);
+    const subject = isFirstInNeighborhood ? null : this.resolveSubject(factPack, allowRevisit, position);
 
     if (subject) {
       const subjectKey = landmarkSubjectKey(subject.name);
@@ -761,7 +796,7 @@ class GeminiService {
     position: Position,
     destination?: string,
     onChunk?: (text: string) => void,
-    opts?: { requireWelcomeStory?: boolean }
+    opts?: { requireWelcomeStory?: boolean; discoveryPosition?: Position }
   ): Promise<NarrationResult> {
     if (!this.ai) {
       return { ...EMPTY_NARRATION, text: "Hey, AI's still loading up. Give me just a second." };
@@ -774,7 +809,7 @@ class GeminiService {
     let factPack: StoryFactPack | null = null;
     let preliminaryCache: CachedStoryResult | null = null;
 
-    const factPackPromise = this.gatherFactPack(position);
+    const factPackPromise = this.gatherFactPack(position, opts?.discoveryPosition);
     // Pass the persona version as a partial version-key filter so old-persona
     // stories (with slang, meters, etc.) are never served from the preliminary
     // lookup. The full version key (with fact pack hash) is applied later.
