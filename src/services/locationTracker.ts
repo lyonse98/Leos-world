@@ -2,7 +2,7 @@ import { Position } from '../hooks/useGeolocation';
 import { supabase } from './supabase';
 import { storyStore } from './storyStore';
 import { heardStories } from './heardStories';
-import { storyCoverage } from './storyCoverage';
+import { storyCoverage, landmarkSubjectKey } from './storyCoverage';
 import { calculateDistance, resolveMovementMode, MovementModeHysteresis } from '../utils/geo';
 import { AREA_ANGLES } from './storyCoverage';
 
@@ -28,6 +28,16 @@ class LocationTracker {
   private recentStoryTexts: string[] = [];
   private lastKnownMode: MovementModeHysteresis = 'stationary';
   private storiesToldCount = 0;
+  // The neighborhood whose welcome intro has been DETECTED but not yet
+  // GENERATED (Pass 1, Oct 27, 2026). A neighborhood transition is
+  // recorded in lastNeighborhood the moment shouldTellNewStory sees
+  // it — if the serve that detected it then fails, redirects, or is
+  // pre-empted, the welcome used to be silently consumed and never
+  // fired. The debt survives here instead: it is set on every
+  // transition (tour start included), re-offered by later decisions
+  // for the same neighborhood, and cleared only when a story is
+  // actually generated with an intro context (updateLastStoryTopic).
+  private pendingIntroNeighborhood: string | null = null;
   // Where and when the listener last settled in one spot. Drives the
   // dwell-triggered deep cuts: stand somewhere long enough and Leo stops
   // giving you the quick hits and starts giving you the full story.
@@ -121,6 +131,7 @@ class LocationTracker {
     if (!this.lastLocation) {
       const hasNeighborhood = !!(neighborhood && neighborhood.trim().length > 0);
       this.lastLocation = { position, landmarkNames, timestamp: Date.now(), storyDepthLevel: 0, depthCycle: 0, lastNeighborhood: neighborhood ?? null, storiesInNeighborhood: 0 };
+      if (hasNeighborhood && neighborhood) this.pendingIntroNeighborhood = neighborhood;
       // First story of the tour: if we know the neighborhood, lead with a brief
       // situating intro before diving into landmarks. Otherwise start normally.
       return { shouldTell: true, context: hasNeighborhood ? 'neighborhood_intro' : 'initial', depthLevel: 0, depthCycle: 0, isNeighborhoodIntro: hasNeighborhood };
@@ -150,12 +161,50 @@ class LocationTracker {
         lastNeighborhood: currentNeighborhood,
         storiesInNeighborhood: 0,
       };
+      // The chapter break is owed from this moment (Pass 1): if this
+      // serve's welcome never gets generated, later decisions re-offer
+      // it instead of the transition having been silently consumed.
+      if (currentNeighborhood) this.pendingIntroNeighborhood = currentNeighborhood;
+      return { shouldTell: true, context: 'neighborhood_intro', depthLevel: 0, depthCycle: 0, isNeighborhoodIntro: true };
+    }
+
+    // Chapter-break re-offer (Pass 1, Oct 27, 2026): the transition was
+    // recorded on an earlier call but its welcome was never generated
+    // (failed serve, redirect, pre-emption). The listener is still in
+    // that neighborhood — offer the welcome again.
+    if (
+      this.pendingIntroNeighborhood &&
+      currentNeighborhood &&
+      prevNeighborhood &&
+      currentNeighborhood.toLowerCase() === this.pendingIntroNeighborhood.toLowerCase() &&
+      prevNeighborhood.toLowerCase() === currentNeighborhood.toLowerCase()
+    ) {
+      this.lastLocation = {
+        position,
+        landmarkNames,
+        timestamp: Date.now(),
+        storyDepthLevel: this.lastLocation.storyDepthLevel,
+        depthCycle: this.lastLocation.depthCycle,
+        lastNeighborhood: currentNeighborhood,
+        storiesInNeighborhood: 0,
+      };
       return { shouldTell: true, context: 'neighborhood_intro', depthLevel: 0, depthCycle: 0, isNeighborhoodIntro: true };
     }
 
     // Track neighborhood even when it hasn't changed, so the first entry is recorded.
     if (currentNeighborhood && !prevNeighborhood) {
       this.lastLocation.lastNeighborhood = currentNeighborhood;
+      // Null → known during the opener phase (Pass 1): the tour began
+      // before the neighborhood resolved, so the first decision could
+      // only return 'initial'. If nothing has been told yet, the
+      // neighborhood welcome is still the owed first story — fire it
+      // now rather than letting the start area go unwelcomed.
+      if (this.storiesToldCount === 0) {
+        this.pendingIntroNeighborhood = currentNeighborhood;
+        this.lastLocation.position = position;
+        this.lastLocation.timestamp = Date.now();
+        return { shouldTell: true, context: 'neighborhood_intro', depthLevel: 0, depthCycle: 0, isNeighborhoodIntro: true };
+      }
     }
 
     if (hasMoved || hasNewLandmarks) {
@@ -240,6 +289,13 @@ class LocationTracker {
     rotation?: { subjectKey: string; angle: string } | null
   ) {
     if (this.lastLocation) {
+      // An intro-context story was actually generated: the owed
+      // neighborhood welcome (tour start or chapter break) is paid.
+      // Generation is the consumption point — a decision alone never
+      // clears the debt, which is what lets failed serves re-offer.
+      if (context === 'initial' || context === 'neighborhood_intro' || context === 'welcome_back') {
+        this.pendingIntroNeighborhood = null;
+      }
       this.lastLocation.lastStoryTopic = topic;
       this.lastLocation.lastStoryText = storyText;
       this.toldStories.add(topic.toLowerCase());
@@ -324,6 +380,34 @@ class LocationTracker {
     return this.toldStories.has(topic.toLowerCase());
   }
 
+  // A neighborhood welcome has been detected but not yet generated
+  // (see pendingIntroNeighborhood). storyCache consults this so a
+  // buffered story cannot take the serve on which the welcome is due.
+  hasPendingNeighborhoodIntro(): boolean {
+    return this.pendingIntroNeighborhood !== null;
+  }
+
+  // Pass 1 (Oct 27, 2026): a story that was mid-play when the page
+  // hid and then settled unheard is released for retelling later in
+  // the drive — out of the in-drive told set, out of the session
+  // lock, out of the in-memory heard set. Deliberately NOT undone:
+  // the durable heard record (Supabase) and the permanent coverage
+  // angles. Those are cross-session truth; the release is scoped to
+  // this drive, which is exactly the scope the field failure needs.
+  releaseInterruptedStory(topic: string): void {
+    if (!topic) return;
+    this.toldStories.delete(topic.toLowerCase());
+    this.saveToStorage();
+    const base = topic.split(' — ')[0].trim();
+    storyCoverage.unlockSubjectForSession(landmarkSubjectKey(base));
+    heardStories.unmarkHeard(topic);
+    if (this.lastLocation?.lastStoryTopic === topic) {
+      this.lastLocation.lastStoryTopic = undefined;
+      this.lastLocation.lastStoryText = undefined;
+    }
+    console.log(`[LocationTracker] Released interrupted story "${topic}" for retelling`);
+  }
+
   getAllToldStories(): string[] {
     return Array.from(this.toldStories);
   }
@@ -374,6 +458,7 @@ class LocationTracker {
 
   reset() {
     this.lastLocation = null;
+    this.pendingIntroNeighborhood = null;
     this.dwellAnchor = null;
     // Day-scoped lockout: a tour restart does NOT clear today's
     // landmark locks, aliases, or telling counts (see storyCoverage).

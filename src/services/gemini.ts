@@ -879,7 +879,7 @@ class GeminiService {
     position: Position,
     destination?: string,
     onChunk?: (text: string) => void,
-    opts?: { requireWelcomeStory?: boolean; discoveryPosition?: Position }
+    opts?: { requireWelcomeStory?: boolean; discoveryPosition?: Position; introContextReplay?: string | null }
   ): Promise<NarrationResult> {
     if (!this.ai) {
       return { ...EMPTY_NARRATION, text: "Hey, AI's still loading up. Give me just a second." };
@@ -915,11 +915,36 @@ class GeminiService {
     // (the storyCache opener), which covers the first serve even if
     // tracker state was warmed by an earlier fetch.
     const landmarkNames = factPack.places.map(p => p.name);
-    const decision = locationTracker.shouldTellNewStory(
+    let decision = locationTracker.shouldTellNewStory(
       position,
       landmarkNames,
       factPack.areaInfo.neighborhood
     );
+    // Opener replay (Pass 1, Oct 27, 2026): storyCache snapshots the
+    // intro decision of the reserved opener serve. If that serve's
+    // generation failed, this retry's fresh tracker call sees a
+    // consumed decision and would deal a landmark as the tour's first
+    // story — the exact Oct 27 commute failure. When the caller hands
+    // back the snapshot and the fresh decision is not itself an intro,
+    // replay the snapshot: this serve stays the welcome it was
+    // reserved to be. (The tracker's own owed-intro re-offer covers
+    // the mid-tour chapter-break case; this covers the opener, whose
+    // tracker state may have been warmed by an earlier fetch.)
+    if (
+      opts?.requireWelcomeStory === true &&
+      opts?.introContextReplay &&
+      decision.context !== 'initial' &&
+      decision.context !== 'neighborhood_intro'
+    ) {
+      const freshContext = decision.context;
+      decision = {
+        ...decision,
+        shouldTell: true,
+        context: opts.introContextReplay,
+        isNeighborhoodIntro: opts.introContextReplay === 'neighborhood_intro',
+      };
+      console.log(`[Gemini] Replaying snapshotted intro context "${opts.introContextReplay}" over fresh decision "${freshContext}"`);
+    }
     const introContext = decision.context === 'initial' || decision.context === 'neighborhood_intro';
     const cacheServeBlocked = introContext || opts?.requireWelcomeStory === true;
 

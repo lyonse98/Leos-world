@@ -6,6 +6,7 @@ import { storyLibrary } from './storyLibrary';
 import { heardStories } from './heardStories';
 import { latencyModel } from './latencyModel';
 import { analytics } from './analytics';
+import { locationTracker } from './locationTracker';
 
 export interface CachedStory {
   id: string;
@@ -105,6 +106,16 @@ class StoryCacheService {
   // and the tour opened mid-landmark-hunt. Cleared only by a live serve
   // that actually returns the first story.
   private openerPending = true;
+  // The intro context of the reserved opener serve, snapshotted the
+  // first time an opener serve's decision comes back as an intro
+  // (Pass 1, Oct 27, 2026). The tracker consumes its first-story
+  // decision inside getTourNarration BEFORE generation, so when the
+  // reserved serve's generation fails, a naive retry sees a consumed
+  // decision and deals a landmark as the tour's first story. The
+  // snapshot is handed back on the retry (introContextReplay) so the
+  // serve replays the intro it was reserved to be. Cleared when an
+  // opener serve actually returns a story, and on arm/reset.
+  private openerIntroContext: string | null = null;
   private prefetchTargets: PrefetchTarget[] = [];
   private isPrefetching = false;
   private isPrefetchingAhead = false;
@@ -247,7 +258,12 @@ class StoryCacheService {
     // While the opener is pending the local cache is not consulted at
     // all — the first story must be generated live as the welcome (see
     // the openerPending note). After the opener, serves are unchanged.
-    const cached = openerServe ? null : this.findNearestUnplayedCache(position);
+    // Pass 1: the same bypass applies while a mid-tour neighborhood
+    // welcome is owed (a chapter break) — a buffered story must not
+    // take the serve on which the welcome is due, or the new
+    // neighborhood gets entered without ever being introduced.
+    const introOwed = !openerServe && locationTracker.hasPendingNeighborhoodIntro();
+    const cached = openerServe || introOwed ? null : this.findNearestUnplayedCache(position);
     if (cached) {
       const servedKey = cached.rotation?.subjectKey ?? landmarkSubjectKey(cached.topic.split(' — ')[0].trim());
       // Tenant guard (Area C, Oct 26, 2026): a buffered story about a
@@ -334,11 +350,23 @@ class StoryCacheService {
       const result = await geminiService.getTourNarration(position, undefined, onChunk, {
         requireWelcomeStory: openerServe,
         discoveryPosition,
+        introContextReplay: openerServe ? this.openerIntroContext : null,
       });
       console.log('[StoryCache] getTourNarration returned:', { textLen: result.text?.length || 0, subject: result.subject, mode: result.mode });
+      // Snapshot the reserved serve's intro decision (Pass 1) — taken
+      // even when the text came back empty, because an empty text is
+      // exactly the failure the snapshot exists to repair on retry.
+      if (
+        openerServe &&
+        !this.openerIntroContext &&
+        (result.context === 'initial' || result.context === 'neighborhood_intro' || result.context === 'welcome_back')
+      ) {
+        this.openerIntroContext = result.context;
+      }
       const story = result.text;
       if (story && story.trim().length > 0) {
         this.openerPending = false;
+        this.openerIntroContext = null;
         if (openerServe) {
           // First-serve audit: was the tour's first story the welcome,
           // an area story, or a landmark? Aggregate-only (the daily
@@ -579,6 +607,7 @@ class StoryCacheService {
 
   armOpener(): void {
     this.openerPending = true;
+    this.openerIntroContext = null;
   }
 
   private findNearestUnplayedCache(position: Position): CachedStory | null {
@@ -663,6 +692,7 @@ class StoryCacheService {
   reset() {
     this.cache = [];
     this.openerPending = true;
+    this.openerIntroContext = null;
     this.missedQueue = [];
     this.prefetchTargets = [];
     this.lastFetchPosition = null;

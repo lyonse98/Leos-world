@@ -392,6 +392,20 @@ class StoryCoverageService {
     return false;
   }
 
+  // Pass 1 (Oct 27, 2026): release ONE subject (and its alias group)
+  // from the session lock — the counterpart to lockSubjectForSession
+  // for a story the platform killed before it was heard, so it can be
+  // retold later in the same drive. Daily counts and coverage angles
+  // are NOT rolled back: they record that a telling happened today,
+  // which stays true.
+  unlockSubjectForSession(subjectKey: string): void {
+    this.syncDay();
+    for (const member of this.aliasGroupOf(subjectKey)) {
+      this.sessionLockedSubjects.delete(member);
+    }
+    this.saveDayState();
+  }
+
   // --- Daily cap (prominence-scaled) ---------------------------------------
   // A minor subject may be TOLD at most DAILY_MINOR_CAP times per
   // calendar day across all sessions. Majors (Tier-1, library) are

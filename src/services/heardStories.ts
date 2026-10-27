@@ -93,6 +93,19 @@ class HeardStoriesService {
     if (bare.length > 0) this.heardSubjects.add(bare);
   }
 
+  // Pass 1 (Oct 27, 2026): in-memory counterpart to markHeard for a
+  // story that was generated but never heard (killed by backgrounding
+  // mid-play), so it can be retold later in the same drive. The
+  // durable row written by record() is NOT deleted — the release is
+  // scoped to this drive's in-memory guards and does not rewrite the
+  // cross-session record.
+  unmarkHeard(topic: string): void {
+    const key = this.normalize(topic);
+    if (key.length > 0) this.heardTopics.delete(key);
+    const bare = normalizePlaceName(topic.split(' — ')[0]);
+    if (bare.length > 0) this.heardSubjects.delete(bare);
+  }
+
   async hydrate(): Promise<void> {
     if (this.hydrated) return;
     if (this.hydrating) return this.hydrating;
