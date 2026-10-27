@@ -2764,6 +2764,29 @@ export const useVoice = () => {
     return Math.max(0, totalEstS - elapsedS);
   }, []);
 
+  // The total estimated telling time of the location stories
+  // WAITING in the queue (Item 7 follow-up, Oct 27, 2026). The Q&A
+  // answer is spoken WITHOUT the front flag — by design it lines up
+  // behind the stories already promised to the road — so its
+  // failsafe horizon in App must span those stories too, exactly as
+  // the Item 5 follow-up taught it to span the story on air. Item
+  // 7's warm-head insertion made a two-deep waiting queue a normal
+  // state (warm head + priority item behind it); the sim's
+  // post-Item-7 runs caught the horizon falling short by precisely
+  // the second story (18 premature releases across the suite). The
+  // durable rule, stated once: the answer's horizon spans
+  // EVERYTHING that will sound before it — on-air remainder plus
+  // every waiting location story's estimated telling.
+  const getWaitingLocationStoriesRemainingS = useCallback((): number => {
+    let total = 0;
+    for (const item of storyQueueRef.current) {
+      if (!item.isLocationStory) continue;
+      const full = item.transitionText ? `${item.transitionText} ${item.text}` : item.text;
+      total += estimateSpeechDurationS(full);
+    }
+    return total;
+  }, []);
+
   // Median-timed presynth readiness (pre-publish stack Item 3,
   // Oct 27, 2026): Erik's concern was that presynth fires but lands
   // late, and nothing noticed. The deadline is the latency model's
@@ -2852,6 +2875,7 @@ export const useVoice = () => {
     rateCurrentStory,
     getCurrentStorySeconds,
     getCurrentStoryRemainingS,
+    getWaitingLocationStoriesRemainingS,
     getCurrentStoryTopic,
     setOnStoryStart,
     getLastSpokenSentences,

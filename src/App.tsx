@@ -757,7 +757,16 @@ function App() {
         // unchanged: the horizon is still bounded, just honest about
         // the wait it has to span.
         const onAirRemainingS = voice.getCurrentStoryRemainingS() ?? 0;
-        armAnswerFailsafe(answerFailsafeMs(fullAnswer) + onAirRemainingS * 1000);
+        // Item 7 follow-up (Oct 27, 2026): the answer lines up
+        // behind the WAITING stories too (it carries no front flag
+        // — they were promised first), and warm-head insertion made
+        // a two-deep waiting queue normal. The horizon spans all of
+        // it: on-air remainder + every waiting location story. The
+        // sim caught the shortfall as premature releases the same
+        // day Item 7 landed; the rule is now stated in one place
+        // (useVoice.getWaitingLocationStoriesRemainingS).
+        const waitingRemainingS = voice.getWaitingLocationStoriesRemainingS();
+        armAnswerFailsafe(answerFailsafeMs(fullAnswer) + (onAirRemainingS + waitingRemainingS) * 1000);
         const cycle = ++answerCycleRef.current;
         voice.speakTracked(fullAnswer, {
           onSettleDetail: (info) => {
