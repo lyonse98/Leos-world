@@ -6,9 +6,11 @@
 //   node scripts/library/build-corridors.mjs [--segments=id1,id2] [--tts=batch|live|off] [--no-ingest]
 //
 // One banked story per (segment, direction) from src/data/corridors.ts,
-// generated with the leo-v13 persona (the library's voice — see
-// bundle-corridors.mjs for why the persona is pinned to the v13
-// source) from free fact sources only: Wikipedia + OSM + Wikidata +
+// generated with the leo-v14 persona (Erik's ruling, Oct 27, 2026:
+// all new library content is v14 — the v1 bank was generated under
+// v13 before the ruling and is replaced through the swap in
+// ~/workspace/leos-world/v14-library-swap.md) from free fact
+// sources only: Wikipedia + OSM + Wikidata +
 // the historic registry, sampled at each neighborhood anchor along
 // the segment — the same sources, assembled the same way, as the
 // 345-story place corpus (lib.mjs assembleFacts). Audio: one Gemini
@@ -17,7 +19,7 @@
 // the same key and the builder never spends the last of it).
 //
 // Ingestion follows ingest.mjs exactly: audio → tts-audio bucket at
-// library/<place_key>/corridor.wav (x-upsert:false), rows →
+// library/<place_key>/corridor-v14.wav (x-upsert:false), rows →
 // story_library with Prefer: resolution=ignore-duplicates, keyed
 // (place_key = normalizePlaceKey(displayName), angle = 'corridor').
 // Re-runnable and resumable: the manifest is the progress record;
@@ -53,8 +55,8 @@ const ttsMode = argVal('tts', 'batch');
 const doIngest = !args.includes('--no-ingest');
 
 const app = await import('/tmp/leo-corridor-bundle.mjs');
-if (app.LEO_PERSONA_VERSION !== 'leo-v13') {
-  console.error(`[corridors] bundle persona is ${app.LEO_PERSONA_VERSION}, expected leo-v13 — re-run bundle-corridors.mjs`);
+if (app.LEO_PERSONA_VERSION !== 'leo-v14') {
+  console.error(`[corridors] bundle persona is ${app.LEO_PERSONA_VERSION}, expected leo-v14 (Erik's Oct 27 ruling: all new library content is v14) — re-run bundle-corridors.mjs`);
   process.exit(1);
 }
 const keys = await loadKeys();
@@ -120,6 +122,18 @@ function buildCorridorPrompt(segment, areaFacts) {
       'Where the drive climbs, crosses, or opens a view, say so; the road itself is the narrator\'s stage. ' +
       `LENGTH: about ${targetSentences} sentences — this stretch takes roughly ${traversalMin.toFixed(1)} minutes to drive at free-flow speed, and the story should fill most of that drive, finishing just before the road hands off to the next stretch. Depth from the facts at hand, never from invention.`
   );
+  // THE v14 BRIEF (Erik's rulings, Oct 27, 2026 — all new library
+  // content generates under this set; the neighborhood builder
+  // carries its twin): mission first, the WOW lead as a gate,
+  // portal connections SOURCE-GROUNDED (Ruling 2 — free invention
+  // is out, even for links), and the position-binding ban at
+  // segment scale.
+  parts.push(
+    'THE v14 BRIEF: This story exists to make the listener love this town more — to fall in love with the city for the first time, or all over again. ' +
+      'THE WOW LEAD: open with the single most compelling or surprising fact in the material above — the story\'s first breath is the best thing in the pack, shaped as a hook; never spend the lead on orientation or a date. ' +
+      'PORTAL, SOURCE-GROUNDED: every outward connection — neighborhood to bay, canyon, border, Navy, park — must be grounded in the material provided (the facts, published local history or lore, sourced local opinion); a connection you cannot ground, omit. Never invent a link. ' +
+      'POSITION-BINDING: narrate this stretch as a place unfolding in order; no expiring micro-claims — nothing "on your left" or "on your right," no "you are about to pass" a specific building. The segment is the frame; what is true of the stretch stays true for the whole telling.'
+  );
   return parts.join('\n\n');
 }
 
@@ -158,11 +172,17 @@ for (const segment of segments) {
     tts_model: TTS_MODEL,
     voice: TTS_VOICE,
     fact_sources: [...allSources],
+    // WOW/thin gate (Erik's ruling, Oct 27, 2026 — harmonized
+    // with the neighborhood rule): a segment whose assembled pack
+    // has neither Wikipedia nor the registry cannot support a
+    // genuine wow lead from sources; flag it listen-before-
+    // trusting in the v1 list.
+    thin_facts: !allSources.has('wikipedia') && !allSources.has('historic_registry'),
   };
   byId.set(segment.id, entry);
   manifest.push(entry);
   saveManifest();
-  console.log(`[corridors] ${segment.id}: generated ${text.length} chars`);
+  console.log(`[corridors] ${segment.id}: generated ${text.length} chars${entry.thin_facts ? ' (THIN FACTS — listen before trusting)' : ''}`);
   await sleep(2000);
 }
 
@@ -267,7 +287,11 @@ if (doIngest && ready.length > 0) {
       .replace(/&/g, 'and')
       .replace(/[^a-z0-9 .'-]/gi, '')
       .replace(/\s+/g, ' ');
-    const bucketKey = `library/${asciiPlace}/corridor.wav`;
+    // Versioned audio key (v14 re-bank, Oct 27, 2026): the v13
+    // object already sits at corridor.wav and storage is
+    // no-upsert — v14 audio must land at a NEW key or the swapped
+    // row would point at v13 audio.
+    const bucketKey = `library/${asciiPlace}/corridor-v14.wav`;
     e.audio_path = bucketKey;
     saveManifest();
     const bytes = readFileSync(path.join(audioDir, e.audio_file));

@@ -1,14 +1,21 @@
-// Bundles the modules the corridor builder needs, the same way
+// Bundles the modules the library builders need, the same way
 // bundle-app.mjs does for the place corpus — with ONE deliberate
-// difference: the persona comes from the leo-v13 source file
-// (extracted from git commit f1b0022 to /tmp/leo-persona-v13.ts),
-// because the banked library's voice is v13's. Pass 2 later edited
-// leoPersona.ts for leo-v14 (unpublished); corridor stories are
-// LIBRARY stories, and the library is v13 by Erik's doctrine — one
-// voice across the whole bank. If the persona is ever re-banked,
-// this is the file to re-point.
+// difference: WHICH persona source it bundles, which Erik's
+// persona rulings govern:
+//   - The original 345-story library (Oct 26) bundled v13 — the
+//     frozen library stays v13 forever (Erik: "leave existing
+//     library as is").
+//   - ALL NEW library content (Erik's ruling, Oct 27, 2026)
+//     bundles the CURRENT app persona — leo-v14 — straight from
+//     the working tree's leoPersona.ts, so the banked voice is
+//     the live voice: v13's voice carried whole, plus the
+//     mission line, and the builders' briefs add the v14
+//     instruction layer (portal rule as source-grounded per
+//     Ruling 2, position-binding, design-band lengths, the WOW
+//     lead). One voice going forward, by Erik's explicit call.
+// This bundler therefore points at the working tree. If the
+// persona is ever re-banked again, this is the file to re-point.
 //
-//   git show f1b0022:src/services/leoPersona.ts > /tmp/leo-persona-v13.ts
 //   node scripts/library/bundle-corridors.mjs
 //
 // Output: /tmp/leo-corridor-bundle.mjs (a build artifact).
@@ -19,9 +26,9 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const personaPath = '/tmp/leo-persona-v13.ts';
+const personaPath = path.join(repoRoot, 'src/services/leoPersona.ts');
 if (!existsSync(personaPath)) {
-  console.error('[bundle-corridors] /tmp/leo-persona-v13.ts missing — extract it: git show f1b0022:src/services/leoPersona.ts > /tmp/leo-persona-v13.ts');
+  console.error('[bundle-corridors] working-tree leoPersona.ts missing at', personaPath);
   process.exit(1);
 }
 const entryPath = '/tmp/leo-corridor-bundle-entry.ts';
@@ -66,7 +73,7 @@ const checks = {
 };
 console.log('[bundle-corridors] bundle written to', outPath);
 console.log('[bundle-corridors] checks:', JSON.stringify(checks, null, 2));
-if (app.LEO_PERSONA_VERSION !== 'leo-v13' || !app.CORRIDOR_SEGMENTS?.length) {
-  console.error('[bundle-corridors] FAILED: expected the v13 persona and the segment dataset');
+if (app.LEO_PERSONA_VERSION !== 'leo-v14' || !app.CORRIDOR_SEGMENTS?.length) {
+  console.error('[bundle-corridors] FAILED: expected the v14 persona (Erik\'s Oct 27 ruling: all new library content is v14) and the segment dataset');
   process.exit(1);
 }

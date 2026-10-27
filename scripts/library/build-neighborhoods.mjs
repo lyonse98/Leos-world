@@ -5,9 +5,11 @@
 //   node scripts/library/build-neighborhoods.mjs [--areas=slug1,slug2] [--tts=batch|live|off] [--no-ingest]
 //
 // One banked welcome intro per area in neighborhoods.mjs,
-// generated with the leo-v13 persona (the library's voice — the
-// persona is pinned to the v13 source in the shared bundle) from
-// free fact sources only: Wikipedia + OSM + Wikidata + the
+// generated with the leo-v14 persona (Erik's ruling, Oct 27,
+// 2026: all new library content is v14 — the v1 bank was
+// generated under v13 hours before the ruling and is replaced
+// through the swap in ~/workspace/leos-world/v14-library-swap.md)
+// from free fact sources only: Wikipedia + OSM + Wikidata + the
 // historic registry, sampled at the area's anchor — the same
 // sources, assembled the same way, as the 345-story place corpus
 // and the corridor bank (lib.mjs assembleFacts). Audio: one Gemini
@@ -27,7 +29,7 @@
 // verified.
 //
 // Ingestion follows ingest.mjs exactly: audio → tts-audio bucket at
-// library/<place_key>/neighborhood_intro.wav (x-upsert:false),
+// library/<place_key>/neighborhood_intro-v14.wav (x-upsert:false),
 // rows → story_library with Prefer: resolution=ignore-duplicates,
 // keyed (place_key = normalizePlaceKey(areaName),
 // angle = 'neighborhood_intro'). Re-runnable and resumable.
@@ -66,8 +68,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const slug = s => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
 const app = await import('/tmp/leo-corridor-bundle.mjs');
-if (app.LEO_PERSONA_VERSION !== 'leo-v13') {
-  console.error(`[neighborhoods] bundle persona is ${app.LEO_PERSONA_VERSION}, expected leo-v13 — re-run bundle-corridors.mjs`);
+if (app.LEO_PERSONA_VERSION !== 'leo-v14') {
+  console.error(`[neighborhoods] bundle persona is ${app.LEO_PERSONA_VERSION}, expected leo-v14 (Erik's Oct 27 ruling: all new library content is v14) — re-run bundle-corridors.mjs`);
   process.exit(1);
 }
 const keys = await loadKeys();
@@ -116,6 +118,18 @@ function buildIntroPrompt(area, facts) {
       'the Navy, the canyon system, the old towns under the new ones — let it open. Write it as a welcome: the listener ' +
       'should finish knowing what kind of place they have arrived in, and wanting to stay a while. ' +
       'LENGTH: 10 to 12 sentences. Depth from the facts at hand, never from invention.'
+  );
+  // THE v14 BRIEF (Erik's rulings, Oct 27, 2026 — the corridor
+  // builder carries its twin): mission first, the WOW lead as a
+  // gate, portal connections SOURCE-GROUNDED (Ruling 2), and the
+  // position-binding ban (a welcome is heard on arrival, but the
+  // rule is the rule — banked text never binds to a passing
+  // moment).
+  parts.push(
+    'THE v14 BRIEF: This welcome exists to make the listener love this town more — to fall in love with the city for the first time, or all over again. ' +
+      'THE WOW LEAD: open with the single most compelling or surprising fact in the material above — the first breath is the best thing in the pack, shaped as a hook; never spend the lead on orientation, a boundary, or a founding date. ' +
+      'PORTAL, SOURCE-GROUNDED: where this neighborhood opens onto a bigger story, ground the connection in the material provided (the facts, published local history or lore, sourced local opinion); a connection you cannot ground, omit. Never invent a link. ' +
+      'POSITION-BINDING: no expiring claims — nothing "on your left" or "coming up," nothing pinned to the moment of arrival. Anchor to the place itself; what is true of it stays true whenever the listener hears this.'
   );
   return parts.join('\n\n');
 }
@@ -321,7 +335,11 @@ if (doIngest && ready.length > 0) {
       .replace(/&/g, 'and')
       .replace(/[^a-z0-9 .'-]/gi, '')
       .replace(/\s+/g, ' ');
-    const bucketKey = `library/${asciiPlace}/neighborhood_intro.wav`;
+    // Versioned audio key (v14 re-bank, Oct 27, 2026): the v13
+    // object already sits at neighborhood_intro.wav and storage
+    // is no-upsert — v14 audio must land at a NEW key or the
+    // swapped row would point at v13 audio.
+    const bucketKey = `library/${asciiPlace}/neighborhood_intro-v14.wav`;
     e.audio_path = bucketKey;
     saveManifest();
     const bytes = readFileSync(path.join(audioDir, e.audio_file));
