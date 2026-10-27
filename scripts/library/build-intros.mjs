@@ -45,7 +45,12 @@ const INTROS = [
   { id: 'resume-3', text: "Hey, you're back! Good, I saved some good ones. Picking up where we left off." },
 ];
 
-const SUPABASE_URL = 'https://mdfbeobaldoegfmmlaya.supabase.co';
+// Leo's World production project (matches VITE_SUPABASE_URL in the app).
+// RC-0 (2026-10-27 audit): this previously pointed at a dead project host,
+// which silently failed every clip upload while the app read from the
+// correct project. Keep in sync with src/services/supabase.ts if the
+// project ever moves.
+const SUPABASE_URL = 'https://yejpouwceyxgjptsemtg.supabase.co';
 const OUT_DIR = join(homedir(), 'workspace', 'leos-world', 'intros-audio');
 
 async function main() {
