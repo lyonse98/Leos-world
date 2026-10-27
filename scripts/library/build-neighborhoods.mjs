@@ -129,6 +129,28 @@ for (const area of areas) {
     continue;
   }
   const facts = await assembleFacts(app, records, { name: area.name }, { lat: area.lat, lng: area.lng });
+  // Area sampling supplement (Item 8 build, Oct 27, 2026):
+  // assembleFacts' Wikipedia geosearch runs at the app's standard
+  // radius, tuned for landmarks beside a driver — a neighborhood's
+  // own article often sits farther from the anchor than that (the
+  // first chunk-1 pass ran ~38% thin: Vista, Cardiff, San Pasqual
+  // all NONE at standard radius). When the standard pass found no
+  // Wikipedia, retry at the service's deep-mode radius (2 km —
+  // inside the area's own footprint) before accepting a thin pack.
+  // Builder-side only; the shared place pipeline is untouched.
+  if (!facts.sources.includes('wikipedia')) {
+    try {
+      const pos = { lat: area.lat, lng: area.lng, accuracy: 10, altitude: null, altitudeAccuracy: null, heading: null, speed: null };
+      const deep = await app.wikipedia.getNearbyArticles(pos, true);
+      if (deep.length > 0) {
+        facts.wikiContext = [facts.wikiContext, app.wikipedia.formatForPrompt(deep)].filter(Boolean).join('\n');
+        facts.sources.push('wikipedia');
+        console.log(`[neighborhoods] ${area.id}: deep-mode Wikipedia retry found ${deep.length} article(s)`);
+      }
+    } catch (e) {
+      console.warn(`[neighborhoods] ${area.id}: deep-mode retry failed: ${e.message}`);
+    }
+  }
   console.log(`[neighborhoods] ${area.id} · ${area.name}: facts ${facts.sources.join('+') || 'NONE'}`);
   const prompt = buildIntroPrompt(area, facts);
   const text = await generateText(ai, app, prompt);
