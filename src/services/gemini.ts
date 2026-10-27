@@ -1217,6 +1217,30 @@ class GeminiService {
       );
     }
 
+    // Position-binding rule (pre-publish stack Item 7, Oct 27,
+    // 2026; Erik's rule, so a story told one queue slot late never
+    // sounds out of order): a story's text is generated BEFORE it
+    // is heard and may wait in line behind another story — any
+    // phrase that binds the telling to the listener's position at
+    // generation time can be false by the time it is spoken. The
+    // ban is OUTRIGHT rather than freshness-gated: generation-time
+    // freshness does not survive the queue (the wait is unbounded),
+    // so no confidence condition the prompt could state would be
+    // honest. Place-anchored language always survives. Folded into
+    // the unpublished leo-v14 prompt behavior (Item 5's handling —
+    // no version bump; the live build is still v13).
+    parts.push(
+      'POSITION-BINDING — LANGUAGE THAT NEVER EXPIRES: this story may be heard minutes after it is written, ' +
+        'from further down the road. Nothing in it may depend on where the listener is at this moment. NEVER use ' +
+        'expiring positional or temporal claims: "on your left", "on your right", "coming up", "just ahead of you", ' +
+        '"you are about to pass", "the building you are passing now", "as you approach", "right here beside you", ' +
+        'or anything that pins the story to a passing moment. Anchor to the PLACE instead: "here in Point Loma", ' +
+        '"along this stretch of the bay", "in this neighborhood", "across the water in Coronado", or a compass point ' +
+        '("on the bay side of the point"). You MAY — and should — describe what a place looks like: a true visual ' +
+        'trait ("the white tower with the red roof") helps the listener spot it whenever they reach it. What ' +
+        'expires is direction and approach, never description.'
+    );
+
     return parts.join('\n\n');
   }
 
@@ -2020,6 +2044,9 @@ class GeminiService {
     }
     parts.push(
       'Answer the question directly and completely. Take as much time as the answer needs — 4 to 6 sentences is fine if the question warrants it, but keep it under 10 sentences so the listener can get back to the tour. The listener asked because they are curious, so give them a satisfying, full answer, not a quick summary. Ground it in this location and what you just told them when relevant. If you do not actually know, say so plainly and offer what you do know about the wider area — never invent specifics.'
+    );
+    parts.push(
+      'POSITION-BINDING (Item 7): this answer may be heard a minute or two after the question was asked — the story now playing finishes first, and the car keeps moving. Never pin the answer to the listener\'s immediate position ("on your left", "coming up on your right", "that tower right beside you"); name the place, describe what it looks like, or use a compass point instead. The nearby list above was true when they asked; refer to those places by name, not by where they sit around the car.'
     );
 
     const prompt = parts.join('\n\n');
