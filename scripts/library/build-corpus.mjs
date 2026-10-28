@@ -131,14 +131,17 @@ for (const n of selected) {
       let title = seed.wikiTitle || null;
       if (!title) {
         const q = encodeURIComponent(seed.name);
-        const sres = await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${q}&srlimit=3&format=json`, { signal: AbortSignal.timeout(20_000) });
+        // Wikimedia rejects UA-less requests with an HTML error page
+        // (the corridor-regen builder hit the same wall, Oct 28) —
+        // without this header the rescue dies on JSON.parse.
+        const sres = await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${q}&srlimit=3&format=json`, { headers: { 'User-Agent': 'LeosWorldLibraryBuilder/1.0 (offline corpus build)' }, signal: AbortSignal.timeout(20_000) });
         const sjson = await sres.json();
         const wanted = seed.name.toLowerCase().replace(/-/g, ' ');
         title = (sjson?.query?.search ?? []).map(r => r.title)
           .find(t => t.toLowerCase().replace(/-/g, ' ').includes(wanted)) || null;
       }
       if (title) {
-        const tres = await fetch(`https://en.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&titles=${encodeURIComponent(title)}&format=json`, { signal: AbortSignal.timeout(20_000) });
+        const tres = await fetch(`https://en.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&titles=${encodeURIComponent(title)}&format=json`, { headers: { 'User-Agent': 'LeosWorldLibraryBuilder/1.0 (offline corpus build)' }, signal: AbortSignal.timeout(20_000) });
         const tjson = await tres.json();
         const page = Object.values(tjson?.query?.pages ?? {})[0];
         const extract = (page?.extract ?? '').trim();
