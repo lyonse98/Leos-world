@@ -103,7 +103,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // dataset is the rule as code. The honesty contract is the
 // library's own: facts come from the fact blocks below or they do
 // not appear.
-function buildCorridorPrompt(segment, areaFacts) {
+function buildCorridorPrompt(segment, areaFacts, priorTelling = null) {
   const parts = [];
   const targetSentences = app.corridorTargetSentences(segment);
   const traversalMin = (segment.lengthKm * 1000) / app.designSpeedMps(segment) / 60;
@@ -134,6 +134,34 @@ function buildCorridorPrompt(segment, areaFacts) {
       'Where the drive climbs, crosses, or opens a view, say so; the road itself is the narrator\'s stage. ' +
       `LENGTH: about ${targetSentences} sentences — this stretch takes roughly ${traversalMin.toFixed(1)} minutes to drive at free-flow speed, and the story should fill most of that drive, finishing just before the road hands off to the next stretch. Depth from the facts at hand, never from invention.`
   );
+  // ENTERTAINMENT BAR (Erik's bar, Oct 28, 2026 — folded verbatim
+  // into every Batch 2 brief in seeds.mjs as B2_ENTERTAINMENT and
+  // carried here for corridor generation from the gapfill wave on;
+  // existing bank entries are manifest-skipped and unaffected).
+  parts.push(
+    'ENTERTAINMENT BAR (Erik\u2019s bar, Oct 28 — governs how everything else in this brief lands): the story succeeds only if the driver wants to keep listening and would come back tomorrow for more. ' +
+      'Education is the payload; entertainment is the vehicle — a story that teaches but bores FAILS, even if every fact is right. ' +
+      'Talk like a friend in the passenger seat who happens to know amazing things about this town — WITH the driver, not AT them; shotgun rider, not tour guide, not docent. ' +
+      'No lecture cadence: no fact-stacking, no "did you know" chains, no schoolroom first/then/finally sequencing, no Wikipedia-summary-with-jokes. ' +
+      'Dates and names appear only when they earn their place in the story. ' +
+      'The most arresting fact in the pack arrives the way a riding companion blurts out something too good not to share — not as a lesson opening. ' +
+      'Humor where the ground honestly supports it; never force a joke, never invent a fact for one.'
+  );
+  // SAMENESS DISCIPLINE (Oct 28 corridor audit, binding on chained
+  // generation): when the previous segment of THIS chain was told
+  // earlier in the same run, its core material rides this brief as
+  // soft exclusions — the audit's structural finding was a segment
+  // closing by introducing the next stretch's subject and the next
+  // segment re-deriving it from scratch.
+  if (priorTelling) {
+    parts.push(
+      `SAMENESS DISCIPLINE (binding): the previous stretch of this same drive — "${priorTelling.displayName}" — was just told from material headed: ${priorTelling.wikiTitles.join('; ') || 'its area fact packs'}. ` +
+        `Its opening ran: "${priorTelling.opening}" ` +
+        'Do NOT re-derive those subjects as your lead or your substance — at most a passing line where the road truly requires it. ' +
+        'Your telling must be substantially different from the previous stretch in subject and in texture (no repainted backdrop). ' +
+        'And do not close by introducing the next stretch\u2019s subject as your ending beat — end on your own ground.'
+    );
+  }
   // THE v14 BRIEF (Erik's rulings, Oct 27, 2026 — all new library
   // content generates under this set; the neighborhood builder
   // carries its twin): mission first, the WOW lead as a gate,
@@ -151,11 +179,25 @@ function buildCorridorPrompt(segment, areaFacts) {
 }
 
 // ------------------------------------------------------------ text phase
+// Sameness chain state: the previous segment told IN THIS RUN on the
+// same freeway + direction whose exit anchor is this segment's entry
+// (see the SAMENESS DISCIPLINE block in the prompt builder).
+let prevChainTelling = null;
+const firstSentence = text => {
+  const m = text.replace(/\s+/g, ' ').match(/^[^.!?]+[.!?]/);
+  return (m ? m[0] : text.slice(0, 160)).trim().slice(0, 220);
+};
 for (const segment of segments) {
   const placeKey = app.normalizePlaceKey(segment.displayName);
   let entry = byId.get(segment.id);
   if (entry?.story_text) {
     console.log(`[corridors] ${segment.id}: text exists (${entry.story_text.length} chars), skipping`);
+    prevChainTelling = {
+      segment,
+      displayName: segment.displayName,
+      wikiTitles: entry.fact_stages?.wikiTitles ?? [],
+      opening: firstSentence(entry.story_text),
+    };
     continue;
   }
   // Upgraded assembly (corridor-facts.mjs): per-area packs plus
@@ -168,7 +210,14 @@ for (const segment of segments) {
   const { areaFacts, sources: allSources, detail: factDetail } = await assembleCorridorFacts(
     app, records, segment, librarySubjects
   );
-  const prompt = buildCorridorPrompt(segment, areaFacts);
+  const chained =
+    prevChainTelling &&
+    prevChainTelling.segment.freeway === segment.freeway &&
+    prevChainTelling.segment.direction === segment.direction &&
+    prevChainTelling.segment.toName === segment.fromName
+      ? prevChainTelling
+      : null;
+  const prompt = buildCorridorPrompt(segment, areaFacts, chained);
   const text = await generateText(ai, app, prompt);
   const mid = segment.polyline[Math.floor(segment.polyline.length / 2)];
   entry = {
@@ -194,6 +243,13 @@ for (const segment of segments) {
     // genuine wow lead from sources; flag it listen-before-
     // trusting in the v1 list.
     thin_facts: !allSources.has('wikipedia') && !allSources.has('historic_registry'),
+    sameness_exclusion_from: chained ? chained.segment.id : null,
+  };
+  prevChainTelling = {
+    segment,
+    displayName: segment.displayName,
+    wikiTitles: factDetail.wikiTitles ?? [],
+    opening: firstSentence(text),
   };
   byId.set(segment.id, entry);
   manifest.push(entry);
