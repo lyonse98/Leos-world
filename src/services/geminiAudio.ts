@@ -123,6 +123,23 @@ class GeminiAudioService {
     return this.ai !== null;
   }
 
+  // On-device pinning (silence fillers, Oct 28, 2026): the lane's
+  // pool must live ON THE DEVICE before a dead zone, not stream
+  // through it — a true dead zone cannot fetch. Pinning stores a
+  // pre-rendered clip's Blob in this service's own cache (memory +
+  // IndexedDB) under the clip's exact text, so playback resolves
+  // through textToAudioUrl as an ordinary cache hit and mints a
+  // fresh object URL per play — the player's per-play revocation
+  // can never invalidate the pinned audio itself (see the cache's
+  // Blob doctrine above).
+  async hasPinnedAudio(text: string): Promise<boolean> {
+    return (await this.getCachedAudio(text)) !== null;
+  }
+
+  async pinAudio(text: string, blob: Blob): Promise<void> {
+    await this.setCachedAudio(text, blob);
+  }
+
   async generateAudioStory(
     factPack: FactPack,
     options?: { mode?: 'walking' | 'driving' | 'highway' | 'rural'; destination?: string }

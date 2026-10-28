@@ -19,6 +19,7 @@ import { latencyModel } from './services/latencyModel';
 import { calculateDistance, bearingDegrees, headingDelta } from './utils/geo';
 
 import { storyLikes } from './services/storyLikes';
+import { fillerLane } from './services/fillerLane';
 import { LEO_MODEL_ID, LEO_QA_MODEL_ID } from './services/leoPersona';
 import { geminiAudio } from './services/geminiAudio';
 import { SUPABASE_CONFIGURED } from './services/supabase';
@@ -656,6 +657,10 @@ function App() {
     }
     voice.muteForMinutes(0);
     voice.stop();
+    // Silence-filler lane retires AFTER the stop: the stop settles
+    // any filler on air or waiting, and its filler_played event
+    // files from that settle before the lane's state resets.
+    fillerLane.endTour();
     voice.deactivateMediaSession();
     geolocation.stopTracking();
     localStorage.removeItem(RESUME_SESSION_KEY);
@@ -1140,6 +1145,11 @@ function App() {
           } else {
             voice.queueStory(result.story, originLat, originLng, isRoad, undefined, result.subject, result.audioUrl, serveGeo);
           }
+          // The queue has recovered — tell the filler lane (Oct 28,
+          // 2026): a filler on air records the recovery for its
+          // filler_played event, and the silence-episode chain ends
+          // here (the next outage opens with a first bridge again).
+          fillerLane.noteStoryQueued();
         }
 
         // Trigger prefetch in the background so the next story is ready.
@@ -1219,6 +1229,19 @@ function App() {
 
   const isProcessingQuestionRef = useRef(isProcessingQuestion);
   isProcessingQuestionRef.current = isProcessingQuestion;
+
+  // Silence-filler lane host (Oct 28, 2026): the lane's watcher
+  // reads the world through this snapshot — render-assigned mirrors
+  // (the positionRef pattern) for the React-state facts, live
+  // getters for the player's. Playback goes back through the
+  // player's own queue (voice.queueFiller), so the pair is ordinary
+  // scripted items with the player's settle guarantee.
+  const fillerGateRef = useRef({ audioBlocked: false, wasInterrupted: false, listening: false });
+  fillerGateRef.current = {
+    audioBlocked: voice.audioBlocked,
+    wasInterrupted: voice.wasInterrupted,
+    listening: speech.isListening,
+  };
 
   // Route breadcrumbs (Area G, Oct 26, 2026): a lightweight position
   // sample ~every 30s while touring. The position rides the sealed
@@ -1355,6 +1378,28 @@ function App() {
   const voiceRef = useRef(voice);
   voiceRef.current = voice;
 
+  // Silence-filler lane host registration (Oct 28, 2026): one
+  // registration for the app's lifetime — the snapshot reads refs
+  // and live player getters at tick time, so it never goes stale.
+  useEffect(() => {
+    fillerLane.setHost({
+      snapshot: () => ({
+        tourActive: isTourStartedRef.current,
+        openingSettled: voiceRef.current.isOpeningSettled(),
+        playing: voiceRef.current.isPlayingStory(),
+        queueLength: voiceRef.current.getQueueLength(),
+        questionLocked:
+          isProcessingQuestionRef.current || pttHoldRef.current || fillerGateRef.current.listening,
+        userPaused:
+          fillerGateRef.current.audioBlocked ||
+          fillerGateRef.current.wasInterrupted ||
+          voiceRef.current.isMuted(),
+      }),
+      play: (bridge, filler, onSettle) =>
+        voiceRef.current.queueFiller(bridge?.text ?? null, filler, onSettle),
+    });
+  }, []);
+
   // First-90-seconds guarantee, part 1: warm the story cache while the
   // listener is still on the landing page. The seconds spent reading the
   // landing page become generation time, so the first fetch after START
@@ -1473,6 +1518,10 @@ function App() {
             queuedCount++;
           }
           storyCache.refreshPendingSubjects();
+          // A reconnect that replays a batch IS a queue recovery
+          // for the filler lane (Oct 28, 2026) — the dead-zone case
+          // the lane exists for ends here.
+          if (queuedCount > 0) fillerLane.noteStoryQueued();
 
           setStoriesCount(prev => prev + queuedCount);
           setLastStorySource('cache');
@@ -1730,6 +1779,12 @@ function App() {
       // Media Session (Pass 1): lock-screen / car-stereo presence and
       // transport controls for the tour.
       voice.activateMediaSession();
+      // Silence-filler lane (Oct 28, 2026): pin the whole pool
+      // on-device NOW, while the opening covers the downloads, and
+      // start the true-silence watcher. The lane gates itself on
+      // the opening machine, so nothing it does can reach the ear
+      // before the opening settles.
+      fillerLane.beginTour();
       storyCache.setOnline(navigator.onLine);
 
       // (sessionId + analytics.init + session_start moved up, to the tap —

@@ -72,6 +72,11 @@ interface StoryQueueItem {
   // directly and pre-synthesis skips the item entirely — the audio
   // already exists, so no quota is ever spent on it.
   audioUrl?: string;
+  // Silence-filler item (Oct 28, 2026): the filler's display title.
+  // While a filler plays, the Media Session names it like any other
+  // telling (lock screen / car display); the next location story
+  // restores the standing tour metadata. Absent on every other item.
+  fillerTitle?: string;
   // Tell-geometry correlation (Area G, Oct 26, 2026): the per-story id
   // minted at the serve/prefetch decision, the projected center the
   // story was fetched for, and the horizon used — carried so playback
@@ -1244,6 +1249,18 @@ export const useVoice = () => {
     });
   }, [advanceOpening]);
 
+  // The gate question the rest of the app asks the machine (the
+  // silence-filler lane, Oct 28, 2026): has the opening finished —
+  // 'open' (debt settled, welcome answered) or 'failed' (expired at
+  // the backstop, debt settled undelivered on the record, the tour
+  // proceeding without it)? Both are post-opening states: location
+  // stories flow in either, so silence past this point is the
+  // lane's to fill. 'idle' means no opening is running at all.
+  const isOpeningSettled = useCallback((): boolean => {
+    const s = openerStateRef.current;
+    return s === 'open' || s === 'failed';
+  }, []);
+
   // Settle the item currently in the player: fire its onPlaybackEnd
   // exactly once with whether it FULLY delivered (sounded AND ran to
   // natural completion — see currentPlaybackRef), and forget it. Every
@@ -2395,6 +2412,29 @@ export const useVoice = () => {
       ? { topic: item.topic ?? '', text: item.text, startedAt: Date.now() }
       : null;
 
+    // Media Session titles (filler lane, Oct 28, 2026): while a
+    // silence filler plays, the lock screen / car display names the
+    // telling like any other story; the next LOCATION story restores
+    // the tour's standing metadata, so a filler title never lingers
+    // past its telling. Other scripted lines leave metadata alone.
+    try {
+      if ('mediaSession' in navigator) {
+        if (item.fillerTitle) {
+          navigator.mediaSession.metadata = new MediaMetadata({
+            title: item.fillerTitle,
+            artist: 'Leo — San Diego stories',
+            album: "Leo's World",
+          });
+        } else if (item.isLocationStory) {
+          navigator.mediaSession.metadata = new MediaMetadata({
+            title: "Leo's World",
+            artist: 'Leo — your AI tour guide',
+            album: "Leo's World",
+          });
+        }
+      }
+    } catch { /* garnish — never break a dequeue */ }
+
     // Tell the app what just went on air, so the rating control points at the
     // story actually playing rather than the one most recently queued.
     onStoryStartRef.current?.(item.isLocationStory ? (item.topic ?? null) : null);
@@ -3131,6 +3171,44 @@ export const useVoice = () => {
     });
   }, [enqueue]);
 
+  // Queue one silence-filler pair (Oct 28, 2026): the bridge clip,
+  // then the filler story, as SCRIPTED items — they append behind
+  // whatever is playing, are never displaced by the single-slot
+  // replacement, skip the gap pacing and the freshness gate (they
+  // are location-less by design), and the recovered queue simply
+  // plays after the filler ends (the never-cut courtesy; a Tier-1
+  // arriving mid-filler inserts behind it per the warm-head rule).
+  // Both texts resolve through the pinned on-device TTS cache —
+  // the lane pins them at tour start — so a pair costs no synthesis
+  // and plays in a dead zone. The filler's settle is tracked so
+  // the lane learns its truth exactly once (services/fillerLane).
+  // Returns false when muted: the pair was refused, not queued.
+  const queueFiller = useCallback((
+    bridgeText: string | null,
+    filler: { text: string; title: string },
+    onSettleDetail: (info: PlaybackSettle) => void
+  ): boolean => {
+    if (Date.now() < mutedUntilRef.current) {
+      console.log('[Voice] Muted — dropping filler pair');
+      return false;
+    }
+    if (bridgeText && bridgeText.trim().length > 0) {
+      enqueue({
+        text: bridgeText.trim(),
+        generatedAt: Date.now(),
+        isLocationStory: false,
+      });
+    }
+    enqueue({
+      text: filler.text,
+      generatedAt: Date.now(),
+      isLocationStory: false,
+      fillerTitle: filler.title,
+      onSettleDetail,
+    });
+    return true;
+  }, [enqueue]);
+
   // Skip the currently playing story and flush the queue. Leo goes quiet
   // immediately; the on-story-complete callback still fires so the app can
   // decide what comes next.
@@ -3378,6 +3456,8 @@ export const useVoice = () => {
     queueStory,
     queuePriorityStory,
     queueStoryWithTransition,
+    queueFiller,
+    isOpeningSettled,
     skipCurrent,
     muteForMinutes,
     isMuted,

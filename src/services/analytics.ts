@@ -26,6 +26,12 @@ type EventType = 'session_start' | 'session_end' | 'story_played' | 'ad_played' 
   // which clip played, that it was pre-rendered, and whether it
   // completed — the runway made countable per tour.
   | 'opener_clip'
+  // Silence fillers (Oct 28, 2026): one event per filler firing —
+  // which filler, which bridge opened it, the true-silence duration
+  // that triggered it, whether the real queue recovered while it
+  // played, and its settle truth. The lane's value (outages covered
+  // vs. honest silence) is countable from these rows alone.
+  | 'filler_played'
   // Route breadcrumbs (Area G, Oct 26, 2026): a lightweight position
   // sample ~every 30s while touring and at tour end, for the owner's
   // own Bolt-panel forensics. SEALED ONLY — this kind is deliberately

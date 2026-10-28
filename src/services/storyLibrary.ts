@@ -149,6 +149,39 @@ class StoryLibraryService {
     return this.lookup(areaName, 'neighborhood_intro');
   }
 
+  // Silence-filler pool (Oct 28, 2026): every 'filler' row — the
+  // county-general stories the filler lane pins on-device at tour
+  // start and serves into true silence. Rows only; the lane does
+  // its own audio pinning (the audio is pinned by TEXT into the
+  // TTS cache, not handed out as one-shot URLs the way toResult
+  // serves an episode). Fails to null like everything in this
+  // module: a missing pool means an inert lane, never a broken tour.
+  async loadFillerRows(): Promise<Array<{ placeName: string; text: string; audioPath: string }> | null> {
+    if (!SUPABASE_CONFIGURED || this.tableMissing) return null;
+    try {
+      const { data, error } = await supabase
+        .from('story_library')
+        .select('place_name, story_text, audio_path')
+        .eq('angle', 'filler')
+        .limit(50);
+      if (error) {
+        if (this.isMissingTableError(error)) {
+          this.tableMissing = true;
+          console.warn('[StoryLibrary] story_library table not present yet — library inactive this session');
+        } else {
+          console.warn('[StoryLibrary] Filler pool load failed (continuing without):', error.message);
+        }
+        return null;
+      }
+      const rows = (data ?? []) as Array<{ place_name: string; story_text: string; audio_path: string }>;
+      if (rows.length === 0) return null;
+      return rows.map(r => ({ placeName: r.place_name, text: r.story_text, audioPath: r.audio_path }));
+    } catch (error) {
+      console.warn('[StoryLibrary] Filler pool load threw (continuing without):', error);
+      return null;
+    }
+  }
+
   // Place-wide lookup (Pass 2, Oct 27, 2026): the library's episode for
   // a place, at ANY angle the caller still considers servable. The
   // exact-(place, angle) lookup above starved the library on real
