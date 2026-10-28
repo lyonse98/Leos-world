@@ -10,6 +10,7 @@ import {
   storyBehindM,
   storyMaxAgeS,
 } from '../utils/geo';
+import { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, corridorProgressM } from '../data/corridors';
 import { tasteProfile } from '../services/tasteProfile';
 import { geminiAudio, TTS_MODEL } from '../services/geminiAudio';
 import { quotaGuard } from '../services/quotaGuard';
@@ -33,6 +34,12 @@ interface StoryQueueItem {
   // Rural/highway stories are anchored to the region, not a point, so the
   // behind-you check does not apply to them.
   regionAnchored?: boolean;
+  // Banked corridor serve (src/data/corridors segment id): the item's
+  // ground is a freeway SEGMENT, not its library row's anchor point,
+  // and its freshness at dequeue is judged against the segment alone
+  // (corridor expiry — see corridorExitExpired). Absent on every
+  // non-corridor item.
+  corridorSegmentId?: string;
   // Location stories compete for the single waiting slot; scripted lines do not.
   isLocationStory: boolean;
   // Speak through the local (browser) voice FIRST, never Gemini TTS.
@@ -98,6 +105,13 @@ export interface PlaybackSettle {
   engine: 'gemini' | 'browser' | null;
   attempts: number;
   soundedMs: number;
+  // Why an undelivered item left the queue, when the player itself
+  // decided the exit (corridor expiry, Oct 28, 2026): the dequeue
+  // gate sets 'corridor-expired' so the hearing funnel can consume
+  // the segment for the tour instead of releasing it for a re-serve
+  // the driver's position has already made meaningless. Absent on
+  // every other settle path.
+  dropReason?: string;
 }
 
 // Opening state machine (fix-order Item 8, Oct 28, 2026). The tour
@@ -1635,7 +1649,42 @@ export const useVoice = () => {
     return diff < 90; // |bearing − heading| in (90°, 270°): rear hemisphere
   };
 
+  // Corridor exit test (Oct 28, 2026; Erik's ruling: "segment
+  // stories on freeways expire if it's behind the user, like we do
+  // live stories"). A banked corridor item's ground is its SEGMENT,
+  // not the library row's anchor point: the story is fresh exactly
+  // while the driver has not passed the segment's exit. Position
+  // keys the verdict, never elapsed time — a driver crawling ON the
+  // segment in traffic keeps the story however long the queue wait
+  // (the serve layer's traffic handoff, honored at the player), and
+  // the point-anchor bounds (reach / age / rear cut) do not apply:
+  // at freeway speed the reach cap (8 km) exceeds every segment in
+  // the bank, and a rear cut against a point is meaningless for a
+  // stretch of road. The margin past the exit is CORRIDOR_BUFFER_M —
+  // the same 450 m that defines being ON the segment for matching
+  // (src/data/corridors), reused as the symmetric "no longer on it"
+  // line; it absorbs the hand-laid polylines' snap and GPS noise
+  // without granting a grace stretch. storyBehindM's 1500 m
+  // point-anchor floor was considered and rejected: a driver 1500 m
+  // past the exit is deep into the NEXT segment, whose story is the
+  // rightful serve.
+  const corridorExitExpired = (item: StoryQueueItem, current: CurrentPosition): boolean => {
+    if (!item.corridorSegmentId) return false;
+    const segment = CORRIDOR_SEGMENTS.find(s => s.id === item.corridorSegmentId);
+    if (!segment) return false;
+    return corridorProgressM(segment, current).overshootM > CORRIDOR_BUFFER_M;
+  };
+
   const isStillRelevant = useCallback((item: StoryQueueItem): boolean => {
+    // Corridor items are judged against their segment alone (see
+    // corridorExitExpired): exited → drop; anything else — on the
+    // segment, short of it, or position unknown — stays relevant,
+    // however long the item has waited.
+    if (item.corridorSegmentId) {
+      const current = currentPositionProviderRef.current?.();
+      if (!current) return true;
+      return !corridorExitExpired(item, current);
+    }
     if (item.lat === undefined || item.lng === undefined) return true;
     const current = currentPositionProviderRef.current?.();
     if (!current) return true;
@@ -2183,6 +2232,16 @@ export const useVoice = () => {
       const next = storyQueueRef.current[0];
       if (isStillRelevant(next)) break;
       storyQueueRef.current.shift();
+      // Corridor expiry (Oct 28, 2026): when this drop is a segment
+      // EXIT, the record names it from the behind-me family (Erik:
+      // "expire if it's behind the user, like we do live stories")
+      // and the settle below carries the reason, so the hearing
+      // funnel consumes the segment for the tour instead of
+      // releasing it for a re-serve.
+      const dropPos = currentPositionProviderRef.current?.();
+      const corridorExpired = !!(
+        next.corridorSegmentId && dropPos && corridorExitExpired(next, dropPos)
+      );
       // If the stale item IS the reserved welcome, the gate's wait is
       // over: a welcome that can no longer be heard must not hold the
       // tour hostage (Pass 1 safety valve).
@@ -2203,7 +2262,9 @@ export const useVoice = () => {
           if (typeof pos.heading === 'number') {
             bearingOffset = headingDelta(bearingDegrees(pos, { lat: next.lat, lng: next.lng }), pos.heading);
           }
-          if (isFarBehindAtSpeed(next, pos, distanceM)) {
+          if (corridorExpired) {
+            source = typeof pos.speed === 'number' && pos.speed >= FREEWAY_SPEED_MPS ? 'stale_highway' : 'stale_behind';
+          } else if (isFarBehindAtSpeed(next, pos, distanceM)) {
             source = typeof pos.speed === 'number' && pos.speed >= FREEWAY_SPEED_MPS ? 'stale_highway' : 'stale_behind';
           }
         }
@@ -2223,6 +2284,7 @@ export const useVoice = () => {
       if (next.onPlaybackEnd || next.onSettleDetail) {
         const info: PlaybackSettle = {
           sounded: false, completed: false, engine: null, attempts: next.attempts ?? 0, soundedMs: 0,
+          ...(corridorExpired ? { dropReason: 'corridor-expired' } : {}),
         };
         next.onSettleDetail?.(info);
         next.onPlaybackEnd?.(false);
@@ -2979,7 +3041,7 @@ export const useVoice = () => {
     kind?: 'location' | 'scripted',
     topic?: string,
     audioUrl?: string,
-    geo?: { storyId?: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; introServe?: boolean; onSettleDetail?: (info: PlaybackSettle) => void; generatedAt?: number }
+    geo?: { storyId?: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; introServe?: boolean; onSettleDetail?: (info: PlaybackSettle) => void; generatedAt?: number; corridorSegmentId?: string }
   ) => {
     if (Date.now() < mutedUntilRef.current) {
       console.log('[Voice] Muted — dropping queued story');
@@ -3003,6 +3065,7 @@ export const useVoice = () => {
       storyId: geo?.storyId,
       projectedCenter: geo?.projectedCenter,
       horizonS: geo?.horizonS,
+      corridorSegmentId: geo?.corridorSegmentId,
       onSettleDetail: geo?.onSettleDetail,
     });
   }, [enqueue]);
@@ -3016,7 +3079,7 @@ export const useVoice = () => {
     regionAnchored?: boolean,
     topic?: string,
     audioUrl?: string,
-    geo?: { storyId?: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; introServe?: boolean; onSettleDetail?: (info: PlaybackSettle) => void; generatedAt?: number }
+    geo?: { storyId?: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; introServe?: boolean; onSettleDetail?: (info: PlaybackSettle) => void; generatedAt?: number; corridorSegmentId?: string }
   ) => {
     if (Date.now() < mutedUntilRef.current) {
       console.log('[Voice] Muted — dropping priority story');
@@ -3036,6 +3099,7 @@ export const useVoice = () => {
       storyId: geo?.storyId,
       projectedCenter: geo?.projectedCenter,
       horizonS: geo?.horizonS,
+      corridorSegmentId: geo?.corridorSegmentId,
       onSettleDetail: geo?.onSettleDetail,
     });
   }, [enqueue]);

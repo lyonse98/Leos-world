@@ -301,7 +301,7 @@ class StoryCacheService {
     // queueStarved when the player is idle with an empty queue; it
     // threads into the gemini serve, where it arms the forced refill.
     opts?: { queueStarved?: boolean }
-  ): Promise<{ story: string; fromCache: boolean; topic: string; subject: string; context: string; rotation: StoryRotation | null; fromLibrary: boolean; audioUrl?: string; anchorLat?: number; anchorLng?: number; major?: boolean; storyId: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; generatedAt: number } | null> {
+  ): Promise<{ story: string; fromCache: boolean; topic: string; subject: string; context: string; rotation: StoryRotation | null; fromLibrary: boolean; audioUrl?: string; anchorLat?: number; anchorLng?: number; corridorSegmentId?: string; major?: boolean; storyId: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; generatedAt: number } | null> {
     this.lastServeInfo = { decisionConsumed: false, designedSilence: false, generationAttempted: false, emptyReason: null };
     this.pruneStalePrefetches(position);
     const openerServe = this.openerPending;
@@ -500,7 +500,7 @@ class StoryCacheService {
           projectedCenter,
           horizonS,
         });
-        return { story, fromCache: false, topic, subject: result.subject, context: result.context, rotation: result.rotation, fromLibrary: !!result.fromLibrary, audioUrl: result.audioUrl, anchorLat: result.anchorLat, anchorLng: result.anchorLng, major: result.major ?? false, storyId, projectedCenter, horizonS, generatedAt };
+        return { story, fromCache: false, topic, subject: result.subject, context: result.context, rotation: result.rotation, fromLibrary: !!result.fromLibrary, audioUrl: result.audioUrl, anchorLat: result.anchorLat, anchorLng: result.anchorLng, corridorSegmentId: result.corridorSegmentId, major: result.major ?? false, storyId, projectedCenter, horizonS, generatedAt };
       }
     } catch (error) {
       console.error('[StoryCache] Live fetch failed:', error);

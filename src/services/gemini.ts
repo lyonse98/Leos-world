@@ -64,6 +64,12 @@ export interface NarrationResult {
   audioUrl?: string;
   anchorLat?: number;
   anchorLng?: number;
+  // Banked corridor serves only (Item 6): the matched segment's id,
+  // threaded through the app into the player's queue item so the
+  // dequeue gate can judge the story against its SEGMENT rather
+  // than the library row's anchor (corridor expiry, Oct 28, 2026).
+  // Absent on every other serve.
+  corridorSegmentId?: string;
   fromLibrary?: boolean;
   // The served subject is a major (Tier-1 landmark / marked major
   // subject) — the app gives such serves the priority queue lane
@@ -1640,7 +1646,7 @@ class GeminiService {
               corridorHit.topic, position, corridorHit.text, 'cache_hit', 0, versionKey
             );
             trackDiag('pipeline', 'corridor-serve', `${corridorMatch.segment.id} matched ${Math.round(corridorMatch.distanceM)}m off its polyline`);
-            return { text: corridorHit.text, subject: corridorHit.topic, context: 'corridor', mode: factPack.mode, rotation: null, audioUrl: corridorHit.audioUrl, anchorLat: corridorHit.lat, anchorLng: corridorHit.lng, fromLibrary: true, major: true };
+            return { text: corridorHit.text, subject: corridorHit.topic, context: 'corridor', mode: factPack.mode, rotation: null, audioUrl: corridorHit.audioUrl, anchorLat: corridorHit.lat, anchorLng: corridorHit.lng, corridorSegmentId: corridorMatch.segment.id, fromLibrary: true, major: true };
           }
         }
       }

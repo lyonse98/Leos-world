@@ -456,6 +456,15 @@ function App() {
     } else if (rec.subjectKey) {
       storyCoverage.settleSubjectQueued(rec.subjectKey, false);
       storyCoverage.releaseSubjectInFlight(rec.subjectKey);
+      // Corridor expiry (Oct 28, 2026): the settle above is the
+      // ledger's ordinary undelivered release, but a segment the
+      // driver has EXITED is positionally spent — when the player
+      // dropped the story for segment exit, consume the segment for
+      // the rest of the tour, so a later pass over the same ground
+      // (a loop back onto the freeway) cannot re-serve it.
+      if (info.dropReason === 'corridor-expired') {
+        storyCoverage.markCorridorSegmentConsumed(rec.subjectKey);
+      }
     }
   };
   // A story that was served (and marked in-flight by a serve path)
@@ -1104,6 +1113,11 @@ function App() {
             // freshness age measures from the story's generation,
             // not from this enqueue.
             generatedAt: result.generatedAt,
+            // Corridor expiry (Oct 28, 2026): a banked corridor
+            // serve carries its segment id into the queue item, so
+            // the player can expire the story at dequeue if the
+            // driver has already exited the segment.
+            corridorSegmentId: result.corridorSegmentId,
           };
           registerHearing({
             storyId: result.storyId,

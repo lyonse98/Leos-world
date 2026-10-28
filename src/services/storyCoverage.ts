@@ -662,6 +662,21 @@ class StoryCoverageService {
     return this.corridorTriggered.has(segmentId);
   }
 
+  // Corridor expiry (Oct 28, 2026): a banked segment story dropped
+  // at the player because the driver had already exited the segment
+  // settles UNDELIVERED (the telling ledger's ordinary release —
+  // settleSubjectQueued(key, false) at the funnel), but the segment
+  // itself is consumed for the tour: the serve gate's
+  // hasHeardThisTour check must refuse it if the driver later loops
+  // back onto the same ground. Records ONLY the tour-heard mark —
+  // no daily tally, no session lock (a new tour is a new telling
+  // context, exactly as for a delivered corridor telling). No-op
+  // for any key that is not a corridor subject.
+  markCorridorSegmentConsumed(subjectKey: string): void {
+    if (!CORRIDOR_SUBJECT_KEYS.has(subjectKey)) return;
+    this.recordTourHeard(subjectKey);
+  }
+
   // Erik's minor rule (Oct 27, 2026): a minor place — not Tier-1, not
   // a marked major — gets ONE telling per tour, full stop. Once any
   // angle of it has been heard on this tour, no other angle serves,

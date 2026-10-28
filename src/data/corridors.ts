@@ -1682,6 +1682,68 @@ export function matchCorridor(pos: {
   return best;
 }
 
+export interface CorridorProgress {
+  // Along-track distance of the listener's nearest point on the
+  // polyline, from the segment's entry (0) to its exit (lengthM);
+  // grows past lengthM by overshootM once the listener has passed
+  // the exit.
+  alongM: number;
+  lengthM: number;
+  // How far PAST the segment's exit the listener has travelled,
+  // measured along the exit leg's direction of travel. Zero while
+  // the listener is on (or has not yet reached) the segment.
+  overshootM: number;
+  // Straight distance from the listener to the nearest polyline point.
+  distanceM: number;
+}
+
+// Along-track progress of a position against one segment — the
+// playback gate's exit test (corridor expiry, Oct 28, 2026).
+// matchCorridor answers "is the driver ON this segment" at serve
+// time; this answers the opposite question at story start: has the
+// driver already LEFT through the far end? Pure projection in the
+// module's flat local frame. Overshoot is signed along the exit
+// leg's travel direction, so a listener beside the exit vertex —
+// or one who has not reached it — accrues none.
+export function corridorProgressM(
+  segment: CorridorSegment,
+  pos: { lat: number; lng: number }
+): CorridorProgress {
+  const pts = segment.polyline;
+  let lengthM = 0;
+  let best: { alongM: number; distanceM: number } | null = null;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = toLocalM(pts[0], pts[i]);
+    const b = toLocalM(pts[0], pts[i + 1]);
+    const legM = Math.hypot(b.x - a.x, b.y - a.y);
+    const { distanceM, t } = pointToSegmentM(pos, pts[i], pts[i + 1]);
+    if (!best || distanceM < best.distanceM) {
+      best = { alongM: lengthM + t * legM, distanceM };
+    }
+    lengthM += legM;
+  }
+  let overshootM = 0;
+  if (pts.length >= 2) {
+    const exit = pts[pts.length - 1];
+    const prev = pts[pts.length - 2];
+    const e = toLocalM(exit, exit);
+    const pv = toLocalM(exit, prev);
+    const p = toLocalM(exit, pos);
+    const tx = e.x - pv.x;
+    const ty = e.y - pv.y;
+    const tLen = Math.hypot(tx, ty);
+    if (tLen > 0) {
+      overshootM = Math.max(0, ((p.x - e.x) * tx + (p.y - e.y) * ty) / tLen);
+    }
+  }
+  return {
+    alongM: best ? best.alongM + overshootM : 0,
+    lengthM,
+    overshootM,
+    distanceM: best ? best.distanceM : Number.POSITIVE_INFINITY,
+  };
+}
+
 // The segment that FOLLOWS a given one on the same freeway run —
 // one's exit anchor is the next's entry by construction. Used by
 // the serve layer's chaining telemetry (and the builder's manifest);
