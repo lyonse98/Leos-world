@@ -9,7 +9,7 @@ import { heardStories } from './heardStories';
 import { pickStorySubject, StorySubject } from './relevance';
 import { tasteProfile } from './tasteProfile';
 import { deriveTags, isInterestTag } from './storyTags';
-import { storyCoverage, AREA_ANGLES, LANDMARK_ANGLES, describeAngle, describeArea, areaSubjectKey, landmarkSubjectKey, isRotationAngle } from './storyCoverage';
+import { storyCoverage, AREA_ANGLES, LANDMARK_ANGLES, describeAngle, describeArea, areaSubjectKey, landmarkSubjectKey, isRotationAngle, angleFromTopic } from './storyCoverage';
 // Highway Corridor Library (Item 6): segment matching for the
 // banked freeway narration — see src/data/corridors.ts.
 import { matchCorridor } from '../data/corridors';
@@ -89,6 +89,26 @@ export interface NarrationResult {
 }
 
 const EMPTY_NARRATION: NarrationResult = { text: '', subject: '', context: '', mode: 'walking', rotation: null };
+
+// Retell gate (Erik's disparateness doctrine, Oct 28, 2026): the
+// one permitted second telling of a Tier-1 place within a tour.
+// Assembled when a live generation targets a Tier-1 subject with
+// exactly one delivered telling this tour (storyCoverage's
+// canRetellTier1): the first telling's text rides into the prompt
+// as a binding exclusion list, and the model may answer with the
+// decline sentinel instead of a story when no disjoint story can
+// be filled from the fact pack. See buildStoryPrompt (the gate
+// block) and the decline handling in getTourNarration.
+interface RetellGate {
+  subjectKey: string;
+  subjectName: string;
+  angle: string | null;
+  firstText: string;
+}
+
+// The decline sentinel is the ENTIRE response — a story that
+// merely opens with the word is not a decline.
+const DECLINE_TEXT_RE = /^decline[.!]?$/i;
 
 // Latency-adaptive length floor (pre-publish stack Item 5, Oct 27,
 // 2026). LATENCY_BASELINE_S is the pipeline latency the ruled length
@@ -612,13 +632,22 @@ class GeminiService {
     // rotation is the designed exception to each. The minor rule is
     // NOT bypassed — its filter is applied to the revisited pool
     // itself below.
-    const blocked = (place: NearbyPlace) => {
+    // Told-subject ledger (Oct 28, 2026): the last check is Erik's
+    // queue-time rule — a subject with a telling committed this
+    // tour (queued, playing, or delivered) is told for selection,
+    // whatever the older records say. The Tier-1 revisit pool is
+    // the ONE path allowed past it, and only through the
+    // disparateness gate, so it calls blocked with viaRetellGate:
+    // every other clause (lock, pending/in-flight, cap, minor)
+    // still applies there in full.
+    const blocked = (place: NearbyPlace, viaRetellGate: boolean = false) => {
       if (allowRevisit) return false;
       const key = landmarkSubjectKey(place.name);
       if (storyCoverage.isSubjectLockedForSession(key)) return true;
       if (storyCoverage.isSubjectPending(key)) return true;
       if (storyCoverage.isDailyCapped(key) && !storyLibrary.hasPlace(place.name)) return true;
       if (storyCoverage.isMinorRetellBlocked(key)) return true;
+      if (!viaRetellGate && storyCoverage.isSubjectToldForSelection(key)) return true;
       return false;
     };
 
@@ -669,10 +698,19 @@ class GeminiService {
       // dealt twice while one telling awaits its settle — and the
       // freshness test is the same one the hearing funnel's lock
       // decision uses, so pool and lock cannot disagree.
+      // Disparateness gate (Erik's refinement, Oct 28, 2026): the
+      // pool is now ALSO the retell gate's door. A Tier-1 re-enters
+      // only when canRetellTier1 holds — exactly one delivered
+      // telling this tour, none in flight, the gate not already
+      // declined — so a place can be retold at most once per tour,
+      // and the generation that follows carries the first telling's
+      // facts as binding exclusions (buildStoryPrompt's gate block)
+      // with a decline outcome that spends the slot without a story.
       const tier1Revisit = factPack.places.filter(p =>
         placesService.isTier1Landmark(p) &&
         heardStories.hasHeardSubject(p.name) &&
-        !blocked(p) &&
+        !blocked(p, true) &&
+        storyCoverage.canRetellTier1(landmarkSubjectKey(p.name)) &&
         storyCoverage.hasFreshAngle(landmarkSubjectKey(p.name), LANDMARK_ANGLES, [LANDMARK_ANGLES[0]])
       );
       if (tier1Revisit.length > 0) {
@@ -685,13 +723,30 @@ class GeminiService {
       return null;
     }
 
-    const revisited = factPack.places.filter(p =>
-      storyCoverage.hasFreshAngle(landmarkSubjectKey(p.name), LANDMARK_ANGLES, [LANDMARK_ANGLES[0]]) &&
-      // The minor rule binds at dwell too (Item 1): parked rotation
-      // may revisit Tier-1 and major places at fresh angles, but a
-      // minor place heard on this tour is done for the tour.
-      !storyCoverage.isMinorRetellBlocked(landmarkSubjectKey(p.name))
-    );
+    const revisited = factPack.places.filter(p => {
+      const key = landmarkSubjectKey(p.name);
+      // Told-subject ledger at dwell (Oct 28, 2026): parked depth
+      // rotation is exempt from the lock/pending/cap bypass above,
+      // but not from the ledger's hard facts — a subject with a
+      // telling still unsettled in the player is never re-dealt,
+      // and a Tier-1 already told on this tour re-enters only
+      // through the same one-retell gate as the moving pool.
+      if (storyCoverage.hasUnsettledTelling(key)) return false;
+      if (
+        storyCoverage.isTier1Subject(key) &&
+        storyCoverage.deliveredTellingCount(key) >= 1 &&
+        !storyCoverage.canRetellTier1(key)
+      ) {
+        return false;
+      }
+      return (
+        storyCoverage.hasFreshAngle(key, LANDMARK_ANGLES, [LANDMARK_ANGLES[0]]) &&
+        // The minor rule binds at dwell too (Item 1): parked rotation
+        // may revisit Tier-1 and major places at fresh angles, but a
+        // minor place heard on this tour is done for the tour.
+        !storyCoverage.isMinorRetellBlocked(key)
+      );
+    });
     if (revisited.length > 0) {
       return pickStorySubject(revisited, this.recentPrimaryTags(), { ignoreHeardPenalty: true });
     }
@@ -715,10 +770,37 @@ class GeminiService {
   // BEFORE the dwell bypass on purpose: it is a per-tour place rule,
   // not a movement rule — a minor place heard on this tour does not
   // serve another angle from a shelf even while parked.
+  // Assemble the retell gate for a live generation, or null when
+  // this generation is not a gated retell: the subject must be a
+  // Tier-1 place with exactly one delivered telling this tour and
+  // the gate still open (canRetellTier1), and the first telling's
+  // text must be on record to serve as the exclusion list. (A
+  // subject whose first "telling" never reached the listener has
+  // no exclusions to carry — canRetellTier1 already excludes it,
+  // since it counts delivered tellings only.)
+  private retellGateFor(subjectKey: string, subjectName: string, angle: string | null): RetellGate | null {
+    if (!storyCoverage.canRetellTier1(subjectKey)) return null;
+    const firstText = storyCoverage.firstDeliveredTellingText(subjectKey);
+    if (!firstText) return null;
+    return { subjectKey, subjectName, angle, firstText };
+  }
+
+  private static isDeclineText(text: string): boolean {
+    return DECLINE_TEXT_RE.test(text.trim());
+  }
+
   private isTopicLockedForSession(topic: string, dwell: boolean): boolean {
     const base = this.topicBaseName(topic);
     const key = landmarkSubjectKey(base);
     if (storyCoverage.isMinorRetellBlocked(key)) return true;
+    // Told-subject ledger (Oct 28, 2026): checked BEFORE the dwell
+    // bypass on purpose, like the minor rule — a subject with a
+    // telling still unsettled in the player, a declined retell, or
+    // a spent Tier-1 retell slot does not serve another angle from
+    // a shelf even while parked. A Tier-1 with one delivered
+    // telling may still serve here at a genuinely different angle:
+    // that serve IS its one retell (see storyCoverage).
+    if (storyCoverage.isServeRefusedByToldLedger(key, angleFromTopic(topic))) return true;
     if (dwell) return false;
     if (storyCoverage.isSubjectLockedForSession(key)) return true;
     // In-flight counts as locked for SERVING (fix stack RC-2): a
@@ -985,7 +1067,8 @@ class GeminiService {
     context: string,
     depthLevel: number,
     depthCycle: number,
-    destination: string | undefined
+    destination: string | undefined,
+    retellGate: RetellGate | null = null
   ): string {
     const lastTopic = locationTracker.getLastStoryTopic();
     const lastStoryText = locationTracker.getLastStoryText();
@@ -1033,6 +1116,32 @@ class GeminiService {
         if (covered.length > 0) {
           parts.push(`ANGLES ALREADY COVERED ON IT (do not repeat): ${covered.map(describeAngle).join(', ')}.`);
         }
+      }
+
+      if (retellGate) {
+        // The disparateness gate (Erik's rule, Oct 28, 2026): a
+        // retell is permitted ONLY as a genuinely different story —
+        // "not just a different tint of the same story." The first
+        // telling's full text is the exclusion list: every fact in
+        // it is spent. The decline outcome is a first-class success
+        // of judgment: when the fact pack cannot fill the new angle
+        // without reusing spent facts, the model returns the
+        // sentinel and the caller records the subject as
+        // mention-only for the rest of the tour — no tinted repeat
+        // is dealt in its place.
+        parts.push(
+          `RETELL GATE (BINDING): this is the ONE second telling of "${retellGate.subjectName}" permitted on this tour` +
+            (retellGate.angle ? `, on the new angle "${describeAngle(retellGate.angle)}"` : '') +
+            `. It is permitted only as a genuinely different story. The first telling is quoted below — EVERY fact in it is spent. ` +
+            'Do not reuse, recap, paraphrase, or re-introduce any of it, and do not re-explain what the place is. ' +
+            'Write only from fact-pack material that does not appear in the spent telling. ' +
+            'If the fact pack cannot fill a complete story on the new angle without reusing spent facts, do not write a story at all: ' +
+            'reply with the single word DECLINE and nothing else — no story, no apology, no explanation. ' +
+            'A declined retell is good judgment, not a failure.'
+        );
+        parts.push(
+          `FIRST TELLING OF "${retellGate.subjectName}" (spent — none of its facts may be reused):\n"${retellGate.firstText}"`
+        );
       }
     } else {
       const areaKey = target.rotation?.subjectKey ?? areaSubjectKey(position.lat, position.lng);
@@ -1389,7 +1498,14 @@ class GeminiService {
       prelimBase !== null &&
       !storyCoverage.isMajorSubject(landmarkSubjectKey(prelimBase)) &&
       !storyCoverage.isSubjectLockedForSession(landmarkSubjectKey(prelimAnchor.name)) &&
-      !heardStories.hasHeardSubject(prelimAnchor.name);
+      !heardStories.hasHeardSubject(prelimAnchor.name) &&
+      // Told-subject ledger (Oct 28, 2026): if the whole place
+      // already has a telling committed this tour — queued in the
+      // player or delivered — the deferral's purpose is served:
+      // the tenant's story queues behind it like any next story,
+      // and suppressing the serve would only starve the cycle.
+      !storyCoverage.hasUnsettledTelling(landmarkSubjectKey(prelimAnchor.name)) &&
+      storyCoverage.deliveredTellingCount(landmarkSubjectKey(prelimAnchor.name)) === 0;
 
     // If the preliminary cache found an unheard story, serve it right away.
     // Session lockout applies too: a cached angle-variant of a landmark
@@ -1683,7 +1799,23 @@ class GeminiService {
         if (
           !storyCoverage.isSubjectLockedForSession(anchorKey) &&
           !storyCoverage.isDailyCapped(anchorKey) &&
-          !heardStories.hasHeardSubject(anchor.name)
+          !heardStories.hasHeardSubject(anchor.name) &&
+          // Told-subject ledger (Oct 28, 2026) — the NASSCO hole.
+          // The guard used to consult only the lock, the cap, and
+          // the heard record, none of which see a telling that is
+          // QUEUED but not yet heard: on Erik's Oct 28 drive the
+          // redirect re-chose NASSCO on three consecutive cycles
+          // (~45 s apart) while its first telling sat unplayed in
+          // the queue, dealt two spare copies, and the spares were
+          // mute-flushed at tour end. A committed telling counts
+          // from the moment it is queued, so the redirect may fire
+          // only when the anchor has no telling in flight and none
+          // delivered this tour. (An anchor whose telling settled
+          // UNDELIVERED may still be re-served through here — the
+          // RC-2 release — but never while its queue window stands
+          // open.)
+          !storyCoverage.hasUnsettledTelling(anchorKey) &&
+          storyCoverage.deliveredTellingCount(anchorKey) === 0
         ) {
           const anchorAngle = storyCoverage.nextAngle(
             anchorKey,
@@ -1744,13 +1876,27 @@ class GeminiService {
             // place-wide walk must not hand back a second angle of a
             // minor place already heard this tour — the walk, not the
             // target, is where Pass 2's displacement would re-deal it.
+            // Told-subject ledger (Oct 28, 2026): the walk must ALSO
+            // not hand back any angle while a telling of the place is
+            // still unsettled in the player, nor a second copy of an
+            // angle this tour already dealt, nor anything once a
+            // Tier-1's one retell is spent or declined. A Tier-1 with
+            // one delivered telling may serve here at a genuinely
+            // different shelved angle — that serve IS its one retell.
             (_angle, topic) =>
               !heardStories.hasHeard(topic) &&
-              !storyCoverage.isMinorRetellBlocked(landmarkSubjectKey(this.topicBaseName(topic)))
+              !storyCoverage.isMinorRetellBlocked(landmarkSubjectKey(this.topicBaseName(topic))) &&
+              !storyCoverage.isServeRefusedByToldLedger(landmarkSubjectKey(this.topicBaseName(topic)), _angle)
           )
         : null;
       if (!libHit) {
         libHit = await storyLibrary.lookup(target.subject.name, target.angle);
+      }
+      if (libHit && storyCoverage.isServeRefusedByToldLedger(subjectKey, libHit.angle)) {
+        // The exact-angle fallback bypasses the walk's filters: the
+        // same ledger verdict applies to its result.
+        console.log(`[Gemini] Library hit for "${libHit.topic}" refused — subject already told this tour (told-subject ledger)`);
+        libHit = null;
       }
       if (libHit) {
         console.log(`[Gemini] Library hit: "${libHit.topic}" (${libHit.angle})`);
@@ -1887,11 +2033,45 @@ class GeminiService {
       }
     }
 
+    // Retell gate (Oct 28, 2026): when this generation is the one
+    // permitted second telling of a Tier-1 place, it carries the
+    // first telling's facts as binding exclusions and may decline.
+    const retellGate =
+      target.kind === 'landmark' && target.subject
+        ? this.retellGateFor(subjectKey, target.subject.name, target.angle)
+        : null;
+
     generationAttempted = true;
     const text = await this.generateStory(
-      position, factPack, target, effectiveContext, depthLevel, depthCycle, destination, onChunk, true, versionKey
+      position, factPack, target, effectiveContext, depthLevel, depthCycle, destination, onChunk, true, versionKey, 0, retellGate
     );
     console.log('[Gemini] generateStory returned:', text ? `${text.length} chars` : 'EMPTY');
+    if (retellGate && text && GeminiService.isDeclineText(text)) {
+      // The gate declined: no disjoint story could be filled
+      // without reusing the first telling's facts. Record the
+      // decline — the subject is mention-only for the rest of the
+      // tour (every serve path refuses it via the ledger) and the
+      // gate does not re-attempt — and return an honest empty: the
+      // cycle DID its work (decisionConsumed), the silence is
+      // designed, and nothing is queued in the retell's place. The
+      // place can still be MENTIONED as connective tissue by later
+      // stories through the ordinary told-context prompt material.
+      storyCoverage.markRetellDeclined(retellGate.subjectKey);
+      trackDiag(
+        'pipeline',
+        'retell-declined',
+        `"${retellGate.subjectName}" — no disjoint story could be filled without reusing the first telling's facts; mention-only for the rest of the tour`
+      );
+      console.log(`[Gemini] Retell declined for "${retellGate.subjectName}" — mention-only for the rest of the tour`);
+      return {
+        ...EMPTY_NARRATION,
+        context: effectiveContext,
+        mode: factPack.mode,
+        decisionConsumed: true,
+        generationAttempted: true,
+        emptyReason: 'retell-declined',
+      };
+    }
     if (text && text.trim().length > 0) {
       locationTracker.commitDepthAdvance();
       if (target.kind === 'landmark') {
@@ -1956,13 +2136,22 @@ class GeminiService {
             // never even BUFFER a second angle of a minor place heard
             // this tour — the buffer serve would refuse it anyway,
             // and buffering it wastes the prefetch cycle.
+            // Told-subject ledger (Oct 28, 2026): likewise never
+            // buffer a story the ledger would refuse at serve time —
+            // a telling in flight, an already-dealt angle, or a
+            // Tier-1 past its one retell.
             (_angle, topic) =>
               !heardStories.hasHeard(topic) &&
-              !storyCoverage.isMinorRetellBlocked(landmarkSubjectKey(this.topicBaseName(topic)))
+              !storyCoverage.isMinorRetellBlocked(landmarkSubjectKey(this.topicBaseName(topic))) &&
+              !storyCoverage.isServeRefusedByToldLedger(landmarkSubjectKey(this.topicBaseName(topic)), _angle)
           )
         : null;
       if (!libHit) {
         libHit = await storyLibrary.lookup(target.subject.name, target.angle);
+      }
+      if (libHit && storyCoverage.isServeRefusedByToldLedger(subjectKey, libHit.angle)) {
+        console.log(`[Gemini] Prefetch library hit for "${libHit.topic}" refused — subject already told this tour (told-subject ledger)`);
+        libHit = null;
       }
       if (libHit) {
         console.log(`[Gemini] Prefetch library hit: "${libHit.topic}" (${libHit.angle})`);
@@ -1999,10 +2188,31 @@ class GeminiService {
       return { text: cached.storyText, subject: cached.topic, context: 'prefetch', mode: factPack.mode, rotation: null };
     }
 
+    // Retell gate (Oct 28, 2026): a prefetched generation can be
+    // the gated retell too (the prefetcher picks targets through
+    // the same resolveSubject pools). It carries the same
+    // exclusions and may decline the same way — and a declined
+    // prefetch must return EMPTY, never the sentinel: the buffer
+    // would otherwise deal "DECLINE" as a story.
+    const retellGate =
+      target.kind === 'landmark' && target.subject
+        ? this.retellGateFor(subjectKey, target.subject.name, target.angle)
+        : null;
     const text = await this.generateStory(
       position, factPack, target, 'prefetch', 0, 0, undefined, undefined, false, versionKey,
-      2 // lane priority: prefetch — a live serve or a question always takes the lane first (fix stack RC-4)
+      2, // lane priority: prefetch — a live serve or a question always takes the lane first (fix stack RC-4)
+      retellGate
     );
+    if (retellGate && text && GeminiService.isDeclineText(text)) {
+      storyCoverage.markRetellDeclined(retellGate.subjectKey);
+      trackDiag(
+        'pipeline',
+        'retell-declined',
+        `"${retellGate.subjectName}" (prefetch) — no disjoint story could be filled without reusing the first telling's facts; mention-only for the rest of the tour`
+      );
+      console.log(`[Gemini] Prefetch retell declined for "${retellGate.subjectName}" — mention-only for the rest of the tour`);
+      return { ...EMPTY_NARRATION, mode: factPack.mode };
+    }
     return {
       text,
       subject: target.displayTopic,
@@ -2023,9 +2233,10 @@ class GeminiService {
     onChunk: ((text: string) => void) | undefined,
     updateTracker: boolean,
     versionKey: string,
-    lanePriority: number = 0
+    lanePriority: number = 0,
+    retellGate: RetellGate | null = null
   ): Promise<string> {
-    const prompt = this.buildStoryPrompt(position, factPack, target, context, depthLevel, depthCycle, destination);
+    const prompt = this.buildStoryPrompt(position, factPack, target, context, depthLevel, depthCycle, destination, retellGate);
     const topic = target.displayTopic;
     const shouldUpdate = updateTracker && target.kind === 'landmark' && !target.rotation;
 

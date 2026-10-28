@@ -1,7 +1,7 @@
 import { Position } from '../hooks/useGeolocation';
 import { calculateDistance, offsetPositionByHeading, MovementModeHysteresis, storyReachM, estimateSpeechDurationS } from '../utils/geo';
 import { geminiService, StoryRotation } from './gemini';
-import { storyCoverage, landmarkSubjectKey } from './storyCoverage';
+import { storyCoverage, landmarkSubjectKey, angleFromTopic } from './storyCoverage';
 import { storyLibrary } from './storyLibrary';
 import { heardStories } from './heardStories';
 import { latencyModel } from './latencyModel';
@@ -335,11 +335,22 @@ class StoryCacheService {
       const tenantAnchor = storyLibrary.containingMajorAnchor(
         cached.lat, cached.lng, cached.topic.split(' — ')[0].trim()
       );
+      const tenantAnchorKey = tenantAnchor ? landmarkSubjectKey(tenantAnchor.name) : null;
       const tenantDeferred =
         tenantAnchor !== null &&
+        tenantAnchorKey !== null &&
         !storyCoverage.isMajorSubject(servedKey) &&
-        !storyCoverage.isSubjectLockedForSession(landmarkSubjectKey(tenantAnchor.name)) &&
-        !heardStories.hasHeardSubject(tenantAnchor.name);
+        !storyCoverage.isSubjectLockedForSession(tenantAnchorKey) &&
+        !heardStories.hasHeardSubject(tenantAnchor.name) &&
+        // Told-subject ledger (Oct 28, 2026): if the whole place
+        // already has a telling committed this tour — queued in the
+        // player or delivered — the deferral's purpose is served:
+        // the tenant's story queues behind it like any next story
+        // instead of the serve falling through to a live path whose
+        // redirect would only re-deal the anchor (the NASSCO
+        // pattern: three anchor serves for one tenant approach).
+        !storyCoverage.hasUnsettledTelling(tenantAnchorKey) &&
+        storyCoverage.deliveredTellingCount(tenantAnchorKey) === 0;
       if (tenantDeferred) {
         console.log(`[StoryCache] Tenant serve deferred — "${cached.topic}" waits for whole place "${tenantAnchor!.name}"`);
       } else {
@@ -690,6 +701,22 @@ class StoryCacheService {
     const base = story.topic.split(' — ')[0].trim();
     const key = landmarkSubjectKey(base);
     if (storyCoverage.isMinorRetellBlocked(key)) return true;
+    // Told-subject ledger (Oct 28, 2026): bound by the parked
+    // exemption too, like the minor rule — a buffered angle of a
+    // place with a telling still unsettled in the player, an
+    // already-dealt angle, or a Tier-1 past its one retell (or
+    // declined) does not serve even at a standstill. This is the
+    // check that stops the Oct 28 Temple pattern: a second angle
+    // dealt from the buffer while the first telling was still in
+    // the queue.
+    if (
+      storyCoverage.isServeRefusedByToldLedger(
+        key,
+        story.rotation?.angle ?? angleFromTopic(story.topic)
+      )
+    ) {
+      return true;
+    }
     const speed = position.speed ?? null;
     if (speed !== null && speed < 1.0) return false;
     if (storyCoverage.isSubjectLockedForSession(key)) return true;

@@ -202,6 +202,19 @@ export function describeArea(lat: number, lng: number): string {
   return `the area around ${cellLat.toFixed(3)}, ${cellLng.toFixed(3)}`;
 }
 
+// One committed telling in the tour telling ledger (see the ledger
+// section below): a story handed to the player for a landmark
+// subject, with the settle the hearing funnel eventually delivered
+// for it. `angle` is the telling's rotation/library angle when known
+// (null for angle-less serves); `text` is kept so a later retell of
+// the same subject can carry it as its exclusion list.
+interface TourTelling {
+  angle: string | null;
+  text: string;
+  settled: boolean;
+  delivered: boolean;
+}
+
 type SubjectCoverage = Record<string, number>;
 
 interface StoredCoverage {
@@ -348,6 +361,45 @@ class StoryCoverageService {
   // served story with the page, so there is nothing to persist.
   private inFlightSubjects: Set<string> = new Set();
 
+  // Tour telling ledger (told-subject integrity, Oct 28, 2026): every
+  // telling COMMITTED to the player this tour, per landmark subject —
+  // written at queue time by the app's hearing funnel
+  // (registerHearing), settled by the same funnel. Erik's Oct 28
+  // ruling: a place counts as told from the moment it is QUEUED, not
+  // from the moment it is heard. The Oct 28 field drive showed why:
+  // "told" used to land only at playback completion, so a place
+  // sitting in the player queue was invisible to selection — NASSCO
+  // was served three times in ~60s by the tenant redirect while its
+  // first telling waited unplayed, and a second angle of the San
+  // Diego California Temple was dealt while its first was still in
+  // the queue. The in-flight set above covers some of that window,
+  // but not every serve path consults it (the tenant redirect did
+  // not), and it releases the instant a telling settles — including
+  // the delivered settle after which Erik's per-tour rules (minor
+  // one-telling, Tier-1 one-retell cap) must still bind. The ledger
+  // is the one record every serve path now consults. Tour-scoped and
+  // in-memory, like the tour-heard record; alias-group aware like
+  // every other subject operation.
+  //
+  // Settle semantics, reconciled with coverage-at-hearing (fix stack
+  // RC-2): a telling that settles UNDELIVERED records nothing beyond
+  // its own settle — the subject is free again exactly as RC-2 ruled
+  // (a displaced major must be re-servable later in the drive; that
+  // recycling is deliberate and verified). What the ledger changes
+  // is the QUEUED window and the delivered aftermath: while any
+  // telling is unsettled the subject is told for every selection
+  // purpose, and once a telling is DELIVERED the per-tour rules
+  // below bind for the rest of the tour.
+  private tourTellings: Map<string, TourTelling[]> = new Map();
+
+  // Tier-1 subjects whose one permitted retell was attempted and
+  // DECLINED by the disparateness gate this tour (the generation
+  // could not fill a genuinely different story without reusing the
+  // first telling's facts). A declined subject is mention-only for
+  // the rest of the tour: no serve path may deal it a story again,
+  // and the gate does not re-attempt the generation.
+  private retellDeclinedSubjects: Set<string> = new Set();
+
   private static todayStamp(): string {
     const d = new Date();
     const mm = String(d.getMonth() + 1).padStart(2, '0');
@@ -454,6 +506,11 @@ class StoryCoverageService {
     // service (pre-publish stack Item 1): a new tour starts with no
     // minor place yet told on it, whatever earlier tours today did.
     this.tourHeardSubjects.clear();
+    // The telling ledger and the retell-decline record are per-tour
+    // for the same reason (told-subject integrity, Oct 28, 2026): a
+    // new tour starts with nothing yet told on it.
+    this.tourTellings.clear();
+    this.retellDeclinedSubjects.clear();
     // Corridor triggers are per-tour too (Item 6 refinement): a
     // segment triggered on the drive out is not triggered on the
     // drive home — the return direction is a different segment
@@ -680,6 +737,159 @@ class StoryCoverageService {
     return false;
   }
 
+  // --- Tour telling ledger (told-subject integrity, Oct 28, 2026) --------
+  // Written and settled by the app's hearing funnel — registerHearing
+  // at queue time, settleHearing at the player's settle — so the
+  // record exists for exactly the stories the listener was actually
+  // dealt, whatever serve flavor produced them (live, cache, library,
+  // tenant redirect, catch-up batch). Landmark subjects only: area
+  // stories have their own angle coverage and no per-tour telling
+  // rule.
+
+  markSubjectQueued(subjectKey: string, angle: string | null, text: string): void {
+    if (!subjectKey || !subjectKey.startsWith('landmark:')) return;
+    const list = this.tourTellings.get(subjectKey) ?? [];
+    list.push({ angle, text, settled: false, delivered: false });
+    this.tourTellings.set(subjectKey, list);
+  }
+
+  // Settle the oldest unsettled telling of this subject. The funnel
+  // registers and settles under the same derived key; the alias-group
+  // scan is the fallback for a serve that registered under a variant.
+  settleSubjectQueued(subjectKey: string, delivered: boolean): void {
+    if (!subjectKey || !subjectKey.startsWith('landmark:')) return;
+    const own = this.tourTellings.get(subjectKey) ?? [];
+    let open = own.find(t => !t.settled);
+    if (!open) {
+      for (const member of this.aliasGroupOf(subjectKey)) {
+        if (member === subjectKey) continue;
+        open = (this.tourTellings.get(member) ?? []).find(t => !t.settled);
+        if (open) break;
+      }
+    }
+    if (!open) return;
+    open.settled = true;
+    open.delivered = delivered;
+  }
+
+  private tellingsFor(subjectKey: string): TourTelling[] {
+    const out: TourTelling[] = [];
+    for (const member of this.aliasGroupOf(subjectKey)) {
+      const list = this.tourTellings.get(member);
+      if (list) out.push(...list);
+    }
+    return out;
+  }
+
+  // Every telling committed this tour (queued, playing, or settled).
+  tourTellingCount(subjectKey: string): number {
+    return this.tellingsFor(subjectKey).length;
+  }
+
+  // Tellings that were actually HEARD this tour (delivered settles).
+  deliveredTellingCount(subjectKey: string): number {
+    return this.tellingsFor(subjectKey).filter(t => t.settled && t.delivered).length;
+  }
+
+  // A telling has been dealt and its settle has not landed: the
+  // subject is mid-telling, and NO serve path may deal it again.
+  hasUnsettledTelling(subjectKey: string): boolean {
+    return this.tellingsFor(subjectKey).some(t => !t.settled);
+  }
+
+  toldAnglesThisTour(subjectKey: string): string[] {
+    return [
+      ...new Set(
+        this.tellingsFor(subjectKey)
+          .map(t => t.angle)
+          .filter((a): a is string => !!a)
+      ),
+    ];
+  }
+
+  // The first DELIVERED telling's text — the exclusion list a gated
+  // retell generation must carry (Erik's disparateness rule: the
+  // retell may spend only facts the first telling did not).
+  firstDeliveredTellingText(subjectKey: string): string | null {
+    const first = this.tellingsFor(subjectKey).find(t => t.settled && t.delivered);
+    return first ? first.text : null;
+  }
+
+  markRetellDeclined(subjectKey: string): void {
+    for (const member of this.aliasGroupOf(subjectKey)) {
+      this.retellDeclinedSubjects.add(member);
+    }
+  }
+
+  isRetellDeclined(subjectKey: string): boolean {
+    for (const member of this.aliasGroupOf(subjectKey)) {
+      if (this.retellDeclinedSubjects.has(member)) return true;
+    }
+    return false;
+  }
+
+  // The NON-GATE selection verdict (Erik's Oct 28 ruling): true when
+  // ordinary selection / serve paths must treat this subject as
+  // already told this tour. A Tier-1 subject with a delivered telling
+  // reads as told here even though fresh angles remain — its ONLY
+  // re-entry is the disparateness-gated retell (canRetellTier1,
+  // consulted by the revisit pool itself). Majors that are not
+  // Tier-1 return false once settled: the session lock written at
+  // the same settle governs them, exactly as before. Minors with a
+  // delivered telling are told (the queue-era form of the one-
+  // telling rule — the tour-heard record enforces the same thing).
+  isSubjectToldForSelection(subjectKey: string): boolean {
+    if (!subjectKey.startsWith('landmark:')) return false;
+    if (this.hasUnsettledTelling(subjectKey)) return true;
+    if (this.isRetellDeclined(subjectKey)) return true;
+    const delivered = this.deliveredTellingCount(subjectKey);
+    if (delivered === 0) return false;
+    if (this.isTier1Subject(subjectKey)) return true;
+    if (this.isMajorSubject(subjectKey)) return false;
+    return true;
+  }
+
+  // May this Tier-1 subject be RETOLD right now (Erik's Oct 28
+  // disparateness doctrine)? Exactly one delivered telling so far,
+  // no telling in flight, and the gate has not already declined it.
+  // The retell itself — gated generation, or a banked serve at a
+  // genuinely different angle — is what consumes the slot: once a
+  // second telling is DELIVERED the count reaches two and this
+  // stays false for the rest of the tour (the one-retell cap).
+  canRetellTier1(subjectKey: string): boolean {
+    if (!subjectKey.startsWith('landmark:')) return false;
+    if (!this.isTier1Subject(subjectKey)) return false;
+    if (this.isRetellDeclined(subjectKey)) return false;
+    if (this.hasUnsettledTelling(subjectKey)) return false;
+    return this.deliveredTellingCount(subjectKey) === 1;
+  }
+
+  // The cache/library serve verdict: may a SHELF story about this
+  // subject, at this angle, be dealt now? Refused while a telling
+  // is unsettled (the pile-up window), after a declined retell, at
+  // or past the Tier-1 cap, and — the disparateness test for pre-
+  // authored material — when the angle on offer is one this tour
+  // has already been dealt. A Tier-1 subject with exactly one
+  // delivered telling may serve ONE more time from the shelf, at a
+  // genuinely different angle: the shelved angles are separately
+  // authored stories of the place, so angle-distinctness is the
+  // disparateness evidence, and the serve consumes the retell slot
+  // exactly as a gated generation would. Non-Tier-1 subjects defer
+  // to the existing checks (session lock, minor rule, daily cap),
+  // which the callers apply alongside this one.
+  isServeRefusedByToldLedger(subjectKey: string, angle: string | null): boolean {
+    if (!subjectKey.startsWith('landmark:')) return false;
+    if (this.hasUnsettledTelling(subjectKey)) return true;
+    if (this.isRetellDeclined(subjectKey)) return true;
+    if (!this.isTier1Subject(subjectKey)) return false;
+    const delivered = this.deliveredTellingCount(subjectKey);
+    if (delivered >= 2) return true;
+    if (delivered === 1 && angle !== null && this.toldAnglesThisTour(subjectKey).includes(angle)) {
+      return true;
+    }
+    return false;
+  }
+
   /**
    * THE hearing record for coverage (fix stack RC-2): called exactly
    * once per served story, from the player's settle, and only when
@@ -747,6 +957,8 @@ class StoryCoverageService {
     this.sessionLockedSubjects.clear();
     this.sessionAliasGroups.clear();
     this.inFlightSubjects.clear();
+    this.tourTellings.clear();
+    this.retellDeclinedSubjects.clear();
     this.tourHeardSubjects.clear();
     this.corridorTriggered.clear();
     this.dailyCounts = {};
@@ -767,6 +979,8 @@ class StoryCoverageService {
     this.subjects = {};
     this.recent = [];
     this.clearSessionLocks();
+    this.tourTellings.clear();
+    this.retellDeclinedSubjects.clear();
     this.majorSubjects.clear();
     this.tier1Subjects.clear();
     this.pendingSubjects.clear();

@@ -410,6 +410,19 @@ function App() {
     pendingHearingRef.current.set(rec.storyId, rec);
     if (rec.subjectKey?.startsWith('landmark:')) {
       storyCoverage.markSubjectInFlight(rec.subjectKey);
+      // Told-subject ledger (Oct 28, 2026): the subject counts as
+      // TOLD from this moment — queued, not heard — for every
+      // selection purpose (storyCoverage's ledger section). This
+      // registration is the one choke point every queued location
+      // story passes through, whatever serve flavor produced it, so
+      // the ledger cannot be bypassed by a serve path the way the
+      // in-flight mark was (the tenant redirect never consulted it
+      // and re-served NASSCO twice more on Erik's Oct 28 drive).
+      storyCoverage.markSubjectQueued(
+        rec.subjectKey,
+        rec.rotation?.angle ?? angleFromTopic(rec.topic),
+        rec.storyText
+      );
     }
   };
   const settleHearing = (storyId: string, info: PlaybackSettle) => {
@@ -417,6 +430,13 @@ function App() {
     if (!rec) return;
     pendingHearingRef.current.delete(storyId);
     if (info.sounded && info.completed) {
+      // The ledger settles on EVERY exit, delivered or not — an
+      // unsettled entry would bar the subject for the rest of the
+      // tour. Delivered-ness is recorded because Erik's per-tour
+      // rules (minor one-telling, Tier-1 one-retell cap) count
+      // HEARD tellings; an undelivered settle spends nothing but
+      // the telling's own queue window (RC-2).
+      if (rec.subjectKey) storyCoverage.settleSubjectQueued(rec.subjectKey, true);
       if (rec.subjectKey?.startsWith('landmark:')) {
         // The angle just heard rides along (pre-publish stack
         // Item 1): the Tier-1 per-angle lock decision counts it as
@@ -434,6 +454,7 @@ function App() {
         storyText: rec.storyText,
       });
     } else if (rec.subjectKey) {
+      storyCoverage.settleSubjectQueued(rec.subjectKey, false);
       storyCoverage.releaseSubjectInFlight(rec.subjectKey);
     }
   };
@@ -911,6 +932,12 @@ function App() {
         if (!placesService.isTier1Landmark(p) || p.distance > tier1ScanRadiusM) return false;
         const key = landmarkSubjectKey(p.name);
         if (storyCoverage.isSubjectLockedForSession(key)) return false;
+        // Told-subject ledger (Oct 28, 2026): a place with a telling
+        // already committed this tour is not pinnable for a queue
+        // jump — its story is already coming (or has been heard) —
+        // unless the one gated retell remains, whose serve SHOULD
+        // still take the priority lane when it comes.
+        if (storyCoverage.tourTellingCount(key) > 0 && !storyCoverage.canRetellTier1(key)) return false;
         if (!heardStories.hasHeardSubject(p.name)) return true;
         return storyCoverage.hasFreshAngle(key, LANDMARK_ANGLES, [LANDMARK_ANGLES[0]]);
       });
@@ -1400,6 +1427,21 @@ function App() {
             if (moving && subjectKey.startsWith('landmark:')) {
               if (storyCoverage.isSubjectLockedForSession(subjectKey)) continue;
               if (storyCoverage.isSubjectInFlight(subjectKey)) continue;
+            }
+            // Told-subject ledger (Oct 28, 2026): the batch replays
+            // buffered stories en masse, so the per-tour telling
+            // rules bind here without the moving qualifier — a place
+            // with a telling already committed this tour (including
+            // one registered earlier in THIS batch) does not replay
+            // a second angle back to back, and a Tier-1 past its
+            // one retell does not replay at all.
+            if (
+              storyCoverage.isServeRefusedByToldLedger(
+                subjectKey,
+                story.rotation?.angle ?? angleFromTopic(story.topic)
+              )
+            ) {
+              continue;
             }
             registerHearing({
               storyId: story.storyId,
