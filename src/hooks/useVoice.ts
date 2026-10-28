@@ -203,6 +203,15 @@ const TTS_SYNTH_TIMEOUT_MS = 30000;
 // never leaves the listener in unexplained silence.
 const BRIDGE_AFTER_MS = 4000;
 
+// How long scripted lines may sit in the pre-unlock hold before the
+// hold itself is reported as a platform block (the recovery banner).
+// A healthy start holds the welcome for well under a second — the
+// prime lands inside the tap's own gesture — so 3 s of holding is
+// unambiguous: sound is blocked, and until now that state registered
+// NOTHING (no attempt, no block, no banner), leaving the listener in
+// silence with no control offered (tour 0a36c9d7, Oct 27, 2026).
+const HELD_LINES_BLOCKED_MS = 3000;
+
 // Total playback attempts for one queue item across ALL failure exits
 // (blocked, engine failure, watchdog advance). When the bound is hit
 // the item is dropped and the queue moves on: a line that cannot be
@@ -312,8 +321,25 @@ export const useVoice = () => {
   // unlockedRef back to false and stripped the src out from under the
   // live prime, so a line already spoken (the tour-start welcome) sat
   // held in pendingSpeechRef waiting for an unlock that had, on paper,
-  // already happened. Only the LATEST prime may write state or flush.
+  // already happened. The refined rule (Oct 27, 2026, tour 0a36c9d7):
+  // only the latest prime may do ELEMENT bookkeeping (pause / src
+  // churn) or let a FAILURE write state — but a prime whose play()
+  // SUCCEEDED has proven the element unlocked, whichever generation it
+  // belongs to, and that proof still latches (see unlock()).
   const primeGenRef = useRef<number>(0);
+  // Set while a prime's play() promise is unsettled. An unlock() call
+  // arriving in that window COALESCES onto the in-flight prime instead
+  // of re-priming: tour start primes synchronously inside the tap,
+  // awaits the voice list for up to ~2s, then primes AGAIN — and the
+  // second prime's src assignment aborted / superseded the first, the
+  // only one launched inside iOS's user-activation window. (Tour
+  // 0a36c9d7: prime #1's success discarded by the generation guard,
+  // prime #2 rejected outside the window, the unlock never latched,
+  // and the held welcome + opener sat until teardown settled them
+  // undelivered, attempts=0.) The flag clears in the prime's own
+  // settlement handlers, so a FAILED prime never blocks the next
+  // gesture's retry — the muted-banner path must not dead-end.
+  const primeInFlightRef = useRef<boolean>(false);
   const audioBlockedRef = useRef<boolean>(false);
   // Increments every time playback ownership changes (new story, skip, mute).
   // Callbacks from a story that no longer owns the queue check this and bail,
@@ -429,6 +455,47 @@ export const useVoice = () => {
   // is still resolving — a single slot would have overwritten the welcome
   // with the opener and lost it.
   const pendingSpeechRef = useRef<Array<{ text: string; localVoice?: boolean; audioUrl?: string; onSettle?: (info: PlaybackSettle) => void }>>([]);
+  // Held-line gesture safety net (Oct 27, 2026): while lines sit in the
+  // hold awaiting an unlock, a document-level pointerdown listener
+  // retries unlock() on the next gesture ANYWHERE — not only on the
+  // muted banner (App's handleUnlockAudio). The watch lives only while
+  // the hold is non-empty and the unlock unearned; syncHoldWatch keeps
+  // its lifecycle tied to the hold's. flushHeldLines and the teardown
+  // settle reach it through the ref — both are defined before the watch
+  // helpers, which need unlock() to exist first.
+  const holdWatchArmedRef = useRef<boolean>(false);
+  const unlockRef = useRef<() => void>(() => {});
+  const syncHoldWatchRef = useRef<() => void>(() => {});
+  // Pending held-lines watchdog: armed while scripted lines sit in
+  // pendingSpeechRef; fires HELD_LINES_BLOCKED_MS after the hold began
+  // if the lines are still held and the unlock is still unearned.
+  const heldBlockedTimerRef = useRef<number | null>(null);
+  // Keep the watchdog's lifecycle tied to the hold's: arm it when
+  // scripted lines are waiting on an unearned unlock and no block is
+  // already on the banner; clear it the moment the hold empties. The
+  // banner state itself is only ever SET here (markAudioBlocked) —
+  // clearing belongs to the existing paths (a tap, a story reaching
+  // the element, speech actually starting), exactly as for any other
+  // platform block.
+  const syncHeldBlockedTimer = () => {
+    const held = pendingSpeechRef.current.length > 0;
+    if (held && !everUnlockedRef.current && !audioBlockedRef.current) {
+      if (heldBlockedTimerRef.current === null) {
+        heldBlockedTimerRef.current = window.setTimeout(() => {
+          heldBlockedTimerRef.current = null;
+          // Re-check at the deadline: the hold may have drained, the
+          // unlock may have landed, or a real playback failure may
+          // have claimed the banner in the meantime.
+          if (pendingSpeechRef.current.length > 0 && !everUnlockedRef.current && !audioBlockedRef.current) {
+            markAudioBlocked('blocked');
+          }
+        }, HELD_LINES_BLOCKED_MS);
+      }
+    } else if (heldBlockedTimerRef.current !== null) {
+      clearTimeout(heldBlockedTimerRef.current);
+      heldBlockedTimerRef.current = null;
+    }
+  };
   const speakRef = useRef<(text: string, opts?: { localVoice?: boolean; audioUrl?: string; onSettle?: (info: PlaybackSettle) => void }) => void>(() => {});
   const pendingTrackedRef = useRef<{
     text: string;
@@ -504,6 +571,11 @@ export const useVoice = () => {
       pendingTrackedRef.current = null;
       speakTrackedRef.current(heldTracked.text, heldTracked, { front: heldTracked.front });
     }
+    // The drain may have emptied the hold — or re-held every line, if
+    // the engine is still locked (speak re-arms from its own hold
+    // branch in that case). Keep the gesture watch in sync either way.
+    syncHoldWatchRef.current();
+    syncHeldBlockedTimer();
   }, []);
 
   // Playback that actually sounded IS an unlock, whatever the prime
@@ -546,14 +618,41 @@ export const useVoice = () => {
     }
 
     const audio = audioElRef.current;
-    if (audio) {
+    if (audio && !primeInFlightRef.current) {
+      // Coalesce (Oct 27, 2026): a prime is already in flight — the
+      // common case is tour start's second unlock() landing while the
+      // in-tap prime is still settling. Re-priming here would reassign
+      // the element's src, aborting the in-flight prime and bumping
+      // its generation so its settlement is discarded, while the new
+      // prime's play() runs outside the activation window and rejects:
+      // the exact tour-0a36c9d7 failure. The in-flight prime's own
+      // handlers latch + flush when it lands, and the flush at the end
+      // of this call covers anything already speakable.
+      primeInFlightRef.current = true;
       const primeGen = ++primeGenRef.current;
       audio.muted = true;
       audio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
       audio.play().then(() => {
-        // A newer unlock() has re-primed since this attempt began; this
-        // settlement belongs to a dead prime and must not touch state.
-        if (primeGen !== primeGenRef.current) return;
+        primeInFlightRef.current = false;
+        if (primeGen !== primeGenRef.current) {
+          // A newer prime superseded this one while its play() was in
+          // flight — but it SUCCEEDED, and a successful play() is
+          // platform proof the element is unlocked: the gesture that
+          // launched it is the activation the platform demands. The
+          // generation guard exists to keep a stale prime from doing
+          // element bookkeeping on an element a newer prime is using,
+          // and to keep stale FAILURES from un-latching (below) — it
+          // was never meant to throw away a proven unlock. Latch +
+          // flush; skip the cleanup, which belongs to the live prime.
+          // muted is the one safe write: the prime clip is digital
+          // silence, so un-muting early is inaudible, and the live
+          // prime's own settlement re-writes it either way.
+          audio.muted = false;
+          everUnlockedRef.current = true;
+          unlockedRef.current = true;
+          flushHeldLines();
+          return;
+        }
         audio.pause();
         audio.currentTime = 0;
         audio.muted = false;
@@ -570,21 +669,70 @@ export const useVoice = () => {
         // whoever's call made it happen.
         flushHeldLines();
       }).catch(() => {
+        primeInFlightRef.current = false;
         // Same generation guard as the success path: an aborted prime
         // (killed by the next unlock's src assignment) must not reset
         // the unlock a newer prime already earned, nor strip its src.
         if (primeGen !== primeGenRef.current) return;
+        // Nor may a failure that lands AFTER the unlock was earned by
+        // another path (a stale prime's success above, or real
+        // playback proving the element) touch the element at all: the
+        // src it would strip now belongs to live playback.
+        if (everUnlockedRef.current) return;
         audio.muted = false;
         audio.removeAttribute('src');
         // A failed prime proves only that THIS attempt failed. It must
         // never revoke an unlock an earlier prime — or real playback —
         // already earned.
-        if (!everUnlockedRef.current) unlockedRef.current = false;
+        unlockedRef.current = false;
       });
     }
 
     flushHeldLines();
   }, [flushHeldLines]);
+
+  unlockRef.current = unlock;
+
+  // Held-line gesture safety net (Oct 27, 2026): the next gesture
+  // anywhere retries the unlock while lines are held. A pointerdown is
+  // a fresh user-activation window — the one thing a failed prime
+  // needs. Capture phase, so the retry primes before the tap's own
+  // handlers run: a tap on the muted banner finds the recovery already
+  // under way, and its own unlock() call coalesces / flushes behind it.
+  const onHoldGesture = useCallback(() => {
+    unlockRef.current();
+  }, []);
+
+  const armHoldWatch = useCallback(() => {
+    if (holdWatchArmedRef.current || typeof document === 'undefined') return;
+    holdWatchArmedRef.current = true;
+    document.addEventListener('pointerdown', onHoldGesture, true);
+  }, [onHoldGesture]);
+
+  const disarmHoldWatch = useCallback(() => {
+    if (!holdWatchArmedRef.current || typeof document === 'undefined') return;
+    holdWatchArmedRef.current = false;
+    document.removeEventListener('pointerdown', onHoldGesture, true);
+  }, [onHoldGesture]);
+
+  // The watch lives exactly while speech is held and the unlock is
+  // unearned. Invoked after every drain/settle of the hold (through
+  // syncHoldWatchRef) and mirrored by the hold branches, which arm it.
+  const syncHoldWatch = useCallback(() => {
+    const held = pendingSpeechRef.current.length > 0 || pendingTrackedRef.current !== null;
+    if (held && !everUnlockedRef.current) armHoldWatch();
+    else disarmHoldWatch();
+  }, [armHoldWatch, disarmHoldWatch]);
+
+  syncHoldWatchRef.current = syncHoldWatch;
+
+  useEffect(() => () => {
+    disarmHoldWatch();
+    if (heldBlockedTimerRef.current !== null) {
+      clearTimeout(heldBlockedTimerRef.current);
+      heldBlockedTimerRef.current = null;
+    }
+  }, [disarmHoldWatch]);
 
   const initializeVoice = useCallback(() => {
     if (!synthRef.current) return false;
@@ -770,11 +918,16 @@ export const useVoice = () => {
     // whatever the app most wanted to say.
     if (!unlockedRef.current) {
       pendingSpeechRef.current.push({ text: trimmed, localVoice: opts?.localVoice, audioUrl: opts?.audioUrl, onSettle: opts?.onSettle });
+      // Arm the gesture safety net: the next tap anywhere retries the
+      // unlock, so a held line is one gesture away from recovery even
+      // if every prime so far has missed its activation window.
+      armHoldWatch();
+      syncHeldBlockedTimer();
       return;
     }
 
     speakPriority(trimmed, opts?.onSettle ? { onSettleDetail: opts.onSettle } : undefined, opts);
-  }, [speakPriority]);
+  }, [speakPriority, armHoldWatch]);
 
   speakRef.current = speak;
 
@@ -809,11 +962,12 @@ export const useVoice = () => {
         displaced.onPlaybackEnd?.(false);
       }
       pendingTrackedRef.current = { text: trimmed, ...cbs, front: opts?.front };
+      armHoldWatch();
       return;
     }
 
     speakPriority(trimmed, cbs, { front: opts?.front });
-  }, [speakPriority]);
+  }, [speakPriority, armHoldWatch]);
 
   speakTrackedRef.current = speakTracked;
 
@@ -1023,6 +1177,9 @@ export const useVoice = () => {
     for (const line of heldLines) {
       line.onSettle?.(undelivered);
     }
+    // The hold is empty now; the gesture safety net stands down with it.
+    syncHoldWatchRef.current();
+    syncHeldBlockedTimer();
   }, []);
 
   const stop = useCallback(() => {
