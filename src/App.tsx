@@ -1503,12 +1503,15 @@ function App() {
 
   const handleStartTour = async (resume: boolean = false) => {
     try {
-      // Prime the audio element FIRST, synchronously inside this tap.
-      // iOS Safari's user-activation window is short, and everything
-      // below (init, voice loading, the ensureVoiceReady await) can
-      // burn it — a prime that lands after the window closes leaves
-      // every story's play() blocked for the whole tour.
-      voice.unlock();
+      // Begin the opening transaction FIRST, synchronously inside
+      // this tap (Item 8): beginOpening launches the audio prime
+      // itself, so the element's play() runs inside iOS Safari's
+      // user-activation window — everything below (init, voice
+      // loading, the ensureVoiceReady await) happens AFTER the
+      // prime is in flight and cannot push it outside the window.
+      // A prime that lands after the window closes leaves every
+      // story's play() blocked for the whole tour.
+      voice.beginOpening();
       geminiService.initialize();
       try { geminiAudio.initialize(); } catch (e) { console.error('[Tour] Gemini TTS init failed:', e); }
 
@@ -1550,7 +1553,7 @@ function App() {
       // fails to load or play, playback falls back to the device
       // voice speaking the same words — the cover survives the
       // failure; a variant with no clip at all speaks locally.
-      voice.speak(intro, {
+      voice.speakOpeningLine('greeting', intro, {
         ...(introClipUrl ? { audioUrl: introClipUrl } : { localVoice: true }),
         onSettle: (info) => {
           // The canned welcome's settle, on the record (Oct 26,
@@ -1610,7 +1613,7 @@ function App() {
       if (primaryOpener) {
         const playedThisStart: string[] = [primaryOpener.id];
         const queueOpenerSegment = (opener: PuckOpener, isExtension: boolean) => {
-          voice.speak(opener.transcript, {
+          voice.speakOpeningLine('opener', opener.transcript, {
             audioUrl: openerAudioUrl(opener),
             onSettle: (info) => {
               try {
@@ -1660,11 +1663,14 @@ function App() {
       // the route/subject memory the prompt's connective layer reads
       // starts empty, alongside the tracker it derives from.
       driveArc.reset();
-      // Opener gate (Pass 1, Oct 27, 2026): from here until the
-      // neighborhood welcome airs, the player may not START a
-      // landmark/area story — welcome → neighborhood → landmarks is
-      // structural now, not a race the intro has to win.
-      voice.beginOpenerGate();
+      // Opening gate (Item 8): there is no separate gate to arm —
+      // the opening transaction began at the top of this handler
+      // (voice.beginOpening, inside the tap), and the state machine
+      // holds every location story behind the greeting debt and
+      // then behind the neighborhood welcome until the welcome
+      // settles. Greeting → neighborhood → landmarks is the
+      // machine's transition structure, not a race anything has
+      // to win.
       // Media Session (Pass 1): lock-screen / car-stereo presence and
       // transport controls for the tour.
       voice.activateMediaSession();

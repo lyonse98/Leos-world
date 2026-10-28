@@ -56,8 +56,10 @@ interface StoryQueueItem {
   // The reserved neighborhood-welcome serve (Pass 1, Oct 27, 2026). An
   // introServe item is protected in the queue: the single-slot
   // replacement and priority splices must not displace it before it
-  // airs, and while the opener gate is armed it is the ONLY location
-  // story allowed to start. Its settle releases the gate.
+  // airs. Under the opening state machine (Item 8) it may start only
+  // once the greeting debt is discharged — and then it is the ONLY
+  // location story allowed to start until its settle answers the
+  // gate (releaseOpenerGate).
   introServe?: boolean;
   // Pre-made audio (curated library episode): playback uses this URL
   // directly and pre-synthesis skips the item entirely — the audio
@@ -96,6 +98,36 @@ export interface PlaybackSettle {
   engine: 'gemini' | 'browser' | null;
   attempts: number;
   soundedMs: number;
+}
+
+// Opening state machine (fix-order Item 8, Oct 28, 2026). The tour
+// opening is one owned transaction with ONE explicit state value:
+//   idle      — no tour opening in flight.
+//   priming   — opening begun (the prime launched synchronously in
+//               the Start gesture); the unlock is not yet earned and
+//               the greeting debt is held.
+//   welcoming — the unlock is earned; the greeting debt is
+//               discharging and the welcome has not settled.
+//   covered   — the greeting debt is fully settled; the welcome has
+//               not settled. Landmarks still wait.
+//   open      — the opening completed: debt settled AND the
+//               welcome's gate question answered. Normal queueing.
+//   failed    — the opening expired at the backstop with debt
+//               outstanding: the debt was settled undelivered, on
+//               the record, and the tour proceeded without it.
+type OpeningState = 'idle' | 'priming' | 'welcoming' | 'covered' | 'open' | 'failed';
+
+// One registered opener line (the greeting, or one opener-clip
+// segment) and the machine wrapper that settles it. Registration is
+// what makes the line DEBT: from that moment the machine owes it to
+// the listener, in sequence, ahead of the welcome — and the wrapper
+// fires exactly once on every terminal path, which is what makes
+// the opener telemetry (opener_spoken / opener_clip, filed by the
+// caller's onSettle) unconditional rather than incidental.
+interface OpenerDebtEntry {
+  kind: 'greeting' | 'opener';
+  settled: boolean;
+  settle: (info: PlaybackSettle) => void;
 }
 
 interface CurrentPosition {
@@ -418,23 +450,37 @@ export const useVoice = () => {
   // diagnostics so the reason for browser voice is visible.
   const [ttsStatus, setTtsStatus] = useState<string>('idle');
   const backgroundedRef = useRef<boolean>(false);
-  // Opener gate state (Pass 1, Oct 27, 2026): armed by the app at tour
-  // start via beginOpenerGate(); while armed, playStoryFromQueue may
-  // start ONLY the introServe item (plus scripted lines, which are the
-  // welcome/clip the gate exists to protect). Released by the intro's
-  // settle, by the intro being stale-dropped, or by the timeout
-  // backstop timer — never by an ordinary story starting.
-  const openerGateRef = useRef<{ armedAt: number } | null>(null);
+  // Opening state machine state (Item 8, Oct 28, 2026): the single
+  // state value, its arming timestamp, and the two facts the
+  // player's gate derives from — is greeting debt outstanding, and
+  // has the reserved welcome's gate question been answered (aired,
+  // settled, or terminally dropped). This REPLACES the Pass 1 gate
+  // ref and the fix stack's T6 order-guard latch: those were two
+  // more independently-owned predicates in the conjunction the
+  // audit's §2b indicted, and in the field they disagreed — the
+  // gate let the welcome start while the greeting sat held, the
+  // latch then licensed the guard to suppress the greeting outright
+  // (Oct 28, tour 70a8cbcf: held 49 s, settled attempts=0). Here
+  // there is one state, and the welcome's start is a transition OF
+  // that state, so the disagreement has no representation.
+  const openerStateRef = useRef<OpeningState>('idle');
+  const openerArmedAtRef = useRef<number>(0);
+  const openerWelcomeDoneRef = useRef<boolean>(true);
   const openerGateTimerRef = useRef<number | null>(null);
-  // T6 order guard (fix stack, Oct 27, 2026): latched the moment an
-  // introServe item is dequeued into the player. Held welcome/opener
-  // lines belong BEFORE the neighborhood intro; once the intro has
-  // started they must never flush after it (the sim-proven hole:
-  // primes never land, the intro sounds through the element, the
-  // flush fires late and the welcome talks over the intro's tail).
-  // flushHeldLines settles held lines undelivered instead once this
-  // is set. Reset at every gate-begin (a new tour's opener).
-  const introStartedRef = useRef<boolean>(false);
+  // The greeting debt: every line registered through
+  // speakOpeningLine for this opening. A registered line may be
+  // DELAYED (it waits for the unlock like everything else) but
+  // never dropped: the welcome and the landmarks wait behind it,
+  // and its only exits are playing or a settle that files its
+  // telemetry (the backstop sweep, teardown).
+  const openerDebtRef = useRef<OpenerDebtEntry[]>([]);
+  // Ref bridge to the machine's advance function: the unlock paths
+  // (prime settlement, proven-unlock) are defined before the
+  // machine section, and every unlock latch funnels through
+  // flushHeldLines — the bridge lets the flush keep the state
+  // value truthful (priming → welcoming the moment the unlock is
+  // earned) without a declaration-order knot.
+  const advanceOpeningRef = useRef<() => void>(() => {});
   // The queue item currently in the player, retained so a return from
   // backgrounding can restart IT (replay/re-speak) instead of abandoning
   // it to the watchdog. Set at dequeue; cleared at settle, and on the
@@ -543,27 +589,18 @@ export const useVoice = () => {
     const held = pendingSpeechRef.current;
     if (held.length > 0) {
       pendingSpeechRef.current = [];
-      if (introStartedRef.current) {
-        // Order guard (fix stack, sim hole T6): the neighborhood
-        // intro has already started, so these held welcome/opener
-        // lines can no longer take their place in the sequence —
-        // speaking them now would put the welcome AFTER the intro it
-        // exists to precede. Settle them undelivered instead: their
-        // owners record an honest no-sound, and nothing held can
-        // ever flush late again.
-        const undelivered: PlaybackSettle = {
-          sounded: false, completed: false, engine: null, attempts: 0, soundedMs: 0,
-        };
-        for (const line of held) {
-          line.onSettle?.(undelivered);
-        }
-        try {
-          trackDiag('playback', 'opener-order-guard', `${held.length} held opener line(s) suppressed — the intro had already started`);
-        } catch { /* diagnostics only */ }
-      } else {
-        for (const line of held) {
-          speakRef.current(line.text, { localVoice: line.localVoice, audioUrl: line.audioUrl, onSettle: line.onSettle });
-        }
+      // No order guard (Item 8): held lines ALWAYS speak, in order.
+      // The fix stack's guard settled held greeting/opener lines
+      // undelivered once the intro had started — but under the
+      // opening state machine the intro cannot start ahead of
+      // unsettled debt (the player's gate answers to the machine),
+      // so the late-flush inversion the guard policed is
+      // unrepresentable, and the lines it used to suppress (Oct 28,
+      // tour 70a8cbcf: the greeting, discarded after a 49 s hold)
+      // are precisely the debt this machine exists to pay. A flush
+      // can therefore only ever move the debt toward the speaker.
+      for (const line of held) {
+        speakRef.current(line.text, { localVoice: line.localVoice, audioUrl: line.audioUrl, onSettle: line.onSettle });
       }
     }
     const heldTracked = pendingTrackedRef.current;
@@ -576,6 +613,10 @@ export const useVoice = () => {
     // branch in that case). Keep the gesture watch in sync either way.
     syncHoldWatchRef.current();
     syncHeldBlockedTimer();
+    // Every flush rides an unlock event (a prime landing, a later
+    // unlock() call, playback proving the element): the facts the
+    // opening state derives from may have just changed.
+    advanceOpeningRef.current();
   }, []);
 
   // Playback that actually sounded IS an unlock, whatever the prime
@@ -978,45 +1019,216 @@ export const useVoice = () => {
     }
   }, []);
 
-  // Opener gate (Pass 1, Oct 27, 2026). Erik's required sequence is
-  // generic welcome → neighborhood welcome → landmarks, and on the
-  // Oct 27 commute the first audible thing was a landmark: the reserved
-  // intro serve could be displaced in the queue, consumed by a failed
-  // generation, or simply beaten to the speaker. The gate makes the
-  // order structural instead of hopeful: from tour start until the
-  // neighborhood welcome has aired, no landmark/area story may START.
-  // Release is always on the record (pipeline_diag), whatever the path.
-  const beginOpenerGate = useCallback(() => {
-    openerGateRef.current = { armedAt: Date.now() };
-    introStartedRef.current = false;
-    // Backstop armed HERE, at gate-begin (fix stack D2, Oct 27,
-    // 2026). Pass 1 armed this timer lazily inside playStoryFromQueue
-    // — only when a landmark head happened to reach the gate check —
-    // so in the locked state the audit reproduced (intro blocked and
-    // requeued, nothing else ever dequeuing) the timer was never
-    // armed at all and the gate could hold landmarks hostage far
-    // past its own backstop. The release now lands at the backstop
-    // whatever the queue does.
+  // ---- Opening state machine (fix-order Item 8, Oct 28, 2026) ----
+  // One module, one state value, owning the prime, the greeting
+  // debt, the gate, and the welcome's first-serve answer. Erik's
+  // required sequence is greeting → opener clip → neighborhood
+  // welcome → landmarks; the machine makes that order structural
+  // instead of a conjunction of predicates that can pairwise
+  // disagree (audit §2b). The backstop (OPENER_GATE_TIMEOUT_MS,
+  // armed at begin, per the fix stack's D2 lesson) bounds the whole
+  // transaction: an opening that cannot complete expires ON THE
+  // RECORD — its debt settled undelivered, its telemetry filed —
+  // and the tour proceeds, rather than deadlocking in silence.
+
+  const openerDebtOutstanding = () => openerDebtRef.current.some(d => !d.settled);
+
+  // Identity test for the player: is this queue item's settle
+  // callback one of the machine's debt wrappers, still unsettled?
+  const isOpenerDebtSettle = (fn: ((info: PlaybackSettle) => void) | undefined) =>
+    fn !== undefined && openerDebtRef.current.some(d => !d.settled && d.settle === fn);
+
+  // Where a debt entry's physical line currently sits, if anywhere:
+  // held lines match by their onSettle, queued lines by their
+  // onSettleDetail — both ARE the entry's wrapper. An unsettled
+  // entry found in neither container is in the player.
+  const debtEntryContainer = (entry: OpenerDebtEntry): 'held' | 'queued' | 'player' => {
+    if (pendingSpeechRef.current.some(l => l.onSettle === entry.settle)) return 'held';
+    if (storyQueueRef.current.some(q => q.onSettleDetail === entry.settle)) return 'queued';
+    return 'player';
+  };
+
+  // Recompute the state from the machine's facts after any settle,
+  // registration, or unlock. Terminal states (open / failed) latch
+  // until the next beginOpening or stop; reaching 'open' retires
+  // the backstop.
+  const advanceOpening = useCallback(() => {
+    const state = openerStateRef.current;
+    if (state === 'idle' || state === 'open' || state === 'failed') return;
+    if (openerDebtOutstanding()) {
+      openerStateRef.current = everUnlockedRef.current ? 'welcoming' : 'priming';
+      return;
+    }
+    if (!openerWelcomeDoneRef.current) {
+      openerStateRef.current = 'covered';
+      return;
+    }
+    openerStateRef.current = 'open';
+    if (openerGateTimerRef.current !== null) {
+      clearTimeout(openerGateTimerRef.current);
+      openerGateTimerRef.current = null;
+    }
+  }, []);
+
+  advanceOpeningRef.current = advanceOpening;
+
+  // Terminally settle debt entries that are still sitting in a
+  // container (held or queued): the line is REMOVED first, so a
+  // line settled here can never also be spoken later, then its
+  // wrapper fires — the caller's telemetry (opener_spoken /
+  // opener_clip) files with the truth. Entries in the player are
+  // left to the player's own settle (every player exit settles),
+  // unless `force` is set — teardown, where the player will never
+  // settle anything again and the registry guarantee is the only
+  // one left.
+  const settleOpenerDebt = useCallback((info: PlaybackSettle, force: boolean = false) => {
+    for (const entry of openerDebtRef.current) {
+      if (entry.settled) continue;
+      const where = debtEntryContainer(entry);
+      if (where === 'held') {
+        const idx = pendingSpeechRef.current.findIndex(l => l.onSettle === entry.settle);
+        if (idx !== -1) pendingSpeechRef.current.splice(idx, 1);
+        entry.settle(info);
+      } else if (where === 'queued') {
+        const idx = storyQueueRef.current.findIndex(q => q.onSettleDetail === entry.settle);
+        if (idx !== -1) storyQueueRef.current.splice(idx, 1);
+        entry.settle(info);
+      } else if (force) {
+        entry.settle(info);
+      }
+    }
+    syncHoldWatchRef.current();
+    syncHeldBlockedTimer();
+  }, []);
+
+  // The backstop's terminal path: the opening has had its full
+  // budget and cannot complete. Debt still sitting in containers is
+  // settled undelivered — honestly, on the record — the welcome's
+  // gate question is answered, and the tour proceeds. Debt in the
+  // PLAYER is discharging right now (the unlock landed at the last
+  // moment): its own settle finishes the opening, so the backstop
+  // simply re-arms and stands down. `kickPlayer` is false when the
+  // caller is playStoryFromQueue itself (it falls through to its
+  // own dequeue — a nested kick would double-start the queue).
+  const expireOpening = useCallback((kickPlayer: boolean) => {
+    const state = openerStateRef.current;
+    if (state !== 'priming' && state !== 'welcoming' && state !== 'covered') return;
+    const discharging = openerDebtRef.current.some(
+      d => !d.settled && debtEntryContainer(d) === 'player'
+    );
+    if (discharging) {
+      if (openerGateTimerRef.current !== null) clearTimeout(openerGateTimerRef.current);
+      openerGateTimerRef.current = window.setTimeout(() => {
+        openerGateTimerRef.current = null;
+        expireOpening(true);
+      }, OPENER_GATE_TIMEOUT_MS);
+      return;
+    }
+    const hadDebt = openerDebtOutstanding();
+    if (hadDebt) {
+      settleOpenerDebt({
+        sounded: false, completed: false, engine: null, attempts: 0, soundedMs: 0,
+      });
+    }
+    openerWelcomeDoneRef.current = true;
+    openerStateRef.current = hadDebt ? 'failed' : 'open';
+    if (openerGateTimerRef.current !== null) {
+      clearTimeout(openerGateTimerRef.current);
+      openerGateTimerRef.current = null;
+    }
+    try { trackDiag('playback', 'opener-gate-release', 'timeout'); } catch { /* diagnostics only */ }
+    console.log(
+      hadDebt
+        ? '[Voice] Opening expired at the backstop — greeting debt settled undelivered, tour proceeds'
+        : '[Voice] Opening expired at the backstop — the welcome never landed, tour proceeds'
+    );
+    if (kickPlayer) playStoryFromQueueRef.current();
+  }, [settleOpenerDebt]);
+
+  // The welcome's gate question is answered (its settle, or its
+  // terminal drop): record it, file the release, and advance the
+  // machine. Unlike the Pass 1 gate, answering the question does
+  // NOT by itself free the landmarks — if greeting debt is somehow
+  // still outstanding (the welcome was dropped from the queue while
+  // its lines sat held), the player's gate keeps holding location
+  // stories behind the debt until it discharges or expires.
+  const releaseOpenerGate = useCallback((reason: string) => {
+    const state = openerStateRef.current;
+    if (state !== 'priming' && state !== 'welcoming' && state !== 'covered') return;
+    if (openerWelcomeDoneRef.current) return;
+    openerWelcomeDoneRef.current = true;
+    try { trackDiag('playback', 'opener-gate-release', reason); } catch { /* diagnostics only */ }
+    console.log(`[Voice] Opener gate released (${reason})`);
+    advanceOpening();
+  }, [advanceOpening]);
+
+  // Begin the opening transaction. Called by the app as the FIRST
+  // act of the Start-tour tap handler: the prime it launches runs
+  // synchronously inside the gesture, on the actual playback
+  // element, before any await — no async setup (voice readiness,
+  // hydration, GPS) can push the first play() outside the platform's
+  // user-activation window, which is the precondition every later
+  // recovery path depends on.
+  const beginOpening = useCallback(() => {
+    // A previous opening that somehow never retired (its tour ended
+    // without a stop()) leaves its registry behind: settle whatever
+    // is still owed before the new transaction overwrites it, so
+    // even that path files its telemetry.
+    if (openerDebtRef.current.some(d => !d.settled)) {
+      settleOpenerDebt(
+        { sounded: false, completed: false, engine: null, attempts: 0, soundedMs: 0 },
+        true
+      );
+    }
+    openerStateRef.current = 'priming';
+    openerArmedAtRef.current = Date.now();
+    openerWelcomeDoneRef.current = false;
+    openerDebtRef.current = [];
     if (openerGateTimerRef.current !== null) {
       clearTimeout(openerGateTimerRef.current);
     }
     openerGateTimerRef.current = window.setTimeout(() => {
       openerGateTimerRef.current = null;
-      releaseOpenerGate('timeout');
-      playStoryFromQueueRef.current();
+      expireOpening(true);
     }, OPENER_GATE_TIMEOUT_MS);
-  }, []);
+    unlock();
+  }, [unlock, expireOpening, settleOpenerDebt]);
 
-  const releaseOpenerGate = useCallback((reason: string) => {
-    if (!openerGateRef.current) return;
-    openerGateRef.current = null;
-    if (openerGateTimerRef.current !== null) {
-      clearTimeout(openerGateTimerRef.current);
-      openerGateTimerRef.current = null;
+  // Speak a line that belongs to the opening (the canned greeting,
+  // or one opener-clip segment). The line is REGISTERED as debt
+  // before it is spoken: from that moment the machine owes it, the
+  // welcome waits behind it, and the wrapper below settles it
+  // exactly once on every terminal path — played, flushed late,
+  // displaced, torn down, or backstop-expired. The caller's
+  // onSettle (which files opener_spoken / opener_clip) therefore
+  // cannot be bypassed: there is no silent opening anymore. (Oct
+  // 28, tour e3f15bd6: the tap recovered the tour but the greeting
+  // vanished with NO opener event of any kind — the absence this
+  // registration exists to make impossible.)
+  const speakOpeningLine = useCallback((
+    kind: 'greeting' | 'opener',
+    text: string,
+    opts?: { localVoice?: boolean; audioUrl?: string; onSettle?: (info: PlaybackSettle) => void }
+  ) => {
+    const entry: OpenerDebtEntry = { kind, settled: false, settle: () => {} };
+    entry.settle = (info: PlaybackSettle) => {
+      if (entry.settled) return;
+      entry.settled = true;
+      try { opts?.onSettle?.(info); } catch { /* a metric must never break the opening */ }
+      advanceOpening();
+    };
+    openerDebtRef.current.push(entry);
+    advanceOpening();
+    if (!text.trim()) {
+      entry.settle({ sounded: false, completed: false, engine: null, attempts: 0, soundedMs: 0 });
+      return;
     }
-    try { trackDiag('playback', 'opener-gate-release', reason); } catch { /* diagnostics only */ }
-    console.log(`[Voice] Opener gate released (${reason})`);
-  }, []);
+    speakRef.current(text, {
+      localVoice: opts?.localVoice,
+      audioUrl: opts?.audioUrl,
+      onSettle: entry.settle,
+    });
+  }, [advanceOpening]);
 
   // Settle the item currently in the player: fire its onPlaybackEnd
   // exactly once with whether it FULLY delivered (sounded AND ran to
@@ -1211,11 +1423,21 @@ export const useVoice = () => {
     preSynthText2Ref.current = null;
     presynthMissRef.current = null;
     playbackStartedRef.current = false;
-    // Tour teardown retires the opener machinery with everything else:
-    // a stopped tour must not leave a gate (or its backstop timer)
-    // armed against the next tour's first story.
-    openerGateRef.current = null;
-    introStartedRef.current = false;
+    // Tour teardown retires the opening machine with everything
+    // else: a stopped tour must not leave a gate (or its backstop
+    // timer) armed against the next tour's first story. The settles
+    // above have already fired every registered debt line's wrapper
+    // through whichever container it sat in; the forced sweep is
+    // the registry-level guarantee that no line is left unsettled —
+    // its telemetry unfired — whatever path it took to get here.
+    settleOpenerDebt(
+      { sounded: false, completed: false, engine: null, attempts: 0, soundedMs: 0 },
+      true
+    );
+    openerStateRef.current = 'idle';
+    openerArmedAtRef.current = 0;
+    openerWelcomeDoneRef.current = true;
+    openerDebtRef.current = [];
     if (openerGateTimerRef.current !== null) {
       clearTimeout(openerGateTimerRef.current);
       openerGateTimerRef.current = null;
@@ -1223,7 +1445,7 @@ export const useVoice = () => {
     currentItemRef.current = null;
     backgroundedTopicRef.current = null;
     clearWatchdog();
-  }, [clearWatchdog, settleCurrentPlayback, settleQueuedTrackedItems]);
+  }, [clearWatchdog, settleCurrentPlayback, settleQueuedTrackedItems, settleOpenerDebt]);
 
   const processQueue = useCallback(() => {
     if (isProcessingQueueRef.current || sentenceQueueRef.current.length === 0) {
@@ -2007,24 +2229,54 @@ export const useVoice = () => {
       }
     }
 
-    // Opener gate (Pass 1): until the neighborhood welcome has aired,
-    // a landmark/area story may not START. Scripted lines and the
-    // intro serve itself pass. The intro is protected at enqueue
-    // (piece 3a) so it sits ahead of any waiting landmark — holding
-    // here simply waits for it; its settle re-enters this function
-    // through the normal onDone chain. Safety valve: past the
-    // backstop, release and proceed rather than deadlock the tour.
-    // The backstop timer itself is armed at gate-begin (fix stack
-    // D2) — this check remains only as the in-band fast path for a
-    // dequeue that happens to land past the deadline first.
+    // Opening debt priority (Item 8): a registered greeting/opener
+    // line waiting anywhere in the queue outranks every location
+    // story, the reserved welcome included. Enqueue order alone
+    // cannot promise this — the welcome is priority-enqueued and
+    // can land ahead of a greeting that flushed a moment earlier —
+    // so the player enforces it structurally, here, at the one
+    // place every start passes through: while debt is outstanding,
+    // the first waiting debt line is moved to the head before any
+    // gate decision is made.
+    if (openerDebtOutstanding()) {
+      const debtIdx = storyQueueRef.current.findIndex(
+        q => !q.isLocationStory && isOpenerDebtSettle(q.onSettleDetail)
+      );
+      if (debtIdx > 0) {
+        const [debtLine] = storyQueueRef.current.splice(debtIdx, 1);
+        storyQueueRef.current.unshift(debtLine);
+      }
+    }
+
+    // Opening gate (Item 8 state machine): while an opening is in
+    // flight, a location story's right to start is decided by the
+    // machine, not by the queue. (1) While greeting debt is
+    // outstanding, NO location story starts — the reserved welcome
+    // included: the welcome waits behind the greeting, never the
+    // reverse. (2) Once the debt is discharged, only the reserved
+    // welcome may start until its settle answers the gate (the
+    // Pass 1 rule, unchanged). Scripted lines always pass — the
+    // debt lines themselves are scripted, and they are how the
+    // opening discharges. Past the backstop the opening expires
+    // instead (expireOpening) and the tour proceeds; this in-band
+    // check is only the fast path for a dequeue that happens to
+    // land past the deadline before the timer does.
     const gateHead = storyQueueRef.current[0];
-    if (openerGateRef.current && gateHead && gateHead.isLocationStory && !gateHead.introServe) {
-      const armedFor = Date.now() - openerGateRef.current.armedAt;
-      if (armedFor < OPENER_GATE_TIMEOUT_MS) {
+    const openingState = openerStateRef.current;
+    if (
+      (openingState === 'priming' || openingState === 'welcoming' || openingState === 'covered') &&
+      gateHead && gateHead.isLocationStory
+    ) {
+      const armedFor = Date.now() - openerArmedAtRef.current;
+      if (armedFor >= OPENER_GATE_TIMEOUT_MS) {
+        expireOpening(false);
+      } else if (openerDebtOutstanding()) {
+        console.log('[Voice] Opening: holding a location story behind the greeting debt');
+        return;
+      } else if (!openerWelcomeDoneRef.current && !gateHead.introServe) {
         console.log('[Voice] Opener gate: holding a landmark story until the neighborhood welcome airs');
         return;
       }
-      releaseOpenerGate('timeout');
     }
 
     const item = storyQueueRef.current.shift();
@@ -2193,9 +2445,10 @@ export const useVoice = () => {
       ...playGeo,
     };
     currentPlaybackRef.current = playback;
-    // T6 order guard latch (fix stack): the intro has STARTED — held
-    // welcome/opener lines may no longer flush behind it.
-    if (item.introServe) introStartedRef.current = true;
+    // (No order-guard latch on the intro's start — Item 8 deleted
+    // it. The introServe start has no ordering side effects anymore:
+    // the machine's gate made this start imply the greeting debt
+    // was already discharged, so there is nothing left to guard.)
     // Retain the item itself for the leave/return restart (Pass 1):
     // the lifecycle record knows how the dequeue ended, but only the
     // item can be replayed.
@@ -2301,7 +2554,7 @@ export const useVoice = () => {
     } else {
       playSegmentsBrowser([fullText], onDone, markSounded, tracked);
     }
-  }, [isStillRelevant, playSegmentsBrowser, playSegmentsWithGemini, clearWatchdog, settleCurrentPlayback]);
+  }, [isStillRelevant, playSegmentsBrowser, playSegmentsWithGemini, clearWatchdog, settleCurrentPlayback, expireOpening]);
 
   const playStoryFromQueueRef = useRef(playStoryFromQueue);
   playStoryFromQueueRef.current = playStoryFromQueue;
@@ -3076,7 +3329,8 @@ export const useVoice = () => {
     isPlayingStory,
     setOnStoryComplete,
     setOnStoryInterrupted,
-    beginOpenerGate,
+    beginOpening,
+    speakOpeningLine,
     activateMediaSession,
     deactivateMediaSession,
     getQueueLength,
