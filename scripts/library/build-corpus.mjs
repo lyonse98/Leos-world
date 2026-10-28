@@ -118,6 +118,40 @@ for (const n of selected) {
   }
 
   const facts = await assembleFacts(app, records, seed, coords);
+  // Tier-3 name-search rescue (Batch 1, Oct 27, 2026 — the
+  // neighborhood builder's 989a4b1 pattern, same honesty contract):
+  // geosearch assembles ZERO narrative facts for some manifest-named
+  // subjects whose Wikipedia articles plainly exist (La Jolla
+  // Playhouse, Font's Point). When the pack has neither Wikipedia nor
+  // the registry, retrieve by name instead of by radius; a seed may
+  // pin the exact article via `wikiTitle` (remote subjects whose own
+  // article is the parent park's). Never displaces a working pack.
+  if (!facts.sources.includes('wikipedia') && !facts.sources.includes('historic_registry')) {
+    try {
+      let title = seed.wikiTitle || null;
+      if (!title) {
+        const q = encodeURIComponent(seed.name);
+        const sres = await fetch(`https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${q}&srlimit=3&format=json`, { signal: AbortSignal.timeout(20_000) });
+        const sjson = await sres.json();
+        const wanted = seed.name.toLowerCase().replace(/-/g, ' ');
+        title = (sjson?.query?.search ?? []).map(r => r.title)
+          .find(t => t.toLowerCase().replace(/-/g, ' ').includes(wanted)) || null;
+      }
+      if (title) {
+        const tres = await fetch(`https://en.wikipedia.org/w/api.php?action=query&prop=extracts&explaintext=1&titles=${encodeURIComponent(title)}&format=json`, { signal: AbortSignal.timeout(20_000) });
+        const tjson = await tres.json();
+        const page = Object.values(tjson?.query?.pages ?? {})[0];
+        const extract = (page?.extract ?? '').trim();
+        if (extract.length > 400) {
+          facts.wikiContext = [facts.wikiContext, `Wikipedia — ${title}:\n${extract.slice(0, 6000)}`].filter(Boolean).join('\n');
+          facts.sources.push('wikipedia');
+          console.log(`[build] #${n} ${seed.name}: name-search Wikipedia rescue found "${title}" (${extract.length} chars)`);
+        }
+      }
+    } catch (e) {
+      console.warn(`[build] #${n} ${seed.name}: name-search rescue failed: ${e.message}`);
+    }
+  }
   console.log(`[build] #${n} ${seed.name} @ ${coords.lat.toFixed(5)},${coords.lng.toFixed(5)} [${coords.source}] facts: ${facts.sources.join('+') || 'NONE'}`);
 
   const fullAngles = seed.angles.map(angleFor);
@@ -129,7 +163,15 @@ for (const n of selected) {
       console.log(`[build]   ${angle}: text exists (${entry.story_text.length} chars), skipping`);
       continue;
     }
-    const prompt = buildPrompt(app, seed, coords, facts, angle, fullAngles.slice(0, i));
+    let prompt = buildPrompt(app, seed, coords, facts, angle, fullAngles.slice(0, i));
+    // Batch briefs (Generation Batch 1, Oct 27, 2026): a seed's `brief`
+    // carries its portal line + sensitivity flags VERBATIM into every
+    // angle's generation; `angleBriefs[short]` rides one angle only
+    // (the designated people-angle directions). Older seeds carry
+    // neither field and are unaffected.
+    if (seed.brief) prompt += `\n\nBRIEF FOR THIS PLACE (binding): ${seed.brief}`;
+    const angleBrief = seed.angleBriefs?.[seed.angles[i]];
+    if (angleBrief) prompt += `\n\nBRIEF FOR THIS ANGLE (binding): ${angleBrief}`;
     const text = await generateText(ai, app, prompt);
     entry = {
       seed_n: seed.n,
