@@ -2,6 +2,14 @@ import { supabase, SUPABASE_CONFIGURED } from './supabase';
 import { storyLibrary } from './storyLibrary';
 import { geminiAudio } from './geminiAudio';
 import { analytics, trackDiag } from './analytics';
+import {
+  resolveFillerRegion,
+  fillerTagsForTitle,
+  fillerMatchFor,
+  orderFillersForRegion,
+  type FillerRegion,
+  type FillerMatch,
+} from '../data/fillerRegions';
 
 // ---------------------------------------------------------------------------
 // Silence fillers (Oct 28, 2026) — Erik's feature, spec:
@@ -38,6 +46,17 @@ import { analytics, trackDiag } from './analytics';
 //  - Fillers are not place stories: they never touch the
 //    told-subject ledger (storyCoverage), never mark a place told,
 //    and do not interact with corridor expiry.
+//  - Region-first pick (Oct 28, Erik approved): ONE lane, a
+//    smarter pick — not a parallel watcher. At fire time the
+//    driver's position resolves to a coarse region
+//    (data/fillerRegions.ts, whose source of truth is
+//    filler-regions.json); unplayed fillers tagged with that
+//    region go first, then unplayed universals, then any
+//    unplayed, the per-tour shuffle preserved within each tier.
+//    The choice is made entirely on-device from the pinned pool —
+//    GPS needs no network, and the region map ships in the app.
+//    Outside the county (or with no fix yet) the region is null
+//    and the pick is exactly the pre-region rotation.
 //
 // The watcher reads the world through the host the app registers
 // (App owns tour state, the Q&A lock, and the player); playback goes
@@ -66,6 +85,9 @@ export interface FillerHostSnapshot {
   // Playback suspended pending the listener: the blocked banner, the
   // tap-to-resume state, or an active mute.
   userPaused: boolean;
+  // The driver's latest fix, when one exists. Used only to resolve
+  // the filler region at fire time; null leaves the pick general.
+  position: { lat: number; lng: number } | null;
 }
 
 export interface FillerHost {
@@ -157,6 +179,10 @@ class FillerLaneService {
     bridgeSlug: string | null;
     silenceS: number;
     recovered: boolean;
+    // The region resolved at fire time and how this clip matched
+    // it — carried into the filler_played event, the pick's record.
+    region: FillerRegion | null;
+    matched: FillerMatch;
   } | null = null;
 
   // Watcher state.
@@ -339,7 +365,18 @@ class FillerLaneService {
     try {
       const pool = await this.loadPool();
       if (!pool) return; // no shelf — the lane is inert (diag filed at load)
-      const next = this.playOrder.find(c => !this.playedIds.has(c.id));
+      // Region-first pick: resolve where the driver is NOW (the
+      // snapshot is synchronous; GPS works offline and the map is
+      // in the bundle, so the choice never leaves the phone). A
+      // null region — outside the county, or no fix yet — leaves
+      // the shuffled play order untouched: the pre-region pick.
+      const position = this.host ? this.host.snapshot().position : null;
+      const region = position ? resolveFillerRegion(position.lat, position.lng) : null;
+      const ordered =
+        region === null
+          ? this.playOrder
+          : orderFillersForRegion(this.playOrder, region, c => fillerTagsForTitle(c.title));
+      const next = ordered.find(c => !this.playedIds.has(c.id));
       if (!next) {
         if (!this.stoodDown) {
           this.stoodDown = true;
@@ -387,6 +424,8 @@ class FillerLaneService {
         bridgeSlug: bridge.slug,
         silenceS: Math.round(silenceS * 10) / 10,
         recovered: false,
+        region,
+        matched: fillerMatchFor(fillerTagsForTitle(next.title), region),
       };
       const ok = host.play(
         { text: bridge.text },
@@ -425,6 +464,8 @@ class FillerLaneService {
         filler: active.clip.title,
         filler_id: active.clip.id,
         bridge: active.bridgeSlug,
+        region: active.region,
+        matched: active.matched,
         silence_s: active.silenceS,
         recovered_during: active.recovered,
         sounded: info.sounded,

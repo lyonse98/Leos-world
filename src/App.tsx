@@ -1406,6 +1406,9 @@ function App() {
           fillerGateRef.current.audioBlocked ||
           fillerGateRef.current.wasInterrupted ||
           voiceRef.current.isMuted(),
+        position: positionRef.current
+          ? { lat: positionRef.current.lat, lng: positionRef.current.lng }
+          : null,
       }),
       play: (bridge, filler, onSettle) =>
         voiceRef.current.queueFiller(bridge?.text ?? null, filler, onSettle),
