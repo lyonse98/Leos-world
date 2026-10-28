@@ -18,7 +18,6 @@ import { storyCoverage, landmarkSubjectKey, LANDMARK_ANGLES, angleFromTopic } fr
 import { latencyModel } from './services/latencyModel';
 import { calculateDistance, bearingDegrees, headingDelta } from './utils/geo';
 
-import { ambientAudio } from './services/ambientAudio';
 import { storyLikes } from './services/storyLikes';
 import { LEO_MODEL_ID, LEO_QA_MODEL_ID } from './services/leoPersona';
 import { geminiAudio } from './services/geminiAudio';
@@ -93,7 +92,6 @@ function daySkyGradient(): string {
 
 const RESUME_SESSION_KEY = 'leo_active_session';
 const RESUME_SESSION_TTL_MS = 30 * 60 * 1000;
-const AMBIENT_KEY = 'leo_ambient_on';
 // Q&A generation-phase failsafe bound (fix stack RC-4): the worst
 // legal generation is the lane wait (90s) plus a primary generation
 // deadline (~20s) plus the flagship fallback (~20s) plus rate-limit
@@ -174,13 +172,6 @@ function App() {
   const [shareToast, setShareToast] = useState<string | null>(null);
   const [hasLikedStory, setHasLikedStory] = useState<boolean>(false);
   const [likeAnimating, setLikeAnimating] = useState<boolean>(false);
-  const [ambientOn, setAmbientOn] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem(AMBIENT_KEY) === 'true';
-    } catch {
-      return false;
-    }
-  });
   const [backendBannerDismissed, setBackendBannerDismissed] = useState<boolean>(false);
 
   const voice = useVoice();
@@ -219,22 +210,6 @@ function App() {
 
   const requestTokenRef = useRef<number>(0);
   const kickoffFiredRef = useRef(false);
-
-  // Step the ambient bed back whenever a voice is present, so it never fights
-  // Leo or the listener for attention.
-  useEffect(() => {
-    ambientAudio.setDucked(voice.isSpeaking || isProcessingQuestion);
-  }, [voice.isSpeaking, isProcessingQuestion]);
-
-  // The bed needs a tap to start, so it follows the tour rather than
-  // autoplaying on load.
-  useEffect(() => {
-    if (isTourStarted && ambientOn) {
-      ambientAudio.start();
-    } else {
-      ambientAudio.stop();
-    }
-  }, [isTourStarted, ambientOn]);
 
   // Dead-air pacing. Every filler line goes through this clock so exactly one
   // plays per silence, and so the quiet stretches Leo promises actually happen.
@@ -314,7 +289,6 @@ function App() {
     const onVisibilityChange = () => {
       if (document.visibilityState !== 'visible') return;
       restartTracking();
-      ambientAudio.resumeIfNeeded();
     };
 
     document.addEventListener('visibilitychange', onVisibilityChange);
@@ -605,23 +579,9 @@ function App() {
     setTimeout(() => setShareToast(null), 3500);
   };
 
-  const handleToggleAmbient = () => {
-    setAmbientOn(prev => {
-      const next = !prev;
-      try {
-        localStorage.setItem(AMBIENT_KEY, String(next));
-      } catch {
-        // storage unavailable — the choice just won't survive a reload
-      }
-      return next;
-    });
-  };
-
-  // Lifting the audio block also gives the ambient bed its gesture back after
-  // a trip to another app.
+  // Lift the audio block after a trip to another app.
   const handleUnlockAudio = () => {
     voice.unlock();
-    ambientAudio.resumeIfNeeded();
   };
 
   // Full quit: silence Leo, drop queued stories, cancel in-flight requests,
@@ -1683,8 +1643,6 @@ function App() {
         queueOpenerSegment(primaryOpener, false);
       }
 
-      if (ambientOn) ambientAudio.start();
-
       // Flip to the tour view immediately. The intro is already playing — the
       // listener should see the tour screen, not the landing page or the resume
       // prompt. The database hydration below still completes before GPS starts,
@@ -1899,17 +1857,6 @@ function App() {
                     <MapPin size={14} className="animate-pulse" />
                   </div>
                 )}
-                <button
-                  onClick={handleToggleAmbient}
-                  title={ambientOn ? 'Turn ambient background audio off' : 'Turn ambient background audio on'}
-                  className={`p-1.5 rounded-full transition-all border ${
-                    ambientOn
-                      ? 'bg-cyan-950/80 border-cyan-700/60 text-cyan-300'
-                      : 'bg-slate-800/80 border-slate-700/60 text-slate-400 hover:bg-slate-700'
-                  }`}
-                >
-                  <Music size={16} />
-                </button>
                 <button
                   onClick={() => setPocketMode(!pocketMode)}
                   title="Pocket Mode"

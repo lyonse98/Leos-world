@@ -88,7 +88,6 @@ const GENERIC_STATIONARY = [
   "Not every second needs narration. Sometimes a place speaks for itself.",
   "Standing still is underrated. This spot has layers.",
   "Quick pause. Look around slowly — you'll catch details I can't narrate.",
-  "I'm working on the next one. Enjoy the ambient version of this tour for a moment.",
   "Notice anything odd around here? If yes, I probably have the story.",
   "This is a good people-watching corner, for what it's worth. I've logged hours here.",
   "Give this one a minute. The best detail isn't obvious until you stop.",
