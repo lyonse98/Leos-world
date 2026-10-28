@@ -71,6 +71,16 @@ export interface NarrationResult {
   // Absent on every other serve.
   corridorSegmentId?: string;
   fromLibrary?: boolean;
+  // Tour thread (Oct 28, 2026): the telling's signature fact — its
+  // lead, captured verbatim at generation (see leadFactFromText).
+  // Set ONLY on results whose text was generated live by this
+  // service; library, corridor-bank, and ephemeral-cache results
+  // leave it absent, because their stored data carries no designated
+  // lead and the thread never derives one after the fact. Threaded
+  // storyCache → App hearing funnel → the tour telling ledger, where
+  // it surfaces (if the telling is delivered) in later prompts'
+  // TOUR THREAD block.
+  signatureFact?: string | null;
   // The served subject is a major (Tier-1 landmark / marked major
   // subject) — the app gives such serves the priority queue lane
   // identically whatever their source (Area C, Oct 26, 2026).
@@ -115,6 +125,30 @@ interface RetellGate {
 // The decline sentinel is the ENTIRE response — a story that
 // merely opens with the word is not a decline.
 const DECLINE_TEXT_RE = /^decline[.!]?$/i;
+
+// Tour thread signature fact (Oct 28, 2026): a live telling's lead,
+// captured verbatim at generation time. The live fact pack
+// designates no single lead fact — the WOW-gate discipline lives in
+// the persona, whose hook rules make the story open on its most
+// compelling beat — so the telling's own first sentence IS the lead
+// the brief selected, and capturing it quotes the telling rather
+// than inventing a designation the fact pack never made. Only a
+// clean, complete first sentence of moderate length qualifies; an
+// abbreviation-shattered fragment ("The U.") fails the length floor
+// and an over-long opener fails the cap — both record NO fact rather
+// than a mangled one.
+const MAX_SIGNATURE_FACT_CHARS = 170;
+const MIN_SIGNATURE_FACT_CHARS = 30;
+function leadFactFromText(text: string): string | null {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  const match = clean.match(/^[^.!?]+[.!?]/);
+  if (!match) return null;
+  const sentence = match[0].trim();
+  if (sentence.length < MIN_SIGNATURE_FACT_CHARS || sentence.length > MAX_SIGNATURE_FACT_CHARS) {
+    return null;
+  }
+  return sentence;
+}
 
 // Latency-adaptive length floor (pre-publish stack Item 5, Oct 27,
 // 2026). LATENCY_BASELINE_S is the pipeline latency the ruled length
@@ -1229,6 +1263,18 @@ class GeminiService {
       }
     }
 
+    // Tour thread (Oct 28, 2026): the telling ledger's delivered
+    // digest — subject, topic tags, and (for live generations) the
+    // captured lead of each story this listener has actually HEARD
+    // this tour — as continuity material for callbacks and contrast.
+    // Compact by construction (~40 tokens a telling, hard-capped):
+    // no story texts ride here. The prohibitions above stand
+    // untouched alongside it, and the block is absent entirely until
+    // the first telling is delivered, so a tour's first-story prompt
+    // is byte-identical to the pre-thread prompt.
+    const threadBlock = storyCoverage.tourThreadBlock();
+    if (threadBlock) parts.push(threadBlock);
+
     if (weaveCallback && recentStoryTexts.length >= 2) {
       parts.push(
         `CALLBACK INVITATION: You have told ${storiesToldCount} stories this tour. If a genuine thread connects two or more of them, surface it in one line woven into this story. If none exists, skip it.`
@@ -2095,6 +2141,9 @@ class GeminiService {
       context: effectiveContext,
       mode: factPack.mode,
       rotation: target.rotation,
+      // Tour thread: this text was generated live just now — its
+      // lead rides along for the ledger (see NarrationResult).
+      signatureFact: leadFactFromText(text),
       major:
         target.kind === 'landmark' && target.subject
           ? storyCoverage.isMajorSubject(subjectKey) || (targetPlace ? placesService.isTier1Landmark(targetPlace) : false)
@@ -2225,6 +2274,10 @@ class GeminiService {
       context: 'prefetch',
       mode: factPack.mode,
       rotation: target.rotation,
+      // Tour thread: live-generated in this call — capture the lead
+      // (see NarrationResult). Declines returned empty above, so a
+      // sentinel can never be captured here.
+      signatureFact: leadFactFromText(text),
     };
   }
 

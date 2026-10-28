@@ -47,6 +47,13 @@ export interface CachedStory {
   // against — where the place IS, not where it was fetched.
   audioUrl?: string;
   fromLibrary?: boolean;
+  // Tour thread (Oct 28, 2026): the telling's signature fact,
+  // captured by gemini at live generation and carried so the App
+  // hearing funnel can record it in the tour telling ledger. Present
+  // only on entries whose text was generated live (this session's
+  // serves and prefetches); library and shared-cache entries leave
+  // it null — their stored data carries no designated lead.
+  signatureFact?: string | null;
 }
 
 interface QueueEntry {
@@ -301,7 +308,7 @@ class StoryCacheService {
     // queueStarved when the player is idle with an empty queue; it
     // threads into the gemini serve, where it arms the forced refill.
     opts?: { queueStarved?: boolean }
-  ): Promise<{ story: string; fromCache: boolean; topic: string; subject: string; context: string; rotation: StoryRotation | null; fromLibrary: boolean; audioUrl?: string; anchorLat?: number; anchorLng?: number; corridorSegmentId?: string; major?: boolean; storyId: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; generatedAt: number } | null> {
+  ): Promise<{ story: string; fromCache: boolean; topic: string; subject: string; context: string; rotation: StoryRotation | null; fromLibrary: boolean; audioUrl?: string; anchorLat?: number; anchorLng?: number; corridorSegmentId?: string; major?: boolean; storyId: string; projectedCenter?: { lat: number; lng: number }; horizonS?: number; generatedAt: number; signatureFact?: string | null } | null> {
     this.lastServeInfo = { decisionConsumed: false, designedSilence: false, generationAttempted: false, emptyReason: null };
     this.pruneStalePrefetches(position);
     const openerServe = this.openerPending;
@@ -393,6 +400,9 @@ class StoryCacheService {
         // prefetch-chosen library items reach the queue through this
         // branch, so this is where their right-of-way is decided.
         major: cached.fromLibrary ? storyCoverage.isMajorSubject(servedKey) : false,
+        // Tour thread: a buffered live generation carries its
+        // captured lead to the funnel; a library entry carries none.
+        signatureFact: cached.signatureFact ?? null,
         storyId: cached.storyId,
         projectedCenter: cached.projectedCenter,
         horizonS: cached.horizonS,
@@ -496,11 +506,12 @@ class StoryCacheService {
           regionAnchored: mode === 'driving',
           audioUrl: result.audioUrl,
           fromLibrary: result.fromLibrary,
+          signatureFact: result.signatureFact ?? null,
           storyId,
           projectedCenter,
           horizonS,
         });
-        return { story, fromCache: false, topic, subject: result.subject, context: result.context, rotation: result.rotation, fromLibrary: !!result.fromLibrary, audioUrl: result.audioUrl, anchorLat: result.anchorLat, anchorLng: result.anchorLng, corridorSegmentId: result.corridorSegmentId, major: result.major ?? false, storyId, projectedCenter, horizonS, generatedAt };
+        return { story, fromCache: false, topic, subject: result.subject, context: result.context, rotation: result.rotation, fromLibrary: !!result.fromLibrary, audioUrl: result.audioUrl, anchorLat: result.anchorLat, anchorLng: result.anchorLng, corridorSegmentId: result.corridorSegmentId, major: result.major ?? false, storyId, projectedCenter, horizonS, generatedAt, signatureFact: result.signatureFact ?? null };
       }
     } catch (error) {
       console.error('[StoryCache] Live fetch failed:', error);
@@ -582,6 +593,7 @@ class StoryCacheService {
           regionAnchored: mode === 'driving',
           audioUrl: result.audioUrl,
           fromLibrary: result.fromLibrary,
+          signatureFact: result.signatureFact ?? null,
           // Prefetch provenance (Area G): this story was fetched FOR
           // the anticipated center under this horizon — play time
           // measures the prediction against reality.
@@ -661,6 +673,7 @@ class StoryCacheService {
           regionAnchored: mode === 'driving',
           audioUrl: result.audioUrl,
           fromLibrary: result.fromLibrary,
+          signatureFact: result.signatureFact ?? null,
           projectedCenter: { lat: target.lat, lng: target.lng },
           horizonS: Math.round(effectiveHorizonS),
         });
@@ -845,6 +858,7 @@ class StoryCacheService {
             regionAnchored: false,
             audioUrl: result.audioUrl,
             fromLibrary: result.fromLibrary,
+            signatureFact: result.signatureFact ?? null,
           });
         }
       } catch (error) {

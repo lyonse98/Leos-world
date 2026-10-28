@@ -169,6 +169,11 @@ export function areaSubjectKey(lat: number, lng: number): string {
 }
 
 import { normalizePlaceName } from './placeName';
+// Tour-thread topic tags (Oct 28, 2026): the app's existing tag
+// vocabulary — the same derivation the taste machinery runs on told
+// topics (recentPrimaryTags in gemini.ts reads it the same way). A
+// pure module; no cycle.
+import { deriveTags, describeTag, isInterestTag } from './storyTags';
 // The durable heard record (pre-publish stack Item 1, Oct 27, 2026):
 // the Tier-1 per-angle lock decision at settle time needs to know
 // whether the canonical angle was already spent on this listener in
@@ -213,6 +218,30 @@ interface TourTelling {
   text: string;
   settled: boolean;
   delivered: boolean;
+  // Tour thread (Oct 28, 2026): the display subject (the topic's base
+  // name, as the listener heard it announced), the telling's topic
+  // tags in the storyTags vocabulary, and its signature fact — the
+  // lead captured at generation time, for live generations only. A
+  // shelf serve records null: the library row carries no designated
+  // lead line, and a lead is never derived from the text or invented
+  // after the fact. These fields are read only once the telling is
+  // DELIVERED — the thread is what the driver actually heard.
+  topicBase?: string;
+  tags?: string[];
+  signatureFact?: string | null;
+  // Hearing order within the tour: a per-tour sequence stamped only
+  // at a DELIVERED settle, so the thread reads in the order the
+  // listener met the stories, not the order the pipeline dealt them.
+  threadOrder?: number;
+}
+
+// One entry of the tour thread: a delivered telling reduced to the
+// compact digest the next live generation is fed — subject, topic
+// tags, and (where one was captured) the telling's signature fact.
+export interface TourThreadEntry {
+  subject: string;
+  tags: string[];
+  signatureFact: string | null;
 }
 
 type SubjectCoverage = Record<string, number>;
@@ -392,6 +421,11 @@ class StoryCoverageService {
   // below bind for the rest of the tour.
   private tourTellings: Map<string, TourTelling[]> = new Map();
 
+  // Tour-thread delivery sequence (Oct 28, 2026): stamped onto a
+  // telling at its delivered settle (see settleSubjectQueued), reset
+  // with the ledger at every tour start.
+  private threadSeq = 0;
+
   // Tier-1 subjects whose one permitted retell was attempted and
   // DECLINED by the disparateness gate this tour (the generation
   // could not fill a genuinely different story without reusing the
@@ -511,6 +545,7 @@ class StoryCoverageService {
     // new tour starts with nothing yet told on it.
     this.tourTellings.clear();
     this.retellDeclinedSubjects.clear();
+    this.threadSeq = 0;
     // Corridor triggers are per-tour too (Item 6 refinement): a
     // segment triggered on the drive out is not triggered on the
     // drive home — the return direction is a different segment
@@ -761,11 +796,43 @@ class StoryCoverageService {
   // stories have their own angle coverage and no per-tour telling
   // rule.
 
-  markSubjectQueued(subjectKey: string, angle: string | null, text: string): void {
+  markSubjectQueued(
+    subjectKey: string,
+    angle: string | null,
+    text: string,
+    meta?: { topic?: string; signatureFact?: string | null }
+  ): void {
     if (!subjectKey || !subjectKey.startsWith('landmark:')) return;
     const list = this.tourTellings.get(subjectKey) ?? [];
-    list.push({ angle, text, settled: false, delivered: false });
+    list.push({
+      angle,
+      text,
+      settled: false,
+      delivered: false,
+      topicBase: meta?.topic ? meta.topic.split(' — ')[0].trim() : undefined,
+      tags: this.threadTagsFor(meta?.topic, angle, text),
+      signatureFact: meta?.signatureFact ?? null,
+    });
     this.tourTellings.set(subjectKey, list);
+  }
+
+  // The telling's thread tags: its rotation angle's label first (the
+  // vocabulary the prompt already speaks — the canonical first angle
+  // is the default telling and adds nothing, so it is skipped), then
+  // interest tags derived from the topic + text by the existing
+  // storyTags machinery — the same tag set the taste profile derives
+  // from a told topic. No new taxonomy, capped at three.
+  private threadTagsFor(topic: string | undefined, angle: string | null, text: string): string[] {
+    const tags: string[] = [];
+    if (angle && angle !== LANDMARK_ANGLES[0]) tags.push(describeAngle(angle));
+    const base = topic ? topic.split(' — ')[0].trim() : '';
+    for (const tag of deriveTags({ topic: base, text })) {
+      if (tags.length >= 3) break;
+      if (!isInterestTag(tag)) continue;
+      const label = describeTag(tag);
+      if (!tags.includes(label)) tags.push(label);
+    }
+    return tags.slice(0, 3);
   }
 
   // Settle the oldest unsettled telling of this subject. The funnel
@@ -785,6 +852,14 @@ class StoryCoverageService {
     if (!open) return;
     open.settled = true;
     open.delivered = delivered;
+    if (delivered) {
+      // Tour thread (Oct 28, 2026): a delivered telling joins the
+      // thread in HEARING order — the sequence stamps here, at the
+      // settle, so a story queued early but heard late takes its
+      // place where the listener actually met it. An undelivered
+      // settle stamps nothing: the telling never enters the thread.
+      open.threadOrder = ++this.threadSeq;
+    }
   }
 
   private tellingsFor(subjectKey: string): TourTelling[] {
@@ -828,6 +903,77 @@ class StoryCoverageService {
   firstDeliveredTellingText(subjectKey: string): string | null {
     const first = this.tellingsFor(subjectKey).find(t => t.settled && t.delivered);
     return first ? first.text : null;
+  }
+
+  // --- Tour thread (Oct 28, 2026) --------------------------------------
+  // Erik's direction: stories should feel connected — Leo remembers
+  // what he told earlier in the tour and can call back to it —
+  // WITHOUT feeding whole prior stories into each new prompt. The
+  // thread is that memory in compact form: this tour's DELIVERED
+  // tellings, in hearing order, each reduced to subject + topic tags
+  // + (for live generations) the signature fact captured when the
+  // story was generated. buildStoryPrompt feeds it as continuity
+  // material alongside the standing prohibitions; selection-side
+  // topic PACING over the same data remains v15 work — this build
+  // lands the data and the feed only.
+
+  // The thread entries, most recent last. Delivered only, by
+  // construction: an entry exists only where a telling carries a
+  // threadOrder, which is stamped exclusively at a delivered settle.
+  // A telling displaced before it ever played is absent however long
+  // it sat queued — the thread is what the driver HEARD, not what
+  // the pipeline dealt. Landmark subjects only, like the ledger
+  // itself; area and intro tellings stay with the tracker's
+  // last-topic / drive-arc material, as before.
+  tourThread(limit: number = 10): TourThreadEntry[] {
+    const heard: { order: number; entry: TourThreadEntry }[] = [];
+    for (const [key, list] of this.tourTellings) {
+      for (const t of list) {
+        if (t.threadOrder === undefined) continue;
+        heard.push({
+          order: t.threadOrder,
+          entry: {
+            subject: t.topicBase || key.slice('landmark:'.length),
+            tags: t.tags ?? [],
+            signatureFact: t.signatureFact ?? null,
+          },
+        });
+      }
+    }
+    heard.sort((a, b) => a.order - b.order);
+    return heard.slice(-limit).map(h => h.entry);
+  }
+
+  // The thread as a prompt block, or '' when nothing has been heard
+  // yet this tour — so a tour's first-story prompt is byte-identical
+  // to the pre-thread prompt. Budget: ~40 tokens per telling with a
+  // hard cap of ~500 tokens across the lines (1900 chars ≈ 475
+  // tokens at the app's ~4 chars/token), oldest lines dropped first
+  // when the cap binds. A signature fact rides only where one was
+  // captured at generation; shelf tellings appear as subject + tags,
+  // never with a derived or invented lead.
+  tourThreadBlock(limit: number = 10): string {
+    const entries = this.tourThread(limit);
+    if (entries.length === 0) return '';
+    const MAX_THREAD_LINE_CHARS = 1900;
+    const lines: string[] = [];
+    let used = 0;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      const line =
+        `${e.subject}` +
+        (e.tags.length > 0 ? ` — ${e.tags.join(', ')}` : '') +
+        (e.signatureFact ? ` — "${e.signatureFact}"` : '');
+      if (lines.length > 0 && used + line.length > MAX_THREAD_LINE_CHARS) break;
+      lines.unshift(line);
+      used += line.length;
+    }
+    return (
+      'TOUR THREAD SO FAR — the stories this listener has actually heard this tour, in order. ' +
+      'This is continuity material, not content: you may weave AT MOST ONE line of callback or contrast drawn from it into this story. ' +
+      'This story stays about the ground in front of you — nothing in the thread is retold or re-explained, and a fact listed under another place belongs to THAT place; never attribute it to the place you are telling now.\n' +
+      lines.map((l, i) => `${i + 1}. ${l}`).join('\n')
+    );
   }
 
   markRetellDeclined(subjectKey: string): void {
@@ -974,6 +1120,7 @@ class StoryCoverageService {
     this.inFlightSubjects.clear();
     this.tourTellings.clear();
     this.retellDeclinedSubjects.clear();
+    this.threadSeq = 0;
     this.tourHeardSubjects.clear();
     this.corridorTriggered.clear();
     this.dailyCounts = {};

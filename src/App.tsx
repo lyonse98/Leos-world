@@ -116,6 +116,12 @@ interface HearingRecord {
   storyText: string;
   position?: Position;
   subjectKey: string | null;
+  // Tour thread (Oct 28, 2026): the telling's signature fact,
+  // captured at live generation and threaded through storyCache;
+  // null/absent for library and shared-cache serves. Recorded into
+  // the telling ledger at registration; it surfaces in the thread
+  // only if this record settles delivered.
+  signatureFact?: string | null;
 }
 
 function App() {
@@ -422,7 +428,12 @@ function App() {
       storyCoverage.markSubjectQueued(
         rec.subjectKey,
         rec.rotation?.angle ?? angleFromTopic(rec.topic),
-        rec.storyText
+        rec.storyText,
+        // Tour thread (Oct 28, 2026): the display topic and the
+        // captured lead (live generations only) ride into the
+        // ledger with the telling; the thread reads them only on a
+        // delivered settle.
+        { topic: rec.topic, signatureFact: rec.signatureFact ?? null }
       );
     }
   };
@@ -1132,6 +1143,7 @@ function App() {
             storyText: result.story,
             position,
             subjectKey: hearingSubjectKeyFor(result.topic, result.rotation),
+            signatureFact: result.signatureFact ?? null,
           });
           if (isQueueJump || isIntroServe) {
             // Front of the waiting queue — behind nothing but any scripted
@@ -1510,6 +1522,7 @@ function App() {
               storyText: story.text,
               position: geolocation.position ?? undefined,
               subjectKey,
+              signatureFact: story.signatureFact ?? null,
             });
             voice.queueStory(story.text, undefined, undefined, undefined, 'scripted', story.topic, undefined, {
               storyId: story.storyId,
