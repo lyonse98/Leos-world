@@ -32,6 +32,13 @@ type EventType = 'session_start' | 'session_end' | 'story_played' | 'ad_played' 
   // played, and its settle truth. The lane's value (outages covered
   // vs. honest silence) is countable from these rows alone.
   | 'filler_played'
+  // Audio unlock latch (Oct 29, 2026): fired ONCE per tour at the
+  // moment the platform unlock is first earned — source names the
+  // path that earned it ('prime' | 'playback-proof' |
+  // 'gesture-retry') and ms_from_tour_start times it. Tour 2c6562f7's
+  // diagnosis had to infer the latch (and its absence) from
+  // circumstantial events; this row makes it a recorded fact.
+  | 'unlock_latched'
   // Route breadcrumbs (Area G, Oct 26, 2026): a lightweight position
   // sample ~every 30s while touring and at tour end, for the owner's
   // own Bolt-panel forensics. SEALED ONLY — this kind is deliberately

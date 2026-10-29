@@ -391,6 +391,26 @@ export const useVoice = () => {
   // settlement handlers, so a FAILED prime never blocks the next
   // gesture's retry — the muted-banner path must not dead-end.
   const primeInFlightRef = useRef<boolean>(false);
+  // Unlock-latch telemetry (Oct 29, 2026, tour 2c6562f7): the latch
+  // moment itself was never an event — a tour where the prime never
+  // landed could only be diagnosed by inference from the wreckage
+  // around it. unlockLatchedRef makes the event once-per-tour (reset
+  // at every beginOpening); nextPrimeSourceRef carries WHO is asking
+  // for the prime, so a latch earned by a retry the listener provoked
+  // (banner tap, hold-watch gesture) is not misfiled as the tap's
+  // own prime.
+  const unlockLatchedRef = useRef<boolean>(false);
+  const nextPrimeSourceRef = useRef<'prime' | 'gesture-retry'>('prime');
+  const noteUnlockLatched = (source: 'prime' | 'playback-proof' | 'gesture-retry') => {
+    if (unlockLatchedRef.current) return;
+    unlockLatchedRef.current = true;
+    try {
+      analytics.track('unlock_latched', null, undefined, {
+        source,
+        ms_from_tour_start: analytics.tourElapsedMs(),
+      });
+    } catch { /* a metric must never break the latch */ }
+  };
   const audioBlockedRef = useRef<boolean>(false);
   // Increments every time playback ownership changes (new story, skip, mute).
   // Callbacks from a story that no longer owns the queue check this and bail,
@@ -491,7 +511,9 @@ export const useVoice = () => {
   // DELAYED (it waits for the unlock like everything else) but
   // never dropped: the welcome and the landmarks wait behind it,
   // and its only exits are playing or a settle that files its
-  // telemetry (the backstop sweep, teardown).
+  // telemetry (teardown, or the next opening's registry sweep).
+  // The backstop is NOT an exit since Oct 29, 2026: expiring the
+  // gate leaves the debt standing (see expireOpening).
   const openerDebtRef = useRef<OpenerDebtEntry[]>([]);
   // Ref bridge to the machine's advance function: the unlock paths
   // (prime settlement, proven-unlock) are defined before the
@@ -529,7 +551,7 @@ export const useVoice = () => {
   // settle reach it through the ref — both are defined before the watch
   // helpers, which need unlock() to exist first.
   const holdWatchArmedRef = useRef<boolean>(false);
-  const unlockRef = useRef<() => void>(() => {});
+  const unlockRef = useRef<(sourceHint?: 'gesture-retry') => void>(() => {});
   const syncHoldWatchRef = useRef<() => void>(() => {});
   // Pending held-lines watchdog: armed while scripted lines sit in
   // pendingSpeechRef; fires HELD_LINES_BLOCKED_MS after the hold began
@@ -636,6 +658,17 @@ export const useVoice = () => {
     // unlock() call, playback proving the element): the facts the
     // opening state derives from may have just changed.
     advanceOpeningRef.current();
+    // Queue kick (audio-unlock fix, Oct 29, 2026): queue items held
+    // behind the unlanded prime (see playStoryFromQueue's hold) do
+    // not restart themselves when the latch lands and no scripted
+    // line was held to carry the restart — every latch path funnels
+    // through this flush, so the kick lives here. While the prime
+    // is still unlanded the kick is a no-op by the same hold, so
+    // flushes from an unlock() whose prime is still in flight cost
+    // nothing.
+    if (!isPlayingStoryRef.current && storyQueueRef.current.length > 0) {
+      try { playStoryFromQueueRef.current(); } catch { /* the flush must never break */ }
+    }
   }, []);
 
   // Playback that actually sounded IS an unlock, whatever the prime
@@ -647,10 +680,15 @@ export const useVoice = () => {
   const markProvenUnlock = useCallback(() => {
     everUnlockedRef.current = true;
     unlockedRef.current = true;
+    noteUnlockLatched('playback-proof');
     flushHeldLines();
   }, [flushHeldLines]);
 
-  const unlock = useCallback(() => {
+  const unlock = useCallback((sourceHint?: 'gesture-retry') => {
+    // A caller acting for a fresh listener gesture (the banner tap,
+    // the hold-watch net) names itself, so the prime it launches
+    // files its latch under that source if it lands.
+    if (sourceHint) nextPrimeSourceRef.current = sourceHint;
     // Resume the speech synth in case the platform paused it while
     // backgrounded — needed on every call, latched or not.
     const synth = synthRef.current;
@@ -710,6 +748,8 @@ export const useVoice = () => {
           audio.muted = false;
           everUnlockedRef.current = true;
           unlockedRef.current = true;
+          noteUnlockLatched(nextPrimeSourceRef.current);
+          nextPrimeSourceRef.current = 'prime';
           flushHeldLines();
           return;
         }
@@ -719,6 +759,8 @@ export const useVoice = () => {
         audio.removeAttribute('src');
         everUnlockedRef.current = true;
         unlockedRef.current = true;
+        noteUnlockLatched(nextPrimeSourceRef.current);
+        nextPrimeSourceRef.current = 'prime';
         // The prime just landed — NOW any line being held can actually
         // be heard. Flush it here, not only in unlock(): the tour-start
         // flow speaks the intro after its last unlock() call, and if
@@ -760,7 +802,7 @@ export const useVoice = () => {
   // handlers run: a tap on the muted banner finds the recovery already
   // under way, and its own unlock() call coalesces / flushes behind it.
   const onHoldGesture = useCallback(() => {
-    unlockRef.current();
+    unlockRef.current('gesture-retry');
   }, []);
 
   const armHoldWatch = useCallback(() => {
@@ -1047,8 +1089,10 @@ export const useVoice = () => {
   // disagree (audit §2b). The backstop (OPENER_GATE_TIMEOUT_MS,
   // armed at begin, per the fix stack's D2 lesson) bounds the whole
   // transaction: an opening that cannot complete expires ON THE
-  // RECORD — its debt settled undelivered, its telemetry filed —
-  // and the tour proceeds, rather than deadlocking in silence.
+  // RECORD — the gate answered, the state 'failed', the tour
+  // proceeds — rather than deadlocking in silence. Since Oct 29,
+  // 2026 the expiry no longer settles the greeting debt itself:
+  // the debt survives for a late unlock (see expireOpening).
 
   const openerDebtOutstanding = () => openerDebtRef.current.some(d => !d.settled);
 
@@ -1121,12 +1165,14 @@ export const useVoice = () => {
   }, []);
 
   // The backstop's terminal path: the opening has had its full
-  // budget and cannot complete. Debt still sitting in containers is
-  // settled undelivered — honestly, on the record — the welcome's
-  // gate question is answered, and the tour proceeds. Debt in the
-  // PLAYER is discharging right now (the unlock landed at the last
-  // moment): its own settle finishes the opening, so the backstop
-  // simply re-arms and stands down. `kickPlayer` is false when the
+  // budget and cannot complete. The welcome's gate question is
+  // answered, the state becomes 'failed', and the tour proceeds —
+  // but since Oct 29, 2026 the greeting debt itself SURVIVES the
+  // gate (see the body): 'failed' is a statement about the lane's
+  // eligibility, not about the debt. Debt in the PLAYER is
+  // discharging right now (the unlock landed at the last moment):
+  // its own settle finishes the opening, so the backstop simply
+  // re-arms and stands down. `kickPlayer` is false when the
   // caller is playStoryFromQueue itself (it falls through to its
   // own dequeue — a nested kick would double-start the queue).
   const expireOpening = useCallback((kickPlayer: boolean) => {
@@ -1145,9 +1191,19 @@ export const useVoice = () => {
     }
     const hadDebt = openerDebtOutstanding();
     if (hadDebt) {
-      settleOpenerDebt({
-        sounded: false, completed: false, engine: null, attempts: 0, soundedMs: 0,
-      });
+      // Audio-unlock fix (Oct 29, 2026; tour 2c6562f7): the backstop
+      // used to settle this debt undelivered at attempts=0 — the
+      // greeting expired unattempted while the tour's stories
+      // burned against the locked element. The debt now SURVIVES
+      // the gate: it stays registered and held, and ANY proven
+      // unlock from here — a late prime, a gesture retry, a filler
+      // that sounds (markProvenUnlock) — flushes greeting → opener
+      // → held stories first, through the player's own debt
+      // priority. Only teardown (stop) settles what a whole tour
+      // never unlocked, with the tour's truth on the record.
+      try {
+        trackDiag('playback', 'opener-debt-survives-gate', 'gate expired with greeting debt outstanding; debt held for a late unlock');
+      } catch { /* diagnostics only */ }
     }
     openerWelcomeDoneRef.current = true;
     openerStateRef.current = hadDebt ? 'failed' : 'open';
@@ -1158,7 +1214,7 @@ export const useVoice = () => {
     try { trackDiag('playback', 'opener-gate-release', 'timeout'); } catch { /* diagnostics only */ }
     console.log(
       hadDebt
-        ? '[Voice] Opening expired at the backstop — greeting debt settled undelivered, tour proceeds'
+        ? '[Voice] Opening expired at the backstop — greeting debt survives for a late unlock, tour proceeds'
         : '[Voice] Opening expired at the backstop — the welcome never landed, tour proceeds'
     );
     if (kickPlayer) playStoryFromQueueRef.current();
@@ -1201,6 +1257,11 @@ export const useVoice = () => {
     }
     openerStateRef.current = 'priming';
     openerArmedAtRef.current = Date.now();
+    // The latch event is once per tour: a new opening re-arms it,
+    // and the prime it is about to launch files as 'prime' unless a
+    // gesture retry claims the source first.
+    unlockLatchedRef.current = false;
+    nextPrimeSourceRef.current = 'prime';
     openerWelcomeDoneRef.current = false;
     openerDebtRef.current = [];
     if (openerGateTimerRef.current !== null) {
@@ -2244,6 +2305,27 @@ export const useVoice = () => {
   const playStoryFromQueue = useCallback(() => {
     if (isPlayingStoryRef.current) return;
 
+    // Audio-unlock hold (Oct 29, 2026; tour 2c6562f7) — the
+    // single-writer rule for the opening. While the opening is
+    // 'priming' and the unlock is unearned, NOTHING in this queue
+    // attempts the shared element: no play(), no src writes, and
+    // none of the machinery below — the staleness sweep, the opener
+    // gate, the dequeue itself — may drop or settle a waiting item
+    // for the blocked window. On tour 2c6562f7 the story pipeline
+    // served into exactly this window: every attempt rejected
+    // (NotAllowedError, 11 audio_blocked), the served stories
+    // dropped as stale/displaced unheard, while the greeting sat in
+    // the scripted hold and expired unattempted. Held items simply
+    // wait; the latch paths restart the player through
+    // flushHeldLines' queue kick. The hold releases the moment the
+    // unlock is earned (everUnlocked), or when the opening leaves
+    // 'priming' — the backstop's 'failed' state deliberately
+    // re-admits attempts, which is how a late filler can prove the
+    // unlock and flush the surviving greeting debt.
+    if (!everUnlockedRef.current && openerStateRef.current === 'priming') {
+      return;
+    }
+
     // Drop any waiting story that no longer describes where the listener is.
     while (storyQueueRef.current.length > 0) {
       const next = storyQueueRef.current[0];
@@ -2915,6 +2997,14 @@ export const useVoice = () => {
 
   const enqueue = useCallback((item: StoryQueueItem) => {
     const queue = storyQueueRef.current;
+    // Audio-unlock hold (Oct 29, 2026; tour 2c6562f7): while the
+    // opening is 'priming' and the unlock is unearned, displacement
+    // is suspended — a story served into the blocked window waits,
+    // it is not spliced out by a priority serve or a fresher story
+    // and settled unheard. Ordering still runs (the queue the latch
+    // inherits is the queue the doctrines built); only the drops
+    // wait for a window in which the items can actually be heard.
+    const startHoldActive = !everUnlockedRef.current && openerStateRef.current === 'priming';
     // Tell-geometry stamps (Area G): when this item joined the queue,
     // and how deep the queue was once it had — the settle reports the
     // wait; until now queue time per story was invisible.
@@ -2955,6 +3045,7 @@ export const useVoice = () => {
       const keep = new Set<StoryQueueItem>();
       if (head && isWarmOrWarming(head)) keep.add(head);
       for (const { q } of locEntries) if (q.priority) keep.add(q);
+      if (startHoldActive) for (const { q } of locEntries) keep.add(q);
       for (let i = queue.length - 1; i >= 0; i--) {
         const q = queue[i];
         if (q.isLocationStory && !q.introServe && !keep.has(q)) {
@@ -3033,7 +3124,7 @@ export const useVoice = () => {
       );
     } else if (item.isLocationStory) {
       const waitingCount = queue.filter(i => i.isLocationStory).length;
-      if (waitingCount >= MAX_PENDING_LOCATION_STORIES) {
+      if (waitingCount >= MAX_PENDING_LOCATION_STORIES && !startHoldActive) {
         // The single waiting slot goes to the fresher story — unless
         // every waiting location story is the protected intro, in
         // which case the newcomer queues BEHIND it (a brief depth-2

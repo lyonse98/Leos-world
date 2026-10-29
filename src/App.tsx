@@ -623,7 +623,7 @@ function App() {
 
   // Lift the audio block after a trip to another app.
   const handleUnlockAudio = () => {
-    voice.unlock();
+    voice.unlock('gesture-retry');
   };
 
   // Full quit: silence Leo, drop queued stories, cancel in-flight requests,

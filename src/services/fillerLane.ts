@@ -462,6 +462,13 @@ class FillerLaneService {
     try {
       analytics.track('filler_played', null, undefined, {
         filler: active.clip.title,
+        // Explicit title key (Oct 29, 2026): region + matched have
+        // ridden this event since the region picker's build, but
+        // the clip's name only ever travelled as 'filler' — a
+        // field diagnosis reading for region/matched/title found
+        // none of the three. All three now ride under their own
+        // names at the call site.
+        title: active.clip.title,
         filler_id: active.clip.id,
         bridge: active.bridgeSlug,
         region: active.region,
