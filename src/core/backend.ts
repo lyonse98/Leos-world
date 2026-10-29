@@ -209,10 +209,29 @@ export async function findCachedStory(
   if (error || !data || data.length === 0) return null;
   const row = data[0] as { story_text: string; topic: string; created_at?: string };
   if (!row.story_text) return null;
+  // SHARED-CACHE CONTAINMENT (Miles edition): tour_stories is shared
+  // with the live Leo build. A cached text in which the guide
+  // introduces himself as Leo must never be served by this build —
+  // it reads as a cache MISS and the story is generated fresh under
+  // the Miles persona. (The screen applies only to this ephemeral
+  // cache, never to the curated library: real people and places
+  // named Leo, e.g. Leo Carrillo, are content, not self-reference.)
+  if (SELF_REFERENCE_LEO.test(row.story_text)) return null;
   return { topic: row.topic, story_text: row.story_text, lat, lng, created_at: row.created_at ?? null };
 }
 
-/** Write a freshly generated story into the shared cache (append-only use). */
+/** First-person Leo self-references a shared-cache row may carry. */
+const SELF_REFERENCE_LEO = /\bI['’]m Leo\b|\bI am Leo\b|\bmy name is Leo\b|\bthis is Leo\b/i;
+
+/**
+ * Write a freshly generated story into the shared cache.
+ *
+ * SHARED-CACHE CONTAINMENT (Miles edition): this build deliberately
+ * does NOT write back. Its live generations speak as Miles; the
+ * shared tour_stories cache is read by the live Leo build, which
+ * must never serve a Miles-voiced text. The seam stays (the tour
+ * calls it uniformly); the write is suppressed here, in one place.
+ */
 export async function putCachedStory(
   sessionId: string,
   topic: string,
@@ -221,19 +240,13 @@ export async function putCachedStory(
   lng: number,
   personaVersion: string,
 ): Promise<void> {
-  if (!BACKEND_CONFIGURED) return;
-  try {
-    await db.from('tour_stories').insert({
-      session_id: sessionId,
-      topic,
-      story_text: storyText,
-      lat,
-      lng,
-      version_key: personaVersion,
-    });
-  } catch {
-    /* cache write is best-effort */
-  }
+  void sessionId;
+  void topic;
+  void storyText;
+  void lat;
+  void lng;
+  void personaVersion;
+  return;
 }
 
 // ------------------------------------------------------------ heard ledger + likes
