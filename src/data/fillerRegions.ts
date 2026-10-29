@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Filler regions (Oct 28, 2026) — the region-first picker's data.
 //
-// HAND COPY of ~/workspace/leos-world/filler-regions.json (version 2).
+// HAND COPY of ~/workspace/leos-world/filler-regions.json (version 3).
 // THAT JSON IS THE SOURCE OF TRUTH — Erik is ground truth for the
 // tags and can re-tag there; update this file in the same commit
 // whenever the JSON changes. Tags below are keyed by the slugified
@@ -43,10 +43,15 @@ export const FILLER_REGIONS: readonly FillerRegion[] = [
   'backcountry',
 ];
 
-// Slugified filler title → its regions. Mirrors `existing_20_tags`
-// and `regional_27_tags` in filler-regions.json v2 (verified
-// title-by-title; the regional 27 were added by the Oct 28, 2026
-// master render campaign that ingested them).
+// Slugified filler title → its regions. Mirrors `existing_20_tags`,
+// `regional_27_tags` and `weave_2_tags` in filler-regions.json v3
+// (verified title-by-title; the regional 27 were added by the
+// Oct 28, 2026 master render campaign that ingested them, and
+// 'the pandemonium' by the Oct 29, 2026 weave-popculture ingest.
+// The weave program's other new filler, "America's Finest City",
+// slugifies to the existing universal 'america s finest city'
+// entry below — its authored tags are likewise all six, so it
+// needs no key of its own.)
 export const FILLER_REGION_TAGS: Readonly<Record<string, readonly FillerRegion[]>> = {
   'the marine layer': ['coast', 'central'],
   'santa ana winds': ['east', 'north', 'backcountry', 'central'],
@@ -97,6 +102,10 @@ export const FILLER_REGION_TAGS: Readonly<Record<string, readonly FillerRegion[]
   'the dark sky summer': ['backcountry'],
   'the wind s highway': ['backcountry', 'east'],
   'the brief garden': ['backcountry'],
+  // Weave-popculture pair (added Oct 29, 2026; mirrors weave_2_tags
+  // in filler-regions.json v3 — regions as authored in
+  // weave-new-rows-corpus-v1/manifest.json).
+  'the pandemonium': ['coast', 'central', 'east'],
 }
 
 /** "The palms aren't from here" → "the palms aren t from here". */
