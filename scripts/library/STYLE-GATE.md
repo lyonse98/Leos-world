@@ -54,6 +54,11 @@ worst flags before its output is ever quoted — or it stays out.
 
 ## Scope notes
 
+- **A9 (first person) — adopted Oct 28, 2026, Erik's ruling.** Every
+  story carries a genuine first-person beat (the documentary-pack's
+  sixth beat in the persona). The gate flags zero-first-person texts
+  mechanically as an **advisory**; whether a present beat is *genuine*
+  — a person surfacing, not a token "I" stuffed in — is judgment.
 - The gate applies to **new generation from Batch 2B onward**. It is
   not retrofitted onto the standing shelf (the Pass 2 health map
   measured the shelf for prioritization; retrofitting the Oct 28

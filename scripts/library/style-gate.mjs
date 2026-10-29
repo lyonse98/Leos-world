@@ -116,6 +116,15 @@ function wowScore(sentence) {
   return score;
 }
 
+// A9 — first-person presence (ADOPTED criterion: Erik's ruling,
+// Oct 28, 2026 — "use the first person A9 aspect, moving forward").
+// The mechanical layer counts first-person tokens; ZERO in a story
+// is an advisory (the story has no Leo beat on its face). Whether a
+// present beat is GENUINE — a person surfacing with an observation,
+// reaction, or preference, vs a token "I" stuffed in to check the
+// box — is judgment (see JUDGMENT_REQUIRED).
+const FIRST_PERSON_RE = /\b(I|I'm|I've|I'll|I'd|me|my|mine|myself)\b/g;
+
 // A1 — narrow begins-with-a-year flag (see header: flag, not verdict).
 const YEAR_OPENER_RE = /^\s*(in\s+)?(the year\s+)?(1[5-9]\d\d|20\d\d)\b/i;
 // A1 advisory — definition opener ("X is a ...") in sentence 1.
@@ -212,6 +221,19 @@ function gateStory(entry, opts) {
     advise('A13', `sentence-variance missing: ${!hasShort ? 'no ≤6-word sentence' : ''}${!hasShort && !hasLong ? ' and ' : ''}${!hasLong ? 'no ≥20-word sentence' : ''}`);
   }
 
+  // A9 first-person presence (advisory — adopted criterion, Erik's
+  // ruling Oct 28, 2026). Zero first-person tokens = the story never
+  // surfaces Leo; judgment then decides whether that is a miss or
+  // the rare justified absence. A nonzero count does NOT satisfy A9
+  // by itself — quality of the beat is judgment (token-stuffing is
+  // its own fail in the audit).
+  const fpCount = (text.match(FIRST_PERSON_RE) || []).length;
+  if (fpCount === 0) {
+    advise('A9', 'zero first-person tokens — no Leo beat on the face of the text; judgment: A9 (adopted) expects a genuine first-person beat in every story');
+  } else {
+    notes.push(`A9: ${fpCount} first-person token(s) ✓ (quality is judgment)`);
+  }
+
   return { flags, advisory, notes, sentences };
 }
 
@@ -226,7 +248,7 @@ const JUDGMENT_REQUIRED = [
   'A6  specifics traceability + swap test (density counting is mechanical-lite; honesty is judgment)',
   'A7  present-tense scene — exists at the pivot AND every scene detail traces to sources (highest fabrication risk)',
   'A8  button landing — classification of the final sentence; affection landings ≤1 in 3 per batch',
-  'A9  Leo presence + contested-claim attribution (note: first-person register is Erik\'s open ruling — not gated here)',
+  'A9  first-person beat QUALITY — ADOPTED criterion (Erik\'s ruling, Oct 28, 2026): the beat must be genuine, a person surfacing (observation, reaction, preference), never a token "I" stuffed in; the place stays the subject. Presence counting is mechanical (A9 advisory above); quality is judgment. Also: contested-claim attribution',
   'A11 dark-material grammar — human before toll, toll once, no victim-targeted jokes (the exclusion SWEEP above is mechanical)',
   'A12 speculation payoff — every pivot answered with a sourced fact (surface forms flagged above)',
   'A13 lecture cadence / fact-runs — JUDGMENT-ONLY: the mechanical fact-run detector was retired in the Pass 1 audit (17/17 worst cases were vivid narrative)',
