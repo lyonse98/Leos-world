@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // Filler regions (Oct 28, 2026) — the region-first picker's data.
 //
-// HAND COPY of ~/workspace/leos-world/filler-regions.json (version 1).
+// HAND COPY of ~/workspace/leos-world/filler-regions.json (version 2).
 // THAT JSON IS THE SOURCE OF TRUTH — Erik is ground truth for the
 // tags and can re-tag there; update this file in the same commit
 // whenever the JSON changes. Tags below are keyed by the slugified
@@ -44,7 +44,9 @@ export const FILLER_REGIONS: readonly FillerRegion[] = [
 ];
 
 // Slugified filler title → its regions. Mirrors `existing_20_tags`
-// in filler-regions.json v1 exactly (verified title-by-title).
+// and `regional_27_tags` in filler-regions.json v2 (verified
+// title-by-title; the regional 27 were added by the Oct 28, 2026
+// master render campaign that ingested them).
 export const FILLER_REGION_TAGS: Readonly<Record<string, readonly FillerRegion[]>> = {
   'the marine layer': ['coast', 'central'],
   'santa ana winds': ['east', 'north', 'backcountry', 'central'],
@@ -66,7 +68,36 @@ export const FILLER_REGION_TAGS: Readonly<Record<string, readonly FillerRegion[]
   'wireless valley': ['central', 'north'],
   'avocado country': ['north', 'backcountry'],
   'the eternal ground': ['backcountry', 'east'],
-};
+  // Regional 27 (added Oct 28, 2026 — master render campaign;
+  // mirrors regional_27_tags in filler-regions.json v2).
+  'the morning glance': ['coast'],
+  'the burn off': ['coast', 'central'],
+  'the moving edge': ['coast'],
+  'the hidden forest': ['coast'],
+  'the blue fire': ['coast'],
+  'the friday crawl': ['north', 'east'],
+  'the patchwork': ['north'],
+  'the winter flip': ['north', 'east'],
+  'the ranchos under the suburbs': ['north'],
+  'the wild edge': ['north', 'east'],
+  'the canyon fingers': ['central'],
+  'the old seabed': ['central'],
+  'the valley that built the county': ['central'],
+  'the hidden river': ['central', 'east'],
+  'the heat line': ['east'],
+  'reservoir country': ['east'],
+  'granite country': ['east', 'backcountry'],
+  'the oak belt': ['east', 'backcountry'],
+  'the binational day': ['south'],
+  'the pink shore': ['south'],
+  'the other bay': ['south'],
+  'the third language': ['south'],
+  'the empty corner': ['south', 'backcountry'],
+  'the big drop': ['backcountry'],
+  'the dark sky summer': ['backcountry'],
+  'the wind s highway': ['backcountry', 'east'],
+  'the brief garden': ['backcountry'],
+}
 
 /** "The palms aren't from here" → "the palms aren t from here". */
 export function slugifyFillerTitle(title: string): string {

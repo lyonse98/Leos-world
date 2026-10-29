@@ -419,11 +419,32 @@ export async function submitTtsBatch(geminiKey, items, displayName) {
 export async function pollTtsBatch(geminiKey, name, { timeoutMs = 50 * 60 * 1000, intervalMs = 15000 } = {}) {
   const deadline = Date.now() + timeoutMs;
   let lastState = '';
+  let transientFails = 0;
   while (Date.now() < deadline) {
-    const res = await fetchText(`https://generativelanguage.googleapis.com/v1beta/${name}?key=${geminiKey}`, {
-      headers: { Referer: APP_REFERER },
-    }, 180000);
-    if (!res.ok) throw new Error(`batch poll HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    let res;
+    try {
+      res = await fetchText(`https://generativelanguage.googleapis.com/v1beta/${name}?key=${geminiKey}`, {
+        headers: { Referer: APP_REFERER },
+      }, 180000);
+    } catch (e) {
+      // Network-level poll failure — transient until proven otherwise
+      // (lesson of the Oct 28 master render campaign: a single 503 on
+      // the state endpoint is NOT a job failure; the job lives
+      // server-side and must not be abandoned for a hiccup).
+      if (++transientFails > 8) throw e;
+      console.warn(`[batch] poll ${name} network error (${e.message.slice(0, 100)}) — retry ${transientFails}/8 in 30s`);
+      await sleep(30000);
+      continue;
+    }
+    if (!res.ok) {
+      if ([429, 500, 502, 503, 504].includes(res.status) && ++transientFails <= 8) {
+        console.warn(`[batch] poll ${name} HTTP ${res.status} — transient, retry ${transientFails}/8 in 30s`);
+        await sleep(30000);
+        continue;
+      }
+      throw new Error(`batch poll HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    }
+    transientFails = 0;
     const json = await res.json();
     // State enum arrives as BATCH_STATE_* on this API surface (JOB_STATE_*
     // in other docs) — normalize before comparing.
