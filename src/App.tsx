@@ -19,13 +19,13 @@ import { usePosition, useWakeLock } from './hooks';
 
 type Pose = 'idle' | 'speaking' | 'listening' | 'thinking' | 'wave' | 'pointing' | 'liked';
 
-function LeoFigure({ pose, large }: { pose: Pose; large?: boolean }) {
+function MilesFigure({ pose, large }: { pose: Pose; large?: boolean }) {
   return (
     <div className={`relative ${large ? 'h-52 sm:h-72' : 'h-36 sm:h-48'} flex items-end justify-center`}>
       <div className="absolute bottom-0 h-24 w-24 rounded-full bg-sky-500/20 blur-2xl" />
       <img
-        src={`/leo/leo-${pose}.webp`}
-        alt="Leo, your tour guide"
+        src={`/miles/miles-${pose}.webp`}
+        alt="Miles, your tour guide"
         className="relative max-h-full w-auto object-contain drop-shadow-2xl"
         draggable={false}
       />
@@ -109,8 +109,8 @@ export default function App() {
     if (view.nowPlaying) {
       navigator.mediaSession.metadata = new MediaMetadata({
         title: view.nowPlaying.label,
-        artist: "Leo — Leo's World",
-        album: "Leo's World Tour",
+        artist: "Miles",
+        album: "Miles — AI Guide for the Road",
       });
     }
     const set = (action: MediaSessionAction, fn: (() => void) | null) => {
@@ -178,9 +178,9 @@ export default function App() {
           <div className="leo-float-slow absolute top-1/3 -right-24 h-80 w-80 rounded-full bg-amber-500/10 blur-3xl" />
         </div>
         <main className="safe-top safe-bottom relative mx-auto flex min-h-full w-full max-w-xl flex-col items-center px-6 py-8">
-          <LeoFigure pose="wave" large />
+          <MilesFigure pose="wave" large />
           <h1 className="leo-shimmer mt-2 bg-gradient-to-r from-sky-200 via-white to-amber-200 bg-clip-text text-center text-4xl font-bold text-transparent sm:text-5xl">
-            Leo&rsquo;s World
+            Miles
           </h1>
           <p className="mt-3 text-center text-sm leading-relaxed text-slate-300 sm:text-base">
             A local friend riding shotgun — real stories about the streets you&rsquo;re
@@ -232,7 +232,7 @@ export default function App() {
 
           {!isStandalone && (
             <div className="mt-6 w-full rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-              <p className="text-sm font-medium text-slate-200">Add Leo to your home screen</p>
+              <p className="text-sm font-medium text-slate-200">Add Miles to your home screen</p>
               <p className="mt-1 text-xs leading-relaxed text-slate-400">
                 On iPhone: tap Share, then &ldquo;Add to Home Screen.&rdquo; On Android: use the
                 browser menu&rsquo;s &ldquo;Install app.&rdquo; Best first run: stay in this
@@ -242,7 +242,7 @@ export default function App() {
           )}
 
           <p className="mt-auto pt-8 text-center text-xs leading-relaxed text-slate-400">
-            Leo is an AI guide. Stories are drawn from public records and local history —
+            Miles is an AI guide. Stories are drawn from public records and local history —
             and like any good storyteller, he may occasionally get a detail wrong.
           </p>
         </main>
@@ -278,7 +278,7 @@ export default function App() {
       </header>
 
       <main className="relative flex flex-1 flex-col items-center px-5 pt-1">
-        <LeoFigure pose={pose} />
+        <MilesFigure pose={pose} />
 
         {view.banner === 'blocked' && (
           <button
@@ -309,7 +309,7 @@ export default function App() {
             {view.nowPlaying
               ? view.nowPlaying.label
               : view.qaPhase === 'generating'
-                ? 'Leo is thinking…'
+                ? 'Miles is thinking…'
                 : 'Listening to the road…'}
           </p>
         </div>
@@ -376,9 +376,9 @@ export default function App() {
               placeholder={
                 view.qaLocked
                   ? view.qaPhase === 'generating'
-                    ? 'Leo is answering…'
+                    ? 'Miles is answering…'
                     : 'One question at a time…'
-                  : 'Ask Leo about this place…'
+                  : 'Ask Miles about this place…'
               }
               className="w-full bg-transparent text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none"
               maxLength={300}
@@ -393,7 +393,7 @@ export default function App() {
             </button>
           </div>
           <p className="mt-1.5 text-center text-[11px] text-slate-500">
-            Type a question — Leo answers one at a time, then the tour rolls on.
+            Type a question — Miles answers one at a time, then the tour rolls on.
           </p>
         </form>
 

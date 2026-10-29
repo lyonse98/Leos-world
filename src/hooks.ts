@@ -48,7 +48,7 @@ export function usePosition(onPosition: (pos: Position) => void): {
       err => {
         setError(
           err.code === err.PERMISSION_DENIED
-            ? 'Location is off for this site — Leo needs it to know where you are.'
+            ? 'Location is off for this site — Miles needs it to know where you are.'
             : 'Still looking for a location fix…',
         );
       },

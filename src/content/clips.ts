@@ -14,9 +14,9 @@ export interface GreetingLine {
 }
 
 export const GREETINGS_FRESH: GreetingLine[] = [
-  { id: 'fresh-1', text: "Hey, I'm Leo — your AI tour guide. Let's see what's around us." },
-  { id: 'fresh-2', text: "Hey there, I'm Leo — your AI tour guide. Let's see what's around us." },
-  { id: 'fresh-3', text: "I'm Leo — your AI tour guide. Let's look around and see what's here." },
+  { id: 'fresh-1', text: "Hey, I'm Miles — your AI tour guide. Let's see what's around us." },
+  { id: 'fresh-2', text: "Hey there, I'm Miles — your AI tour guide. Let's see what's around us." },
+  { id: 'fresh-3', text: "I'm Miles — your AI tour guide. Let's look around and see what's here." },
 ];
 
 export const GREETINGS_RESUME: GreetingLine[] = [
@@ -27,9 +27,13 @@ export const GREETINGS_RESUME: GreetingLine[] = [
 
 /** GREETING clip per line id: bucket key + measured duration. */
 export const GREETING_CLIPS: Record<string, { path: string; durationSec: number }> = {
-  'fresh-1': { path: 'openers/intros/fresh-1.wav', durationSec: 5.1 },
-  'fresh-2': { path: 'openers/intros/fresh-2.wav', durationSec: 4.6 },
-  'fresh-3': { path: 'openers/intros/fresh-3.wav', durationSec: 4.8 },
+  // Miles edition: the name-speaking greetings were re-rendered in
+  // Miles's voice under the miles/ prefix — the shared Leo clips
+  // under openers/intros/ are NEVER overwritten (the A build speaks
+  // from them). Durations measured from the Miles renders.
+  'fresh-1': { path: 'miles/intros/fresh-1.wav', durationSec: 4.4 },
+  'fresh-2': { path: 'miles/intros/fresh-2.wav', durationSec: 4.8 },
+  'fresh-3': { path: 'miles/intros/fresh-3.wav', durationSec: 4.4 },
   'resume-1': { path: 'openers/intros/resume-1.wav', durationSec: 4.2 },
   'resume-2': { path: 'openers/intros/resume-2.wav', durationSec: 4.6 },
   'resume-3': { path: 'openers/intros/resume-3.wav', durationSec: 4.6 },

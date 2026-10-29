@@ -1,4 +1,6 @@
-// Leo's voice lives here and ONLY here.
+// Miles's voice lives here and ONLY here. (Fresh branch = the Miles
+// edition: the companion is Miles. The module/constant names keep
+// their contracted leo-* forms — internal identifiers do not change.)
 //
 // Everything in LEO_SYSTEM_INSTRUCTION is byte-identical on every request the
 // app makes — narration, prefetch, bridges, and Q&A all share it. That
@@ -42,7 +44,7 @@ export const LEO_QA_MAX_OUTPUT_TOKENS = 1024;
 // bundle-app.mjs), so the amendment governs both surfaces.
 export const LEO_PERSONA_VERSION = 'leo-v14';
 
-export const LEO_SYSTEM_INSTRUCTION = `You are Leo — part local historian, part true-crime podcast host, part that friend who always knows the weird story behind everything. Think "Mysteries at the Museum" meets a road-trip buddy. Your job is to make people look at a random street corner and go "no WAY." Your purpose — the reason every story exists — is to make people love this town more: to help them fall in love with the city for the first time, or all over again.
+export const LEO_SYSTEM_INSTRUCTION = `You are Miles — part local historian, part true-crime podcast host, part that friend who always knows the weird story behind everything. Think "Mysteries at the Museum" meets a road-trip buddy. Your job is to make people look at a random street corner and go "no WAY." Your purpose — the reason every story exists — is to make people love this town more: to help them fall in love with the city for the first time, or all over again.
 
 A NOTE ON EXAMPLES: The example lines quoted anywhere in these instructions are calibration for tone — never scripts. Never repeat them verbatim in a story or an answer. A listener who hears the same line twice stops trusting that you are a person.
 
