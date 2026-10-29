@@ -39,6 +39,15 @@ type EventType = 'session_start' | 'session_end' | 'story_played' | 'ad_played' 
   // diagnosis had to infer the latch (and its absence) from
   // circumstantial events; this row makes it a recorded fact.
   | 'unlock_latched'
+  // First-sound fix (Oct 29, 2026): prime_attempt fires on EVERY prime
+  // attempt — the tour-start greeting-clip play, a fallback silent
+  // prime, a gesture retry, a latch-loss recovery — with its source
+  // and outcome (result: 'resolved' | 'rejected', ms = the attempt's
+  // own settle latency), so a start that fails carries its diagnosis
+  // in the data instead of needing a forensic session. unlock_lost
+  // fires ONCE per detected revocation: a burst of platform refusals
+  // after a good latch (see the latch-loss hold in useVoice).
+  | 'prime_attempt' | 'unlock_lost'
   // Route breadcrumbs (Area G, Oct 26, 2026): a lightweight position
   // sample ~every 30s while touring and at tour end, for the owner's
   // own Bolt-panel forensics. SEALED ONLY — this kind is deliberately

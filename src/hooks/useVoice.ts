@@ -271,6 +271,66 @@ const HELD_LINES_BLOCKED_MS = 3000;
 // and re-attempted on every fetch-cycle trigger).
 const MAX_PLAYBACK_ATTEMPTS = 3;
 
+// Latch-loss detection (first-sound fix, Oct 29, 2026): the platform
+// can REVOKE an earned unlock mid-tour (an interruption, a route
+// change, an OS pause that outlives its welcome), and the only
+// evidence is play() refusing again. Two kind='blocked' refusals
+// inside this window, after a good latch, are treated as a loss —
+// one refusal can be a single bad attempt, two in ten seconds is the
+// platform saying no. On a loss the queue holds unattempted (the
+// 07846b7 priming hold, re-engaged) until the next gesture re-primes.
+const LATCH_LOSS_WINDOW_MS = 10_000;
+const LATCH_LOSS_MIN_BLOCKS = 2;
+
+// While a latch loss stands, the player probes the PRIME on this
+// interval (never a queue item — a probe spends no item's attempt
+// economy): a landed prime clears the loss and the flush restarts
+// the queue, a rejected one only files its prime_attempt and the
+// probe re-arms. Without it, a loss the listener never taps through
+// would hold owed lines (a Q&A answer above all) past every
+// failsafe the app runs; with it, held items get their attempts —
+// and their honest settles — on a bounded clock, while the banner
+// tap remains the instant recovery.
+const LATCH_PROBE_INTERVAL_MS = 20_000;
+
+// The fallback prime clip (first-sound fix, Oct 29, 2026): ~200 ms
+// of near-silence WITH actual samples — a 220 Hz sine at amplitude
+// 28 (≈ −58 dB, inaudible in a car) — built once as a Blob URL. The
+// pre-fix prime was a 44-byte WAV header containing ZERO samples:
+// a zero-length play() can resolve without the element ever having
+// sounded, so the "prime" proved nothing on platforms that key the
+// unlock to real playback. This clip is the fallback carrier (banner
+// retries, re-primes) for when the greeting clip can't go first.
+let primeClipUrlCache: string | null = null;
+function primeClipUrl(): string {
+  if (primeClipUrlCache) return primeClipUrlCache;
+  const sampleRate = 8000;
+  const frames = 1600; // 200 ms
+  const bytes = new Uint8Array(44 + frames * 2);
+  const view = new DataView(bytes.buffer);
+  const writeAscii = (off: number, s: string) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(off + i, s.charCodeAt(i));
+  };
+  writeAscii(0, 'RIFF');
+  view.setUint32(4, 36 + frames * 2, true);
+  writeAscii(8, 'WAVE');
+  writeAscii(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeAscii(36, 'data');
+  view.setUint32(40, frames * 2, true);
+  for (let i = 0; i < frames; i++) {
+    view.setInt16(44 + i * 2, Math.round(28 * Math.sin((2 * Math.PI * 220 * i) / sampleRate)), true);
+  }
+  primeClipUrlCache = URL.createObjectURL(new Blob([bytes.buffer], { type: 'audio/wav' }));
+  return primeClipUrlCache;
+}
+
 export const useVoice = () => {
   const [isInitialized, setIsInitialized] = useState(false);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -411,6 +471,51 @@ export const useVoice = () => {
       });
     } catch { /* a metric must never break the latch */ }
   };
+  // Prime-attempt telemetry (first-sound fix, Oct 29, 2026): EVERY
+  // prime attempt files its outcome — the greeting-clip play, a
+  // fallback silent prime, a banner/gesture retry, a latch-loss
+  // recovery — so a failed start arrives with its diagnosis attached
+  // (which carrier was tried, in whose gesture, how it settled)
+  // instead of another inference from circumstantial events. ms is
+  // the attempt's own settle latency.
+  const trackPrimeAttempt = (
+    source: 'prime' | 'gesture-retry',
+    startedAt: number,
+    result: 'resolved' | 'rejected'
+  ) => {
+    try {
+      analytics.track('prime_attempt', null, undefined, {
+        source,
+        result,
+        ms: Math.max(0, Math.round(performance.now() - startedAt)),
+      });
+    } catch { /* a metric must never break a prime */ }
+  };
+  // First-sound state (Oct 29, 2026): true while the greeting clip's
+  // own play() — the tour's first media action — is unsettled. During
+  // that window the clip IS the prime: unlock() coalesces onto it
+  // exactly as onto an in-flight silent prime, because a second
+  // carrier would reassign the shared element's src and abort the
+  // greeting mid-flight.
+  const firstSoundInFlightRef = useRef<boolean>(false);
+  // A tour is active between beginOpening and stop. The document
+  // gesture listener gates its re-primes on this: on the landing
+  // page, the START tap's own pointerdown must not fire a silent
+  // prime ahead of the click — the greeting clip is the first media
+  // action of the tour now, and pointerdown precedes click.
+  const tourActiveRef = useRef<boolean>(false);
+  // Latch-loss state (Oct 29, 2026): set when a burst of platform
+  // refusals after a good latch proves the unlock was revoked (see
+  // markAudioBlocked). While set, the player holds the queue
+  // unattempted and unlock() primes again despite everUnlocked —
+  // the loss is cleared by the next landed prime or proven playback.
+  const latchLostRef = useRef<boolean>(false);
+  const blockedBurstRef = useRef<{ count: number; windowStart: number }>({ count: 0, windowStart: 0 });
+  // The latch-loss probe timer + its scheduler's ref bridge (the
+  // scheduler lives beside primeElement, below; the burst detector
+  // in markAudioBlocked is defined before both).
+  const latchProbeTimerRef = useRef<number | null>(null);
+  const scheduleLatchProbeRef = useRef<() => void>(() => {});
   const audioBlockedRef = useRef<boolean>(false);
   // Increments every time playback ownership changes (new story, skip, mute).
   // Callbacks from a story that no longer owns the queue check this and bail,
@@ -481,6 +586,35 @@ export const useVoice = () => {
           : 'audio error (synthesis or playback failure)',
       });
     } catch { /* a metric must never break the banner */ }
+    // Latch-loss detection (first-sound fix, Oct 29, 2026): a
+    // 'blocked' refusal AFTER a good latch is the only evidence the
+    // platform revoked the unlock. A burst of them (see
+    // LATCH_LOSS_*) engages the loss state: the player re-engages
+    // its hold so queued stories wait unattempted instead of
+    // burning their attempt economy against a locked element, and
+    // the next gesture re-primes. unlock_lost fires once per loss.
+    if (kind === 'blocked' && everUnlockedRef.current && !latchLostRef.current) {
+      const now = Date.now();
+      const burst = blockedBurstRef.current;
+      if (now - burst.windowStart > LATCH_LOSS_WINDOW_MS) {
+        burst.count = 1;
+        burst.windowStart = now;
+      } else {
+        burst.count += 1;
+      }
+      if (burst.count >= LATCH_LOSS_MIN_BLOCKS) {
+        latchLostRef.current = true;
+        blockedBurstRef.current = { count: 0, windowStart: 0 };
+        scheduleLatchProbeRef.current();
+        console.warn('[Voice] Unlock lost — the platform is refusing playback after a good latch; holding the queue until the next gesture');
+        try {
+          analytics.track('unlock_lost', null, undefined, {
+            source: 'blocked-burst',
+            ms_from_tour_start: analytics.tourElapsedMs(),
+          });
+        } catch { /* a metric must never break the hold */ }
+      }
+    }
   };
   // Set when the listener returns to a tour whose audio the platform paused.
   // Surfaces as "tap to resume" instead of leaving them in unexplained silence.
@@ -541,7 +675,7 @@ export const useVoice = () => {
   // the pre-rendered Puck opener), and both can land here while the prime
   // is still resolving — a single slot would have overwritten the welcome
   // with the opener and lost it.
-  const pendingSpeechRef = useRef<Array<{ text: string; localVoice?: boolean; audioUrl?: string; onSettle?: (info: PlaybackSettle) => void }>>([]);
+  const pendingSpeechRef = useRef<Array<{ text: string; localVoice?: boolean; audioUrl?: string; onSettle?: (info: PlaybackSettle) => void; firstSound?: boolean }>>([]);
   // Held-line gesture safety net (Oct 27, 2026): while lines sit in the
   // hold awaiting an unlock, a document-level pointerdown listener
   // retries unlock() on the next gesture ANYWHERE — not only on the
@@ -552,6 +686,11 @@ export const useVoice = () => {
   // helpers, which need unlock() to exist first.
   const holdWatchArmedRef = useRef<boolean>(false);
   const unlockRef = useRef<(sourceHint?: 'gesture-retry') => void>(() => {});
+  // Ref bridge to the first-sound attempt (defined late in the hook,
+  // beside the player machinery it borrows): unlock() and speak()
+  // are defined before it and reach it through here — the same
+  // pattern as speakRef / unlockRef.
+  const attemptFirstSoundRef = useRef<(line: { text: string; audioUrl?: string; onSettle?: (info: PlaybackSettle) => void }) => void>(() => {});
   const syncHoldWatchRef = useRef<() => void>(() => {});
   // Pending held-lines watchdog: armed while scripted lines sit in
   // pendingSpeechRef; fires HELD_LINES_BLOCKED_MS after the hold began
@@ -583,7 +722,7 @@ export const useVoice = () => {
       heldBlockedTimerRef.current = null;
     }
   };
-  const speakRef = useRef<(text: string, opts?: { localVoice?: boolean; audioUrl?: string; onSettle?: (info: PlaybackSettle) => void }) => void>(() => {});
+  const speakRef = useRef<(text: string, opts?: { localVoice?: boolean; audioUrl?: string; onSettle?: (info: PlaybackSettle) => void; firstSound?: boolean }) => void>(() => {});
   const pendingTrackedRef = useRef<{
     text: string;
     onPlaybackStart?: () => void;
@@ -680,9 +819,131 @@ export const useVoice = () => {
   const markProvenUnlock = useCallback(() => {
     everUnlockedRef.current = true;
     unlockedRef.current = true;
+    // Sound coming out is also the latch-loss recovery: a loss the
+    // burst detector declared is disproven by any real playback.
+    if (latchLostRef.current) {
+      latchLostRef.current = false;
+      blockedBurstRef.current = { count: 0, windowStart: 0 };
+    }
     noteUnlockLatched('playback-proof');
     flushHeldLines();
   }, [flushHeldLines]);
+
+  // The fallback prime: a muted play() of the real-sample prime
+  // clip on the shared element. Extracted from unlock() (first-sound
+  // fix, Oct 29, 2026) so the greeting clip's rejection path can run
+  // it as the same gesture's second carrier without duplicating the
+  // generation bookkeeping. The generation discipline is the Oct 27,
+  // 2026 settlement (tour 0a36c9d7): only the latest prime does
+  // element bookkeeping or lets a failure write state, but a prime
+  // whose play() SUCCEEDED proves the unlock whichever generation it
+  // belongs to. Every settlement files prime_attempt.
+  const primeElement = () => {
+    const audio = audioElRef.current;
+    if (!audio || primeInFlightRef.current) return;
+    // Coalesce (Oct 27, 2026): a prime is already in flight — the
+    // common case is tour start's second unlock() landing while the
+    // in-tap prime is still settling. Re-priming here would reassign
+    // the element's src, aborting the in-flight prime and bumping
+    // its generation so its settlement is discarded, while the new
+    // prime's play() runs outside the activation window and rejects:
+    // the exact tour-0a36c9d7 failure. The in-flight prime's own
+    // handlers latch + flush when it lands, and the caller's flush
+    // covers anything already speakable.
+    primeInFlightRef.current = true;
+    const primeGen = ++primeGenRef.current;
+    const startedAt = performance.now();
+    audio.muted = true;
+    audio.src = primeClipUrl();
+    audio.play().then(() => {
+      primeInFlightRef.current = false;
+      if (primeGen !== primeGenRef.current) {
+        // A newer prime superseded this one while its play() was in
+        // flight — but it SUCCEEDED, and a successful play() is
+        // platform proof the element is unlocked: the gesture that
+        // launched it is the activation the platform demands. The
+        // generation guard exists to keep a stale prime from doing
+        // element bookkeeping on an element a newer prime is using,
+        // and to keep stale FAILURES from un-latching (below) — it
+        // was never meant to throw away a proven unlock. Latch +
+        // flush; skip the cleanup, which belongs to the live prime.
+        // muted is the one safe write: the prime clip is near-silence,
+        // so un-muting early is inaudible, and the live prime's own
+        // settlement re-writes it either way.
+        audio.muted = false;
+        everUnlockedRef.current = true;
+        unlockedRef.current = true;
+        latchLostRef.current = false;
+        blockedBurstRef.current = { count: 0, windowStart: 0 };
+        noteUnlockLatched(nextPrimeSourceRef.current);
+        trackPrimeAttempt(nextPrimeSourceRef.current, startedAt, 'resolved');
+        nextPrimeSourceRef.current = 'prime';
+        flushHeldLines();
+        return;
+      }
+      audio.pause();
+      audio.currentTime = 0;
+      audio.muted = false;
+      audio.removeAttribute('src');
+      everUnlockedRef.current = true;
+      unlockedRef.current = true;
+      // A landed prime also clears a latch loss: this is the
+      // recovery the loss state exists to wait for.
+      latchLostRef.current = false;
+      blockedBurstRef.current = { count: 0, windowStart: 0 };
+      noteUnlockLatched(nextPrimeSourceRef.current);
+      trackPrimeAttempt(nextPrimeSourceRef.current, startedAt, 'resolved');
+      nextPrimeSourceRef.current = 'prime';
+      // The prime just landed — NOW any line being held can actually
+      // be heard. Flush it here, not only in unlock(): the tour-start
+      // flow speaks the intro after its last unlock() call, and if
+      // the prime hadn't resolved yet the intro was held in
+      // pendingSpeechRef with no further unlock coming — in a car,
+      // possibly no tap ever — so the welcome simply never sounded.
+      // A held line must be spoken the moment the engine unlocks,
+      // whoever's call made it happen.
+      flushHeldLines();
+    }).catch(() => {
+      primeInFlightRef.current = false;
+      trackPrimeAttempt(nextPrimeSourceRef.current, startedAt, 'rejected');
+      // Same generation guard as the success path: an aborted prime
+      // (killed by the next unlock's src assignment) must not reset
+      // the unlock a newer prime already earned, nor strip its src.
+      if (primeGen !== primeGenRef.current) return;
+      // Nor may a failure that lands AFTER the unlock was earned by
+      // another path (a stale prime's success above, or real
+      // playback proving the element) touch the element at all: the
+      // src it would strip now belongs to live playback. During a
+      // latch LOSS the earned-unlock fact no longer protects the
+      // element — the failure bookkeeping below is the loss's own.
+      if (everUnlockedRef.current && !latchLostRef.current) return;
+      audio.muted = false;
+      audio.removeAttribute('src');
+      // A failed prime proves only that THIS attempt failed. It must
+      // never revoke an unlock an earlier prime — or real playback —
+      // already earned.
+      unlockedRef.current = false;
+    });
+  };
+
+  // The latch-loss probe (first-sound fix, Oct 29, 2026): while a
+  // loss stands, retry the prime itself on the probe interval. The
+  // chain re-arms unconditionally and dies on its own the first
+  // time it wakes to a cleared loss (a landed prime, proven
+  // playback, a gesture, a new tour, teardown) — the wake checks
+  // the state before priming, so a stale chain can never prime a
+  // healthy element.
+  const scheduleLatchProbe = () => {
+    if (latchProbeTimerRef.current !== null) return;
+    latchProbeTimerRef.current = window.setTimeout(() => {
+      latchProbeTimerRef.current = null;
+      if (!latchLostRef.current) return;
+      primeElement();
+      scheduleLatchProbe();
+    }, LATCH_PROBE_INTERVAL_MS);
+  };
+
+  scheduleLatchProbeRef.current = scheduleLatchProbe;
 
   const unlock = useCallback((sourceHint?: 'gesture-retry') => {
     // A caller acting for a fresh listener gesture (the banner tap,
@@ -697,98 +958,60 @@ export const useVoice = () => {
     }
 
     // Once an unlock has been EARNED (a prime landed, or real audio
-    // sounded), never prime again: the element stays unlocked for the
-    // session, and a fresh prime can only do harm — its src assignment
-    // churns the very element stories play on, and its rejection (the
-    // call landing outside a user-activation window — tour start primes
-    // in the tap, awaits the voice list for up to 2s, then primes AGAIN)
-    // used to write unlockedRef back to false, un-latching the earned
-    // unlock and stranding every held line for the rest of the tour.
-    // Before the first earned unlock, priming still runs on EVERY call:
-    // the old first-prime latch made the "your browser muted Leo" banner
-    // a dead end (a prime that missed the activation window latched
-    // anyway, and later banner taps early-returned without re-priming),
-    // so the latch below is set only by a prime that actually succeeds.
-    if (everUnlockedRef.current) {
+    // sounded) and not since LOST, never prime again: the element
+    // stays unlocked for the session, and a fresh prime can only do
+    // harm — its src assignment churns the very element stories play
+    // on, and its rejection (the call landing outside a user-
+    // activation window — tour start primes in the tap, awaits the
+    // voice list for up to 2s, then primes AGAIN) used to write
+    // unlockedRef back to false, un-latching the earned unlock and
+    // stranding every held line for the rest of the tour. A latch
+    // LOSS (first-sound fix, Oct 29, 2026) is the one exception: the
+    // platform revoked what was earned, so priming runs again —
+    // that is what the loss state is for. Before the first earned
+    // unlock, priming still runs on EVERY call: the old first-prime
+    // latch made the "your browser muted Leo" banner a dead end (a
+    // prime that missed the activation window latched anyway, and
+    // later banner taps early-returned without re-priming), so the
+    // latch in primeElement is set only by a prime that succeeds.
+    if (everUnlockedRef.current && !latchLostRef.current) {
       unlockedRef.current = true;
       flushHeldLines();
       return;
     }
 
-    const audio = audioElRef.current;
-    if (audio && !primeInFlightRef.current) {
-      // Coalesce (Oct 27, 2026): a prime is already in flight — the
-      // common case is tour start's second unlock() landing while the
-      // in-tap prime is still settling. Re-priming here would reassign
-      // the element's src, aborting the in-flight prime and bumping
-      // its generation so its settlement is discarded, while the new
-      // prime's play() runs outside the activation window and rejects:
-      // the exact tour-0a36c9d7 failure. The in-flight prime's own
-      // handlers latch + flush when it lands, and the flush at the end
-      // of this call covers anything already speakable.
-      primeInFlightRef.current = true;
-      const primeGen = ++primeGenRef.current;
-      audio.muted = true;
-      audio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
-      audio.play().then(() => {
-        primeInFlightRef.current = false;
-        if (primeGen !== primeGenRef.current) {
-          // A newer prime superseded this one while its play() was in
-          // flight — but it SUCCEEDED, and a successful play() is
-          // platform proof the element is unlocked: the gesture that
-          // launched it is the activation the platform demands. The
-          // generation guard exists to keep a stale prime from doing
-          // element bookkeeping on an element a newer prime is using,
-          // and to keep stale FAILURES from un-latching (below) — it
-          // was never meant to throw away a proven unlock. Latch +
-          // flush; skip the cleanup, which belongs to the live prime.
-          // muted is the one safe write: the prime clip is digital
-          // silence, so un-muting early is inaudible, and the live
-          // prime's own settlement re-writes it either way.
-          audio.muted = false;
-          everUnlockedRef.current = true;
-          unlockedRef.current = true;
-          noteUnlockLatched(nextPrimeSourceRef.current);
-          nextPrimeSourceRef.current = 'prime';
-          flushHeldLines();
-          return;
-        }
-        audio.pause();
-        audio.currentTime = 0;
-        audio.muted = false;
-        audio.removeAttribute('src');
-        everUnlockedRef.current = true;
-        unlockedRef.current = true;
-        noteUnlockLatched(nextPrimeSourceRef.current);
-        nextPrimeSourceRef.current = 'prime';
-        // The prime just landed — NOW any line being held can actually
-        // be heard. Flush it here, not only in unlock(): the tour-start
-        // flow speaks the intro after its last unlock() call, and if
-        // the prime hadn't resolved yet the intro was held in
-        // pendingSpeechRef with no further unlock coming — in a car,
-        // possibly no tap ever — so the welcome simply never sounded.
-        // A held line must be spoken the moment the engine unlocks,
-        // whoever's call made it happen.
-        flushHeldLines();
-      }).catch(() => {
-        primeInFlightRef.current = false;
-        // Same generation guard as the success path: an aborted prime
-        // (killed by the next unlock's src assignment) must not reset
-        // the unlock a newer prime already earned, nor strip its src.
-        if (primeGen !== primeGenRef.current) return;
-        // Nor may a failure that lands AFTER the unlock was earned by
-        // another path (a stale prime's success above, or real
-        // playback proving the element) touch the element at all: the
-        // src it would strip now belongs to live playback.
-        if (everUnlockedRef.current) return;
-        audio.muted = false;
-        audio.removeAttribute('src');
-        // A failed prime proves only that THIS attempt failed. It must
-        // never revoke an unlock an earlier prime — or real playback —
-        // already earned.
-        unlockedRef.current = false;
-      });
+    // First-sound coalescing (Oct 29, 2026): while the greeting
+    // clip's own play() is unsettled, IT is the prime in flight —
+    // a silent prime launched now would reassign the element's src
+    // and abort the greeting mid-flight, spending the gesture on
+    // silence and stranding the line it was meant to carry.
+    if (firstSoundInFlightRef.current) {
+      flushHeldLines();
+      return;
     }
+
+    // Clip-first retry (Oct 29, 2026): a held greeting carrying a
+    // first-sound clip is retried AS the prime on a fresh gesture —
+    // the same clip first, ahead of any silent prime — because its
+    // play() inside this gesture is both the unlock attempt and the
+    // content the tour owes first. Only while the element is free
+    // and no prime is in flight; otherwise the line waits for the
+    // ordinary flush like any held line.
+    if (!everUnlockedRef.current && !isPlayingStoryRef.current && !primeInFlightRef.current) {
+      const fsIdx = pendingSpeechRef.current.findIndex(l => l.firstSound && l.audioUrl);
+      if (fsIdx !== -1) {
+        const [line] = pendingSpeechRef.current.splice(fsIdx, 1);
+        attemptFirstSoundRef.current({
+          text: line.text,
+          audioUrl: line.audioUrl,
+          onSettle: line.onSettle,
+        });
+        flushHeldLines();
+        return;
+      }
+    }
+
+    primeElement();
 
     flushHeldLines();
   }, [flushHeldLines]);
@@ -1011,15 +1234,29 @@ export const useVoice = () => {
     }
   }, []);
 
-  const speak = useCallback((text: string, opts?: { localVoice?: boolean; audioUrl?: string; onSettle?: (info: PlaybackSettle) => void }) => {
+  const speak = useCallback((text: string, opts?: { localVoice?: boolean; audioUrl?: string; onSettle?: (info: PlaybackSettle) => void; firstSound?: boolean }) => {
     const trimmed = text.trim();
     if (!trimmed) return;
+
+    // First-sound discipline (Oct 29, 2026): a line flagged
+    // firstSound with a pre-rendered clip does NOT wait for the
+    // unlock — its play() IS the unlock attempt, launched by the
+    // caller synchronously inside the tap, before any await can
+    // push it outside the activation window. The caller's debt
+    // wrapper rides the attempt: if the play() rejects, the line
+    // re-holds (see attemptFirstSound) and the existing hold /
+    // banner / debt flow owns its recovery. Once the unlock is
+    // earned, the flag is moot — the line takes the normal path.
+    if (opts?.firstSound && opts?.audioUrl && !everUnlockedRef.current) {
+      attemptFirstSoundRef.current({ text: trimmed, audioUrl: opts.audioUrl, onSettle: opts?.onSettle });
+      return;
+    }
 
     // Before the first gesture nothing can be heard anyway, so hold the line
     // and let the unlock step speak it. Dropping it here would silently lose
     // whatever the app most wanted to say.
     if (!unlockedRef.current) {
-      pendingSpeechRef.current.push({ text: trimmed, localVoice: opts?.localVoice, audioUrl: opts?.audioUrl, onSettle: opts?.onSettle });
+      pendingSpeechRef.current.push({ text: trimmed, localVoice: opts?.localVoice, audioUrl: opts?.audioUrl, onSettle: opts?.onSettle, firstSound: opts?.firstSound });
       // Arm the gesture safety net: the next tap anywhere retries the
       // unlock, so a held line is one gesture away from recovery even
       // if every prime so far has missed its activation window.
@@ -1238,13 +1475,15 @@ export const useVoice = () => {
   }, [advanceOpening]);
 
   // Begin the opening transaction. Called by the app as the FIRST
-  // act of the Start-tour tap handler: the prime it launches runs
+  // act of the Start-tour tap handler: the first play() it sets in
+  // motion — the fallback prime, or (first-sound discipline) the
+  // greeting clip the caller speaks immediately after — runs
   // synchronously inside the gesture, on the actual playback
   // element, before any await — no async setup (voice readiness,
   // hydration, GPS) can push the first play() outside the platform's
   // user-activation window, which is the precondition every later
   // recovery path depends on.
-  const beginOpening = useCallback(() => {
+  const beginOpening = useCallback((opts?: { firstSoundClip?: boolean }) => {
     // A previous opening that somehow never retired (its tour ended
     // without a stop()) leaves its registry behind: settle whatever
     // is still owed before the new transaction overwrites it, so
@@ -1262,6 +1501,17 @@ export const useVoice = () => {
     // gesture retry claims the source first.
     unlockLatchedRef.current = false;
     nextPrimeSourceRef.current = 'prime';
+    // First-sound state is per-tour like the latch: a loss or an
+    // in-flight clip from a previous tour must not leak into this
+    // one's opening.
+    tourActiveRef.current = true;
+    latchLostRef.current = false;
+    blockedBurstRef.current = { count: 0, windowStart: 0 };
+    firstSoundInFlightRef.current = false;
+    if (latchProbeTimerRef.current !== null) {
+      clearTimeout(latchProbeTimerRef.current);
+      latchProbeTimerRef.current = null;
+    }
     openerWelcomeDoneRef.current = false;
     openerDebtRef.current = [];
     if (openerGateTimerRef.current !== null) {
@@ -1271,7 +1521,15 @@ export const useVoice = () => {
       openerGateTimerRef.current = null;
       expireOpening(true);
     }, OPENER_GATE_TIMEOUT_MS);
-    unlock();
+    // First-sound discipline (Oct 29, 2026): when the caller has a
+    // pre-rendered greeting clip, there is NO silent prime here —
+    // the greeting's own play(), registered by the caller moments
+    // later in the same synchronous tap handler, is the tour's
+    // first media action and its unlock carrier. Priming first
+    // would spend the gesture's activation on silence and reassign
+    // the element under the clip. Without a clip, the prime runs
+    // here exactly as before.
+    if (!opts?.firstSoundClip) unlock();
   }, [unlock, expireOpening, settleOpenerDebt]);
 
   // Speak a line that belongs to the opening (the canned greeting,
@@ -1288,7 +1546,7 @@ export const useVoice = () => {
   const speakOpeningLine = useCallback((
     kind: 'greeting' | 'opener',
     text: string,
-    opts?: { localVoice?: boolean; audioUrl?: string; onSettle?: (info: PlaybackSettle) => void }
+    opts?: { localVoice?: boolean; audioUrl?: string; onSettle?: (info: PlaybackSettle) => void; firstSound?: boolean }
   ) => {
     const entry: OpenerDebtEntry = { kind, settled: false, settle: () => {} };
     entry.settle = (info: PlaybackSettle) => {
@@ -1307,6 +1565,7 @@ export const useVoice = () => {
       localVoice: opts?.localVoice,
       audioUrl: opts?.audioUrl,
       onSettle: entry.settle,
+      firstSound: opts?.firstSound,
     });
   }, [advanceOpening]);
 
@@ -1534,6 +1793,17 @@ export const useVoice = () => {
       clearTimeout(openerGateTimerRef.current);
       openerGateTimerRef.current = null;
     }
+    // First-sound state retires with the tour (Oct 29, 2026): the
+    // next tour's opening starts from a clean latch-loss slate, and
+    // the gesture listener stands down with tourActive.
+    tourActiveRef.current = false;
+    latchLostRef.current = false;
+    blockedBurstRef.current = { count: 0, windowStart: 0 };
+    firstSoundInFlightRef.current = false;
+    if (latchProbeTimerRef.current !== null) {
+      clearTimeout(latchProbeTimerRef.current);
+      latchProbeTimerRef.current = null;
+    }
     currentItemRef.current = null;
     backgroundedTopicRef.current = null;
     clearWatchdog();
@@ -1674,6 +1944,180 @@ export const useVoice = () => {
 
     watchdogRef.current = window.setTimeout(check, checkInterval);
   }, [clearWatchdog, settleCurrentPlayback]);
+
+  // First-sound playback (Oct 29, 2026): the greeting's pre-rendered
+  // clip, played as the tour's FIRST media action — synchronously
+  // inside the tap that registered it, before any await. The play()
+  // is simultaneously the content and the unlock attempt: if it
+  // sounds, the latch files under whoever asked (the tap's 'prime',
+  // a retry's 'gesture-retry') and the line settles through the
+  // player's own record, so the greeting debt's exactly-once settle
+  // and opener_spoken telemetry ride the same path as any queue
+  // item. If it rejects NotAllowedError, NOTHING settles: the
+  // attempt's player state is discarded, the line returns to the
+  // HEAD of the pre-unlock hold flagged firstSound (so the next
+  // gesture retries the same clip AS the prime — see unlock), the
+  // block marks the banner, and the fallback prime runs as the same
+  // gesture's second carrier. A load/decode failure is not a
+  // permission problem: the line hands over to the normal player
+  // path, whose provided-URL handling falls back to the device
+  // voice speaking the same words (the intros.ts policy).
+  const attemptFirstSound = useCallback((line: { text: string; audioUrl?: string; onSettle?: (info: PlaybackSettle) => void }) => {
+    const audio = audioElRef.current;
+    if (!audio || !line.audioUrl || isPlayingStoryRef.current) {
+      // No element, no clip, or the player is already owned: the
+      // line waits at the head of the hold for the ordinary flow.
+      pendingSpeechRef.current.unshift({
+        text: line.text, audioUrl: line.audioUrl, onSettle: line.onSettle, firstSound: true,
+      });
+      armHoldWatch();
+      syncHeldBlockedTimer();
+      return;
+    }
+    firstSoundInFlightRef.current = true;
+    // The clip attempt IS a prime while it is unsettled: unlock()
+    // coalesces onto it via both flags (a silent prime launched now
+    // would reassign the element and abort the greeting).
+    primeInFlightRef.current = true;
+    const source = nextPrimeSourceRef.current;
+    const startedAt = performance.now();
+    const gen = ++playGenRef.current;
+    isPlayingStoryRef.current = true;
+    playbackStartedRef.current = false;
+    const playback = {
+      gen,
+      sounded: false,
+      completed: false,
+      engine: null as 'gemini' | 'browser' | null,
+      soundedAt: null as number | null,
+      attempts: 1,
+      isLocationStory: false,
+      topic: null as string | null,
+      introServe: false,
+      onEnd: undefined as ((sounded: boolean) => void) | undefined,
+      onSettleDetail: line.onSettle,
+    };
+    currentPlaybackRef.current = playback;
+    currentItemRef.current = {
+      text: line.text,
+      generatedAt: Date.now(),
+      isLocationStory: false,
+      audioUrl: line.audioUrl,
+    } as StoryQueueItem;
+    audioBlockedRef.current = false;
+    setAudioBlocked(false);
+    setIsSpeaking(true);
+    startWatchdog();
+    // The element reports a dead clip twice over (an error event AND
+    // a rejected play() promise): the first terminal signal wins.
+    let terminal = false;
+    const teardownAttempt = () => {
+      if (currentPlaybackRef.current === playback) currentPlaybackRef.current = null;
+      currentItemRef.current = null;
+      isPlayingStoryRef.current = false;
+      playbackStartedRef.current = false;
+      setIsSpeaking(false);
+      clearWatchdog();
+    };
+    const handToPlayer = () => {
+      teardownAttempt();
+      speakPriority(line.text, line.onSettle ? { onSettleDetail: line.onSettle } : undefined, { audioUrl: line.audioUrl });
+    };
+    audio.onplaying = () => {
+      if (currentPlaybackRef.current !== playback) return; // a newer item owns the element
+      playbackStartedRef.current = true;
+      storyTimingRef.current.onPlayingAt = Date.now();
+      lastProgressAtRef.current = Date.now();
+      if (!playback.sounded) {
+        playback.sounded = true;
+        playback.engine = 'gemini';
+        playback.soundedAt = Date.now();
+      }
+      // Sound from the clip is a landed prime AND proven playback:
+      // latch (under the asker's source), clear any latch loss, and
+      // let held lines behind the greeting flush.
+      everUnlockedRef.current = true;
+      unlockedRef.current = true;
+      latchLostRef.current = false;
+      blockedBurstRef.current = { count: 0, windowStart: 0 };
+      noteUnlockLatched(source);
+      setWasInterrupted(false);
+      preSynthesizeNextRef.current();
+    };
+    audio.ontimeupdate = () => {
+      lastProgressAtRef.current = Date.now();
+    };
+    audio.onended = () => {
+      if (terminal) return;
+      if (gen !== playGenRef.current) return; // torn down mid-play; its settle already fired
+      terminal = true;
+      playbackStartedRef.current = false;
+      storyTimingRef.current.playbackEndAt = Date.now();
+      lastPlaybackEndRef.current = storyTimingRef.current.playbackEndAt;
+      // Natural completion — the player's own settle, exactly once.
+      if (currentPlaybackRef.current === playback) playback.completed = true;
+      settleCurrentPlayback();
+      setIsSpeaking(false);
+      setTimeout(() => playStoryFromQueueRef.current(), 100);
+    };
+    audio.onerror = () => {
+      if (terminal) return;
+      terminal = true;
+      handToPlayer();
+    };
+    audio.src = line.audioUrl;
+    audio.play().then(() => {
+      firstSoundInFlightRef.current = false;
+      primeInFlightRef.current = false;
+      trackPrimeAttempt(source, startedAt, 'resolved');
+      // Torn down mid-flight (stop/skip bumped the play generation):
+      // the attempt is on the record, but a dead tour must not latch
+      // or flush on its behalf — the next tour primes for itself.
+      if (gen !== playGenRef.current) return;
+      // A resolved play() is platform proof, whichever handler
+      // reports first: latch now (onplaying confirms the sound and
+      // marks the record); held lines flush behind the greeting.
+      everUnlockedRef.current = true;
+      unlockedRef.current = true;
+      latchLostRef.current = false;
+      blockedBurstRef.current = { count: 0, windowStart: 0 };
+      noteUnlockLatched(source);
+      if (nextPrimeSourceRef.current === source) nextPrimeSourceRef.current = 'prime';
+      flushHeldLines();
+    }).catch((playError: unknown) => {
+      firstSoundInFlightRef.current = false;
+      primeInFlightRef.current = false;
+      trackPrimeAttempt(source, startedAt, 'rejected');
+      if (terminal) return; // the error event already routed this attempt
+      terminal = true;
+      // Torn down mid-flight: the debt's teardown settle already
+      // fired through stop(); re-holding the line here would
+      // resurrect it into the NEXT tour's hold.
+      if (gen !== playGenRef.current) return;
+      teardownAttempt();
+      if (playError instanceof DOMException && playError.name === 'NotAllowedError') {
+        audioHealth.recordFailure('gemini');
+        markAudioBlocked('blocked');
+        // The same clip first on the next gesture: back to the head
+        // of the hold, still flagged, so unlock() retries IT as the
+        // prime rather than reaching for silence first.
+        pendingSpeechRef.current.unshift({
+          text: line.text, audioUrl: line.audioUrl, onSettle: line.onSettle, firstSound: true,
+        });
+        armHoldWatch();
+        syncHeldBlockedTimer();
+        // The gesture's activation can outlive the rejection: run
+        // the fallback prime as the same gesture's second carrier.
+        // If it lands, the flush speaks the held greeting through
+        // the player; if it also fails, the banner owns recovery.
+        primeElement();
+      } else {
+        handToPlayer();
+      }
+    });
+  }, [settleCurrentPlayback, startWatchdog, clearWatchdog, speakPriority, armHoldWatch, flushHeldLines]);
+
+  attemptFirstSoundRef.current = attemptFirstSound;
 
   // --- Freshness gate ---
 
@@ -2322,7 +2766,15 @@ export const useVoice = () => {
     // 'priming' — the backstop's 'failed' state deliberately
     // re-admits attempts, which is how a late filler can prove the
     // unlock and flush the surviving greeting debt.
-    if (!everUnlockedRef.current && openerStateRef.current === 'priming') {
+    //
+    // Latch-loss hold (first-sound fix, Oct 29, 2026): the same
+    // hold re-engages mid-tour when the burst detector declares the
+    // earned unlock revoked (latchLostRef, see markAudioBlocked).
+    // Queued items wait unattempted — no attempt-economy burn —
+    // until a prime lands (a gesture's, or the loss probe's) or any
+    // proven playback clears the loss and the flush's queue kick
+    // restarts them.
+    if ((!everUnlockedRef.current && openerStateRef.current === 'priming') || latchLostRef.current) {
       return;
     }
 
@@ -2944,9 +3396,23 @@ export const useVoice = () => {
 
   // A tap anywhere means a fresh gesture. Use it to wake the engine and, if
   // audio was blocked, to pick the held story back up.
+  //
+  // Gesture re-prime (first-sound fix, Oct 29, 2026): during an
+  // active tour EVERY pointerdown re-attempts the prime when the
+  // latch is unearned, lost, or a block is on record — banner tap,
+  // push-to-talk press, pause/resume, a tap anywhere — idempotent
+  // and coalesced inside unlock(), and a no-op flush when the latch
+  // is healthy. The gate (tourActive / a block on record) is what
+  // keeps the START tap's own pointerdown from priming ahead of its
+  // click: pointerdown precedes click, and the greeting clip —
+  // spoken from the click handler — is the tour's first media
+  // action now. Landing-page taps therefore no longer earn the
+  // unlock incidentally; the tour earns it at START, on the record.
   useEffect(() => {
     const onInteraction = () => {
-      unlock();
+      if (tourActiveRef.current || audioBlockedRef.current) {
+        unlock('gesture-retry');
+      }
       setWasInterrupted(false);
       if (!audioBlockedRef.current) return;
       audioBlockedRef.current = false;

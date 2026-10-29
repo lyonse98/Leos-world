@@ -1625,14 +1625,25 @@ function App() {
   const handleStartTour = async (resume: boolean = false) => {
     try {
       // Begin the opening transaction FIRST, synchronously inside
-      // this tap (Item 8): beginOpening launches the audio prime
-      // itself, so the element's play() runs inside iOS Safari's
-      // user-activation window — everything below (init, voice
-      // loading, the ensureVoiceReady await) happens AFTER the
-      // prime is in flight and cannot push it outside the window.
-      // A prime that lands after the window closes leaves every
+      // this tap (Item 8): the transaction registers here, and the
+      // tour's first play() runs inside iOS Safari's user-activation
+      // window — everything below (init, voice loading, the
+      // ensureVoiceReady await) happens AFTER that first play() is
+      // in flight and cannot push it outside the window. A first
+      // play() that lands after the window closes leaves every
       // story's play() blocked for the whole tour.
-      voice.beginOpening();
+      //
+      // First-sound discipline (Oct 29, 2026): WHICH play() goes
+      // first changed. When the greeting has its pre-rendered clip
+      // (every variant does — INTRO_CLIPS), beginOpening launches NO
+      // silent prime: the greeting clip spoken below — still in this
+      // synchronous handler, before the first await — is the first
+      // media action and the unlock carrier. Only a clip-less
+      // greeting (device-voice fallback) keeps the silent prime.
+      const introEntry = getIntroEntry(resume);
+      const intro = introEntry.text;
+      const introClipUrl = introAudioUrl(introEntry);
+      voice.beginOpening(introClipUrl ? { firstSoundClip: true } : undefined);
       geminiService.initialize();
       try { geminiAudio.initialize(); } catch (e) { console.error('[Tour] Gemini TTS init failed:', e); }
 
@@ -1655,28 +1666,9 @@ function App() {
       analytics.init(sessionId);
       analytics.track('session_start', null, 'stationary');
 
-      // Speech must be requested inside this tap. The voice list is resolved
-      // first: it usually loads within a frame, and waiting for it means the
-      // whole opening line plays in Leo's voice instead of swapping speakers
-      // mid-sentence when the list finally arrives.
-      const introEntry = getIntroEntry(resume);
-      const intro = introEntry.text;
-      const introClipUrl = introAudioUrl(introEntry);
-      await voice.ensureVoiceReady();
-      voice.unlock();
-      // The canned opener is PRE-RENDERED Puck (Pass 1, Oct 27, 2026):
-      // every intro variant has a stored clip (INTRO_CLIPS in
-      // intros.ts, built by scripts/library/build-intros.mjs through
-      // the same Batch path as the opener clips), so the welcome
-      // sounds at the tap with zero synthesis wait and zero quota —
-      // it is the warm-up buffer while the first Gemini live story
-      // (the neighborhood welcome) generates behind it. If the clip
-      // fails to load or play, playback falls back to the device
-      // voice speaking the same words — the cover survives the
-      // failure; a variant with no clip at all speaks locally.
-      voice.speakOpeningLine('greeting', intro, {
-        ...(introClipUrl ? { audioUrl: introClipUrl } : { localVoice: true }),
-        onSettle: (info) => {
+      // The greeting's settle handler (shared by both start paths
+      // below): the canned welcome's delivery, on the record.
+      const greetingOnSettle = (info: PlaybackSettle) => {
           // The canned welcome's settle, on the record (Oct 26,
           // 2026): until now first_serve proved the welcome STORY
           // served first, but the greeting line itself had no event —
@@ -1715,8 +1707,49 @@ function App() {
           if (!info.completed) {
             trackDiag('playback', 'opener-settle', `welcome line did not fully deliver (sounded=${info.sounded}, engine=${info.engine ?? 'none'}, attempts=${info.attempts})`);
           }
-        },
-      });
+      };
+
+      // The canned greeting is PRE-RENDERED Puck (Pass 1, Oct 27,
+      // 2026): every intro variant has a stored clip (INTRO_CLIPS in
+      // intros.ts, built by scripts/library/build-intros.mjs through
+      // the same Batch path as the opener clips), so the welcome
+      // sounds at the tap with zero synthesis wait and zero quota —
+      // it is the warm-up buffer while the first Gemini live story
+      // (the neighborhood welcome) generates behind it. If the clip
+      // fails to load or play, playback falls back to the device
+      // voice speaking the same words — the cover survives the
+      // failure; a variant with no clip at all speaks locally.
+      if (introClipUrl) {
+        // FIRST SOUND (Oct 29, 2026): the greeting is registered and
+        // its clip attempted NOW — synchronously inside this tap,
+        // before the ensureVoiceReady await — so the clip's play()
+        // is the tour's first media action and its unlock carrier
+        // (beginOpening launched no silent prime for this start).
+        // The voice list still resolves before anything else speaks:
+        // the unlock() below coalesces behind the clip's attempt,
+        // and the opener queues behind the greeting as always.
+        voice.speakOpeningLine('greeting', intro, {
+          audioUrl: introClipUrl,
+          firstSound: true,
+          onSettle: greetingOnSettle,
+        });
+        await voice.ensureVoiceReady();
+        voice.unlock();
+      } else {
+        // Clip-less greeting: the pre-first-sound order, unchanged.
+        // Speech must be requested inside this tap, and the voice
+        // list is resolved first: it usually loads within a frame,
+        // and waiting for it means the whole opening line plays in
+        // Leo's voice instead of swapping speakers mid-sentence when
+        // the list finally arrives. beginOpening already launched
+        // the silent prime for this path; unlock() re-asserts it.
+        await voice.ensureVoiceReady();
+        voice.unlock();
+        voice.speakOpeningLine('greeting', intro, {
+          localVoice: true,
+          onSettle: greetingOnSettle,
+        });
+      }
 
       // The rotating Puck opener — pre-rendered runway cover, queued
       // immediately behind the canned welcome (Oct 26, 2026). Its job is
