@@ -3400,7 +3400,7 @@ export const useVoice = () => {
   // Gesture re-prime (first-sound fix, Oct 29, 2026): during an
   // active tour EVERY pointerdown re-attempts the prime when the
   // latch is unearned, lost, or a block is on record — banner tap,
-  // push-to-talk press, pause/resume, a tap anywhere — idempotent
+  // pause/resume, a tap anywhere — idempotent
   // and coalesced inside unlock(), and a no-op flush when the latch
   // is healthy. The gate (tourActive / a block on record) is what
   // keeps the START tap's own pointerdown from priming ahead of its

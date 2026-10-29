@@ -1,8 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Eye, EyeOff, Play, MapPin, Wifi, WifiOff, Download, Clock, Compass, VolumeX, Moon, XCircle, Share2, Music, Send, Heart, AlertTriangle, Mic, Smartphone } from 'lucide-react';
+import { Eye, EyeOff, Play, MapPin, Wifi, WifiOff, Download, Clock, Compass, VolumeX, Moon, XCircle, Share2, Music, Send, Heart, AlertTriangle, Smartphone } from 'lucide-react';
 import { useVoice, StoryTiming, PlaybackSettle } from './hooks/useVoice';
 import { useGeolocation, Position } from './hooks/useGeolocation';
-import { useSpeechRecognition } from './hooks/useSpeechRecognition';
 import { useWakeLock } from './hooks/useWakeLock';
 import { geminiService, StoryRotation } from './services/gemini';
 import { storyCache, CachedStory } from './services/storyCache';
@@ -183,19 +182,12 @@ function App() {
 
   const voice = useVoice();
   const geolocation = useGeolocation();
-  const speech = useSpeechRecognition();
-  // While a push-to-talk question is being asked or answered, location
-  // stories must not be queued — Leo stays quiet so the driver can ask,
-  // hear the answer, and only then get the tour back.
-  const pttHoldRef = useRef<boolean>(false);
   useWakeLock(isTourStarted);
 
   // What Leo is doing right now, reduced to one glanceable state. Nothing here
   // needs reading — the colour and the orb tell the listener everything from
   // arm's length, which is the whole point on a drive.
-  const leoStatus = speech.isListening
-    ? { label: 'LISTENING — ASK AWAY', pose: 'listening' as const, orb: 'from-rose-900/60 to-slate-900 border-rose-600/50', glow: 'bg-rose-500/25', ring: 'border-rose-400/30', icon: 'text-rose-300', text: 'text-rose-300' }
-    : isProcessingQuestion
+  const leoStatus = isProcessingQuestion
     ? { label: 'LEO IS THINKING', pose: 'thinking' as const, orb: 'from-amber-900/60 to-slate-900 border-amber-600/50', glow: 'bg-amber-500/25', ring: 'border-amber-400/30', icon: 'text-amber-300', text: 'text-amber-300' }
     : voice.isSpeaking
       ? { label: 'LEO IS SHARING', pose: 'speaking' as const, orb: 'from-blue-900/60 to-slate-900 border-blue-600/50', glow: 'bg-blue-500/25', ring: 'border-blue-400/30', icon: 'text-blue-300', text: 'text-blue-300' }
@@ -375,7 +367,6 @@ function App() {
       answerFailsafeRef.current = null;
     }
     setIsProcessingQuestion(false);
-    pttHoldRef.current = false;
   }, []);
   const armAnswerFailsafe = useCallback((ms: number) => {
     if (answerFailsafeRef.current) window.clearTimeout(answerFailsafeRef.current);
@@ -480,9 +471,9 @@ function App() {
     }
   };
   // A story that was served (and marked in-flight by a serve path)
-  // but will NOT be queued — superseded by the mic, or fetched while
-  // a push-to-talk question owns the audio: release the in-flight
-  // mark so the subject is not stranded for the rest of the session.
+  // but will NOT be queued — superseded by a question or a skip:
+  // release the in-flight mark so the subject is not stranded for
+  // the rest of the session.
   const discardServedStory = (
     topic: string,
     rotation: StoryRotation | null
@@ -513,93 +504,6 @@ function App() {
       setUserInput('');
     }
   };
-
-  // Push-to-talk: tap the orb and Leo stops talking so the driver can ask
-  // a question out loud — the driving-safe form of the typed Q&A box. The
-  // transcript feeds the exact same submitQuestion pipeline; nothing about
-  // how questions are answered changes.
-  const handleOrbPress = () => {
-    if (isProcessingQuestion) {
-      // The lock is visible here too: a press that does nothing reads
-      // as a broken button (the field test's silent-drop lesson), so
-      // say why, once, in plain language.
-      setShareToast("Leo's finishing your last answer — one moment");
-      setTimeout(() => setShareToast(null), 3000);
-      return;
-    }
-    if (!speech.isSupported || speech.isListening) return;
-    if (!geolocation.position) {
-      setShareToast('Leo needs your location to answer — check location is enabled');
-      setTimeout(() => setShareToast(null), 3500);
-      return;
-    }
-    // Stop Leo first: he must not talk over the question, and the mic must
-    // not transcribe his own voice coming through the car speakers.
-    if (voice.isPlayingStory()) {
-      voice.skipCurrent();
-    }
-    pttHoldRef.current = true;
-    speech.startListening();
-  };
-
-  // Press-and-hold is the interaction: finger down, Leo listens; finger
-  // up, he stops and the utterance submits. A quick tap still works —
-  // the mic simply runs until the pause, as before.
-  const pressStartRef = useRef<number>(0);
-  const handleLeoPressStart = () => {
-    pressStartRef.current = Date.now();
-    handleOrbPress();
-  };
-  const handleLeoPressEnd = () => {
-    if (speech.isListening) {
-      speech.stopListening();
-      return;
-    }
-    if (!isProcessingQuestion && Date.now() - pressStartRef.current < 400) {
-      setShareToast('Press and hold Leo while you talk — release to send');
-      setTimeout(() => setShareToast(null), 3500);
-    }
-  };
-
-  // Mic failures used to reset silently, which reads as "the button is
-  // broken". Say what happened and what to do about it instead.
-  const { error: speechError, clearError: clearSpeechError } = speech;
-  useEffect(() => {
-    if (!speechError) return;
-    const msg =
-      speechError === 'not-allowed' || speechError === 'service-not-allowed'
-        ? "Leo can't use the microphone. Allow mic access for this site in Safari — and if you're on the home-screen icon, try Leo in the Safari app, where iOS allows the mic."
-        : speechError === 'no-speech'
-          ? "Leo didn't hear anything — hold him down, speak, then release."
-          : speechError === 'audio-capture'
-            ? 'No microphone is available for Leo to hear you.'
-            : 'Microphone hiccup — try holding Leo again.';
-    setShareToast(msg);
-    setTimeout(() => setShareToast(null), 6000);
-    pttHoldRef.current = false;
-    clearSpeechError();
-  }, [speechError, clearSpeechError]);
-
-  // A finished utterance becomes a submitted question.
-  useEffect(() => {
-    if (!speech.transcript) return;
-    const question = speech.transcript;
-    speech.clearTranscript();
-    if (!submitQuestion(question)) {
-      pttHoldRef.current = false;
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [speech.transcript]);
-
-  // If listening ends with nothing heard (silence, error, accidental tap),
-  // release the hold so the tour resumes instead of waiting forever.
-  const prevListeningRef = useRef<boolean>(false);
-  useEffect(() => {
-    if (prevListeningRef.current && !speech.isListening && !speech.transcript && !isProcessingQuestion) {
-      pttHoldRef.current = false;
-    }
-    prevListeningRef.current = speech.isListening;
-  }, [speech.isListening, speech.transcript, isProcessingQuestion]);
 
   // Diagnostics-only full reset of Leo's memory of this listener: angle
   // coverage wiped locally, heard set cleared, and the anonymous device
@@ -650,8 +554,6 @@ function App() {
 
   const handleEndTour = () => {
     geminiService.cancelAllRequests();
-    speech.stopListening();
-    pttHoldRef.current = false;
     // Retire any in-flight answer cycle BEFORE stopping the player:
     // the stop settles the answer item, and its callback must find the
     // cycle already gone rather than queueing a bridge into a dead tour.
@@ -986,10 +888,10 @@ function App() {
       // Places lookup failure is non-fatal — the normal story path still runs.
     }
 
-    // Capture the epoch before the request. If the user grabs the mic while
-    // Leo is generating, the epoch moves and this story is kept out of the
-    // audio queue — but it was still written to the shared cache, so the work
-    // is not wasted.
+    // Capture the epoch before the request. If a question or a skip
+    // supersedes the request while Leo is generating, the epoch moves
+    // and this story is kept out of the audio queue — but it was still
+    // written to the shared cache, so the work is not wasted.
     const epoch = geminiService.currentRequestToken();
 
     // No bridge filler — silence during generation is fine. The story's own
@@ -1008,7 +910,7 @@ function App() {
       if (bridgeTimer !== null) clearTimeout(bridgeTimer);
 
       if (epoch !== geminiService.currentRequestToken()) {
-        console.log('[Tour] Story generation superseded (mic or skip) — cached, not spoken');
+        console.log('[Tour] Story generation superseded (question or skip) — cached, not spoken');
         // The serve marked its subject in-flight; the story will not
         // be queued, so no settle will ever resolve it — release the
         // mark here or the subject is stranded for the session.
@@ -1040,129 +942,120 @@ function App() {
         // question, so his answers can refer back to the story in progress.
         voice.recordSpokenText(result.story);
 
-        if (pttHoldRef.current) {
-          // A push-to-talk question owns the audio right now. The fetched
-          // story is dropped, not queued — the next cycle refetches, and
-          // the shared caches make that cheap. Its in-flight mark is
-          // released with it (no queue, no settle, no coverage).
-          discardServedStory(result.topic, result.rotation);
-          console.log('[Tour] Story fetched but not queued — push-to-talk question in progress');
-        } else {
-          console.log(`[Tour] Story from ${result.fromLibrary ? 'LIBRARY' : result.fromCache ? 'CACHE' : 'LIVE'}, length: ${result.story.length}, queueing`);
+        console.log(`[Tour] Story from ${result.fromLibrary ? 'LIBRARY' : result.fromCache ? 'CACHE' : 'LIVE'}, length: ${result.story.length}, queueing`);
 
-          // Tell geometry at QUEUE time (Area G): RELATIVE geometry —
-          // the subject's public anchor coordinates, the listener's
-          // distance and bearing offset to it, speed/heading, and the
-          // queue depth it joins. The listener's own coordinates travel
-          // only in this event's sealed position columns, never in data.
-          const anchorForGeo = { lat: result.anchorLat ?? position.lat, lng: result.anchorLng ?? position.lng };
-          analytics.track('story_played', position, position.speed !== null && position.speed >= 6.0 ? 'driving' : 'walking', {
-            source: result.fromLibrary ? 'library' : result.fromCache ? 'cache' : 'live',
-            topic: result.topic,
-            story_id: result.storyId,
-            subject_lat: anchorForGeo.lat,
-            subject_lng: anchorForGeo.lng,
-            distance_m: Math.round(calculateDistance(position.lat, position.lng, anchorForGeo.lat, anchorForGeo.lng)),
-            bearing_offset_deg: typeof position.heading === 'number'
-              ? Math.round(headingDelta(bearingDegrees(position, anchorForGeo), position.heading))
-              : null,
-            speed_mps: position.speed === null ? null : Math.round(position.speed * 10) / 10,
-            heading_deg: position.heading === null ? null : Math.round(position.heading),
-            queue_depth: voice.getQueueLength(),
-          });
-          lastServedStoryRef.current = {
-            storyId: result.storyId,
-            horizonS: result.horizonS,
-            centerOffsetM: result.projectedCenter
-              ? Math.round(calculateDistance(position.lat, position.lng, result.projectedCenter.lat, result.projectedCenter.lng))
-              : null,
-          };
+        // Tell geometry at QUEUE time (Area G): RELATIVE geometry —
+        // the subject's public anchor coordinates, the listener's
+        // distance and bearing offset to it, speed/heading, and the
+        // queue depth it joins. The listener's own coordinates travel
+        // only in this event's sealed position columns, never in data.
+        const anchorForGeo = { lat: result.anchorLat ?? position.lat, lng: result.anchorLng ?? position.lng };
+        analytics.track('story_played', position, position.speed !== null && position.speed >= 6.0 ? 'driving' : 'walking', {
+          source: result.fromLibrary ? 'library' : result.fromCache ? 'cache' : 'live',
+          topic: result.topic,
+          story_id: result.storyId,
+          subject_lat: anchorForGeo.lat,
+          subject_lng: anchorForGeo.lng,
+          distance_m: Math.round(calculateDistance(position.lat, position.lng, anchorForGeo.lat, anchorForGeo.lng)),
+          bearing_offset_deg: typeof position.heading === 'number'
+            ? Math.round(headingDelta(bearingDegrees(position, anchorForGeo), position.heading))
+            : null,
+          speed_mps: position.speed === null ? null : Math.round(position.speed * 10) / 10,
+          heading_deg: position.heading === null ? null : Math.round(position.heading),
+          queue_depth: voice.getQueueLength(),
+        });
+        lastServedStoryRef.current = {
+          storyId: result.storyId,
+          horizonS: result.horizonS,
+          centerOffsetM: result.projectedCenter
+            ? Math.round(calculateDistance(position.lat, position.lng, result.projectedCenter.lat, result.projectedCenter.lng))
+            : null,
+        };
 
-          // Gemini now writes its own transition into the opening of each
-          // story, so we queue directly — no app-side filler needed.
-          const isRoad = position.speed !== null && position.speed >= 6.0;
-          // Library stories anchor at the place itself (the freshness gates
-          // measure against the entry's coordinates); every other source
-          // anchors at the fetch position, exactly as before.
-          const originLat = result.anchorLat ?? position.lat;
-          const originLng = result.anchorLng ?? position.lng;
-          const resultBase = (result.subject || result.topic).split(' — ')[0].trim().toLowerCase();
-          // Right-of-way (Area C, Oct 26, 2026): a serve the pipeline
-          // has marked major — a Tier-1 landmark or a marked major
-          // subject, INCLUDING library serves — takes the priority lane
-          // identically to a live detection. The name-match path below
-          // only fired within 150m of a fresh pool check in the same
-          // cycle, which is how the drive's library SeaWorld serve
-          // queued in the normal lane, sat in the single replaceable
-          // waiting slot, and was displaced by fresher minor stories
-          // until it never played at all.
-          const isQueueJump =
-            result.major === true ||
-            (queueJumpTargetName !== null &&
-              resultBase === queueJumpTargetName.toLowerCase());
-          // Crossing-moment right-of-way (Area F, Oct 26, 2026): a
-          // neighborhood intro IS the crossing — it introduces the area
-          // the listener has just entered, and in the normal lane it
-          // could sit in the replaceable waiting slot behind stories
-          // about the area being LEFT (the drive's Point Loma intro
-          // landed ~7 minutes after entry). Intros take the priority
-          // lane like majors: next after the current story, never
-          // displacing it, never displaced themselves.
-          const isIntroServe =
-            result.context === 'neighborhood_intro' ||
-            result.context === 'initial' ||
-            result.context === 'welcome_back';
-          const serveGeo = {
-            storyId: result.storyId,
-            projectedCenter: result.projectedCenter,
-            horizonS: result.horizonS,
-            // Pass 1 (Oct 27, 2026): intro serves — the tour opener AND
-            // mid-tour neighborhood chapter breaks — are marked so the
-            // player protects them in the queue (no single-slot
-            // replacement, no priority splice) until they air.
-            introServe: isIntroServe,
-            // Hearing funnel (fix stack RC-2): the player's settle for
-            // this exact item resolves its coverage — heard, or
-            // released unheard — exactly once, on every exit path.
-            onSettleDetail: (info: PlaybackSettle) => settleHearing(result.storyId, info),
-            // Honest generation time (fix stack RC-3): the player's
-            // freshness age measures from the story's generation,
-            // not from this enqueue.
-            generatedAt: result.generatedAt,
-            // Corridor expiry (Oct 28, 2026): a banked corridor
-            // serve carries its segment id into the queue item, so
-            // the player can expire the story at dequeue if the
-            // driver has already exited the segment.
-            corridorSegmentId: result.corridorSegmentId,
-          };
-          registerHearing({
-            storyId: result.storyId,
-            topic: result.topic,
-            context: result.context,
-            rotation: result.rotation,
-            storyText: result.story,
-            position,
-            subjectKey: hearingSubjectKeyFor(result.topic, result.rotation),
-            signatureFact: result.signatureFact ?? null,
-          });
-          if (isQueueJump || isIntroServe) {
-            // Front of the waiting queue — behind nothing but any scripted
-            // line already in flight, and always after the current story.
-            voice.queuePriorityStory(result.story, originLat, originLng, isRoad, result.subject, result.audioUrl, serveGeo);
-            if (isQueueJump) {
-              flashPose('pointing', 5000);
-              queueJumpLandmarkRef.current = null;
-              console.log(`[Tour] Major-landmark story queued at the front: "${result.subject}"`);
-            }
-          } else {
-            voice.queueStory(result.story, originLat, originLng, isRoad, undefined, result.subject, result.audioUrl, serveGeo);
+        // Gemini now writes its own transition into the opening of each
+        // story, so we queue directly — no app-side filler needed.
+        const isRoad = position.speed !== null && position.speed >= 6.0;
+        // Library stories anchor at the place itself (the freshness gates
+        // measure against the entry's coordinates); every other source
+        // anchors at the fetch position, exactly as before.
+        const originLat = result.anchorLat ?? position.lat;
+        const originLng = result.anchorLng ?? position.lng;
+        const resultBase = (result.subject || result.topic).split(' — ')[0].trim().toLowerCase();
+        // Right-of-way (Area C, Oct 26, 2026): a serve the pipeline
+        // has marked major — a Tier-1 landmark or a marked major
+        // subject, INCLUDING library serves — takes the priority lane
+        // identically to a live detection. The name-match path below
+        // only fired within 150m of a fresh pool check in the same
+        // cycle, which is how the drive's library SeaWorld serve
+        // queued in the normal lane, sat in the single replaceable
+        // waiting slot, and was displaced by fresher minor stories
+        // until it never played at all.
+        const isQueueJump =
+          result.major === true ||
+          (queueJumpTargetName !== null &&
+            resultBase === queueJumpTargetName.toLowerCase());
+        // Crossing-moment right-of-way (Area F, Oct 26, 2026): a
+        // neighborhood intro IS the crossing — it introduces the area
+        // the listener has just entered, and in the normal lane it
+        // could sit in the replaceable waiting slot behind stories
+        // about the area being LEFT (the drive's Point Loma intro
+        // landed ~7 minutes after entry). Intros take the priority
+        // lane like majors: next after the current story, never
+        // displacing it, never displaced themselves.
+        const isIntroServe =
+          result.context === 'neighborhood_intro' ||
+          result.context === 'initial' ||
+          result.context === 'welcome_back';
+        const serveGeo = {
+          storyId: result.storyId,
+          projectedCenter: result.projectedCenter,
+          horizonS: result.horizonS,
+          // Pass 1 (Oct 27, 2026): intro serves — the tour opener AND
+          // mid-tour neighborhood chapter breaks — are marked so the
+          // player protects them in the queue (no single-slot
+          // replacement, no priority splice) until they air.
+          introServe: isIntroServe,
+          // Hearing funnel (fix stack RC-2): the player's settle for
+          // this exact item resolves its coverage — heard, or
+          // released unheard — exactly once, on every exit path.
+          onSettleDetail: (info: PlaybackSettle) => settleHearing(result.storyId, info),
+          // Honest generation time (fix stack RC-3): the player's
+          // freshness age measures from the story's generation,
+          // not from this enqueue.
+          generatedAt: result.generatedAt,
+          // Corridor expiry (Oct 28, 2026): a banked corridor
+          // serve carries its segment id into the queue item, so
+          // the player can expire the story at dequeue if the
+          // driver has already exited the segment.
+          corridorSegmentId: result.corridorSegmentId,
+        };
+        registerHearing({
+          storyId: result.storyId,
+          topic: result.topic,
+          context: result.context,
+          rotation: result.rotation,
+          storyText: result.story,
+          position,
+          subjectKey: hearingSubjectKeyFor(result.topic, result.rotation),
+          signatureFact: result.signatureFact ?? null,
+        });
+        if (isQueueJump || isIntroServe) {
+          // Front of the waiting queue — behind nothing but any scripted
+          // line already in flight, and always after the current story.
+          voice.queuePriorityStory(result.story, originLat, originLng, isRoad, result.subject, result.audioUrl, serveGeo);
+          if (isQueueJump) {
+            flashPose('pointing', 5000);
+            queueJumpLandmarkRef.current = null;
+            console.log(`[Tour] Major-landmark story queued at the front: "${result.subject}"`);
           }
-          // The queue has recovered — tell the filler lane (Oct 28,
-          // 2026): a filler on air records the recovery for its
-          // filler_played event, and the silence-episode chain ends
-          // here (the next outage opens with a first bridge again).
-          fillerLane.noteStoryQueued();
+        } else {
+          voice.queueStory(result.story, originLat, originLng, isRoad, undefined, result.subject, result.audioUrl, serveGeo);
         }
+        // The queue has recovered — tell the filler lane (Oct 28,
+        // 2026): a filler on air records the recovery for its
+        // filler_played event, and the silence-episode chain ends
+        // here (the next outage opens with a first bridge again).
+        fillerLane.noteStoryQueued();
 
         // Trigger prefetch in the background so the next story is ready.
         storyCache.prefetchForPosition(position, position.speed !== null && position.speed >= 6.0 ? 'driving' : 'walking').catch(() => {});
@@ -1248,11 +1141,10 @@ function App() {
   // getters for the player's. Playback goes back through the
   // player's own queue (voice.queueFiller), so the pair is ordinary
   // scripted items with the player's settle guarantee.
-  const fillerGateRef = useRef({ audioBlocked: false, wasInterrupted: false, listening: false });
+  const fillerGateRef = useRef({ audioBlocked: false, wasInterrupted: false });
   fillerGateRef.current = {
     audioBlocked: voice.audioBlocked,
     wasInterrupted: voice.wasInterrupted,
-    listening: speech.isListening,
   };
 
   // Route breadcrumbs (Area G, Oct 26, 2026): a lightweight position
@@ -1400,8 +1292,7 @@ function App() {
         openingSettled: voiceRef.current.isOpeningSettled(),
         playing: voiceRef.current.isPlayingStory(),
         queueLength: voiceRef.current.getQueueLength(),
-        questionLocked:
-          isProcessingQuestionRef.current || pttHoldRef.current || fillerGateRef.current.listening,
+        questionLocked: isProcessingQuestionRef.current,
         userPaused:
           fillerGateRef.current.audioBlocked ||
           fillerGateRef.current.wasInterrupted ||
@@ -2209,35 +2100,21 @@ function App() {
               {/* Distraction-free by design: no story text on screen. Leo's
                   pose and the orb carry the state so the listener never has
                   to read. */}
-              {/* Leo stands beside the microphone, basically full length —
-                  a row, not a stack, so his head can never slide under the
-                  header ribbon and the like/share row can never slide
-                  under the bottom dock, on phone or desktop alike. */}
+              {/* Leo stands basically full length — a row, not a stack,
+                  so his head can never slide under the header ribbon and
+                  the like/share row can never slide under the bottom
+                  dock, on phone or desktop alike. */}
               <div className="flex flex-row items-center justify-center gap-2 sm:gap-6 w-full">
-                {/* Leo IS the button now. Tapping the orb was an abstraction;
-                    tapping Leo is a shoulder-tap — he stops, leans in, and
-                    listens. The mic badge on his hip teaches the tap once;
-                    his pose and the label carry the state from there. */}
-                <button
-                  type="button"
-                  onPointerDown={(e) => { e.preventDefault(); handleLeoPressStart(); }}
-                  onPointerUp={handleLeoPressEnd}
-                  onPointerCancel={handleLeoPressEnd}
-                  onPointerLeave={handleLeoPressEnd}
-                  onContextMenu={(e) => e.preventDefault()}
-                  onKeyDown={(e) => { if (!e.repeat && (e.key === ' ' || e.key === 'Enter')) { e.preventDefault(); handleLeoPressStart(); } }}
-                  onKeyUp={(e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); handleLeoPressEnd(); } }}
-                  aria-label="Hold Leo to ask him a question by voice"
-                  className="relative shrink-0 rounded-[2rem] transition-transform duration-200 active:scale-[0.98] focus:outline-none touch-none select-none [-webkit-touch-callout:none]"
-                >
+                {/* Leo is the state indicator, not a control: his pose
+                    and the label beside him carry what he's doing, and
+                    questions go in the text box in the dock below.
+                    (Hold-to-talk was removed Oct 29, 2026 — Q&A is
+                    text-only, so Leo carries no mic badge and no press
+                    affordance.) */}
+                <div className="relative shrink-0 rounded-[2rem] select-none">
                   <div className={`absolute inset-x-6 top-6 bottom-10 rounded-full blur-3xl transition-colors duration-700 ${leoStatus.glow}`} />
                   <LeoFigure pose={poseFlash ?? leoStatus.pose} className="relative h-[44vh] sm:h-[56vh] min-h-[240px] max-h-[540px]" />
-                  <span className={`absolute bottom-[7%] right-[1%] flex items-center justify-center w-11 h-11 rounded-full border border-white/25 shadow-xl text-white transition-colors duration-500 ${
-                    leoStatus.pose === 'listening' ? 'bg-rose-500' : leoStatus.pose === 'speaking' ? 'bg-blue-500' : 'bg-amber-500'
-                  }`}>
-                    <Mic size={20} />
-                  </span>
-                </button>
+                </div>
                 <div className="flex flex-col items-center min-w-0">
                 {voice.isSpeaking && (
                   <div className="flex items-center gap-[3px] h-5 mb-4">
@@ -2255,11 +2132,9 @@ function App() {
                   {leoStatus.label}
                 </p>
 
-                {speech.isSupported && !speech.isListening && (
-                  <p className="mt-2.5 text-sm tracking-wide text-slate-400">
-                    Hold Leo to ask him a question
-                  </p>
-                )}
+                <p className="mt-2.5 text-sm tracking-wide text-slate-400">
+                  Ask Leo a question — type it in the box below
+                </p>
 
                 <div className="mt-4 flex flex-wrap justify-center items-center gap-3">
                   <button

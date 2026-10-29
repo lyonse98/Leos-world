@@ -80,7 +80,8 @@ export interface FillerHostSnapshot {
   openingSettled: boolean;
   playing: boolean;
   queueLength: number;
-  // Q&A cycle in flight, push-to-talk hold, or the mic listening.
+  // A Q&A cycle is in flight (question submitted, answer not yet
+  // fully played and stories not yet resumed).
   questionLocked: boolean;
   // Playback suspended pending the listener: the blocked banner, the
   // tap-to-resume state, or an active mute.
