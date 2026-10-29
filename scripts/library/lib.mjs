@@ -269,6 +269,16 @@ export async function assembleFacts(app, records, seed, coords) {
 // rotation directive for non-origin angles, with the neutral 'prefetch'
 // context directive. Corpus mode is 'highway' — the deepest standard
 // drive-by story, and the mode of Erik's I-5 test drives.
+//
+// PERSONA SOURCE: the builders' persona is the app's real
+// LEO_SYSTEM_INSTRUCTION, bundled by bundle-app.mjs — never copied by
+// hand. That includes the DOCUMENTARY PACK amendment to leo-v14
+// (adopted Oct 28, 2026: open loop, the TURN, source-bounded
+// present-tense scene, restraint at peak, human-protagonist
+// anchoring), which therefore governs every builder here exactly as
+// it governs live generation. Re-run bundle-app.mjs after any persona
+// edit. Pre-TTS, every batch must clear style-gate.mjs (see
+// STYLE-GATE.md).
 
 export function buildPrompt(app, seed, coords, facts, angle, coveredAngles) {
   const parts = [];
