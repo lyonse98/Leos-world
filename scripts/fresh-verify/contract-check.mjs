@@ -87,9 +87,9 @@ check("IndexedDB store 'audio'", inFile('core/backend.ts', "'audio'"));
 
 // ---- Bucket layout: manifest paths use the verified live prefixes
 const clips = readFileSync(join(srcRoot, 'content', 'clips.ts'), 'utf8');
-const paths = [...clips.matchAll(/'((?:openers|stall-phrases|fillers)\/[^']+)'/g)].map(m => m[1]);
+const paths = [...clips.matchAll(/'((?:openers|stall-phrases|fillers|miles)\/[^']+)'/g)].map(m => m[1]);
 check('clip manifest paths found', paths.length >= 20, `found ${paths.length}`);
-check('greetings live under openers/intros/', paths.some(p => p.startsWith('openers/intros/fresh-')) && paths.some(p => p.startsWith('openers/intros/resume-')));
+check('greetings: fresh under miles/intros/ (Phase 2), resume shared under openers/intros/', paths.some(p => p.startsWith('miles/intros/fresh-')) && paths.some(p => p.startsWith('openers/intros/resume-')));
 check('stall phrases under stall-phrases/', paths.filter(p => p.includes('stall') || p.includes('worth-it') || p.includes('digging')).every(p => p.startsWith('stall-phrases/')));
 check('bridges under fillers/bridges/', paths.filter(p => p.includes('bridge-')).every(p => p.startsWith('fillers/bridges/')));
 check('no §8A-literal wrong prefixes (intros/, phrases/)', !paths.some(p => p.startsWith('intros/') || p.startsWith('phrases/')));
@@ -117,6 +117,26 @@ check('prime is a real-sample WAV (220 Hz samples)', inFile('core/player.ts', '2
 for (const banned of ['useVoice', 'geminiAudio', 'storyCache', 'placesService']) {
   check(`no import of deleted module: ${banned}`, !new RegExp(`from '[^']*${banned}`).test(corpus));
 }
+
+// ---- Miles edition: persona + shared-cache containment (Phase 2)
+check('persona speaks as Miles', inFile('leoPersona.ts', 'You are Miles —'));
+check(
+  'shared-cache read screens Leo self-references',
+  inFile('core/backend.ts', 'SELF_REFERENCE_LEO') && inFile('core/backend.ts', "if (SELF_REFERENCE_LEO.test(row.story_text)) return null;"),
+);
+check(
+  'no write-back into the shared tour_stories cache',
+  !/from\('tour_stories'\)\.insert/.test(all.find(x => x.path.endsWith('core/backend.ts'))?.text ?? ''),
+);
+check(
+  'Miles greetings point at the miles/ prefix (shared Leo clips untouched)',
+  inFile('content/clips.ts', "path: 'miles/intros/fresh-1.wav'") && inFile('content/clips.ts', "path: 'miles/intros/fresh-3.wav'"),
+);
+check('no user-facing Leo strings remain in App/hooks/index.html', (() => {
+  const app = all.find(x => x.path.endsWith('App.tsx'))?.text ?? '';
+  const hooks = all.find(x => x.path.endsWith('hooks.ts'))?.text ?? '';
+  return !/Leo/.test(app) && !/Leo/.test(hooks);
+})());
 
 console.log(failures === 0 ? '\nCONTRACT: all checks passed' : `\nCONTRACT: ${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

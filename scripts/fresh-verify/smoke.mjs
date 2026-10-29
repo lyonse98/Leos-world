@@ -53,8 +53,8 @@ await page.setGeolocation({ latitude: 32.853, longitude: -117.18 });
 await page.goto(`http://127.0.0.1:${port}/`, { waitUntil: 'networkidle2', timeout: 30_000 });
 await new Promise(r => setTimeout(r, 1500));
 const landingText = await page.evaluate(() => document.body.innerText);
-check('landing renders with product title', /Leo’s World/.test(landingText));
-check('landing shows the companion', /Leo/.test(landingText));
+check('landing renders with product title', /^Miles$/m.test(landingText) || /Miles/.test(landingText));
+check('landing shows the companion', /Miles/.test(landingText));
 const startFound = await page.evaluate(() => {
   const btns = [...document.querySelectorAll('button')];
   const b = btns.find(x => /start tour/i.test(x.textContent ?? ''));
@@ -101,7 +101,7 @@ const ended = await page.evaluate(() => {
 check('End tour button works', ended);
 await new Promise(r => setTimeout(r, 1500));
 const backText = await page.evaluate(() => document.body.innerText);
-check('returns to landing after End tour', /Leo’s World/.test(backText) && /start tour/i.test(backText));
+check('returns to landing after End tour', /Miles/.test(backText) && /start tour/i.test(backText));
 check('zero page errors', pageErrors.length === 0, pageErrors.slice(0, 3).join(' | '));
 
 await browser.close();

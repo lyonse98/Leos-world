@@ -94,7 +94,7 @@ export class FakeAudio {
   }
   classify(src) {
     if (src === null || src === undefined) return 'none';
-    if (src.includes('openers/intros/')) return 'greeting';
+    if (src.includes('openers/intros/') || src.includes('miles/intros/')) return 'greeting';
     if (src.includes('stall-phrases/')) return 'stall';
     if (src.includes('fillers/bridges/')) return 'bridge';
     if (src.includes('fillers/audio/')) return 'filler';
