@@ -1211,4 +1211,73 @@ export async function runScenarios(Tour, extras) {
       JSON.stringify(diags.map(e => e.payload)));
     failTour.endTour();
   }
+
+  // ---------------------------------------------------------- P3 tour-thread prompt feed
+  suite('P3 tour thread: delivered tellings feed later generation prompts');
+  {
+    resetLocalStorage();
+    const prompts = [];
+    const world = makeWorld(Tour, {
+      candidates: [
+        makeCandidate('Balboa Park'),
+        makeCandidate('Live Place'),
+        makeCandidate('Third Place'),
+      ],
+      library: ['Balboa Park'],
+      genStoryBehavior: async prompt => {
+        prompts.push(prompt);
+        if (prompt.includes('Tell the story of Live Place.')) {
+          return 'Live Place hides a 1911 powerhouse behind its eucalyptus grove. ' +
+            'The rest of the tale unfolds slowly, the way all good local stories do, with care. '.repeat(3);
+        }
+        return 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+      },
+    });
+    // Starve prefetch (same trick as the P1 diag world): discovery
+    // answers only at the car's exact position — prefetch asks
+    // ahead of the car and gets nothing — so every story generates
+    // live, at serve time, and its prompt is observable.
+    world.seams.discoverCandidates = async pt =>
+      Math.abs(pt.lat - UTC.lat) < 0.0001 && Math.abs(pt.lng - UTC.lng) < 0.0001
+        ? world.candidates
+        : [];
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+
+    const playedCount = () => world.eventsOf('story_playback').filter(e => e.payload.completed).length;
+    // Welcome + Balboa (library) deliver first.
+    for (let i = 0; i < 30 && playedCount() < 2; i++) await world.clock.advance(5_000);
+    check('P3 precondition: welcome + Balboa delivered', playedCount() >= 2, `played=${playedCount()}`);
+    check('first generation prompt (the welcome) has NO thread block',
+      prompts.length >= 1 && !prompts[0].includes('TOUR THREAD SO FAR'),
+      `prompts=${prompts.length}`);
+
+    // The settle-chained serve cycle generates Live Place next,
+    // with the thread aboard.
+    for (let i = 0; i < 30 && !prompts.some(p => p.includes('Tell the story of Live Place.')); i++) {
+      await world.clock.advance(2_000);
+    }
+    const livePrompt = prompts.find(p => p.includes('Tell the story of Live Place.'));
+    check('Live Place generated live after Balboa delivered', Boolean(livePrompt), `prompts=${prompts.length}`);
+    check('its prompt carries the TOUR THREAD block', Boolean(livePrompt) && livePrompt.includes('TOUR THREAD SO FAR'));
+    check('the thread names the delivered Balboa telling',
+      Boolean(livePrompt) && livePrompt.includes('Balboa Park'));
+    check('the welcome is NOT a thread entry',
+      Boolean(livePrompt) && !livePrompt.includes('Welcome to University City'));
+
+    // Live Place delivers; Third Place's prompt must carry its
+    // captured signature fact, quoted, under Live Place's line.
+    for (let i = 0; i < 30 && playedCount() < 3; i++) await world.clock.advance(5_000);
+    check('P3 precondition: Live Place delivered', playedCount() >= 3, `played=${playedCount()}`);
+    for (let i = 0; i < 30 && !prompts.some(p => p.includes('Tell the story of Third Place.')); i++) {
+      await world.clock.advance(2_000);
+    }
+    const thirdPrompt = prompts.find(p => p.includes('Tell the story of Third Place.'));
+    check('Third Place generated live', Boolean(thirdPrompt), `prompts=${prompts.length}`);
+    check('its thread carries Live Place\u2019s signature fact, quoted',
+      Boolean(thirdPrompt) &&
+        thirdPrompt.includes('"Live Place hides a 1911 powerhouse behind its eucalyptus grove."'),
+      thirdPrompt ? thirdPrompt.slice(thirdPrompt.indexOf('TOUR THREAD'), thirdPrompt.indexOf('TOUR THREAD') + 400) : 'none');
+    tour.endTour();
+  }
 }

@@ -85,6 +85,8 @@ export interface AudibleItem {
   generatedAt?: number;
   text?: string | null;
   // Engine-filled telemetry stamps (P1 salvage); the Player ignores them.
+  /** Lead fact captured at live generation (P3: the thread feed). */
+  signatureFact?: string | null;
   /** Live text-generation duration for this story, ms (null for shelf/cache serves). */
   fetchMs?: number | null;
   /** Synthesis duration when this item's audio was minted, ms. */

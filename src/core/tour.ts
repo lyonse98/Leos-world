@@ -171,6 +171,25 @@ function sanitizeDiagMessage(raw: unknown): string {
     .slice(0, 200);
 }
 
+// Signature-fact capture (P3 salvage, A's leadFactFromText): the
+// generated story's lead sentence, verbatim, when it stands alone
+// as a usable fact (30–170 chars). Shelf tellings never carry one —
+// the thread shows their subject + angle only, never a derived or
+// invented lead.
+const MIN_SIGNATURE_FACT_CHARS = 30;
+const MAX_SIGNATURE_FACT_CHARS = 170;
+
+function leadFactFromText(text: string): string | null {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  const match = clean.match(/^[^.!?]+[.!?]/);
+  if (!match) return null;
+  const sentence = match[0].trim();
+  if (sentence.length < MIN_SIGNATURE_FACT_CHARS || sentence.length > MAX_SIGNATURE_FACT_CHARS) {
+    return null;
+  }
+  return sentence;
+}
+
 const BACKSTOP_MS = 180_000;
 const WELCOME_COOLDOWN_MS = 180_000;
 const QA_FAILSAFE_MS = 150_000;
@@ -185,6 +204,15 @@ interface BufferedText {
   candidate: facts.Candidate;
   /** Text-generation duration at prefetch time (P1: story_timing). */
   fetchMs?: number | null;
+  /** Lead fact captured at prefetch generation (P3: thread feed). */
+  signatureFact?: string | null;
+}
+
+/** One delivered telling, reduced for the tour thread (P3). */
+interface ThreadEntry {
+  subject: string;
+  angle: string | null;
+  signatureFact: string | null;
 }
 
 interface FillerEntry {
@@ -248,6 +276,14 @@ export class Tour {
   private corridorEligible = new Set<string>();
   private lastStoryItem: AudibleItem | null = null;
   private lastSubject: string | null = null;
+  /**
+   * The tour thread (P3 salvage): this tour's DELIVERED tellings in
+   * hearing order, reduced to subject + angle + signature fact —
+   * the prompt feed that lets generation connect and contrast
+   * instead of generating each story amnesic. Delivered only, by
+   * construction: entries are appended at sounded settles.
+   */
+  private thread: ThreadEntry[] = [];
 
   // Settle/lateness stamps (P1 salvage): commit-time context and
   // sound-start truth per story item, joined at settle to file A's
@@ -1160,7 +1196,13 @@ export class Tour {
     const buffered = this.buffer.get(key);
     if (buffered) {
       this.buffer.delete(key);
-      return this.liveStoryItem(candidate, buffered.text, buffered.generatedAt, buffered.fetchMs ?? null);
+      return this.liveStoryItem(
+        candidate,
+        buffered.text,
+        buffered.generatedAt,
+        buffered.fetchMs ?? null,
+        buffered.signatureFact ?? null,
+      );
     }
     // Live generation stands down while a failure economy stands
     // (E3/E6): banked material above is the tour's voice meanwhile.
@@ -1187,7 +1229,7 @@ export class Tour {
         candidate.lng,
         LEO_PERSONA_VERSION,
       );
-      return this.liveStoryItem(candidate, text, this.clock.now(), fetchMs);
+      return this.liveStoryItem(candidate, text, this.clock.now(), fetchMs, leadFactFromText(text));
     } catch (err) {
       this.diag('text', 'generation-failed', err);
       // Q14: a retell generation that cannot produce a complete,
@@ -1209,6 +1251,7 @@ export class Tour {
     text: string,
     generatedAt: number,
     fetchMs: number | null = null,
+    signatureFact: string | null = null,
   ): AudibleItem {
     const item = this.makeItem({
       kind: 'story',
@@ -1224,6 +1267,7 @@ export class Tour {
         text,
         tier1: candidate.tier1,
         fetchMs,
+        signatureFact,
       },
     });
     return item;
@@ -1251,12 +1295,14 @@ export class Tour {
       };
       const pack = await this.seams.buildFactPack(pseudo, this.area, []);
       const rural = this.modeName() === 'rural';
+      const threadBlock = this.tourThreadBlock();
       const prompt = [
         `MODE: ${this.modeName()}`,
         rural
           ? 'RURAL MODE: there is no landmark here. Talk about the road, the county, the terrain — per your rural instructions.'
           : `AREA STORY: tell the story of ${name ?? 'this stretch of road'} itself — the neighborhood scale, not a single pin.`,
         `FACT PACK:\n${facts.factPackText(pack)}`,
+        ...(threadBlock ? [threadBlock] : []),
         this.exclusionsLine(),
       ].join('\n\n');
       const fetchStart = this.clock.now();
@@ -1289,6 +1335,38 @@ export class Tour {
     }
   }
 
+  /**
+   * The thread as a prompt block (P3 salvage, A's tourThreadBlock
+   * contract): delivered tellings in order, ~40 tokens each, hard
+   * cap ~1900 chars with the oldest lines dropped first. '' until
+   * the first telling is delivered — so a tour's first-story prompt
+   * is byte-identical to the pre-thread prompt.
+   */
+  private tourThreadBlock(limit = 10): string {
+    const entries = this.thread.slice(-limit);
+    if (entries.length === 0) return '';
+    const MAX_THREAD_LINE_CHARS = 1900;
+    const lines: string[] = [];
+    let used = 0;
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      const angle = e.angle ? e.angle.replace(/^landmark_/, '').replace(/_/g, ' ') : null;
+      const line =
+        `${e.subject}` +
+        (angle ? ` — ${angle}` : '') +
+        (e.signatureFact ? ` — "${e.signatureFact}"` : '');
+      if (lines.length > 0 && used + line.length > MAX_THREAD_LINE_CHARS) break;
+      lines.unshift(line);
+      used += line.length;
+    }
+    return (
+      'TOUR THREAD SO FAR — the stories this listener has actually heard this tour, in order. ' +
+      'This is continuity material, not content: you may weave AT MOST ONE line of callback or contrast drawn from it into this story. ' +
+      'This story stays about the ground in front of you — nothing in the thread is retold or re-explained, and a fact listed under another place belongs to THAT place; never attribute it to the place you are telling now.\n' +
+      lines.map((l, i) => `${i + 1}. ${l}`).join('\n')
+    );
+  }
+
   private storyPrompt(candidate: facts.Candidate, pack: facts.FactPack, isRetell = false): string {
     const parts = [
       `MODE: ${this.modeName()}`,
@@ -1300,6 +1378,8 @@ export class Tour {
         `The previous story was about ${this.lastSubject}. Write your own one-sentence transition if a genuine one exists; never force a connection.`,
       );
     }
+    const threadBlock = this.tourThreadBlock();
+    if (threadBlock) parts.push(threadBlock);
     if (isRetell) {
       // Q14: a retell must be genuinely distinct material at a new
       // angle. If the fact pack cannot support that, the generator
@@ -1596,6 +1676,18 @@ export class Tour {
       }
       this.lastStoryItem = item;
       this.lastSubject = item.label;
+      // P3 thread ledger: a sounded settle is a DELIVERED telling —
+      // the only entries the thread ever gains. Welcome and area
+      // subjects stay out (A's rule: the thread is place tellings;
+      // intros/area live in the last-topic material, above).
+      if (!subject.startsWith('welcome:') && !subject.startsWith('area:')) {
+        this.thread.push({
+          subject: item.label,
+          angle: item.angleOf ?? null,
+          signatureFact: item.signatureFact ?? null,
+        });
+        if (this.thread.length > 24) this.thread.splice(0, this.thread.length - 24);
+      }
       this.chainCount = 0; // a real story ends a filler episode (F7)
       void this.seams.recordHeard(
         this.sessionId,
@@ -1895,6 +1987,7 @@ export class Tour {
               generatedAt: this.clock.now(),
               candidate,
               fetchMs: this.clock.now() - fetchStart,
+              signatureFact: leadFactFromText(text),
             });
           } catch {
             /* prefetch is speculative; failures are free (S10) */
