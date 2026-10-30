@@ -14,8 +14,8 @@ declare const __BUILD_ID__: string;
 /** Build identifier stamped on every analytics event (contract E). */
 export const BUILD_ID = `fresh-${typeof __BUILD_ID__ === 'string' ? __BUILD_ID__ : 'dev'}`;
 
-const url = import.meta.env.VITE_SUPABASE_URL as string | undefined;
-const anon = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+const url = import.meta.env.VITE_MILES_SUPABASE_URL as string | undefined;
+const anon = import.meta.env.VITE_MILES_SUPABASE_ANON_KEY as string | undefined;
 
 const BACKEND_CONFIGURED = Boolean(url && anon);
 

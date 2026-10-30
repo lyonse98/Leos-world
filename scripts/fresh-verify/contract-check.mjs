@@ -95,11 +95,11 @@ check('bridges under fillers/bridges/', paths.filter(p => p.includes('bridge-'))
 check('no §8A-literal wrong prefixes (intros/, phrases/)', !paths.some(p => p.startsWith('intros/') || p.startsWith('phrases/')));
 
 // ---- Env vars: exactly the five contract names appear
-for (const v of ['VITE_SUPABASE_URL', 'VITE_SUPABASE_ANON_KEY', 'VITE_GEMINI_API_KEY', 'VITE_GOOGLE_MAPS_API_KEY', 'VITE_GOOGLE_PLACES_API_KEY']) {
+for (const v of ['VITE_MILES_SUPABASE_URL', 'VITE_MILES_SUPABASE_ANON_KEY', 'VITE_GEMINI_API_KEY', 'VITE_GOOGLE_MAPS_API_KEY', 'VITE_GOOGLE_PLACES_API_KEY']) {
   check(`env var read: ${v}`, corpus.includes(v));
 }
 const envUsed = new Set([...corpus.matchAll(/VITE_[A-Z_]+/g)].map(m => m[0]));
-check('no non-contract VITE_ vars', [...envUsed].every(v => ['VITE_SUPABASE_URL', 'VITE_SUPABASE_ANON_KEY', 'VITE_GEMINI_API_KEY', 'VITE_GOOGLE_MAPS_API_KEY', 'VITE_GOOGLE_PLACES_API_KEY'].includes(v)), [...envUsed].join(','));
+check('no non-contract VITE_ vars', [...envUsed].every(v => ['VITE_MILES_SUPABASE_URL', 'VITE_MILES_SUPABASE_ANON_KEY', 'VITE_GEMINI_API_KEY', 'VITE_GOOGLE_MAPS_API_KEY', 'VITE_GOOGLE_PLACES_API_KEY'].includes(v)), [...envUsed].join(','));
 
 // ---- Build identification: fresh- prefix + variant tag
 check("build id carries the 'fresh-' prefix", /`fresh-\$\{/.test(corpus) || /'fresh-'/.test(corpus));

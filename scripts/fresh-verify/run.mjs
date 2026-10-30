@@ -22,7 +22,7 @@ execFileSync(
     `--outfile=${out}`,
     '--log-level=warning',
     // The engine reads Vite's import.meta.env; give the harness a fake set.
-    '--define:import.meta.env={"VITE_SUPABASE_URL":"https://fake.test","VITE_SUPABASE_ANON_KEY":"fake-anon","VITE_GEMINI_API_KEY":"fake-gemini","VITE_GOOGLE_MAPS_API_KEY":"fake-maps","VITE_GOOGLE_PLACES_API_KEY":"fake-places"}',
+    '--define:import.meta.env={"VITE_MILES_SUPABASE_URL":"https://fake.test","VITE_MILES_SUPABASE_ANON_KEY":"fake-anon","VITE_GEMINI_API_KEY":"fake-gemini","VITE_GOOGLE_MAPS_API_KEY":"fake-maps","VITE_GOOGLE_PLACES_API_KEY":"fake-places"}',
     // CJS deps (Supabase) use dynamic require inside the ESM bundle.
     "--banner:js=import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);",
   ],

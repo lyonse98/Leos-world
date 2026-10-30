@@ -41,8 +41,8 @@ await build({
   outfile: outPath,
   define: {
     'import.meta.env': JSON.stringify({
-      VITE_SUPABASE_URL: 'https://placeholder.supabase.co',
-      VITE_SUPABASE_ANON_KEY: 'placeholder-anon-key',
+      VITE_MILES_SUPABASE_URL: 'https://placeholder.supabase.co',
+      VITE_MILES_SUPABASE_ANON_KEY: 'placeholder-anon-key',
     }),
   },
   // The Supabase packages are CJS and dynamically require node builtins;
