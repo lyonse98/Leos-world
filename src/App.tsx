@@ -103,6 +103,20 @@ export default function App() {
     return () => document.removeEventListener('visibilitychange', onVisibility);
   }, [engine, view.phase, view.nowPlaying]);
 
+  // P2 salvage — document-level hold-retry net (A's hold watch):
+  // while the unlock latch is unearned or lost, ANY pointerdown
+  // anywhere retries the unlock — capture phase, so the retry
+  // primes before the tap's own handlers run, and the driver never
+  // has to find a specific control. The net lives exactly while the
+  // latch is unearned/lost in an active tour; the Player coalesces
+  // retries onto an in-flight prime, so extra taps are free.
+  useEffect(() => {
+    if (view.phase !== 'active' || view.latch === 'earned') return;
+    const onDown = () => engineRef.current?.noteGesture();
+    document.addEventListener('pointerdown', onDown, true);
+    return () => document.removeEventListener('pointerdown', onDown, true);
+  }, [view.phase, view.latch]);
+
   // Media Session: metadata + transport handlers (seek ±30 s).
   useEffect(() => {
     if (!('mediaSession' in navigator)) return;
@@ -153,10 +167,34 @@ export default function App() {
     // A fresh engine per tour, constructed and started inside the
     // tap: the GREETING's attempt is the handler's first media
     // action (O1), and no state from a previous tour can leak in.
-    const fresh = new Tour({ audio: createBrowserAudio() });
+    // The landing engine's warmed clip blob URLs ride along (P2):
+    // the greeting — the prime carrier — plays from a local blob,
+    // not a network fetch inside the tap.
+    const fresh = new Tour({
+      audio: createBrowserAudio(),
+      clipUrls: engineRef.current?.clipUrls,
+    });
     engineRef.current = fresh;
     setEngine(fresh);
     fresh.start(resume);
+  };
+
+  /**
+   * P2 salvage — pointerdown-first-action: the tour starts on the
+   * START tap's pointerdown (the earliest user-activation moment),
+   * not on click, which trails it by the tap's full press duration.
+   * Keyboard activation has no pointerdown; it arrives as a click
+   * with detail === 0 and takes the same path. A mouse/touch tap
+   * fires BOTH events — the detail guard keeps it to one start.
+   */
+  const startOnPointerDown = (resume: boolean) => (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    startTour(resume);
+  };
+  const startOnKeyboardClick = (resume: boolean) => (e: React.MouseEvent) => {
+    if (e.detail !== 0) return; // a real tap already started on pointerdown
+    startTour(resume);
   };
 
   const submitQuestion = (e: React.FormEvent) => {
@@ -208,7 +246,8 @@ export default function App() {
               </p>
               <div className="mt-4 flex gap-3">
                 <button
-                  onClick={() => startTour(true)}
+                  onPointerDown={startOnPointerDown(true)}
+                  onClick={startOnKeyboardClick(true)}
                   className="flex-1 rounded-xl bg-sky-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-sky-400"
                 >
                   RESUME TOUR
@@ -223,7 +262,8 @@ export default function App() {
             </div>
           ) : (
             <button
-              onClick={() => startTour(false)}
+              onPointerDown={startOnPointerDown(false)}
+              onClick={startOnKeyboardClick(false)}
               className="mt-8 flex w-full items-center justify-center gap-2 rounded-2xl bg-sky-500 px-6 py-4 text-lg font-bold tracking-wide text-white shadow-lg shadow-sky-900/50 transition hover:bg-sky-400 active:scale-[0.99]"
             >
               <Play className="h-6 w-6" /> START TOUR

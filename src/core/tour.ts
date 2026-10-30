@@ -118,6 +118,15 @@ export interface TourDeps {
   audio: AudioPort;
   clock?: Clock;
   seams?: Partial<NetSeams>;
+  /**
+   * Warmed prime-carrier assets (P2 salvage): bucket path → blob
+   * object URL for the stored greeting/opener clips, resolved from
+   * the pinned on-device cache by an earlier instance's landing warm.
+   * App hands the landing engine's map to the START engine, so the
+   * tap's first play() is a local blob — never a network fetch
+   * (A's primeClipUrl discipline, adapted to the per-tour engine).
+   */
+  clipUrls?: Map<string, string>;
 }
 
 export interface TourView {
@@ -169,6 +178,8 @@ export class Tour {
   private clock: Clock;
   private seams: NetSeams;
   readonly player: Player;
+  /** Warmed greeting/opener clip object URLs (see TourDeps.clipUrls). */
+  readonly clipUrls: Map<string, string>;
 
   phase: 'idle' | 'active' | 'ended' = 'idle';
   private sessionId = '';
@@ -285,6 +296,7 @@ export class Tour {
   constructor(deps: TourDeps) {
     this.clock = deps.clock ?? systemClock;
     this.seams = { ...realSeams, ...(deps.seams ?? {}) };
+    this.clipUrls = deps.clipUrls ?? new Map();
     this.player = new Player(deps.audio, this.clock, {
       resolveUrl: item => this.resolveUrl(item),
       stallSource: () => this.pickStall(),
@@ -443,7 +455,7 @@ export class Tour {
     const greeting = this.makeItem({
       kind: 'greeting',
       label: `Greeting — ${line.text}`,
-      source: { kind: 'url', url: this.seams.bucketUrl(clip.path) },
+      source: { kind: 'url', url: this.clipSourceUrl(clip.path) },
       durationSec: clip.durationSec,
       onSettle: rec => this.onGreetingSettle(rec),
     });
@@ -490,11 +502,30 @@ export class Tour {
     const jobs: Promise<unknown>[] = [this.seams.fetchLibraryIndex()];
     for (const line of [...GREETINGS_FRESH, ...GREETINGS_RESUME]) {
       const clip = GREETING_CLIPS[line.id];
-      if (clip) jobs.push(this.seams.pinBucketAudio(clip.path));
+      if (clip) jobs.push(this.warmClipUrl(clip.path));
     }
-    for (const opener of OPENER_CLIPS) jobs.push(this.seams.pinBucketAudio(opener.path));
+    for (const opener of OPENER_CLIPS) jobs.push(this.warmClipUrl(opener.path));
     const [index] = (await Promise.all(jobs)) as [backend.LibraryIndexEntry[]];
     if (index.length) this.libraryIndex = index;
+  }
+
+  /**
+   * Pin a stored clip AND resolve its blob object URL (P2 salvage):
+   * the greeting is the prime carrier, and a carrier that still has
+   * to cross the network inside the tap is the field gap (A's first
+   * sound 2.76 s vs B's ~19 s on the Oct 29 drives). With the blob
+   * warmed before the tap, the greeting's play() resolves locally.
+   * A failed pin simply leaves the bucket URL as the source.
+   */
+  private async warmClipUrl(path: string): Promise<void> {
+    await this.seams.pinBucketAudio(path);
+    const blob = await this.seams.audioCacheGet(path);
+    if (blob) this.clipUrls.set(path, this.objectUrlFor(path, blob));
+  }
+
+  /** The warmed blob URL for a stored clip, or its bucket URL. */
+  private clipSourceUrl(path: string): string {
+    return this.clipUrls.get(path) ?? this.seams.bucketUrl(path);
   }
 
   private pickGreeting(resume: boolean) {
@@ -528,7 +559,7 @@ export class Tour {
     const item = this.makeItem({
       kind: 'opener',
       label: `Opener — ${clip.id}`,
-      source: { kind: 'url', url: this.seams.bucketUrl(clip.path) },
+      source: { kind: 'url', url: this.clipSourceUrl(clip.path) },
       durationSec: clip.durationSec,
       onSettle: rec => this.onOpenerSettle(item, rec, primary),
     });

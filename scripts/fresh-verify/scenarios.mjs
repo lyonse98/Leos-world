@@ -1072,4 +1072,45 @@ export async function runScenarios(Tour, extras) {
     }
     tour.endTour();
   }
+
+  // ---------------------------------------------------------- P2 opener stack: warmed prime carrier
+  suite('P2 warmed prime carrier: the greeting plays from a warmed blob, not the network');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park')],
+      library: ['Balboa Park'],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = world.makeTour(audio);
+    tour.onPosition({ ...UTC, speedMps: 8, headingDeg: 180 });
+    await tour.warmLanding();
+    check('landing warm resolved clip blob URLs', tour.clipUrls.size > 0, `size=${tour.clipUrls.size}`);
+    tour.start(false);
+    const first = audio.log[0];
+    check(
+      'first media action is the greeting, sourced from a blob URL',
+      Boolean(first) && typeof first.src === 'string' && first.src.startsWith('blob:'),
+      `first=${first ? first.src : 'none'}`,
+    );
+    await world.clock.advance(40_000);
+    check('tour latched on the warmed carrier', world.eventsOf('unlock_latched').length === 1,
+      `latched=${world.eventsOf('unlock_latched').length}`);
+    tour.endTour();
+  }
+
+  suite('P2 control: an unwarmed start falls back to the bucket URL');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [] });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    const first = audio.log[0];
+    check(
+      'unwarmed greeting plays from the bucket URL',
+      Boolean(first) && typeof first.src === 'string' && first.src.includes('miles/intros/'),
+      `first=${first ? first.src : 'none'}`,
+    );
+    tour.endTour();
+  }
 }
