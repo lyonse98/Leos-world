@@ -535,7 +535,11 @@ export class Tour {
 
   private onGreetingSettle(rec: SettleRecord): void {
     const item = this.greetingItem;
-    this.emit('opener_spoken', { attempts: item?.attempts ?? 0, sounded: rec.sounded });
+    this.emit('opener_spoken', {
+      attempts: item?.attempts ?? 0,
+      sounded: rec.sounded,
+      ms_from_tour_start: this.clock.now() - this.tourStartAt,
+    });
     if (item) this.debt.delete(item.id);
     if (this.opening === 'priming') {
       this.opening = this.debt.size > 0 ? 'welcoming' : 'covered';
@@ -1191,7 +1195,25 @@ export class Tour {
    */
   private onStoryCommitted(item: AudibleItem): void {
     const subject = item.subject ?? item.label;
-    this.emit('story_played', { subject, source: item.storySource ?? 'live' });
+    // §8 payload enriched Oct 29, 2026 (B instrumentation gap found on
+    // the first graded drive): topic / distance / queue / anchor keys
+    // match A's vocabulary so the shared analytics view grades both
+    // builds identically. subject + angle ride along for the raw log.
+    this.emit('story_played', {
+      subject,
+      topic: item.label,
+      source: item.storySource ?? 'live',
+      angle: item.angleOf ?? null,
+      subject_lat: item.anchor?.lat ?? null,
+      subject_lng: item.anchor?.lng ?? null,
+      distance_m:
+        item.anchor && this.position
+          ? Math.round(
+              calculateDistance(this.position.lat, this.position.lng, item.anchor.lat, item.anchor.lng),
+            )
+          : null,
+      queue_depth: (this.player.current ? 1 : 0) + (this.player.waitingStory ? 1 : 0),
+    });
     this.notify();
   }
 
@@ -1242,7 +1264,19 @@ export class Tour {
         this.judgeDropSpots.set(subject, { lat: this.position.lat, lng: this.position.lng });
       }
       // §8: reason verbatim from the closed vocabulary.
-      this.emit('story_dropped', { reason: rec.dropReason ?? 'attempts-exhausted' });
+      this.emit('story_dropped', {
+        reason: rec.dropReason ?? 'attempts-exhausted',
+        subject,
+        topic: item.label,
+        source: item.storySource ?? 'live',
+        angle: item.angleOf ?? null,
+        distance_m:
+          item.anchor && this.position
+            ? Math.round(
+                calculateDistance(this.position.lat, this.position.lng, item.anchor.lat, item.anchor.lng),
+              )
+            : null,
+      });
       this.notify();
       return;
     }
@@ -1252,6 +1286,18 @@ export class Tour {
       sounded: rec.sounded,
       completed: rec.completed,
       sounded_ms: Math.round(rec.soundedMs),
+      subject,
+      topic: item.label,
+      source: item.storySource ?? 'live',
+      angle: item.angleOf ?? null,
+      subject_lat: item.anchor?.lat ?? null,
+      subject_lng: item.anchor?.lng ?? null,
+      distance_m:
+        item.anchor && this.position
+          ? Math.round(
+              calculateDistance(this.position.lat, this.position.lng, item.anchor.lat, item.anchor.lng),
+            )
+          : null,
     });
     {
       this.counts.storiesPlayed += 1;
