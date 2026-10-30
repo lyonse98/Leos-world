@@ -194,6 +194,16 @@ function leadFactFromText(text: string): string | null {
 
 const BACKSTOP_MS = 180_000;
 const WELCOME_COOLDOWN_MS = 180_000;
+/**
+ * The opening welcome's live deadline (Erik, Oct 30): the first
+ * hello is generated live — custom, ear-catching — but it races
+ * this deadline; if live has not produced inside it, the stored
+ * shelf intro serves in its place. The greeting/opener clips
+ * cover the front of the tour, so 12 s of generation runway sits
+ * behind them without the listener hearing a gap. A tunable first
+ * value, named so the field can argue with it.
+ */
+const WELCOME_LIVE_DEADLINE_MS = 12_000;
 const QA_FAILSAFE_MS = 150_000;
 const QA_GRACE_MS = 45_000;
 const STORM_BASE_MS = 90_000;
@@ -875,9 +885,32 @@ export class Tour {
     this.area = area;
     const name = area.neighborhood ?? area.city ?? 'this neighborhood';
     this.welcomeState = 'warming';
-    const item = await this.generateWelcome(name, this.position);
+    // Live first (Erik, Oct 30): the opening welcome is generated —
+    // custom, ear-catching — but raced against
+    // WELCOME_LIVE_DEADLINE_MS. If live fails outright or misses
+    // the deadline, the stored shelf intro for the start area
+    // serves in its place, so a live outage can no longer silence
+    // the first hello the way it did before this fallback existed.
+    const item = await this.generateWelcomeBeforeDeadline(name, this.position);
     if (this.phase !== 'active') return;
     if (!item) {
+      // The stored fallback — with one exception: when the start
+      // area's intro sits in the cross-day heard set, the live
+      // attempt WAS the alternate-version chance (the doctrine the
+      // mid-tour lane follows in serveOwedWelcome), and re-serving
+      // the heard intro verbatim behind it would repeat the exact
+      // telling the listener already knows. There the historical
+      // owed/cooldown behavior stands instead.
+      if (this.subjectBlockReason(backend.placeKeyOf(name), null) !== 'crossday') {
+        const shelf = await this.shelfIntroItem(name);
+        if (this.phase !== 'active') return;
+        if (shelf) {
+          this.welcomeState = 'ready';
+          this.pendingWelcome = shelf;
+          this.afterDebtChange();
+          return;
+        }
+      }
       this.welcomeState = 'none';
       this.owedWelcome = { name, retryAt: this.clock.now() + WELCOME_COOLDOWN_MS };
       this.maybeOpenTour();
@@ -886,6 +919,31 @@ export class Tour {
     this.welcomeState = 'ready';
     this.pendingWelcome = item;
     this.afterDebtChange();
+  }
+
+  /**
+   * The opening welcome's live attempt, raced against
+   * WELCOME_LIVE_DEADLINE_MS from generation start: whichever
+   * settles first wins. A live result that lands after the
+   * deadline is DISCARDED, structurally — generateWelcome only
+   * builds the item, and this caller alone serves what the race
+   * returns, so a late arrival can never double-serve behind the
+   * stored fallback. (Its latency sample still lands, honestly:
+   * the fetch did happen.)
+   */
+  private async generateWelcomeBeforeDeadline(
+    name: string,
+    at: Position,
+  ): Promise<AudibleItem | null> {
+    let timer: unknown = null;
+    const deadline = new Promise<null>(resolve => {
+      timer = this.clock.setTimeout(() => resolve(null), WELCOME_LIVE_DEADLINE_MS);
+    });
+    try {
+      return await Promise.race([this.generateWelcome(name, at), deadline]);
+    } finally {
+      if (timer !== null) this.clock.clearTimeout(timer);
+    }
   }
 
   private async generateWelcome(name: string, at: Position): Promise<AudibleItem | null> {
@@ -953,8 +1011,10 @@ export class Tour {
    * 'neighborhood_intro'). Null when the shelf holds no intro for
    * the area, the row carries no audio, or the read fails — the
    * caller then falls back to live generation, unchanged. The
-   * OPENING welcome never comes here: it stays live by Erik's
-   * ruling (the first hello is generated, fresh, every tour).
+   * OPENING welcome reaches here only as its fallback (Erik,
+   * Oct 30): live is tried first there, always — this shelf item
+   * serves the first hello solely when live failed or missed its
+   * deadline, and never when the area's intro is cross-day heard.
    */
   private async shelfIntroItem(name: string): Promise<AudibleItem | null> {
     const row = await this.seams.fetchIntroRow(name);
@@ -1009,29 +1069,49 @@ export class Tour {
     if (!this.owedWelcome || this.welcomeServing || this.welcomeOffered || !this.position) return;
     if (this.clock.now() < this.owedWelcome.retryAt) return;
     const { name } = this.owedWelcome;
-    // Heard discipline (Erik, Oct 30): an area whose subject the
-    // P4 cross-day ledger (or an in-tour telling) already covers
-    // gets NO welcome of either kind — not the banked intro, and
-    // not a live generation in its place. The area is treated as
-    // welcomed and the owed record discharged; silence is correct.
-    if (this.subjectBlocked(backend.placeKeyOf(name), null)) {
+    // Heard discipline (Erik, Oct 30, extended same day): WHY the
+    // area's subject is blocked decides the welcome.
+    const block = this.subjectBlockReason(backend.placeKeyOf(name), null);
+    if (block !== null && block !== 'crossday') {
+      // (i) An in-tour state — welcomed or told this tour, in
+      // flight, or judge-dropped at this spot: NO welcome of
+      // either kind. The area is treated as welcomed and the owed
+      // record discharged; silence is correct.
       this.welcomed.add(name.toLowerCase());
       this.owedWelcome = null;
       return;
     }
     this.welcomeServing = true;
     try {
-      // Shelf-first (Erik, Oct 30): the banked intro serves when
-      // the shelf holds one; live generation is the fallback for
-      // areas the shelf doesn't cover, with its O15 owed/cooldown
-      // semantics unchanged.
-      const item =
-        (await this.shelfIntroItem(name)) ?? (await this.generateWelcome(name, this.position));
-      if (this.phase !== 'active') return;
-      if (!item) {
-        // O15: an unheard failed WELCOME remains owed, on a cooldown.
-        this.owedWelcome = { name, retryAt: this.clock.now() + WELCOME_COOLDOWN_MS };
-        return;
+      let item: AudibleItem | null;
+      if (block === 'crossday') {
+        // (ii) Blocked ONLY by the cross-day heard set: the banked
+        // intro is the version this listener already heard on a
+        // previous day, so the shelf is NOT re-served — the
+        // alternate version is a fresh live generation. If live
+        // cannot produce it (failure, tripped breaker), the owed
+        // record discharges silently rather than re-arming on a
+        // cooldown and minting attempt after attempt.
+        item = await this.generateWelcome(name, this.position);
+        if (this.phase !== 'active') return;
+        if (!item) {
+          this.welcomed.add(name.toLowerCase());
+          this.owedWelcome = null;
+          return;
+        }
+      } else {
+        // Shelf-first (Erik, Oct 30): the banked intro serves when
+        // the shelf holds one; live generation is the fallback for
+        // areas the shelf doesn't cover, with its O15 owed/cooldown
+        // semantics unchanged.
+        item =
+          (await this.shelfIntroItem(name)) ?? (await this.generateWelcome(name, this.position));
+        if (this.phase !== 'active') return;
+        if (!item) {
+          // O15: an unheard failed WELCOME remains owed, on a cooldown.
+          this.owedWelcome = { name, retryAt: this.clock.now() + WELCOME_COOLDOWN_MS };
+          return;
+        }
       }
       // The owed record clears only on a SOUNDED settle (O15): an
       // unheard serve re-arms it from onStorySettle. Until that
@@ -1495,8 +1575,20 @@ export class Tour {
 
   // ------------------------------------------------------------ telling ledger (§3)
 
-  private subjectBlocked(subject: string, candidate: facts.Candidate | null): boolean {
-    if (this.inflight.has(subject)) return true;
+  /**
+   * WHY a subject is blocked, when it is (Erik, Oct 30): the
+   * welcome lane treats a block from the cross-day heard set
+   * differently from every in-tour state (see serveOwedWelcome),
+   * so the composition is named rather than collapsed to a bit.
+   * The story lane keeps using subjectBlocked, whose verdict this
+   * decomposition preserves exactly — check order, the drop-spot
+   * expiry side effect, and the Q14 exception included.
+   */
+  private subjectBlockReason(
+    subject: string,
+    candidate: facts.Candidate | null,
+  ): 'inflight' | 'crossday' | 'drop' | 'told' | null {
+    if (this.inflight.has(subject)) return 'inflight';
     // P4 (cross-day heard ledger): a subject this device heard on a
     // previous day is blocked for ordinary serves — subject-level,
     // like A's hasHeardSubject. This is the no-repeat discipline a
@@ -1505,7 +1597,8 @@ export class Tour {
     // Tier-1 retell exception below reachable: subjects settle into
     // the heard set as they deliver, but a subject with an in-tour
     // telling is judged by the in-tour rules, not the cross-day one.
-    if (this.heardTopics.has(subject) && (this.toldCount.get(subject) ?? 0) === 0) return true;
+    if (this.heardTopics.has(subject) && (this.toldCount.get(subject) ?? 0) === 0)
+      return 'crossday';
     // Q12: queueing commits a subject temporarily; an unheard
     // settle RELEASES it (the corridor Q11 consumption is the one
     // exception, tracked in corridorConsumed). A subject that
@@ -1514,7 +1607,7 @@ export class Tour {
     const dropSpot = this.judgeDropSpots.get(subject);
     if (dropSpot && this.position) {
       if (calculateDistance(this.position.lat, this.position.lng, dropSpot.lat, dropSpot.lng) <= 250) {
-        return true;
+        return 'drop';
       }
       this.judgeDropSpots.delete(subject);
     }
@@ -1523,10 +1616,14 @@ export class Tour {
       // Q14: a Tier-1 place may be retold exactly once, at an undealt
       // angle, and only if genuinely distinct material exists — the
       // generator is instructed to decline rather than repeat.
-      if (candidate?.tier1 && told === 1 && !this.retellUsed.has(subject)) return false;
-      return true;
+      if (candidate?.tier1 && told === 1 && !this.retellUsed.has(subject)) return null;
+      return 'told';
     }
-    return false;
+    return null;
+  }
+
+  private subjectBlocked(subject: string, candidate: facts.Candidate | null): boolean {
+    return this.subjectBlockReason(subject, candidate) !== null;
   }
 
   /**

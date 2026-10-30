@@ -1349,7 +1349,9 @@ export async function runScenarios(Tour, extras) {
   // ---------------------------------------------------------- W: mid-tour shelf welcomes (Erik, Oct 30)
   // The owed (area-entry) WELCOME serves the banked neighborhood
   // intro when the shelf holds one; live generation is the fallback.
-  // The OPENING welcome stays live, always.
+  // A cross-day-heard intro earns a LIVE alternate instead of
+  // silence (W-04b/c). The OPENING welcome tries live first and
+  // falls back to the stored intro on failure or deadline (W2).
 
   const welcomePromptsFor = (world, name) =>
     world.genStoryPrompts.filter(p => p.includes('NEIGHBORHOOD WELCOME') && p.includes(name));
@@ -1450,8 +1452,12 @@ export async function runScenarios(Tour, extras) {
     tour.endTour();
   }
 
-  suite('W-04b heard discipline: a cross-day-heard area gets no welcome of either kind');
+  suite('W-04b heard discipline: a cross-day-heard area gets the LIVE alternate welcome');
   {
+    // Erik's doctrine extension (Oct 30) supersedes the original
+    // W-04b: a heard intro is not silence — the alternate version
+    // is a fresh live generation. The shelf row (the heard
+    // version) is never re-served.
     resetLocalStorage();
     const world = makeWorld(Tour, { candidates: [], intros: ['Clairemont'] });
     // As recorded on a previous day: a telling labeled with the
@@ -1462,13 +1468,167 @@ export async function runScenarios(Tour, extras) {
     world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
     tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
     await world.clock.advance(60_000);
-    check('no shelf welcome committed for the heard area',
+    const played = welcomePlayed(world, 'welcome:clairemont');
+    check('the alternate welcome committed exactly once', played.length === 1,
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    check('the alternate is sourced live, not the heard shelf version',
+      played[0]?.payload.source === 'live', JSON.stringify(played[0]?.payload));
+    check('a live welcome was generated for the heard area',
+      welcomePromptsFor(world, 'Clairemont').length === 1,
+      `prompts=${welcomePromptsFor(world, 'Clairemont').length}`);
+    check('the shelf intro was never consulted for the heard area',
+      !world.introFetches.includes('Clairemont'), world.introFetches.join(','));
+    check('the alternate sounded to completion',
+      world.eventsOf('story_playback').some(e => e.payload.subject === 'welcome:clairemont' && e.payload.sounded === true));
+    check('the tour itself is unharmed', tour.view().phase === 'active', tour.view().phase);
+    tour.endTour();
+  }
+
+  suite('W-04c heard discipline: cross-day-heard + live down → silence, owed discharged');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: ['Clairemont'] });
+    world.seams.fetchHeardTopics = async () => ['Clairemont'];
+    // Live is down (the tripped-breaker shape): every generation throws.
+    world.genStoryBehavior = () => {
+      throw new Error('story quota tripped');
+    };
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    check('no welcome of either kind committed for the heard area',
       welcomePlayed(world, 'welcome:clairemont').length === 0,
       JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
-    check('no live welcome generated for the heard area',
-      welcomePromptsFor(world, 'Clairemont').length === 0);
-    check('the block lands before the shelf is even asked',
+    check('the live alternate was attempted exactly once',
+      welcomePromptsFor(world, 'Clairemont').length === 1,
+      `prompts=${welcomePromptsFor(world, 'Clairemont').length}`);
+    check('the shelf intro was never consulted for the heard area',
       !world.introFetches.includes('Clairemont'), world.introFetches.join(','));
+    await world.clock.advance(240_000); // far past the 180 s welcome cooldown
+    check('the owed record was discharged — no cooldown retry mints a second attempt',
+      welcomePromptsFor(world, 'Clairemont').length === 1,
+      `prompts=${welcomePromptsFor(world, 'Clairemont').length}`);
+    check('still no welcome after the cooldown window',
+      welcomePlayed(world, 'welcome:clairemont').length === 0);
+    check('the tour itself is unharmed', tour.view().phase === 'active', tour.view().phase);
+    tour.endTour();
+  }
+
+  // ---------------------------------------------------------- W2: opening deadline fallback (Erik, Oct 30)
+  // The OPENING welcome tries live first — custom, ear-catching —
+  // but races WELCOME_LIVE_DEADLINE_MS (12 s): on a miss or an
+  // outright failure the stored shelf intro serves in its place.
+  // (W-03 above remains the instant-live case: shelf never asked.)
+
+  suite('W-05 opening welcome: live misses the deadline → shelf intro serves, late live discarded');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: ['University City'] });
+    // Live generation takes 20 s — past the 12 s deadline.
+    world.genStoryBehavior = () =>
+      new Promise(res =>
+        world.clock.setTimeout(
+          () => res('A slow welcome to the neighborhood, arriving after its moment. '.repeat(3)),
+          20_000,
+        ),
+      );
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    await world.clock.advance(11_000); // deadline (12 s) not yet reached
+    check('nothing served before the deadline — live still has the floor',
+      welcomePlayed(world, 'welcome:university city').length === 0);
+    check('the shelf has not been consulted yet', world.introFetches.length === 0,
+      world.introFetches.join(','));
+    await world.clock.advance(60_000); // deadline fires; shelf serves; late live lands at ~20 s
+    const played = welcomePlayed(world, 'welcome:university city');
+    check('exactly one welcome committed', played.length === 1, `n=${played.length}`);
+    check('the committed welcome is the stored intro', played[0]?.payload.source === 'library',
+      JSON.stringify(played[0]?.payload));
+    check('welcome angle is neighborhood_intro', played[0]?.payload.angle === 'neighborhood_intro',
+      JSON.stringify(played[0]?.payload));
+    check('the banked intro audio is what played',
+      audio.log.some(e => typeof e.src === 'string' && e.src.endsWith('library/university-city/neighborhood_intro.wav')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    check('the shelf was consulted exactly once, for the fallback',
+      world.introFetches.join(',') === 'University City', world.introFetches.join(','));
+    check('the live attempt was made (and its late result discarded)',
+      welcomePromptsFor(world, 'University City').length === 1,
+      `prompts=${welcomePromptsFor(world, 'University City').length}`);
+    check('the stored welcome sounded to completion',
+      world.eventsOf('story_playback').some(e => e.payload.subject === 'welcome:university city' && e.payload.sounded === true));
+    tour.endTour();
+  }
+
+  suite('W-06 opening welcome: live inside the deadline wins — shelf never fetched');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: ['University City'] });
+    // Live generation takes 5 s — inside the 12 s deadline.
+    world.genStoryBehavior = () =>
+      new Promise(res =>
+        world.clock.setTimeout(
+          () => res('A prompt welcome to the neighborhood, generated fresh. '.repeat(3)),
+          5_000,
+        ),
+      );
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    const played = welcomePlayed(world, 'welcome:university city');
+    check('the live welcome committed exactly once', played.length === 1, `n=${played.length}`);
+    check('the committed welcome is sourced live', played[0]?.payload.source === 'live',
+      JSON.stringify(played[0]?.payload));
+    check('the shelf was never fetched for the fallback', world.introFetches.length === 0,
+      world.introFetches.join(','));
+    check('the banked intro audio never played',
+      !audio.log.some(e => typeof e.src === 'string' && e.src.includes('neighborhood_intro.wav')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    tour.endTour();
+  }
+
+  suite('W-07 opening welcome: live fails outright → shelf intro serves');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: ['University City'] });
+    world.genStoryBehavior = () => {
+      throw new Error('story quota tripped');
+    };
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    const played = welcomePlayed(world, 'welcome:university city');
+    check('exactly one welcome committed', played.length === 1, `n=${played.length}`);
+    check('the committed welcome is the stored intro', played[0]?.payload.source === 'library',
+      JSON.stringify(played[0]?.payload));
+    check('the shelf was consulted exactly once, for the fallback',
+      world.introFetches.join(',') === 'University City', world.introFetches.join(','));
+    check('the live attempt was made first', welcomePromptsFor(world, 'University City').length === 1,
+      `prompts=${welcomePromptsFor(world, 'University City').length}`);
+    tour.endTour();
+  }
+
+  suite('W-08 opening welcome: live fails + no shelf row → owed/cooldown behavior preserved');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: [] });
+    world.genStoryBehavior = () => {
+      throw new Error('story quota tripped');
+    };
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    check('no welcome committed when neither live nor shelf can serve',
+      welcomePlayed(world, 'welcome:university city').length === 0,
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    check('the fallback still consulted the shelf before giving up',
+      world.introFetches.join(',') === 'University City', world.introFetches.join(','));
+    check('the opening live attempt was made', welcomePromptsFor(world, 'University City').length === 1,
+      `prompts=${welcomePromptsFor(world, 'University City').length}`);
+    await world.clock.advance(200_000); // cross the 180 s owed cooldown
+    check('the owed welcome retried after its cooldown (owed behavior intact)',
+      welcomePromptsFor(world, 'University City').length >= 2,
+      `prompts=${welcomePromptsFor(world, 'University City').length}`);
+    check('still no welcome while live stays down',
+      welcomePlayed(world, 'welcome:university city').length === 0);
     check('the tour itself is unharmed', tour.view().phase === 'active', tour.view().phase);
     tour.endTour();
   }
