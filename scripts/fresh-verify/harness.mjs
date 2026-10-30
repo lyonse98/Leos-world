@@ -222,6 +222,16 @@ export function makeCandidate(name, opts = {}) {
 
 const placeKeyOf = name => name.toLowerCase().trim();
 
+// A's library-identity normalization (backend.normalizePlaceKey):
+// the dialect shelf rows were written in — the fetchIntroRow fake
+// normalizes the raw area name with it, exactly like production.
+const normalizeKeyA = name =>
+  name
+    .trim()
+    .toLowerCase()
+    .replace(/[.'’]/g, '')
+    .replace(/\s+/g, ' ');
+
 /**
  * A "world": fake seams + fixtures + factories bound to one clock.
  * Options: candidates, library (names), fillers (titles), behaviors.
@@ -242,6 +252,8 @@ export function makeWorld(Tour, opts = {}) {
     ttsQuota: false,
     storyQuota: false,
     cache: new Map(), // audio cache: key -> Blob
+    introFetches: [], // area names the tour asked the shelf for an intro
+    genStoryPrompts: [], // every generateStory prompt, in order
     heard: [],
     likes: [],
     cachedStories: [],
@@ -266,6 +278,26 @@ export function makeWorld(Tour, opts = {}) {
       lng,
     });
   }
+  // Banked neighborhood intros: rows keyed (A-normalized name,
+  // 'neighborhood_intro') — the fixture speaks the writer's dialect.
+  const introRows = new Map();
+  for (const entry of opts.intros ?? []) {
+    const name = typeof entry === 'string' ? entry : entry.name;
+    const key = normalizeKeyA(name);
+    introRows.set(key, {
+      place_key: key,
+      place_name: name,
+      angle: 'neighborhood_intro',
+      story_text: `The banked intro to ${name}, its streets and its story. `.repeat(30),
+      audio_path:
+        typeof entry === 'string'
+          ? `library/${key.replace(/\s+/g, '-')}/neighborhood_intro.wav`
+          : (entry.audioPath ?? `library/${key.replace(/\s+/g, '-')}/neighborhood_intro.wav`),
+      lat: 32.853,
+      lng: -117.18,
+    });
+  }
+
   const fillerRows = (opts.fillers ?? []).map(title => ({
     place_key: placeKeyOf(title),
     place_name: title,
@@ -279,13 +311,17 @@ export function makeWorld(Tour, opts = {}) {
   const seams = {
     fetchLibraryIndex: async () => libraryIndex,
     fetchLibraryRow: async (key, angle) => libraryRows.get(`${key}|${angle}`) ?? null,
+    fetchIntroRow: async areaName => {
+      world.introFetches.push(areaName);
+      return introRows.get(normalizeKeyA(areaName)) ?? null;
+    },
     fetchFillerRows: async () => fillerRows,
     findCachedStory: async () => null,
     putCachedStory: async rec => {
       world.cachedStories.push(rec);
     },
     fetchHeardTopics: async () => [],
-    recordHeard: async (_session, topic) => {
+    recordHeard: async (_session, _userKey, topic) => {
       world.heard.push(topic);
     },
     recordLike: async (_session, topic) => {
@@ -310,6 +346,7 @@ export function makeWorld(Tour, opts = {}) {
       return new Blob([`speech:${text.length}`]);
     },
     generateStory: async prompt => {
+      world.genStoryPrompts.push(prompt);
       if (world.genStoryBehavior) return world.genStoryBehavior(prompt);
       world.storyTextSeq += 1;
       return `A generated story number ${world.storyTextSeq} about the road ahead, told with care and local color. `.repeat(3);

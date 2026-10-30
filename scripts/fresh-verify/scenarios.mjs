@@ -1345,4 +1345,131 @@ export async function runScenarios(Tour, extras) {
       commits() === 2, `commits=${commits()}`);
     tour.endTour();
   }
+
+  // ---------------------------------------------------------- W: mid-tour shelf welcomes (Erik, Oct 30)
+  // The owed (area-entry) WELCOME serves the banked neighborhood
+  // intro when the shelf holds one; live generation is the fallback.
+  // The OPENING welcome stays live, always.
+
+  const welcomePromptsFor = (world, name) =>
+    world.genStoryPrompts.filter(p => p.includes('NEIGHBORHOOD WELCOME') && p.includes(name));
+  const welcomePlayed = (world, subject) =>
+    world.eventsOf('story_played').filter(e => e.payload.subject === subject);
+
+  suite('W-01 mid-tour welcome: shelf intro serves, zero welcome generation');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: ['Clairemont'] });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    check('the shelf was asked for the entered area', world.introFetches.join(',') === 'Clairemont',
+      world.introFetches.join(','));
+    const played = welcomePlayed(world, 'welcome:clairemont');
+    check('welcome committed exactly once', played.length === 1, `n=${played.length}`);
+    check('welcome source is the library', played[0]?.payload.source === 'library',
+      JSON.stringify(played[0]?.payload));
+    check('welcome angle is neighborhood_intro', played[0]?.payload.angle === 'neighborhood_intro',
+      JSON.stringify(played[0]?.payload));
+    check('the banked intro audio is what played',
+      audio.log.some(e => typeof e.src === 'string' && e.src.endsWith('library/clairemont/neighborhood_intro.wav')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    check('zero generation calls for the mid-tour welcome', welcomePromptsFor(world, 'Clairemont').length === 0,
+      `prompts=${welcomePromptsFor(world, 'Clairemont').length}`);
+    check('the only welcome generation all tour was the opening',
+      world.genStoryPrompts.filter(p => p.includes('NEIGHBORHOOD WELCOME')).length === 1);
+    check('welcome sounded to completion in the terminal pair',
+      world.eventsOf('story_playback').some(e => e.payload.subject === 'welcome:clairemont' && e.payload.sounded === true));
+    check('heard ledger filed the welcome like a live one', world.heard.includes('Welcome to Clairemont'),
+      world.heard.join(' | '));
+    tour.endTour();
+  }
+
+  suite('W-02 mid-tour welcome: no shelf row → live generation fallback');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: [] });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    check('the shelf was asked first', world.introFetches.join(',') === 'Clairemont',
+      world.introFetches.join(','));
+    check('live welcome generated for the uncovered area', welcomePromptsFor(world, 'Clairemont').length === 1,
+      `prompts=${welcomePromptsFor(world, 'Clairemont').length}`);
+    const played = welcomePlayed(world, 'welcome:clairemont');
+    check('welcome committed once, sourced live', played.length === 1 && played[0]?.payload.source === 'live',
+      JSON.stringify(played.map(e => e.payload)));
+    tour.endTour();
+  }
+
+  suite('W-03 opening welcome: stays live even when the shelf holds the start area');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: ['University City'] });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    check('the opening welcome was generated', welcomePromptsFor(world, 'University City').length === 1,
+      `prompts=${welcomePromptsFor(world, 'University City').length}`);
+    const played = welcomePlayed(world, 'welcome:university city');
+    check('opening welcome committed once, sourced live',
+      played.length === 1 && played[0]?.payload.source === 'live', JSON.stringify(played.map(e => e.payload)));
+    check('the shelf was never consulted for the opening', world.introFetches.length === 0,
+      world.introFetches.join(','));
+    check('the banked intro audio never played',
+      !audio.log.some(e => typeof e.src === 'string' && e.src.includes('neighborhood_intro.wav')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    tour.endTour();
+  }
+
+  suite('W-04a heard/welcomed discipline: re-entering a welcomed area serves nothing');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: ['Clairemont', 'Linda Vista'] });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    world.area = { neighborhood: 'Linda Vista', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.008, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    check('Clairemont welcomed exactly once across two entries',
+      welcomePlayed(world, 'welcome:clairemont').length === 1,
+      `n=${welcomePlayed(world, 'welcome:clairemont').length}`);
+    check('the shelf was asked for Clairemont exactly once',
+      world.introFetches.filter(n => n === 'Clairemont').length === 1, world.introFetches.join(','));
+    check('no live welcome was generated for Clairemont either',
+      welcomePromptsFor(world, 'Clairemont').length === 0);
+    tour.endTour();
+  }
+
+  suite('W-04b heard discipline: a cross-day-heard area gets no welcome of either kind');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: ['Clairemont'] });
+    // As recorded on a previous day: a telling labeled with the
+    // area's own name — the P4 ledger keys it 'clairemont'.
+    world.seams.fetchHeardTopics = async () => ['Clairemont'];
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    check('no shelf welcome committed for the heard area',
+      welcomePlayed(world, 'welcome:clairemont').length === 0,
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    check('no live welcome generated for the heard area',
+      welcomePromptsFor(world, 'Clairemont').length === 0);
+    check('the block lands before the shelf is even asked',
+      !world.introFetches.includes('Clairemont'), world.introFetches.join(','));
+    check('the tour itself is unharmed', tour.view().phase === 'active', tour.view().phase);
+    tour.endTour();
+  }
 }

@@ -65,6 +65,7 @@ export type ModeName = 'walking' | 'driving' | 'highway' | 'rural';
 export interface NetSeams {
   fetchLibraryIndex: typeof backend.fetchLibraryIndex;
   fetchLibraryRow: typeof backend.fetchLibraryRow;
+  fetchIntroRow: typeof backend.fetchIntroRow;
   fetchFillerRows: typeof backend.fetchFillerRows;
   findCachedStory: typeof backend.findCachedStory;
   putCachedStory: typeof backend.putCachedStory;
@@ -91,6 +92,7 @@ export interface NetSeams {
 const realSeams: NetSeams = {
   fetchLibraryIndex: backend.fetchLibraryIndex,
   fetchLibraryRow: backend.fetchLibraryRow,
+  fetchIntroRow: backend.fetchIntroRow,
   fetchFillerRows: backend.fetchFillerRows,
   findCachedStory: backend.findCachedStory,
   putCachedStory: backend.putCachedStory,
@@ -937,6 +939,46 @@ export class Tour {
     }
   }
 
+  /**
+   * The banked neighborhood intro as the owed (mid-tour) WELCOME
+   * (Erik, Oct 30): an area entry serves the shelf's pre-rendered
+   * intro row — the same row A's serve looks up — instead of
+   * generating live, so a mid-tour welcome survives any live outage
+   * (quota cap, dead zone, timeout storm). The item carries the
+   * welcome subject and the reserved slot, so all welcome
+   * bookkeeping (O15 re-arm, the welcomed ledger, the P3 thread
+   * exclusion, first-serve classification) treats it exactly as a
+   * generated welcome; only its provenance differs, filed honestly
+   * in the §8 vocabulary (source 'library', angle
+   * 'neighborhood_intro'). Null when the shelf holds no intro for
+   * the area, the row carries no audio, or the read fails — the
+   * caller then falls back to live generation, unchanged. The
+   * OPENING welcome never comes here: it stays live by Erik's
+   * ruling (the first hello is generated, fresh, every tour).
+   */
+  private async shelfIntroItem(name: string): Promise<AudibleItem | null> {
+    const row = await this.seams.fetchIntroRow(name);
+    if (!row || !row.audio_path) return null;
+    const item = this.makeItem({
+      kind: 'story',
+      label: `Welcome to ${name}`,
+      source: { kind: 'url', url: this.seams.bucketUrl(row.audio_path) },
+      durationSec: estimateSpeechDurationS(row.story_text),
+      onSettle: rec => this.onStorySettle(item, rec),
+      story: {
+        subject: `welcome:${name.toLowerCase()}`,
+        angleOf: 'neighborhood_intro',
+        storySource: 'library',
+        anchor: { lat: row.lat, lng: row.lng },
+        regionAnchored: true,
+        generatedAt: this.clock.now(),
+        text: row.story_text,
+        reserved: true,
+      },
+    });
+    return item;
+  }
+
   private async trackNeighborhood(pos: Position): Promise<void> {
     if (
       this.areaResolvedAt &&
@@ -967,9 +1009,24 @@ export class Tour {
     if (!this.owedWelcome || this.welcomeServing || this.welcomeOffered || !this.position) return;
     if (this.clock.now() < this.owedWelcome.retryAt) return;
     const { name } = this.owedWelcome;
+    // Heard discipline (Erik, Oct 30): an area whose subject the
+    // P4 cross-day ledger (or an in-tour telling) already covers
+    // gets NO welcome of either kind — not the banked intro, and
+    // not a live generation in its place. The area is treated as
+    // welcomed and the owed record discharged; silence is correct.
+    if (this.subjectBlocked(backend.placeKeyOf(name), null)) {
+      this.welcomed.add(name.toLowerCase());
+      this.owedWelcome = null;
+      return;
+    }
     this.welcomeServing = true;
     try {
-      const item = await this.generateWelcome(name, this.position);
+      // Shelf-first (Erik, Oct 30): the banked intro serves when
+      // the shelf holds one; live generation is the fallback for
+      // areas the shelf doesn't cover, with its O15 owed/cooldown
+      // semantics unchanged.
+      const item =
+        (await this.shelfIntroItem(name)) ?? (await this.generateWelcome(name, this.position));
       if (this.phase !== 'active') return;
       if (!item) {
         // O15: an unheard failed WELCOME remains owed, on a cooldown.

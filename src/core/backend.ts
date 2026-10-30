@@ -133,6 +133,23 @@ export function placeKeyOf(name: string): string {
 }
 
 /**
+ * The library-identity normalization the shelf's rows were WRITTEN
+ * with (A's normalizePlaceKey, shared verbatim with the library
+ * builder): trimmed, lowercase, periods/apostrophes removed,
+ * whitespace collapsed — "U.S. Grant Hotel" and "US Grant Hotel"
+ * are the same place there. Distinct from placeKeyOf (the shell's
+ * §8A subject rule): a row lookup must speak the writer's dialect
+ * or a punctuated name silently misses its row.
+ */
+export function normalizePlaceKey(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[.'’]/g, '')
+    .replace(/\s+/g, ' ');
+}
+
+/**
  * The library index (no story text): one light fetch makes library
  * lookup local for the whole tour — spec S4/S5 place-first serving
  * without a network round-trip per serve. Cached to
@@ -161,6 +178,17 @@ export async function fetchLibraryRow(placeKey: string, angle: string): Promise<
     .maybeSingle();
   if (error || !data) return null;
   return data as LibraryRow;
+}
+
+/**
+ * The banked neighborhood intro for an area: the story_library row
+ * keyed (normalizePlaceKey(areaName), 'neighborhood_intro') — the
+ * same lookup A's serve performs for mid-tour area entries. Null
+ * when the shelf holds no intro for the area (or the read fails);
+ * the caller falls back to live generation.
+ */
+export async function fetchIntroRow(areaName: string): Promise<LibraryRow | null> {
+  return fetchLibraryRow(normalizePlaceKey(areaName), 'neighborhood_intro');
 }
 
 /** The filler pool: story_library rows with angle = 'filler' (§8A). */
