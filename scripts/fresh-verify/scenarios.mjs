@@ -1280,4 +1280,69 @@ export async function runScenarios(Tour, extras) {
       thirdPrompt ? thirdPrompt.slice(thirdPrompt.indexOf('TOUR THREAD'), thirdPrompt.indexOf('TOUR THREAD') + 400) : 'none');
     tour.endTour();
   }
+
+  // ---------------------------------------------------------- P4 cross-day heard-topics
+  suite('P4 cross-day heard ledger: yesterday\u2019s stories do not re-serve today');
+  {
+    resetLocalStorage();
+    let seamKey = null;
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park'), makeCandidate('Cabrillo Point')],
+      library: ['Balboa Park', 'Cabrillo Point'],
+    });
+    world.seams.fetchHeardTopics = async userKey => {
+      seamKey = userKey;
+      return [' balboa PARK ']; // as recorded: a display name, messy case/space
+    };
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    // Welcome + Cabrillo deliver; Balboa must never even commit.
+    for (let i = 0; i < 30 && !world.eventsOf('story_playback').some(e => e.payload.subject === 'cabrillo point'); i++) {
+      await world.clock.advance(5_000);
+    }
+    check('the seam was called with the device key', typeof seamKey === 'string' && seamKey.startsWith('leo-'),
+      `key=${seamKey}`);
+    check('the cross-day-heard subject never committed',
+      !world.eventsOf('story_played').some(e => e.payload.subject === 'balboa park'),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    check('the unheard subject served normally',
+      world.eventsOf('story_playback').some(e => e.payload.subject === 'cabrillo point'));
+    tour.endTour();
+
+    // Control: an empty ledger changes nothing.
+    resetLocalStorage();
+    const control = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park')],
+      library: ['Balboa Park'],
+    });
+    const controlAudio = new FakeAudio(control.clock, okPolicy());
+    const controlTour = await startAt(control, controlAudio, UTC);
+    await control.clock.advance(60_000);
+    check('control: with an empty ledger the same subject serves',
+      control.eventsOf('story_played').some(e => e.payload.subject === 'balboa park'),
+      JSON.stringify(control.eventsOf('story_played').map(e => e.payload.subject)));
+    controlTour.endTour();
+  }
+
+  suite('P4 guard: the in-tour Tier-1 retell (Q14) survives the heard filter');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Grand Place', { tier1: true })],
+      library: [],
+    });
+    // Starve prefetch so both tellings generate live at serve time.
+    world.seams.discoverCandidates = async pt =>
+      Math.abs(pt.lat - UTC.lat) < 0.0001 && Math.abs(pt.lng - UTC.lng) < 0.0001
+        ? world.candidates
+        : [];
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    const commits = () =>
+      world.eventsOf('story_played').filter(e => e.payload.subject === 'grand place').length;
+    for (let i = 0; i < 40 && commits() < 2; i++) await world.clock.advance(5_000);
+    check('Tier-1 place told, then retold once in-tour (Q14 intact)',
+      commits() === 2, `commits=${commits()}`);
+    tour.endTour();
+  }
 }

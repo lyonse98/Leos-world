@@ -284,6 +284,16 @@ export class Tour {
    * construction: entries are appended at sounded settles.
    */
   private thread: ThreadEntry[] = [];
+  /**
+   * The cross-day heard ledger (P4 salvage): place keys of every
+   * topic this device has been told on previous days, hydrated at
+   * tour start from the backend's heard_stories via the (previously
+   * dead) fetchHeardTopics seam, and merged with this tour's own
+   * delivered subjects as they settle. Erik ruled this salvage of
+   * A's existing heard-topics filter, NOT the shelved v15
+   * selection-engine memory (no pacing, no sequencing — a filter).
+   */
+  private heardTopics = new Set<string>();
 
   // Settle/lateness stamps (P1 salvage): commit-time context and
   // sound-start truth per story item, joined at settle to file A's
@@ -597,6 +607,10 @@ export class Tour {
     const index = await this.seams.fetchLibraryIndex();
     this.libraryIndex = index;
     void resume;
+    // The cross-day heard ledger hydrates in parallel (P4): serve
+    // cycles before it lands are governed by in-tour memory alone,
+    // exactly as a tour behaved before the seam was wired.
+    void this.loadHeardTopics();
     // The WELCOME warms from the tap (O7).
     void this.serveOpeningWelcome();
     // The filler pool loads and pins in the background (F4).
@@ -636,6 +650,26 @@ export class Tour {
   /** The warmed blob URL for a stored clip, or its bucket URL. */
   private clipSourceUrl(path: string): string {
     return this.clipUrls.get(path) ?? this.seams.bucketUrl(path);
+  }
+
+  /**
+   * Hydrate the cross-day heard ledger (P4): the backend returns
+   * heard topics as recorded — display names (recordHeard files the
+   * item label) — normalized here with the shell's own §8A place-key
+   * rule, the same normalization serve candidates are keyed by, so
+   * 'Balboa Park' told last Tuesday keys identically to today's
+   * candidate. A failed fetch degrades to in-tour memory only.
+   */
+  private async loadHeardTopics(): Promise<void> {
+    try {
+      const topics = await this.seams.fetchHeardTopics(this.userKey);
+      for (const topic of topics) {
+        const key = backend.placeKeyOf(topic);
+        if (key) this.heardTopics.add(key);
+      }
+    } catch {
+      /* the ledger is a filter, not a dependency — the tour runs without it */
+    }
   }
 
   private pickGreeting(resume: boolean) {
@@ -1406,6 +1440,15 @@ export class Tour {
 
   private subjectBlocked(subject: string, candidate: facts.Candidate | null): boolean {
     if (this.inflight.has(subject)) return true;
+    // P4 (cross-day heard ledger): a subject this device heard on a
+    // previous day is blocked for ordinary serves — subject-level,
+    // like A's hasHeardSubject. This is the no-repeat discipline a
+    // local commuter feels: yesterday's stories do not re-serve
+    // today. The guard (nothing told THIS tour) keeps the in-tour
+    // Tier-1 retell exception below reachable: subjects settle into
+    // the heard set as they deliver, but a subject with an in-tour
+    // telling is judged by the in-tour rules, not the cross-day one.
+    if (this.heardTopics.has(subject) && (this.toldCount.get(subject) ?? 0) === 0) return true;
     // Q12: queueing commits a subject temporarily; an unheard
     // settle RELEASES it (the corridor Q11 consumption is the one
     // exception, tracked in corridorConsumed). A subject that
@@ -1650,6 +1693,10 @@ export class Tour {
       this.sampleLatency(this.durationSamples, rec.soundedMs / 1000);
       const told = (this.toldCount.get(subject) ?? 0) + 1;
       this.toldCount.set(subject, told);
+      // P4: a delivered subject joins the heard set immediately —
+      // the same set tomorrow's hydration rebuilds from the
+      // backend's record (recordHeard, below) of this very telling.
+      if (subject) this.heardTopics.add(subject);
       if ((item.tier1 ?? false) && told >= 2) this.retellUsed.add(subject);
       if (item.storySource === 'library' && item.angleOf) {
         const set = this.dealtAngles.get(subject) ?? new Set<string>();
