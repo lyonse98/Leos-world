@@ -37,7 +37,7 @@ export interface AudioPort {
   setErrorHandler(cb: (() => void) | null): void;
 }
 
-export type ItemKind = 'greeting' | 'opener' | 'story' | 'answer' | 'bridge' | 'filler';
+export type ItemKind = 'greeting' | 'opener' | 'story' | 'answer' | 'bridge' | 'filler' | 'commentary';
 
 export type AudioSource =
   | { kind: 'url'; url: string }
@@ -563,6 +563,19 @@ export class Player {
     });
     this.soundStartAt = null;
     this.afterSettle();
+  }
+
+  /**
+   * Colour commentary yields to a committed story (B·Miles lane,
+   * Oct 29, 2026): if the current item is commentary, cut it now via
+   * the skip mechanics so the story takes the element with no delay.
+   * Commentary is the only cuttable kind — stories, fillers and
+   * promised lines are never cut. Returns whether a cut happened.
+   */
+  preemptCommentary(): boolean {
+    if (!this.current || this.current.kind !== 'commentary') return false;
+    this.skipCurrent();
+    return true;
   }
 
   seekBy(sec: number): void {

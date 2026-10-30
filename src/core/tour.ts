@@ -30,6 +30,12 @@ import {
   type OpenerClip,
 } from '../content/clips';
 import {
+  COMMENTARY_CLIPS,
+  COMMENTARY_ENABLED,
+  COMMENTARY_MIN_GAP_MS,
+  type CommentaryTod,
+} from '../content/commentary';
+import {
   CORRIDOR_SEGMENTS,
   matchCorridor,
   type CorridorSegment,
@@ -249,6 +255,15 @@ export class Tour {
   private fillerOrder: FillerEntry[] = [];
   private fillerSpent = new Set<string>();
   private fillerReady = false;
+  // Colour commentary lane (B·Miles only, Oct 29, 2026): pre-rendered
+  // bank, conservative caps, yields instantly to any committed story.
+  private commentarySpent = new Set<string>();
+  private commentaryReady = false;
+  private commentaryStoodDown = false; // bucket kill-switch (config.json)
+  private commentaryItem: AudibleItem | null = null;
+  private lastCommentaryAt = Number.NEGATIVE_INFINITY;
+  private firstStoryCompletedAt: number | null = null;
+  private lastStoryCompletedAt = 0;
   private silenceMs = 0;
   private lastTickAt = 0;
   private chainCount = 0;
@@ -457,6 +472,8 @@ export class Tour {
     void this.serveOpeningWelcome();
     // The filler pool loads and pins in the background (F4).
     void this.loadFillerPool();
+    // The commentary bank loads, pins, and checks its kill-switch.
+    void this.loadCommentary();
     // Landing-warmed prefetch continues in-tour (S9/S10).
     void this.prefetchTick();
   }
@@ -1214,6 +1231,8 @@ export class Tour {
           : null,
       queue_depth: (this.player.current ? 1 : 0) + (this.player.waitingStory ? 1 : 0),
     });
+    // A committed story never waits on commentary.
+    this.yieldCommentary();
     this.notify();
   }
 
@@ -1282,6 +1301,17 @@ export class Tour {
     }
     this.synthFailStreak = 0;
     this.stormTrips = 0;
+    if (rec.completed) {
+      // Commentary gate: the lane may only speak after the first
+      // LANDMARK story has completed (the welcome: and area:
+      // stories are the opener sequence, not landmarks), and keeps
+      // a breath after every story.
+      const now = this.clock.now();
+      if (!subject.startsWith('welcome:') && !subject.startsWith('area:')) {
+        if (this.firstStoryCompletedAt === null) this.firstStoryCompletedAt = now;
+        this.lastStoryCompletedAt = now;
+      }
+    }
     this.emit('story_playback', {
       sounded: rec.sounded,
       completed: rec.completed,
@@ -1672,6 +1702,7 @@ export class Tour {
     const elapsed = now - this.lastTickAt;
     this.lastTickAt = now;
     this.fillerTick(elapsed);
+    this.commentaryTick();
     // Owed-WELCOME retry after its cooldown (O15).
     if (this.owedWelcome && now >= this.owedWelcome.retryAt && !this.welcomeServing) {
       void this.serveOwedWelcome();
@@ -1848,12 +1879,162 @@ export class Tour {
     }
   }
 
+  /** Cut a playing commentary clip / withdraw a queued one. The
+   *  lane always yields — to stories, and to questions. */
+  private yieldCommentary(): void {
+    if (!this.commentaryItem || this.commentaryItem.settled) return;
+    if (this.player.current === this.commentaryItem) {
+      this.player.preemptCommentary();
+    } else if (this.player.promised.includes(this.commentaryItem)) {
+      this.commentaryItem.silent = true;
+      this.player.abandon(this.commentaryItem);
+    }
+  }
+
+  // -------------------------------------------------- commentary lane
+
+  /**
+   * Load the commentary bank: check the bucket kill-switch
+   * (the PRESENCE of miles/commentary/disabled.json stands the
+   * lane down with NO republish; any fetch failure leaves the lane
+   * at its code-flag default), then pin every clip on-device like
+   * the filler pool. Any failure leaves the lane dark and the tour
+   * untouched.
+   */
+  private async loadCommentary(): Promise<void> {
+    if (!COMMENTARY_ENABLED) return;
+    // The kill-switch check resolves independently of the pins: the
+    // tick consults the stood-down flag on every pass, and the
+    // lane's first possible fire needs a completed story plus a
+    // gap, so a slow config answer still lands in time — while a
+    // slow network can never leave the lane dark for a whole tour
+    // when the code flag says enabled.
+    void this.checkCommentaryKillSwitch();
+    try {
+      await Promise.all(COMMENTARY_CLIPS.map(c => this.seams.pinBucketAudio(c.path)));
+      this.commentaryReady = true;
+    } catch {
+      /* pins failed — lane stays dark this tour */
+    }
+  }
+
+  private async checkCommentaryKillSwitch(): Promise<void> {
+    try {
+      // Kill-switch v2 (Oct 29): the bucket's RLS lets the app create
+      // objects but not update them, so the flip is the PRESENCE of
+      // disabled.json (one POST kills the lane at the next tour
+      // start; reviving is a console/code action). config.json's
+      // enabled:false is honored too, for whoever can write it.
+      const dis = await fetch(this.seams.bucketUrl('miles/commentary/disabled.json'), {
+        cache: 'no-store',
+      });
+      if (dis.ok) {
+        this.commentaryStoodDown = true;
+        return;
+      }
+      const res = await fetch(this.seams.bucketUrl('miles/commentary/config.json'), {
+        cache: 'no-store',
+      });
+      if (res.ok) {
+        const cfg = (await res.json()) as { enabled?: boolean };
+        if (cfg && cfg.enabled === false) this.commentaryStoodDown = true;
+      }
+    } catch {
+      /* kill-switch unreachable — code flag governs */
+    }
+  }
+
+  /**
+   * The commentary decision, on the 1 s tick. Conservative by
+   * design: the lane speaks only into a genuinely empty player,
+   * only after the first story has completed, at most once per
+   * COMMENTARY_MIN_GAP_MS, and never across Q&A or a pause. A story
+   * committing at any moment cuts or withdraws the clip
+   * (onStoryCommitted), so commentary can never delay a story.
+   */
+  private commentaryTick(): void {
+    if (!COMMENTARY_ENABLED || !this.commentaryReady || this.commentaryStoodDown) return;
+    if (this.phase !== 'active') return;
+    if (this.opening !== 'open' && this.opening !== 'failed') return;
+    if (this.firstStoryCompletedAt === null) return;
+    const now = this.clock.now();
+    if (now - this.lastCommentaryAt < COMMENTARY_MIN_GAP_MS) return;
+    if (now - this.lastStoryCompletedAt < 3_000) return;
+    if (this.commentaryItem && !this.commentaryItem.settled) return;
+    if (this.qaPhase !== 'idle' || this.userPausedFlag || this.interruptedFlag) return;
+    if (this.player.latch !== 'earned') return;
+    const snap = this.player.snapshot();
+    if (snap.currentLabel !== null || snap.promisedCount > 0 || this.player.waitingStory) return;
+    void this.fireCommentary();
+  }
+
+  private async fireCommentary(): Promise<void> {
+    if (this.commentaryItem && !this.commentaryItem.settled) return;
+    const region: FillerRegion | null = this.position
+      ? resolveFillerRegion(this.position.lat, this.position.lng)
+      : null;
+    const hour = new Date(this.clock.now()).getHours();
+    const tod: CommentaryTod =
+      hour >= 5 && hour < 11 ? 'morning' : hour >= 11 && hour < 17 ? 'afternoon' : hour >= 17 && hour < 21 ? 'evening' : 'night';
+    const unspent = COMMENTARY_CLIPS.filter(c => !this.commentarySpent.has(c.id));
+    if (unspent.length === 0) return;
+    // Prefer clips matching this region / this hour; general clips
+    // are the standing fallback; mismatched tagged clips sit last.
+    const score = (c: (typeof COMMENTARY_CLIPS)[number]): number =>
+      (c.region ? (region && c.region === region ? 2 : 0) : 1) +
+      (c.tod ? (c.tod === tod ? 2 : 0) : 1);
+    const best = Math.max(...unspent.map(score));
+    const pool = unspent.filter(c => score(c) === best);
+    const clip = pool[Math.floor(Math.random() * pool.length)];
+    const pinned = await this.seams.audioCacheHas(clip.path);
+    if (!pinned) return;
+    // Re-validate after the await (the filler lane's discipline):
+    // the gap the decision saw must still be there.
+    if (this.phase !== 'active') return;
+    if (this.player.waitingStory || this.player.current) return;
+    if (this.commentaryItem && !this.commentaryItem.settled) return;
+    this.lastCommentaryAt = this.clock.now();
+    const item = this.makeItem({
+      kind: 'commentary',
+      label: `Miles — commentary ${clip.id}`,
+      source: { kind: 'url', url: this.seams.bucketUrl(clip.path) },
+      durationSec: clip.durationSec,
+      onSettle: rec => {
+        if (this.commentaryItem === item) this.commentaryItem = null;
+        if (rec.sounded) {
+          this.commentarySpent.add(clip.id);
+          if (rec.completed) {
+            this.emit('commentary_played', {
+              clip_id: clip.id,
+              kind: 'commentary',
+              region,
+              tod,
+              sounded_ms: Math.round(rec.soundedMs),
+            });
+          } else if (rec.skipped) {
+            this.emit('commentary_cut', {
+              clip_id: clip.id,
+              kind: 'commentary',
+              sounded_ms: Math.round(rec.soundedMs),
+            });
+          }
+        }
+        this.notify();
+      },
+    });
+    this.commentaryItem = item;
+    this.player.enqueuePromised(item);
+  }
+
   // ------------------------------------------------------------ Q&A (§6) — text input only
 
   /** Submit a typed question. Returns false when the lock is held (A2). */
   submitQuestion(raw: string): boolean {
     const question = raw.trim();
     if (!question || this.phase !== 'active' || this.qaPhase !== 'idle') return false;
+    // Commentary yields to Q&A too: a clip alive at submit dies now,
+    // so the answer pipeline owns the player outright (A2/A4).
+    this.yieldCommentary();
     this.qaPhase = 'generating';
     // A4: the failsafe runs from submission, before generation.
     this.qaFailsafe = this.clock.setTimeout(() => this.qaGenerationFailed(), QA_FAILSAFE_MS);

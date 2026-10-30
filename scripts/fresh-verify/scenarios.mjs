@@ -980,4 +980,96 @@ export async function runScenarios(Tour, extras) {
     check('pairs fire whole under slow cache checks (one bridge per filler)', bridgeEntrances >= 1 && Math.abs(bridgeEntrances - fillerEntrances) <= 1 && !doubledBridge, `bridges=${bridgeEntrances} fillers=${fillerEntrances} seq=${transitions.join('|')}`);
     tour.endTour();
   }
+
+  // ---------------------------------------------------------- C-01 commentary gate
+  suite('C-01 commentary gate: no completed story, no commentary');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], library: [] });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    await world.clock.advance(180_000);
+    check('no commentary_played without a completed story', world.eventsOf('commentary_played').length === 0);
+    check('no commentary_cut without a completed story', world.eventsOf('commentary_cut').length === 0);
+    tour.endTour();
+  }
+
+  // ---------------------------------------------------------- C-02/C-03 commentary fire, cap, cut
+  suite('C-02 commentary fires into a dry gap; cap holds; C-03 a committing story cuts it');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park')],
+      library: ['Balboa Park'],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    // Drive until the first story completes, then run the pipeline
+    // dry: no candidates, generation and synthesis both failing.
+    let completed = false;
+    for (let i = 0; i < 48 && !completed; i++) {
+      await world.clock.advance(5_000);
+      completed = world.eventsOf('story_playback').some(e => e.payload.completed === true);
+    }
+    check('C-02 precondition: a story completed', completed);
+    world.candidates = [];
+    world.genStoryBehavior = async () => { throw new Error('dry'); };
+    world.synthBehavior = async () => { throw new Error('dry'); };
+    // The lane speaks into the idle gap (fillers may interleave).
+    let firstFireAt = null;
+    for (let i = 0; i < 36 && firstFireAt === null; i++) {
+      await world.clock.advance(5_000);
+      const cp = world.eventsOf('commentary_played');
+      if (cp.length >= 1) firstFireAt = cp[0].at;
+      else if (tour.view().nowPlaying?.kind === 'commentary') {
+        // Playing but not yet settled; keep advancing to its settle.
+      }
+    }
+    if (firstFireAt === null) {
+      // A clip may still be mid-play at the window's end; settle it.
+      for (let i = 0; i < 6 && firstFireAt === null; i++) {
+        await world.clock.advance(5_000);
+        const cp = world.eventsOf('commentary_played');
+        if (cp.length >= 1) firstFireAt = cp[0].at;
+      }
+    }
+    check('C-02 commentary fired after the first story, into the dry gap', firstFireAt !== null,
+      `played=${world.eventsOf('commentary_played').length} cut=${world.eventsOf('commentary_cut').length}`);
+    // Cap: nothing more until ~4 minutes after the fire.
+    if (firstFireAt !== null) {
+      while (world.clock.now() < firstFireAt + 230_000) {
+        await world.clock.advance(10_000);
+      }
+      check('C-02 cap holds: still exactly one commentary_played inside 230s',
+        world.eventsOf('commentary_played').length === 1,
+        `count=${world.eventsOf('commentary_played').length}`);
+      // C-03: after the cap, wait for the next clip to be PLAYING,
+      // then land a fresh story commit on top of it.
+      let playing = false;
+      for (let i = 0; i < 60 && !playing; i++) {
+        await world.clock.advance(2_000);
+        playing = tour.view().nowPlaying?.kind === 'commentary';
+      }
+      check('C-03 precondition: a second clip is playing after the cap', playing);
+      if (playing) {
+        world.genStoryBehavior = null;
+        world.synthBehavior = null;
+        world.candidates = [makeCandidate('Cabrillo Point')];
+        tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+        for (let i = 0; i < 12; i++) {
+          await world.clock.advance(500);
+          if (world.eventsOf('commentary_cut').length >= 1) break;
+        }
+        check('C-03 the committing story cut the commentary (commentary_cut filed)',
+          world.eventsOf('commentary_cut').length >= 1,
+          `cuts=${world.eventsOf('commentary_cut').length} played=${world.eventsOf('commentary_played').length}`);
+        check('C-03 the cut clip did not file commentary_played',
+          world.eventsOf('commentary_played').length === 1);
+        check('C-03 the new story committed (story_played for the fresh subject)',
+          world.eventsOf('story_played').some(e => String(e.payload.subject ?? '').includes('cabrillo')),
+          JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+      }
+    }
+    tour.endTour();
+  }
 }
