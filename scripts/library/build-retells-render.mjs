@@ -60,7 +60,7 @@ for (const e of entries) {
     report.push(`FAIL ${e.place_name} / ${e.angle}: ${r?.error ?? 'no result'}`);
     continue;
   }
-  const wav = ensureWav(r.bytes, r.mimeType);
+  const wav = ensureWav(r.bytes, r.mimeType).bytes;
   writeFileSync(e.localFile, wav);
   const dur = wavDurationSec(wav);
   // upload under the fresh key (create-only; duplicate = already there)
