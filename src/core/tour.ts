@@ -130,7 +130,7 @@ export interface TourView {
   userPaused: boolean;
   qaLocked: boolean;
   qaPhase: 'idle' | 'generating' | 'answering' | 'awaiting-resume';
-  lastStory: { subject: string; text: string | null } | null;
+  lastStory: { subject: string; label: string; angle: string | null } | null;
   likedSubject: string | null;
   diagnostics: {
     storiesPlayed: number;
@@ -356,8 +356,15 @@ export class Tour {
       userPaused: this.userPausedFlag,
       qaLocked: this.qaPhase !== 'idle',
       qaPhase: this.qaPhase,
+      // The view deliberately carries NO story text (Erik, Oct 30,
+      // 2026): what Miles is speaking never renders on screen — the
+      // UI shows a minimal now-playing card (place name / one line).
       lastStory: this.lastStoryItem
-        ? { subject: this.lastStoryItem.subject ?? this.lastStoryItem.label, text: this.lastStoryItem.text ?? null }
+        ? {
+            subject: this.lastStoryItem.subject ?? this.lastStoryItem.label,
+            label: this.lastStoryItem.label,
+            angle: this.lastStoryItem.angleOf ?? null,
+          }
         : null,
       likedSubject: this.likedSubject,
       diagnostics: {

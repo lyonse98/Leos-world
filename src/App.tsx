@@ -317,9 +317,25 @@ export default function App() {
           <p className="mt-0.5 text-center text-xs text-slate-400">Up next: {view.upNext}</p>
         )}
 
-        {view.lastStory?.text && (
-          <div className="mt-3 max-h-44 w-full max-w-xl overflow-y-auto rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-            <p className="text-sm leading-relaxed text-slate-200">{view.lastStory.text}</p>
+        {view.lastStory && (
+          <div className="mt-3 w-full max-w-xl rounded-2xl border border-slate-800 bg-slate-900/60 px-4 py-3 text-center">
+            <p className="text-sm font-semibold text-slate-100">{view.lastStory.label}</p>
+            <p className="mt-0.5 text-xs text-slate-400">
+              {
+                {
+                  origin: 'How it began',
+                  people: 'The people behind it',
+                  cultural: 'The culture it carries',
+                  building: 'The building itself',
+                  sports: 'The game and the grounds',
+                  surroundings: 'The land around it',
+                  role: 'What it does for the city',
+                  corridor: 'A story of the road',
+                  filler: 'A San Diego story',
+                }[view.lastStory.angle ?? '']
+                ?? 'A San Diego story'
+              }
+            </p>
           </div>
         )}
 
