@@ -20,6 +20,32 @@ export class QuotaError extends Error {
   }
 }
 
+// ------------------------------------------------------------ telemetry sink (P1 salvage)
+//
+// Lane-level events in A's vocabulary — generation_attempt per API
+// attempt, quota_tripped at a breaker trip, question_timing per
+// answered question — file through the owning tour's analytics
+// emit. The lanes are module-level, so the tour registers its emit
+// here at construction (the newest tour owns the sink). A metric
+// must never break a lane: the sink call is wrapped and sinkless
+// operation (tests, landing) is silent.
+
+export type TelemetrySink = (type: string, payload: Record<string, unknown>) => void;
+
+let telemetrySink: TelemetrySink | null = null;
+
+export function setTelemetrySink(sink: TelemetrySink | null): void {
+  telemetrySink = sink;
+}
+
+function tele(type: string, payload: Record<string, unknown>): void {
+  try {
+    telemetrySink?.(type, payload);
+  } catch {
+    /* a metric must never break a lane */
+  }
+}
+
 const apiKey = (): string => (import.meta.env.VITE_GEMINI_API_KEY as string | undefined) ?? '';
 
 // ------------------------------------------------------------ quota breaker (E4/E5)
@@ -46,8 +72,19 @@ function tripQuota(lane: Lane, model: string): void {
   const key = breakerKey(lane, model);
   const state = breakers.get(key) ?? { trips: 0, until: 0 };
   state.trips += 1;
-  state.until = Date.now() + COOLDOWNS_MS[Math.min(state.trips - 1, COOLDOWNS_MS.length - 1)];
+  const cooldown = COOLDOWNS_MS[Math.min(state.trips - 1, COOLDOWNS_MS.length - 1)];
+  state.until = Date.now() + cooldown;
   breakers.set(key, state);
+  // P1 salvage: the trip is on the record in A's pipeline_diag
+  // vocabulary, so a quota wall is readable per-event, not inferred.
+  tele('quota_tripped', {
+    model,
+    source: lane,
+    lane,
+    stage: 'quota',
+    reason: 'tripped',
+    message: `${key} tripped (trip #${state.trips}) — quiet for ${Math.round(cooldown / 1000)}s`,
+  });
 }
 
 function isQuotaResponse(status: number, body: string): boolean {
@@ -123,7 +160,46 @@ async function fetchWithTimeout(
   }
 }
 
+/** Consecutive attempts per text lane since the last success (A's attempt index). */
+const attemptStreak = new Map<Lane, number>();
+
+/**
+ * One generation, on the record (P1 salvage): every attempt files
+ * generation_attempt with model / kind / attempt index / outcome —
+ * failures included, so a drive of timeouts no longer reads as a
+ * drive of slow successes. A breaker skip is not an attempt (A's
+ * rule): it throws before the attempt is filed.
+ */
 async function generateContent(
+  lane: Lane,
+  model: string,
+  systemInstruction: string,
+  userText: string,
+  maxOutputTokens?: number,
+  thinkingOff = false,
+): Promise<string> {
+  if (quotaTripped(lane, model)) throw new QuotaError(lane, model);
+  const attempts = (attemptStreak.get(lane) ?? 0) + 1;
+  const kind = lane === 'qa' ? 'answer' : 'story';
+  try {
+    const out = await generateContentAttempt(lane, model, systemInstruction, userText, maxOutputTokens, thinkingOff);
+    attemptStreak.set(lane, 0);
+    tele('generation_attempt', { model, kind, attempts, reason: 'ok' });
+    return out;
+  } catch (err) {
+    attemptStreak.set(lane, attempts);
+    const reason =
+      err instanceof QuotaError
+        ? 'quota'
+        : (err as { name?: string } | null)?.name === 'AbortError'
+          ? 'timeout'
+          : 'error';
+    tele('generation_attempt', { model, kind, attempts, reason });
+    throw err;
+  }
+}
+
+async function generateContentAttempt(
   lane: Lane,
   model: string,
   systemInstruction: string,
@@ -195,14 +271,27 @@ export function generatePrefetchText(userPrompt: string): Promise<string> {
  * different (lane, model) pair and is checked against its own breaker.
  */
 export async function generateAnswerText(userPrompt: string): Promise<string> {
+  // P1 salvage: the answer's latency and the model that actually
+  // produced it file as question_timing (A's Q&A instrumentation).
+  const startedAt = Date.now();
+  const emitTiming = (model: string) =>
+    tele('question_timing', {
+      fetchTextS: Math.round(((Date.now() - startedAt) / 1000) * 1000) / 1000,
+      model,
+      source: 'gemini',
+    });
   try {
-    return await laneEnqueue('qa', () =>
+    const text = await laneEnqueue('qa', () =>
       generateContent('qa', LEO_QA_MODEL_ID, LEO_SYSTEM_INSTRUCTION, userPrompt, 1024, true),
     );
+    emitTiming(LEO_QA_MODEL_ID);
+    return text;
   } catch {
-    return laneEnqueue('qa', () =>
+    const text = await laneEnqueue('qa', () =>
       generateContent('qa', LEO_MODEL_ID, LEO_SYSTEM_INSTRUCTION, userPrompt, 1024, true),
     );
+    emitTiming(LEO_MODEL_ID);
+    return text;
   }
 }
 

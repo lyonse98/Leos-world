@@ -84,6 +84,16 @@ export interface AudibleItem {
   segmentExit?: { lat: number; lng: number } | null;
   generatedAt?: number;
   text?: string | null;
+  // Engine-filled telemetry stamps (P1 salvage); the Player ignores them.
+  /** Live text-generation duration for this story, ms (null for shelf/cache serves). */
+  fetchMs?: number | null;
+  /** Synthesis duration when this item's audio was minted, ms. */
+  synthMs?: number | null;
+  /** True when this item's audio resolved from the on-device cache. */
+  audioCacheHit?: boolean | null;
+  // Opener clip identity (P1: the opener_clip settle record).
+  openerClipId?: string;
+  openerLengthClass?: string;
 }
 
 export type LatchState = 'unearned' | 'earned' | 'lost';
@@ -476,6 +486,16 @@ export class Player {
   }
 
   private noteBlocked(): void {
+    // P1 salvage: every platform refusal is countable in the record,
+    // in A's vocabulary (A's Oct 29 morning failure was diagnosed
+    // from audio_blocked counts; B filed nothing).
+    this.hooks.emit('audio_blocked', {
+      source: 'blocked',
+      kind: 'blocked',
+      stage: 'playback',
+      reason: 'blocked',
+      message: 'audio blocked by the platform (autoplay/permission)',
+    });
     const now = this.clock.now();
     this.blockedAt = [...this.blockedAt.filter(t => now - t <= BLOCKED_BURST_WINDOW_MS), now];
     if (this.latch === 'earned' && !this.lossDeclared && this.blockedAt.length >= 2) {
@@ -913,6 +933,18 @@ export class Player {
         return;
       }
       if (item.attempts >= this.hooks.attemptCap()) {
+        if (!blocked) {
+          // P1 salvage: a non-blocked playback failure that exhausts
+          // its economy files audio_blocked in A's 'error' kind (a
+          // blocked exhaustion already filed per refusal, above).
+          this.hooks.emit('audio_blocked', {
+            source: 'error',
+            kind: 'error',
+            stage: 'playback',
+            reason: 'error',
+            message: 'audio error (synthesis or playback failure)',
+          });
+        }
         this.current = null;
         this.audio.load(null);
         this.settleItem(item, {

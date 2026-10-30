@@ -1113,4 +1113,102 @@ export async function runScenarios(Tour, extras) {
     );
     tour.endTour();
   }
+
+  // ---------------------------------------------------------- P1 telemetry depth
+  suite('P1 telemetry: opener_clip, first_serve, settle geometry, story_timing, Q&A events, session_end');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park')],
+      library: ['Balboa Park'],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    await world.clock.advance(60_000); // greeting + opener + welcome + Balboa
+
+    const clips = world.eventsOf('opener_clip');
+    check('opener_clip filed for the primary opener', clips.length >= 1 && clips[0].payload.segment === 'primary',
+      JSON.stringify(clips.map(c => c.payload.segment)));
+    check('opener_clip carries clip identity + length class',
+      clips.length >= 1 && typeof clips[0].payload.opener_id === 'string' && clips[0].payload.opener_id.length > 0 &&
+      ['short', 'medium', 'long'].includes(clips[0].payload.length_class),
+      JSON.stringify(clips[0]?.payload ?? null));
+    check('opener_clip sounded truthfully', clips.length >= 1 && clips[0].payload.sounded === true);
+
+    const fs = world.eventsOf('first_serve');
+    check('first_serve filed exactly once, source=welcome', fs.length === 1 && fs[0].payload.source === 'welcome',
+      JSON.stringify(fs.map(e => e.payload)));
+
+    const playbacks = world.eventsOf('story_playback');
+    check('stories settled for the geometry checks', playbacks.length >= 2, `n=${playbacks.length}`);
+    const w = playbacks[0]?.payload ?? {};
+    check('story_playback carries attempts + engine', typeof w.attempts === 'number' && w.engine === 'gemini',
+      JSON.stringify(w));
+    check('story_playback carries queue wait + horizon', typeof w.time_in_queue_s === 'number' && typeof w.horizon_s === 'number',
+      JSON.stringify({ q: w.time_in_queue_s, h: w.horizon_s }));
+    check('story_playback carries told_late (welcome is region-anchored: false)', w.told_late === false,
+      JSON.stringify(w.told_late));
+
+    const timings = world.eventsOf('story_timing');
+    check('story_timing filed with fetchTextS for the live welcome',
+      timings.some(e => typeof e.payload.fetchTextS === 'number'),
+      JSON.stringify(timings.map(e => e.payload)));
+    check('story_timing carries synthS + cacheHit for a synthesized story',
+      timings.some(e => typeof e.payload.synthS === 'number' && e.payload.cacheHit === false),
+      JSON.stringify(timings.map(e => e.payload)));
+
+    const asked = tour.submitQuestion('What is this place?');
+    check('question accepted', asked === true);
+    await world.clock.advance(45_000);
+    const qa = world.eventsOf('question_asked');
+    check('question_asked filed with the QA model', qa.length === 1 && typeof qa[0].payload.model === 'string' && qa[0].payload.model.length > 0,
+      JSON.stringify(qa.map(e => e.payload)));
+    const qp = world.eventsOf('question_playback');
+    check('question_playback filed, completed', qp.length >= 1 && qp[0].payload.completed === true,
+      JSON.stringify(qp.map(e => e.payload)));
+
+    tour.endTour();
+    const se = world.eventsOf('session_end');
+    check('session_end filed once at tour end', se.length === 1 && se[0].payload.ms_from_tour_start > 0,
+      JSON.stringify(se.map(e => e.payload)));
+  }
+
+  suite('P1 audio_blocked is countable; generation failure files pipeline_diag');
+  {
+    resetLocalStorage();
+    const blockedWorld = makeWorld(Tour, { candidates: [] });
+    const blockedAudio = new FakeAudio(blockedWorld.clock, () => ({ action: 'reject', name: 'NotAllowedError' }));
+    const blockedTour = await startAt(blockedWorld, blockedAudio, UTC);
+    await blockedWorld.clock.advance(10_000);
+    const ab = blockedWorld.eventsOf('audio_blocked');
+    check('audio_blocked filed on platform refusal', ab.length >= 1 && ab[0].payload.kind === 'blocked',
+      `n=${ab.length}`);
+    blockedTour.endTour();
+
+    resetLocalStorage();
+    const failWorld = makeWorld(Tour, {
+      candidates: [makeCandidate('Fail Place')],
+      library: [],
+      genStoryBehavior: async prompt => {
+        if (prompt.includes('Fail Place')) throw new Error('boom');
+        return 'A story about the neighborhood, told well and at length for the listener. '.repeat(3);
+      },
+    });
+    // Starve the prefetch lane (its fake ignores genStoryBehavior and
+    // would buffer the failing candidate, hiding the live failure):
+    // discovery ahead of the car returns nothing, so the candidate
+    // can only be served by a live generation — which fails.
+    failWorld.seams.discoverCandidates = async pt =>
+      Math.abs(pt.lat - UTC.lat) > 0.001 || Math.abs(pt.lng - UTC.lng) > 0.001
+        ? []
+        : failWorld.candidates;
+    const failAudio = new FakeAudio(failWorld.clock, okPolicy());
+    const failTour = await startAt(failWorld, failAudio, UTC);
+    await failWorld.clock.advance(90_000);
+    const diags = failWorld.eventsOf('pipeline_diag');
+    check('pipeline_diag filed for the failed generation (stage=text)',
+      diags.some(e => e.payload.stage === 'text' && e.payload.reason === 'generation-failed'),
+      JSON.stringify(diags.map(e => e.payload)));
+    failTour.endTour();
+  }
 }

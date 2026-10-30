@@ -47,7 +47,7 @@ import {
   fillerMatchFor,
   type FillerRegion,
 } from '../data/fillerRegions';
-import { LEO_PERSONA_VERSION } from '../services/leoPersona';
+import { LEO_MODEL_ID, LEO_PERSONA_VERSION, LEO_QA_MODEL_ID } from '../services/leoPersona';
 import { calculateDistance, bearingDegrees, headingDelta, estimateSpeechDurationS } from '../utils/geo';
 import { hashString } from '../utils/hash';
 
@@ -154,6 +154,23 @@ export interface TourView {
   };
 }
 
+// pipeline_diag message hygiene (P1 salvage, A's discipline): the
+// payload never carries story text or user content — call sites pass
+// pipeline messages only — and anything key-shaped is stripped
+// defensively regardless, with a 200-char cap.
+const DIAG_KEY_SHAPED = /AIza[0-9A-Za-z_-]{8,}/g;
+const DIAG_NAMED_SECRET = /(api[_-]?key|authorization|token|secret|password)\s*[:=]\s*[^\s,;]+/gi;
+
+function sanitizeDiagMessage(raw: unknown): string {
+  const msg = raw instanceof Error ? raw.message : String(raw ?? '');
+  return msg
+    .replace(DIAG_KEY_SHAPED, '[redacted]')
+    .replace(DIAG_NAMED_SECRET, '$1=[redacted]')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 200);
+}
+
 const BACKSTOP_MS = 180_000;
 const WELCOME_COOLDOWN_MS = 180_000;
 const QA_FAILSAFE_MS = 150_000;
@@ -166,6 +183,8 @@ interface BufferedText {
   text: string;
   generatedAt: number;
   candidate: facts.Candidate;
+  /** Text-generation duration at prefetch time (P1: story_timing). */
+  fetchMs?: number | null;
 }
 
 interface FillerEntry {
@@ -229,6 +248,18 @@ export class Tour {
   private corridorEligible = new Set<string>();
   private lastStoryItem: AudibleItem | null = null;
   private lastSubject: string | null = null;
+
+  // Settle/lateness stamps (P1 salvage): commit-time context and
+  // sound-start truth per story item, joined at settle to file A's
+  // story_playback geometry + story_timing. Bounded by settle —
+  // every committed story's stamps are deleted at its settle.
+  private commitStamps = new Map<
+    string,
+    { at: number; horizonS: number; distanceM: number | null }
+  >();
+  private soundStamps = new Map<string, { at: number; queueS: number; toldLate: boolean }>();
+  private lastSoundedSettleAt: number | null = null;
+  private firstServeFiled = false;
 
   // Serve machinery (§4)
   private libraryIndex: backend.LibraryIndexEntry[] = [];
@@ -326,6 +357,17 @@ export class Tour {
       },
       onStoryCommitted: item => this.onStoryCommitted(item),
       onSoundStart: item => {
+        // P1 salvage: stamp the sound start (queue wait + lateness
+        // judged HERE, at the start, as A judges told_late) for the
+        // settle record.
+        if (item.kind === 'story') {
+          const commit = this.commitStamps.get(item.id);
+          this.soundStamps.set(item.id, {
+            at: this.clock.now(),
+            queueS: commit ? (this.clock.now() - commit.at) / 1000 : 0,
+            toldLate: this.computeToldLate(item),
+          });
+        }
         // A5(a): a location story STARTING (sound actually begins)
         // after the answer settles is the resume that releases the
         // Q&A lock. A story whose audio never starts — a resolve
@@ -338,6 +380,38 @@ export class Tour {
       onCommit: item => this.onCommit(item),
       onState: () => this.notify(),
     });
+    // P1 salvage: the Gemini lanes file their attempt/quota/timing
+    // events through this tour's emit (see gemini.setTelemetrySink).
+    gemini.setTelemetrySink((type, payload) => this.emit(type, payload));
+  }
+
+  /** A structured pipeline diagnostic, in A's sanitized vocabulary. */
+  private diag(stage: string, reason: string, message: unknown): void {
+    this.emit('pipeline_diag', { stage, reason, message: sanitizeDiagMessage(message) });
+  }
+
+  /**
+   * Told-late, judged at sound start (P1 salvage, A's definition):
+   * the subject sits in the rear hemisphere while driving AND
+   * beyond the story's duration × speed reach — the telling is
+   * about ground already gone. Region-anchored stories are exempt
+   * (the region is still around the listener), as in judgeStory.
+   */
+  private computeToldLate(item: AudibleItem): boolean {
+    if (!this.position || !item.anchor || item.regionAnchored) return false;
+    if (this.position.headingDeg === null) return false;
+    const dist = calculateDistance(
+      this.position.lat,
+      this.position.lng,
+      item.anchor.lat,
+      item.anchor.lng,
+    );
+    const delta = headingDelta(
+      this.position.headingDeg,
+      bearingDegrees(this.position, item.anchor),
+    );
+    const reach = Math.max(item.durationSec, 5) * Math.max(this.position.speedMps, 0.5);
+    return delta > 100 && dist > reach;
   }
 
   // ------------------------------------------------------------ UI plumbing
@@ -562,6 +636,7 @@ export class Tour {
       source: { kind: 'url', url: this.clipSourceUrl(clip.path) },
       durationSec: clip.durationSec,
       onSettle: rec => this.onOpenerSettle(item, rec, primary),
+      story: { openerClipId: clip.id, openerLengthClass: clip.lengthClass },
     });
     this.debt.add(item.id);
     return item;
@@ -605,7 +680,27 @@ export class Tour {
 
   private onOpenerSettle(item: AudibleItem, rec: SettleRecord, primary: boolean): void {
     this.debt.delete(item.id);
-    void rec;
+    // P1 salvage: the opener segment's own settle record (A's
+    // opener_clip) — which clip, which length class, primary or
+    // extension, and whether it sounded. Files even for teardown
+    // settles: the record is the point.
+    if (item.openerClipId) {
+      this.emit('opener_clip', {
+        topic: item.openerClipId,
+        opener_id: item.openerClipId,
+        voice: 'gemini',
+        source: 'prerendered',
+        kind: item.openerLengthClass ?? '',
+        length_class: item.openerLengthClass ?? '',
+        segment: primary ? 'primary' : 'extension',
+        sounded: rec.sounded,
+        completed: rec.completed,
+        engine: rec.sounded ? 'gemini' : 'none',
+        attempts: item.attempts,
+        sounded_ms: Math.round(rec.soundedMs),
+        ms_from_tour_start: this.clock.now() - this.tourStartAt,
+      });
+    }
     // Settles arriving during teardown file their record but spawn
     // nothing: no extension openers, no handovers (O13 completeness
     // is the player's; side effects stop at tour end).
@@ -746,7 +841,8 @@ export class Tour {
       ].join('\n\n');
       const fetchStart = this.clock.now();
       const text = await this.seams.generateStory(prompt);
-      this.sampleLatency(this.fetchSamples, this.clock.now() - fetchStart);
+      const fetchMs = this.clock.now() - fetchStart;
+      this.sampleLatency(this.fetchSamples, fetchMs);
       const subject = `welcome:${name.toLowerCase()}`;
       const item = this.makeItem({
         kind: 'story',
@@ -759,6 +855,7 @@ export class Tour {
           storySource: 'live',
           anchor: { lat: at.lat, lng: at.lng },
           regionAnchored: true,
+          fetchMs,
           generatedAt: this.clock.now(),
           text,
           reserved: true,
@@ -983,8 +1080,9 @@ export class Tour {
       ) {
         await this.serveAreaStory();
       }
-    } catch {
+    } catch (err) {
       /* a failed cycle schedules nothing; triggers keep arriving (S2) */
+      this.diag('pipeline', 'serve-cycle', err);
     } finally {
       this.cycling = false;
       if (this.cycleAgain) {
@@ -1062,7 +1160,7 @@ export class Tour {
     const buffered = this.buffer.get(key);
     if (buffered) {
       this.buffer.delete(key);
-      return this.liveStoryItem(candidate, buffered.text, buffered.generatedAt);
+      return this.liveStoryItem(candidate, buffered.text, buffered.generatedAt, buffered.fetchMs ?? null);
     }
     // Live generation stands down while a failure economy stands
     // (E3/E6): banked material above is the tour's voice meanwhile.
@@ -1079,7 +1177,8 @@ export class Tour {
       const prompt = this.storyPrompt(candidate, pack, isRetell);
       const fetchStart = this.clock.now();
       const text = await this.seams.generateStory(prompt);
-      this.sampleLatency(this.fetchSamples, this.clock.now() - fetchStart);
+      const fetchMs = this.clock.now() - fetchStart;
+      this.sampleLatency(this.fetchSamples, fetchMs);
       void this.seams.putCachedStory(
         this.sessionId,
         candidate.name,
@@ -1088,8 +1187,9 @@ export class Tour {
         candidate.lng,
         LEO_PERSONA_VERSION,
       );
-      return this.liveStoryItem(candidate, text, this.clock.now());
+      return this.liveStoryItem(candidate, text, this.clock.now(), fetchMs);
     } catch (err) {
+      this.diag('text', 'generation-failed', err);
       // Q14: a retell generation that cannot produce a complete,
       // distinct story declines — the generator signals it with
       // an empty response, which the seam surfaces as the
@@ -1104,7 +1204,12 @@ export class Tour {
     }
   }
 
-  private liveStoryItem(candidate: facts.Candidate, text: string, generatedAt: number): AudibleItem {
+  private liveStoryItem(
+    candidate: facts.Candidate,
+    text: string,
+    generatedAt: number,
+    fetchMs: number | null = null,
+  ): AudibleItem {
     const item = this.makeItem({
       kind: 'story',
       label: candidate.name,
@@ -1118,6 +1223,7 @@ export class Tour {
         generatedAt,
         text,
         tier1: candidate.tier1,
+        fetchMs,
       },
     });
     return item;
@@ -1153,6 +1259,7 @@ export class Tour {
         `FACT PACK:\n${facts.factPackText(pack)}`,
         this.exclusionsLine(),
       ].join('\n\n');
+      const fetchStart = this.clock.now();
       const text = await this.seams.generateStory(prompt);
       const item = this.makeItem({
         kind: 'story',
@@ -1167,6 +1274,7 @@ export class Tour {
           regionAnchored: true,
           generatedAt: this.clock.now(),
           text,
+          fetchMs: this.clock.now() - fetchStart,
         },
       });
       this.inflight.add(subject);
@@ -1250,6 +1358,31 @@ export class Tour {
    */
   private onStoryCommitted(item: AudibleItem): void {
     const subject = item.subject ?? item.label;
+    // P1 salvage: commit stamp for the settle record (queue wait,
+    // horizon, subject distance at serve), and the first-serve
+    // audit — was the tour's first story the welcome, a landmark,
+    // or an area story (A's first_serve, filed once per tour).
+    const stampDistanceM =
+      item.anchor && this.position
+        ? Math.round(
+            calculateDistance(this.position.lat, this.position.lng, item.anchor.lat, item.anchor.lng),
+          )
+        : null;
+    this.commitStamps.set(item.id, {
+      at: this.clock.now(),
+      horizonS: this.horizonSec(),
+      distanceM: stampDistanceM,
+    });
+    if (!this.firstServeFiled) {
+      this.firstServeFiled = true;
+      this.emit('first_serve', {
+        source: subject.startsWith('welcome:')
+          ? 'welcome'
+          : subject.startsWith('area:')
+            ? 'area'
+            : 'landmark',
+      });
+    }
     // §8 payload enriched Oct 29, 2026 (B instrumentation gap found on
     // the first graded drive): topic / distance / queue / anchor keys
     // match A's vocabulary so the shared analytics view grades both
@@ -1320,13 +1453,19 @@ export class Tour {
       ) {
         this.judgeDropSpots.set(subject, { lat: this.position.lat, lng: this.position.lng });
       }
-      // §8: reason verbatim from the closed vocabulary.
+      // §8: reason verbatim from the closed vocabulary. P1 salvage:
+      // attempts + queue wait ride along (A's settle depth).
+      const dropCommit = this.commitStamps.get(item.id);
       this.emit('story_dropped', {
         reason: rec.dropReason ?? 'attempts-exhausted',
         subject,
         topic: item.label,
         source: item.storySource ?? 'live',
         angle: item.angleOf ?? null,
+        attempts: item.attempts,
+        time_in_queue_s: dropCommit
+          ? Math.round(((this.clock.now() - dropCommit.at) / 1000) * 10) / 10
+          : null,
         distance_m:
           item.anchor && this.position
             ? Math.round(
@@ -1334,6 +1473,8 @@ export class Tour {
               )
             : null,
       });
+      this.commitStamps.delete(item.id);
+      this.soundStamps.delete(item.id);
       this.notify();
       return;
     }
@@ -1366,7 +1507,64 @@ export class Tour {
               calculateDistance(this.position.lat, this.position.lng, item.anchor.lat, item.anchor.lng),
             )
           : null,
+      // P1 salvage — A's settle/lateness family: attempt count,
+      // engine, settle-time geometry (bearing offset / speed /
+      // heading), the queue wait, lateness judged at sound start,
+      // and the horizon the serve aimed with. (A also files an
+      // end-of-tell geometry judgment; its keys have no home in the
+      // shared view's payload allowlist, so it is not filed here.)
+      attempts: item.attempts,
+      engine: rec.sounded ? 'gemini' : 'none',
+      bearing_offset_deg:
+        item.anchor && this.position && this.position.headingDeg !== null
+          ? Math.round(
+              headingDelta(
+                this.position.headingDeg,
+                bearingDegrees(this.position, item.anchor),
+              ),
+            )
+          : null,
+      speed_mps: this.position ? Math.round(this.position.speedMps * 10) / 10 : null,
+      heading_deg:
+        this.position && this.position.headingDeg !== null
+          ? Math.round(this.position.headingDeg)
+          : null,
+      time_in_queue_s:
+        this.soundStamps.get(item.id) !== undefined
+          ? Math.round((this.soundStamps.get(item.id)?.queueS ?? 0) * 10) / 10
+          : null,
+      told_late: this.soundStamps.get(item.id)?.toldLate ?? false,
+      horizon_s: this.commitStamps.get(item.id)?.horizonS ?? null,
     });
+    // P1 salvage — story_timing: the story's latency truth (A's
+    // per-story timing row). fetchTextS = text generation, synthS =
+    // synthesis, cacheHit = audio came from the on-device cache,
+    // gapS = the silence between the previous sounded story's
+    // settle and this story's sound start.
+    {
+      const soundStamp = this.soundStamps.get(item.id);
+      const fetchTextS = item.fetchMs != null ? Math.round((item.fetchMs / 1000) * 1000) / 1000 : null;
+      const synthS = item.synthMs != null ? Math.round((item.synthMs / 1000) * 1000) / 1000 : null;
+      const gapS =
+        soundStamp && this.lastSoundedSettleAt !== null
+          ? Math.round(((soundStamp.at - this.lastSoundedSettleAt) / 1000) * 1000) / 1000
+          : null;
+      if (fetchTextS !== null || synthS !== null || gapS !== null) {
+        this.emit('story_timing', {
+          fetchTextS,
+          synthS,
+          cacheHit: item.audioCacheHit ?? null,
+          gapS,
+          model: item.storySource === 'live' ? LEO_MODEL_ID : null,
+          story_id: item.id,
+          horizon_s: this.commitStamps.get(item.id)?.horizonS ?? null,
+          center_offset_m: this.commitStamps.get(item.id)?.distanceM ?? null,
+        });
+      }
+      this.lastSoundedSettleAt = this.clock.now();
+      this.commitStamps.delete(item.id);
+      this.soundStamps.delete(item.id);
+    }
     {
       this.counts.storiesPlayed += 1;
       this.sampleLatency(this.durationSamples, rec.soundedMs / 1000);
@@ -1578,10 +1776,17 @@ export class Tour {
     if (inFlight) return inFlight;
     const work = (async () => {
       const cached = await this.seams.audioCacheGet(cacheKey);
-      if (cached) return this.objectUrlFor(cacheKey, cached);
+      if (cached) {
+        // P1 salvage: story_timing stamps — the audio was already
+        // on-device (a presynth or an earlier tour minted it).
+        item.audioCacheHit = true;
+        return this.objectUrlFor(cacheKey, cached);
+      }
       const synthStart = this.clock.now();
       const blob = await this.seams.synthesize(text);
-      this.sampleLatency(this.synthSamples, this.clock.now() - synthStart);
+      item.audioCacheHit = false;
+      item.synthMs = this.clock.now() - synthStart;
+      this.sampleLatency(this.synthSamples, item.synthMs);
       await this.seams.audioCachePut(cacheKey, blob);
       return this.objectUrlFor(cacheKey, blob);
     })();
@@ -1682,8 +1887,15 @@ export class Tour {
               this.area,
               nearby.filter(c => c.name !== candidate.name),
             );
+            const fetchStart = this.clock.now();
             const text = await this.seams.generatePrefetch(this.storyPrompt(candidate, pack));
-            this.buffer.set(key, { subject: key, text, generatedAt: this.clock.now(), candidate });
+            this.buffer.set(key, {
+              subject: key,
+              text,
+              generatedAt: this.clock.now(),
+              candidate,
+              fetchMs: this.clock.now() - fetchStart,
+            });
           } catch {
             /* prefetch is speculative; failures are free (S10) */
           }
@@ -1729,6 +1941,7 @@ export class Tour {
     this.synthStandDownTrips += 1;
     const duration = Math.min(600_000, STORM_BASE_MS * Math.pow(2, this.synthStandDownTrips - 1));
     this.synthStandDownUntil = now + duration;
+    this.diag('tts', 'synthesis-stand-down', `synthesis failed 3 in a row — stand-down #${this.synthStandDownTrips} for ${Math.round(duration / 1000)}s`);
     this.notify();
   }
 
@@ -2074,6 +2287,10 @@ export class Tour {
     // so the answer pipeline owns the player outright (A2/A4).
     this.yieldCommentary();
     this.qaPhase = 'generating';
+    // P1 salvage: the question is on the record (A's question_asked;
+    // the text rides the sealed row only — the grading view's
+    // allowlist excludes it by design).
+    this.emit('question_asked', { question: question.slice(0, 500), model: LEO_QA_MODEL_ID });
     // A4: the failsafe runs from submission, before generation.
     this.qaFailsafe = this.clock.setTimeout(() => this.qaGenerationFailed(), QA_FAILSAFE_MS);
     void this.runAnswerGeneration(question);
@@ -2104,6 +2321,23 @@ export class Tour {
       source: { kind: 'synth', text },
       durationSec: estimateSpeechDurationS(text),
       onSettle: rec => {
+        // P1 salvage: the answer's settle truth files even at
+        // teardown (A's Area B lesson: an answer dropped by a queue
+        // clear used to vanish without a trace), and an incomplete
+        // answer is a pipeline_diag.
+        this.emit('question_playback', {
+          completed: rec.completed,
+          voice: rec.sounded ? 'gemini' : 'none',
+          sounded_ms: Math.round(rec.soundedMs),
+          attempts: item.attempts,
+        });
+        if (!rec.completed) {
+          this.diag(
+            'playback',
+            'answer-settle',
+            `answer did not fully deliver (sounded=${rec.sounded}, attempts=${item.attempts})`,
+          );
+        }
         // Tour end already released the lock (A6 'tour-ended'):
         // a teardown settle must not re-arm the cycle or file a
         // second release when the grace timer later fires.
@@ -2235,6 +2469,13 @@ export class Tour {
 
   endTour(): void {
     if (this.phase !== 'active') return;
+    // P1 salvage: the session closeout (A's session_end) — the
+    // tour's totals, filed before teardown settles begin.
+    this.emit('session_end', {
+      ms_from_tour_start: this.clock.now() - this.tourStartAt,
+      kind: 'summary',
+      message: `stories_played=${this.counts.storiesPlayed} stories_dropped=${this.counts.storiesDropped} fillers=${this.counts.fillersPlayed} questions=${this.counts.questionsAnswered}`,
+    });
     this.phase = 'ended';
     if (this.backstopTimer !== null) this.clock.clearTimeout(this.backstopTimer);
     if (this.tickTimer !== null) this.clock.clearInterval(this.tickTimer);
