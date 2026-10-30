@@ -31,8 +31,9 @@ import {
 //    another 10 s of silence, then the next link fires. Each filler
 //    at most ONCE per tour; pool exhaustion stands the lane down to
 //    honest silence — no repeats, no loops.
-//  - Delivery — the dead-zone condition: the whole pool (20 fillers
-//    + 5 bridges) is PINNED ON-DEVICE at tour start, into the TTS
+//  - Delivery — the dead-zone condition: the whole pool (fillers
+//    + bridges; 72 + 51 since filler batch v2, Oct 30, 2026) is
+//    PINNED ON-DEVICE at tour start, into the TTS
 //    cache (geminiAudio's Blob store, keyed by exact text). A true
 //    dead zone cannot fetch; a pinned clip resolves as an ordinary
 //    cache hit, so the pair plays with zero network. A pair fires
@@ -150,6 +151,288 @@ const BRIDGES: BridgeClip[] = [
     kind: 'continuation',
     text: 'One more, while the town catches up with us.',
     bucketKey: 'fillers/bridges/bridge-next-2.wav',
+  },
+
+  // v2 batch (Erik-approved Oct 30, 2026; rendered + ingested with
+  // filler batch v2 — see filler-batch-v2/render-report.md). Mirrors
+  // B's BRIDGE_CLIPS list and kind mapping exactly, translated to
+  // A's kinds: settling-in + quiet-stretch -> 'first' (17),
+  // time/pivot/return/weather -> 'continuation' (29).
+  {
+    slug: 'v2-settle-1',
+    kind: 'first',
+    text: "Settle in — I've got one that's pure San Diego.",
+    bucketKey: 'fillers/bridges/v2-settle-1.wav',
+  },
+  {
+    slug: 'v2-settle-2',
+    kind: 'first',
+    text: "Alright, my pick this time. And it's a good one.",
+    bucketKey: 'fillers/bridges/v2-settle-2.wav',
+  },
+  {
+    slug: 'v2-settle-3',
+    kind: 'first',
+    text: "Here's a story I never get tired of telling.",
+    bucketKey: 'fillers/bridges/v2-settle-3.wav',
+  },
+  {
+    slug: 'v2-settle-4',
+    kind: 'first',
+    text: "Quiet stretch? Perfect. Let me tell you one about the whole county.",
+    bucketKey: 'fillers/bridges/v2-settle-4.wav',
+  },
+  {
+    slug: 'v2-settle-5',
+    kind: 'first',
+    text: "This next one doesn't belong to any single place. It belongs to everywhere around here.",
+    bucketKey: 'fillers/bridges/v2-settle-5.wav',
+  },
+  {
+    slug: 'v2-settle-6',
+    kind: 'first',
+    text: "Give me a minute with this one. It pays off.",
+    bucketKey: 'fillers/bridges/v2-settle-6.wav',
+  },
+  {
+    slug: 'v2-settle-7',
+    kind: 'first',
+    text: "Okay. A story with no address — it rides along anywhere.",
+    bucketKey: 'fillers/bridges/v2-settle-7.wav',
+  },
+  {
+    slug: 'v2-settle-8',
+    kind: 'first',
+    text: "I've been saving this one for exactly this kind of moment.",
+    bucketKey: 'fillers/bridges/v2-settle-8.wav',
+  },
+  {
+    slug: 'v2-settle-9',
+    kind: 'first',
+    text: "No landmark needed for this one. Just a county truth.",
+    bucketKey: 'fillers/bridges/v2-settle-9.wav',
+  },
+  {
+    slug: 'v2-settle-10',
+    kind: 'first',
+    text: "Let me take the conversation for a stretch.",
+    bucketKey: 'fillers/bridges/v2-settle-10.wav',
+  },
+  {
+    slug: 'v2-time-1',
+    kind: 'continuation',
+    text: "Miles go down smoother with a story riding on them.",
+    bucketKey: 'fillers/bridges/v2-time-1.wav',
+  },
+  {
+    slug: 'v2-time-2',
+    kind: 'continuation',
+    text: "A few more minutes of road calls for a few more minutes of story.",
+    bucketKey: 'fillers/bridges/v2-time-2.wav',
+  },
+  {
+    slug: 'v2-time-3',
+    kind: 'continuation',
+    text: "Time passes differently when somebody's talking.",
+    bucketKey: 'fillers/bridges/v2-time-3.wav',
+  },
+  {
+    slug: 'v2-time-4',
+    kind: 'continuation',
+    text: "Let's spend the next stretch on something worth knowing.",
+    bucketKey: 'fillers/bridges/v2-time-4.wav',
+  },
+  {
+    slug: 'v2-time-5',
+    kind: 'continuation',
+    text: "Nothing to hurry about. There's time, and I have material.",
+    bucketKey: 'fillers/bridges/v2-time-5.wav',
+  },
+  {
+    slug: 'v2-time-6',
+    kind: 'continuation',
+    text: "We've got road ahead, and I've got stories. Fair trade.",
+    bucketKey: 'fillers/bridges/v2-time-6.wav',
+  },
+  {
+    slug: 'v2-time-7',
+    kind: 'continuation',
+    text: "A long drive is just small stories stacked up. Here's another for the pile.",
+    bucketKey: 'fillers/bridges/v2-time-7.wav',
+  },
+  {
+    slug: 'v2-time-8',
+    kind: 'continuation',
+    text: "While the miles tick by — here's something to tick along with them.",
+    bucketKey: 'fillers/bridges/v2-time-8.wav',
+  },
+  {
+    slug: 'v2-pivot-1',
+    kind: 'continuation',
+    text: "Different subject entirely. Trust me on the turn.",
+    bucketKey: 'fillers/bridges/v2-pivot-1.wav',
+  },
+  {
+    slug: 'v2-pivot-2',
+    kind: 'continuation',
+    text: "Change of subject — and I promise it's a promotion.",
+    bucketKey: 'fillers/bridges/v2-pivot-2.wav',
+  },
+  {
+    slug: 'v2-pivot-3',
+    kind: 'continuation',
+    text: "Now for something the guidebooks walk right past.",
+    bucketKey: 'fillers/bridges/v2-pivot-3.wav',
+  },
+  {
+    slug: 'v2-pivot-4',
+    kind: 'continuation',
+    text: "Let me change lanes, subject-wise.",
+    bucketKey: 'fillers/bridges/v2-pivot-4.wav',
+  },
+  {
+    slug: 'v2-pivot-5',
+    kind: 'continuation',
+    text: "New topic, same county.",
+    bucketKey: 'fillers/bridges/v2-pivot-5.wav',
+  },
+  {
+    slug: 'v2-pivot-6',
+    kind: 'continuation',
+    text: "Here's a left turn worth taking.",
+    bucketKey: 'fillers/bridges/v2-pivot-6.wav',
+  },
+  {
+    slug: 'v2-pivot-7',
+    kind: 'continuation',
+    text: "Pivoting — because this one's too good to leave in the glovebox.",
+    bucketKey: 'fillers/bridges/v2-pivot-7.wav',
+  },
+  {
+    slug: 'v2-pivot-8',
+    kind: 'continuation',
+    text: "Forget the famous stuff for a minute. Try this instead.",
+    bucketKey: 'fillers/bridges/v2-pivot-8.wav',
+  },
+  {
+    slug: 'v2-quiet-1',
+    kind: 'first',
+    text: "Quiet roads deserve their own kind of story. This is one of those.",
+    bucketKey: 'fillers/bridges/v2-quiet-1.wav',
+  },
+  {
+    slug: 'v2-quiet-2',
+    kind: 'first',
+    text: "Since it's just us and the road for a bit —",
+    bucketKey: 'fillers/bridges/v2-quiet-2.wav',
+  },
+  {
+    slug: 'v2-quiet-3',
+    kind: 'first',
+    text: "A stretch like this is made for a story like this.",
+    bucketKey: 'fillers/bridges/v2-quiet-3.wav',
+  },
+  {
+    slug: 'v2-quiet-4',
+    kind: 'first',
+    text: "Nothing needs our attention for a moment. Good. Listen to this.",
+    bucketKey: 'fillers/bridges/v2-quiet-4.wav',
+  },
+  {
+    slug: 'v2-quiet-5',
+    kind: 'first',
+    text: "Here's one for the empty miles.",
+    bucketKey: 'fillers/bridges/v2-quiet-5.wav',
+  },
+  {
+    slug: 'v2-quiet-6',
+    kind: 'first',
+    text: "Slow moment? I know a cure.",
+    bucketKey: 'fillers/bridges/v2-quiet-6.wav',
+  },
+  {
+    slug: 'v2-quiet-7',
+    kind: 'first',
+    text: "Let the quiet have a little company.",
+    bucketKey: 'fillers/bridges/v2-quiet-7.wav',
+  },
+  {
+    slug: 'v2-return-1',
+    kind: 'continuation',
+    text: "And while that one settles — here's another.",
+    bucketKey: 'fillers/bridges/v2-return-1.wav',
+  },
+  {
+    slug: 'v2-return-2',
+    kind: 'continuation',
+    text: "One story leads to another around here. This way.",
+    bucketKey: 'fillers/bridges/v2-return-2.wav',
+  },
+  {
+    slug: 'v2-return-3',
+    kind: 'continuation',
+    text: "Before the road takes us somewhere new — a word about everywhere.",
+    bucketKey: 'fillers/bridges/v2-return-3.wav',
+  },
+  {
+    slug: 'v2-return-4',
+    kind: 'continuation',
+    text: "That was one place. This one's the whole picture.",
+    bucketKey: 'fillers/bridges/v2-return-4.wav',
+  },
+  {
+    slug: 'v2-return-5',
+    kind: 'continuation',
+    text: "Staying with you — and widening out for a minute.",
+    bucketKey: 'fillers/bridges/v2-return-5.wav',
+  },
+  {
+    slug: 'v2-return-6',
+    kind: 'continuation',
+    text: "Good. Now let me show you the frame around that picture.",
+    bucketKey: 'fillers/bridges/v2-return-6.wav',
+  },
+  {
+    slug: 'v2-return-7',
+    kind: 'continuation',
+    text: "There's more where that came from — broader, this time.",
+    bucketKey: 'fillers/bridges/v2-return-7.wav',
+  },
+  {
+    slug: 'v2-sky-1',
+    kind: 'continuation',
+    text: "Rain or shine, gray or gold — this one's true either way.",
+    bucketKey: 'fillers/bridges/v2-sky-1.wav',
+  },
+  {
+    slug: 'v2-sky-2',
+    kind: 'continuation',
+    text: "Morning, noon, or midnight — this story holds.",
+    bucketKey: 'fillers/bridges/v2-sky-2.wav',
+  },
+  {
+    slug: 'v2-sky-3',
+    kind: 'continuation',
+    text: "Some things about this county don't change with the light. This is one of them.",
+    bucketKey: 'fillers/bridges/v2-sky-3.wav',
+  },
+  {
+    slug: 'v2-sky-4',
+    kind: 'continuation',
+    text: "The sky does its thing. The county does this. Listen.",
+    bucketKey: 'fillers/bridges/v2-sky-4.wav',
+  },
+  {
+    slug: 'v2-sky-5',
+    kind: 'continuation',
+    text: "Any hour will do for this one. It's always true here.",
+    bucketKey: 'fillers/bridges/v2-sky-5.wav',
+  },
+  {
+    slug: 'v2-sky-6',
+    kind: 'continuation',
+    text: "Daylight version, headlights version — same story either way.",
+    bucketKey: 'fillers/bridges/v2-sky-6.wav',
   },
 ];
 
@@ -310,15 +593,26 @@ class FillerLaneService {
     }
   }
 
-  // First pinnable bridge of the wanted kind, in manifest order,
-  // avoiding an immediate repeat of the last bridge used. Null
-  // when no bridge of the kind can be made playable — the pair
-  // then does not fire at all (the filler never starts cold).
+  // First pinnable bridge of the wanted kind, in RANDOMIZED
+  // candidate order, avoiding an immediate repeat of the last
+  // bridge used. Null when no bridge of the kind can be made
+  // playable — the pair then does not fire at all (the filler
+  // never starts cold). The randomization (Erik-approved
+  // Oct 30, 2026) is what makes the 51-clip bank real: in
+  // manifest order the picker ping-ponged the first two clips
+  // of each kind forever. B's picker randomizes the same way.
+  // The last-used demotion is unchanged — the previous bridge
+  // still sorts to the end of the shuffled order.
   private async pickBridge(kind: 'first' | 'continuation'): Promise<BridgeClip | null> {
     const ofKind = BRIDGES.filter(b => b.kind === kind);
+    const shuffled = [...ofKind];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    }
     const ordered = [
-      ...ofKind.filter(b => b.slug !== this.lastBridgeSlug),
-      ...ofKind.filter(b => b.slug === this.lastBridgeSlug),
+      ...shuffled.filter(b => b.slug !== this.lastBridgeSlug),
+      ...shuffled.filter(b => b.slug === this.lastBridgeSlug),
     ];
     for (const bridge of ordered) {
       if (await this.ensurePinned(bridge.text, bridge.bucketKey)) return bridge;

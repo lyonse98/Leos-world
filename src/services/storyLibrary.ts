@@ -163,7 +163,11 @@ class StoryLibraryService {
         .from('story_library')
         .select('place_name, story_text, audio_path')
         .eq('angle', 'filler')
-        .limit(50);
+        // 500 (raised from 50, Erik-approved Oct 30, 2026): the
+        // pool outgrew the old cap at 72 rows with filler batch
+        // v2, and an unordered 50-row window silently dropped
+        // stories. Matches B's fetch limit.
+        .limit(500);
       if (error) {
         if (this.isMissingTableError(error)) {
           this.tableMissing = true;
