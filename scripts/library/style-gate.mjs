@@ -75,12 +75,25 @@ const RELATIVE_DIRECTIONS = [
 // are left to the judgment audit.
 const DISTANCE_RE = /\b\d[\d,]*(?:\.\d+)?\s*(?:meters?|metres?|yards?|feet|foot|miles?|kilometers?|kilometres?|km)\b/gi;
 
-// A11 — standing-exclusion sweep (honesty class). PSA Flight 182 is
-// default-excluded (memorials-only IF Erik ever flips it explicitly);
-// school shootings are excluded by the D4 standing rule.
+// A11 — standing-exclusion sweep (honesty class). School shootings
+// are excluded by the D4 standing rule. PSA Flight 182 is governed
+// by Erik's MEMORIAL-SPIRIT ruling (Oct 29, 2026 — supersedes the
+// Oct 27 default-exclusion): it may be narrated ONLY in a memorial
+// register (human-first, no toll recitation, no spectacle). A bare
+// reference is therefore an ADVISORY below — judgment verifies the
+// register — while spectacle markers stay HARD flags here.
 const EXCLUSION_PATTERNS = [
-  { re: /\bflight\s*182\b/i, label: 'PSA Flight 182 reference' },
   { re: /\bschool shooting/i, label: 'school-shooting reference' },
+  { re: /\bdeadliest\b/i, label: 'spectacle superlative — memorial register violated if disaster context' },
+  { re: /\bmid-?air collision\b/i, label: 'collision mechanics — spectacle, not memorial register' },
+  { re: /\bdeath toll\b/i, label: 'toll recitation — memorial register violated' },
+];
+
+// A11 memorial advisory — a Flight 182 reference is permitted only
+// in memorial register (Oct 29 ruling); judgment adjudicates.
+const MEMORIAL_PATTERNS = [
+  { re: /\bflight\s*182\b/i, label: 'PSA Flight 182 reference' },
+  { re: /\bPSA\b[^.]{0,60}\b182\b/i, label: 'PSA 182 reference' },
 ];
 
 // A12 — speculation-pivot surface forms (unattributed speculation).
@@ -118,6 +131,9 @@ function wowScore(sentence) {
 
 // A9 — first-person presence (ADOPTED criterion: Erik's ruling,
 // Oct 28, 2026 — "use the first person A9 aspect, moving forward").
+// Refined Oct 29, 2026: a per-story judgment call, NOT a mandate —
+// the advisory exists so the judgment sample can confirm a
+// zero-first-person story is deliberately observational, not a miss.
 // The mechanical layer counts first-person tokens; ZERO in a story
 // is an advisory (the story has no Leo beat on its face). Whether a
 // present beat is GENUINE — a person surfacing with an observation,
@@ -160,6 +176,11 @@ function gateStory(entry, opts) {
   // A11 exclusion sweep — honesty class.
   for (const { re, label } of EXCLUSION_PATTERNS) {
     if (re.test(text)) flag('A11-HONESTY', `exclusion sweep hit: ${label}`);
+  }
+
+  // A11 memorial advisory — 182 references ride on judgment.
+  for (const { re, label } of MEMORIAL_PATTERNS) {
+    if (re.test(text)) advise('A11', `${label} — MEMORIAL-SPIRIT ruling (Oct 29, 2026): permitted only in memorial register; judgment must verify human-first framing, no toll, no spectacle`);
   }
 
   // A12 speculation surface forms.
@@ -224,12 +245,12 @@ function gateStory(entry, opts) {
   // A9 first-person presence (advisory — adopted criterion, Erik's
   // ruling Oct 28, 2026). Zero first-person tokens = the story never
   // surfaces Leo; judgment then decides whether that is a miss or
-  // the rare justified absence. A nonzero count does NOT satisfy A9
+  // a justified absence (Oct 29 refinement: judgment call, not a mandate). A nonzero count does NOT satisfy A9
   // by itself — quality of the beat is judgment (token-stuffing is
   // its own fail in the audit).
   const fpCount = (text.match(FIRST_PERSON_RE) || []).length;
   if (fpCount === 0) {
-    advise('A9', 'zero first-person tokens — no Leo beat on the face of the text; judgment: A9 (adopted) expects a genuine first-person beat in every story');
+    advise('A9', 'zero first-person tokens — no Leo beat on the face of the text; judgment: A9 as refined (Oct 29, 2026) is first person where it makes sense — confirm the absence is a deliberate observational choice, not a miss');
   } else {
     notes.push(`A9: ${fpCount} first-person token(s) ✓ (quality is judgment)`);
   }
@@ -248,7 +269,7 @@ const JUDGMENT_REQUIRED = [
   'A6  specifics traceability + swap test (density counting is mechanical-lite; honesty is judgment)',
   'A7  present-tense scene — exists at the pivot AND every scene detail traces to sources (highest fabrication risk)',
   'A8  button landing — classification of the final sentence; affection landings ≤1 in 3 per batch',
-  'A9  first-person beat QUALITY — ADOPTED criterion (Erik\'s ruling, Oct 28, 2026): the beat must be genuine, a person surfacing (observation, reaction, preference), never a token "I" stuffed in; the place stays the subject. Presence counting is mechanical (A9 advisory above); quality is judgment. Also: contested-claim attribution',
+  'A9  first-person beat QUALITY — ADOPTED criterion (Erik\'s ruling, Oct 28, 2026; refined Oct 29, 2026 — first person where it makes sense, a per-story judgment call, not a quota): when present, the beat must be genuine, a person surfacing (observation, reaction, preference), never a token "I" stuffed in; the place stays the subject. Presence counting is mechanical (A9 advisory above); quality is judgment. Also: contested-claim attribution',
   'A11 dark-material grammar — human before toll, toll once, no victim-targeted jokes (the exclusion SWEEP above is mechanical)',
   'A12 speculation payoff — every pivot answered with a sourced fact (surface forms flagged above)',
   'A13 lecture cadence / fact-runs — JUDGMENT-ONLY: the mechanical fact-run detector was retired in the Pass 1 audit (17/17 worst cases were vivid narrative)',

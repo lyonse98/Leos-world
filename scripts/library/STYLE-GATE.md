@@ -22,7 +22,12 @@ final texts:**
    It must come back **clean, or every FLAG adjudicated** (cleared
    with a reason, or the text fixed and the gate re-run). Honesty-class
    hits (A11 exclusion sweep) are REGENERATE-class: the text does not
-   render, full stop, until it is rewritten and re-gated.
+   render, full stop, until it is rewritten and re-gated. Carve-out
+   (Oct 29, 2026): under Erik's MEMORIAL-SPIRIT ruling, a bare PSA
+   Flight 182 reference is an A11 *advisory*, adjudicated in the
+   judgment layer for memorial register (human-first, no toll, no
+   spectacle); spectacle markers (deadliest / mid-air collision /
+   death toll) remain honesty-class hard hits.
 
 2. **Judgment layer — a judgment audit** over (a) every flagged text
    and (b) a sample of the clean ones (≥15%), applying the
@@ -54,11 +59,15 @@ worst flags before its output is ever quoted — or it stays out.
 
 ## Scope notes
 
-- **A9 (first person) — adopted Oct 28, 2026, Erik's ruling.** Every
-  story carries a genuine first-person beat (the documentary-pack's
-  sixth beat in the persona). The gate flags zero-first-person texts
-  mechanically as an **advisory**; whether a present beat is *genuine*
-  — a person surfacing, not a token "I" stuffed in — is judgment.
+- **A9 (first person) — adopted Oct 28, 2026, Erik's ruling; refined
+  Oct 29, 2026.** Leo speaks as "I" where it makes sense: most stories
+  carry a genuine first-person beat (the documentary-pack's sixth beat
+  in the persona), but it is a per-story judgment call, not a quota —
+  a story that lands better in pure observation may stay observational.
+  The gate flags zero-first-person texts mechanically as an
+  **advisory** so the judgment sample can confirm the absence is
+  deliberate; whether a present beat is *genuine* — a person surfacing,
+  not a token "I" stuffed in — is judgment.
 - The gate applies to **new generation from Batch 2B onward**. It is
   not retrofitted onto the standing shelf (the Pass 2 health map
   measured the shelf for prioritization; retrofitting the Oct 28
