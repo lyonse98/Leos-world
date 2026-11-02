@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Play, Send, MapPin } from 'lucide-react';
+import { Play, Pause, Square, Send, MapPin } from 'lucide-react';
 import { Tour, type TourView } from './core/tour';
 import { createBrowserAudio } from './core/player';
 import { isTesterUnlocked, tryTesterUnlock } from './core/accessGate';
@@ -22,7 +22,7 @@ type Pose = 'idle' | 'speaking' | 'listening' | 'thinking' | 'wave' | 'pointing'
 function MilesFigure({ pose, large }: { pose: Pose; large?: boolean }) {
   return (
     <div className={`relative ${large ? 'h-52 sm:h-72' : 'h-36 sm:h-48'} flex items-end justify-center`}>
-      <div className="absolute bottom-0 h-24 w-24 rounded-full bg-sky-500/20 blur-2xl" />
+      <div className="absolute bottom-0 h-24 w-24 rounded-full bg-sage/30 blur-2xl" />
       <img
         src={`/miles/miles-${pose}.webp`}
         alt="Miles, your tour guide"
@@ -94,6 +94,27 @@ function QuestionForm({
 }
 
 /**
+ * trymiles.app poster backdrop (Nov 2, 2026 friendliness pass):
+ * soft sage + warm-sand light blobs and the site's giant outlined
+ * MILES behind everything — warm cream ground via the root's
+ * bg-cream. Purely decorative; pointer-events-none throughout.
+ */
+function PosterBackdrop() {
+  return (
+    <div className="pointer-events-none absolute inset-0 overflow-hidden">
+      <div className="leo-float absolute -top-20 -left-20 h-72 w-72 rounded-full bg-sage/25 blur-3xl" />
+      <div className="leo-float-slow absolute top-1/3 -right-24 h-80 w-80 rounded-full bg-amber-200/40 blur-3xl" />
+      <div
+        aria-hidden="true"
+        className="absolute top-2 left-1/2 -translate-x-1/2 text-[6.5rem] leading-none font-black tracking-wide whitespace-nowrap text-transparent select-none [-webkit-text-stroke:2px_rgba(21,34,45,0.10)] sm:text-[9rem]"
+      >
+        MILES
+      </div>
+    </div>
+  );
+}
+
+/**
  * Tester access gate screen (Nov 2, 2026). Rendered INSTEAD of the
  * tour shell while locked: nothing in MilesApp — no Tour, no landing
  * warm, no position watch — mounts behind this screen, so a locked
@@ -110,22 +131,19 @@ function AccessGate({ onUnlock }: { onUnlock: () => void }) {
   };
 
   return (
-    <div className="min-h-full overflow-y-auto bg-slate-950 text-slate-100">
-      <div className="pointer-events-none absolute inset-0 overflow-hidden">
-        <div className="leo-float absolute -top-20 -left-20 h-72 w-72 rounded-full bg-sky-600/20 blur-3xl" />
-        <div className="leo-float-slow absolute top-1/3 -right-24 h-80 w-80 rounded-full bg-amber-500/10 blur-3xl" />
-      </div>
+    <div className="relative min-h-full overflow-y-auto bg-cream text-ink">
+      <PosterBackdrop />
       <main className="safe-top safe-bottom relative mx-auto flex min-h-full w-full max-w-xl flex-col items-center px-6 py-8">
         <MilesFigure pose="wave" large />
-        <h1 className="leo-shimmer mt-2 bg-gradient-to-r from-sky-200 via-white to-amber-200 bg-clip-text text-center text-4xl font-bold text-transparent sm:text-5xl">
+        <h1 className="mt-2 text-center text-5xl font-black tracking-tight text-ink sm:text-6xl">
           Miles
         </h1>
-        <p className="mt-3 text-center text-sm leading-relaxed text-slate-300 sm:text-base">
+        <p className="mt-3 text-center text-sm leading-relaxed text-inksoft sm:text-base">
           Miles is in early testing right now. If someone sent you this link,
           they&rsquo;ll have given you a tester code — pop it in and we&rsquo;ll roll.
         </p>
 
-        <form onSubmit={submit} className="mt-8 w-full rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+        <form onSubmit={submit} className="mt-8 w-full rounded-[2rem] bg-white/70 p-5 shadow-xl shadow-ink/10">
           <input
             value={code}
             onChange={e => {
@@ -140,22 +158,22 @@ function AccessGate({ onUnlock }: { onUnlock: () => void }) {
             spellCheck={false}
             enterKeyHint="go"
             aria-label="Tester code"
-            className="w-full rounded-xl border border-slate-700 bg-slate-900/70 px-4 py-3 text-center text-base tracking-widest text-slate-100 placeholder:normal-case placeholder:tracking-normal placeholder:text-slate-500 focus:outline-none"
+            className="w-full rounded-full border-2 border-sage/30 bg-white px-5 py-3.5 text-center text-base tracking-widest text-ink placeholder:normal-case placeholder:tracking-normal placeholder:text-inksoft/50 focus:border-sagedeep focus:outline-none"
           />
           {error && (
-            <p className="mt-2 text-center text-xs text-amber-300">
+            <p className="mt-2 text-center text-xs text-amber-700">
               That code doesn&rsquo;t look right — check with whoever sent you the link.
             </p>
           )}
           <button
             type="submit"
-            className="mt-3 w-full rounded-xl bg-sky-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-sky-400 active:scale-[0.99]"
+            className="mt-3 w-full rounded-full bg-ink px-4 py-3.5 text-sm font-bold text-cream shadow-lg shadow-ink/20 transition hover:bg-sagedeep active:scale-[0.99]"
           >
             Unlock
           </button>
         </form>
 
-        <p className="mt-auto pt-8 text-center text-xs leading-relaxed text-slate-400">
+        <p className="mt-auto pt-8 text-center text-xs leading-relaxed text-inksoft/80">
           Miles is an AI guide. Stories are drawn from public records and local history —
           and like any good storyteller, he may occasionally get a detail wrong.
         </p>
@@ -336,19 +354,39 @@ function MilesApp() {
   };
 
   /**
-   * Face-only tour screen (Nov 2, 2026): a tap anywhere on the
-   * running tour is invisible chrome carrying the functions the old
-   * banners and transport buttons held — the sound-blocked gesture
+   * Tap-anywhere backup (Nov 2, 2026, face-only ruling): a tap
+   * anywhere on the running tour is invisible chrome carrying the
+   * functions the old banners held — the sound-blocked gesture
    * retry (bannerTap), resume after a platform interruption or an
    * OS-level pause (resumeByUser), and otherwise the audio latch's
-   * gesture re-prime (noteGesture, the P2/P8 net). Nothing renders
-   * for any of these; Media Session handlers above cover transport
-   * from the lock screen / car.
+   * gesture re-prime (noteGesture, the P2/P8 net). Since Erik's
+   * amendment later the same day, the VISIBLE transport bar below
+   * is the primary path for pause / resume / end; this surface
+   * stays working as the backup it was built as. Media Session
+   * handlers above also still cover transport from the lock
+   * screen / car.
    */
   const onTourTap = () => {
     if (view.banner === 'blocked') engine.bannerTap();
     else if (view.banner === 'interrupted' || view.userPaused) engine.resumeByUser();
     else engine.noteGesture();
+  };
+
+  /**
+   * Visible transport (Erik's amendment, Nov 2, 2026 ~11:55): the
+   * primary toggle reads real engine state out of the view —
+   * banner 'blocked' → Resume (the press IS the gesture retry,
+   * bannerTap); banner 'interrupted' or userPaused → Resume
+   * (resumeByUser); otherwise the tour is playing → Pause
+   * (pauseByUser). End Tour (in the bar's JSX) calls the engine's
+   * real endTour(): session_end telemetry files on the way out and
+   * the flow returns to the landing.
+   */
+  const transportNeedsResume = view.banner !== null || view.userPaused;
+  const onTransportPrimary = () => {
+    if (view.banner === 'blocked') engine.bannerTap();
+    else if (view.banner === 'interrupted' || view.userPaused) engine.resumeByUser();
+    else engine.pauseByUser();
   };
 
   const isStandalone =
@@ -359,51 +397,48 @@ function MilesApp() {
   // ------------------------------------------------------------ landing
   if (view.phase !== 'active') {
     return (
-      <div className="min-h-full overflow-y-auto bg-slate-950 text-slate-100">
-        <div className="pointer-events-none absolute inset-0 overflow-hidden">
-          <div className="leo-float absolute -top-20 -left-20 h-72 w-72 rounded-full bg-sky-600/20 blur-3xl" />
-          <div className="leo-float-slow absolute top-1/3 -right-24 h-80 w-80 rounded-full bg-amber-500/10 blur-3xl" />
-        </div>
+      <div className="relative min-h-full overflow-y-auto bg-cream text-ink">
+        <PosterBackdrop />
         <main className="safe-top safe-bottom relative mx-auto flex min-h-full w-full max-w-xl flex-col items-center px-6 py-8">
           <MilesFigure pose="wave" large />
-          <h1 className="leo-shimmer mt-2 bg-gradient-to-r from-sky-200 via-white to-amber-200 bg-clip-text text-center text-4xl font-bold text-transparent sm:text-5xl">
+          <h1 className="mt-2 text-center text-5xl font-black tracking-tight text-ink sm:text-6xl">
             Miles
           </h1>
-          <p className="mt-3 text-center text-sm leading-relaxed text-slate-300 sm:text-base">
+          <p className="mt-3 text-center text-sm leading-relaxed text-inksoft sm:text-base">
             A local friend riding shotgun — real stories about the streets you&rsquo;re
             driving, told as you pass them.
           </p>
 
-          <div className="mt-5 flex items-center gap-2 text-xs text-slate-400">
-            <MapPin className="h-4 w-4 text-sky-300" />
+          <div className="mt-5 flex items-center gap-2 text-xs font-semibold text-inksoft">
+            <MapPin className="h-4 w-4 text-sagedeep" />
             {granted && position ? (
               <span>
                 Located — {position.lat.toFixed(3)}, {position.lng.toFixed(3)}
               </span>
             ) : locationError ? (
-              <span className="text-amber-300">{locationError}</span>
+              <span className="text-amber-700">{locationError}</span>
             ) : (
               <span>Finding you…</span>
             )}
           </div>
 
           {resumeOffered && view.phase === 'idle' ? (
-            <div className="mt-8 w-full rounded-2xl border border-sky-500/30 bg-sky-950/60 p-4 text-center">
-              <p className="text-sm font-medium text-sky-100">Tour in progress</p>
-              <p className="mt-1 text-xs text-slate-400">
+            <div className="mt-8 w-full rounded-[2rem] bg-white/70 p-5 text-center shadow-xl shadow-ink/10">
+              <p className="text-sm font-bold text-ink">Tour in progress</p>
+              <p className="mt-1 text-xs text-inksoft">
                 You stepped away recently. Pick it back up, or start fresh.
               </p>
               <div className="mt-4 flex gap-3">
                 <button
                   onPointerDown={startOnPointerDown(true)}
                   onClick={startOnKeyboardClick(true)}
-                  className="flex-1 rounded-xl bg-sky-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-sky-400"
+                  className="flex-1 rounded-full bg-ink px-4 py-3.5 text-sm font-bold text-cream shadow-lg shadow-ink/20 transition hover:bg-sagedeep"
                 >
                   RESUME TOUR
                 </button>
                 <button
                   onClick={() => setResumeOffered(false)}
-                  className="flex-1 rounded-xl border border-slate-600 px-4 py-3 text-sm font-semibold text-slate-200 transition hover:bg-slate-800"
+                  className="flex-1 rounded-full bg-cream2 px-4 py-3.5 text-sm font-bold text-ink transition hover:bg-sage/25"
                 >
                   Start Fresh
                 </button>
@@ -413,16 +448,16 @@ function MilesApp() {
             <button
               onPointerDown={startOnPointerDown(false)}
               onClick={startOnKeyboardClick(false)}
-              className="mt-8 flex w-full items-center justify-center gap-2 rounded-2xl bg-sky-500 px-6 py-4 text-lg font-bold tracking-wide text-white shadow-lg shadow-sky-900/50 transition hover:bg-sky-400 active:scale-[0.99]"
+              className="mt-8 flex w-full items-center justify-center gap-2 rounded-full bg-ink px-6 py-4 text-lg font-extrabold tracking-wide text-cream shadow-xl shadow-ink/25 transition hover:bg-sagedeep active:scale-[0.99]"
             >
               <Play className="h-6 w-6" /> START TOUR
             </button>
           )}
 
           {!isStandalone && (
-            <div className="mt-6 w-full rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
-              <p className="text-sm font-medium text-slate-200">Add Miles to your home screen</p>
-              <p className="mt-1 text-xs leading-relaxed text-slate-400">
+            <div className="mt-6 w-full rounded-[2rem] bg-white/70 p-5 shadow-lg shadow-ink/10">
+              <p className="text-sm font-bold text-ink">Add Miles to your home screen</p>
+              <p className="mt-1 text-xs leading-relaxed text-inksoft">
                 On iPhone: tap Share, then &ldquo;Add to Home Screen.&rdquo; On Android: use the
                 browser menu&rsquo;s &ldquo;Install app.&rdquo; Best first run: stay in this
                 browser tab so the location prompt behaves.
@@ -430,7 +465,7 @@ function MilesApp() {
             </div>
           )}
 
-          <p className="mt-auto pt-8 text-center text-xs leading-relaxed text-slate-400">
+          <p className="mt-auto pt-8 text-center text-xs leading-relaxed text-inksoft/80">
             Miles is an AI guide. Stories are drawn from public records and local history —
             and like any good storyteller, he may occasionally get a detail wrong.
           </p>
@@ -440,37 +475,74 @@ function MilesApp() {
   }
 
   // ------------------------------------------------------------ tour
-  // In-tour screen (Erik, Nov 2, 2026 — liability ruling): while a
-  // tour is RUNNING the screen is Miles's face and nothing else —
-  // no buttons, no text, no now-playing card, no controls of any
-  // kind. Every background system (GPS, selection and playback,
-  // the filler / bridge / hosted lanes, wake lock, telemetry and
-  // diagnostics state) keeps running exactly as before; only the
-  // display changed. The pre-tour landing above is untouched, the
-  // audio unlock still rides the START tap and the tap routing in
-  // onTourTap, and OS Media Session controls still work. Q&A
-  // mounts only under QA_ENABLED, which is off.
+  // In-tour screen (Erik, Nov 2, 2026 — liability ruling, amended
+  // by Erik ~11:55 the same day): while a tour is RUNNING the
+  // screen is Miles's face plus ONE minimal visible transport bar
+  // docked at the bottom — a Pause/Resume toggle and an End Tour
+  // button, labels and all. Nothing else from the old chrome
+  // returns: no header, clock, now-playing, Up next, cards, or
+  // diagnostics. Every background system (GPS, selection and
+  // playback, the filler / bridge / hosted lanes, wake lock,
+  // telemetry and diagnostics state) keeps running exactly as
+  // before. The pre-tour landing above is untouched, the audio
+  // unlock still rides the START tap, the tap-anywhere surface
+  // (onTourTap) still works as a backup, and OS Media Session
+  // controls still work. Q&A mounts only under QA_ENABLED, which
+  // is off.
   return (
     <div
-      className="flex min-h-full flex-col bg-slate-950 text-slate-100"
+      className="relative flex min-h-full flex-col bg-cream text-ink"
       onPointerDown={onTourTap}
     >
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
-        <div className="leo-float absolute -top-24 right-0 h-72 w-72 rounded-full bg-sky-600/15 blur-3xl" />
+        <div className="leo-float absolute -top-24 right-0 h-72 w-72 rounded-full bg-sage/25 blur-3xl" />
+        <div className="leo-float-slow absolute -bottom-24 -left-24 h-72 w-72 rounded-full bg-amber-200/40 blur-3xl" />
       </div>
 
-      <main className="safe-top safe-bottom relative flex flex-1 flex-col items-center justify-center px-5">
-        <MilesFigure pose={pose} large />
-        {QA_ENABLED && (
-          <QuestionForm
-            question={question}
-            qaLocked={view.qaLocked}
-            qaPhase={view.qaPhase}
-            onQuestionChange={setQuestion}
-            onFocusChange={setQuestionFocused}
-            onSubmit={submitQuestion}
-          />
-        )}
+      <main className="safe-top safe-bottom relative flex flex-1 flex-col items-center px-5">
+        <div className="flex w-full flex-1 flex-col items-center justify-center">
+          <MilesFigure pose={pose} large />
+          {QA_ENABLED && (
+            <QuestionForm
+              question={question}
+              qaLocked={view.qaLocked}
+              qaPhase={view.qaPhase}
+              onQuestionChange={setQuestion}
+              onFocusChange={setQuestionFocused}
+              onSubmit={submitQuestion}
+            />
+          )}
+        </div>
+
+        {/* Visible transport bar. The bar swallows its own
+            pointerdowns so a button press doesn't also fire the
+            tap-anywhere backup behind it — the buttons are real
+            gestures, and their handlers prime/resume the audio
+            latch themselves, exactly as the old banners did. The
+            safe-area padding lives on <main> (.safe-bottom), so
+            the bar clears the home indicator. */}
+        <div className="w-full max-w-xl pb-1" onPointerDown={e => e.stopPropagation()}>
+          <div className="flex items-center gap-2 rounded-full bg-white/75 p-2 shadow-xl shadow-ink/15 backdrop-blur">
+            <button
+              type="button"
+              onClick={onTransportPrimary}
+              aria-label={transportNeedsResume ? 'Resume tour' : 'Pause tour'}
+              className="flex flex-1 items-center justify-center gap-2 rounded-full bg-ink px-5 py-3.5 text-base font-bold text-cream shadow-md shadow-ink/20 transition hover:bg-sagedeep active:scale-[0.99]"
+            >
+              {transportNeedsResume ? <Play className="h-5 w-5" /> : <Pause className="h-5 w-5" />}
+              {transportNeedsResume ? 'Resume' : 'Pause'}
+            </button>
+            <button
+              type="button"
+              onClick={() => engine.endTour()}
+              aria-label="End tour"
+              className="flex items-center justify-center gap-2 rounded-full bg-cream2 px-5 py-3.5 text-base font-bold text-ink transition hover:bg-sage/25 active:scale-[0.99]"
+            >
+              <Square className="h-4 w-4" />
+              End tour
+            </button>
+          </div>
+        </div>
       </main>
     </div>
   );

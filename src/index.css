@@ -12,6 +12,20 @@ html, body, #root {
   overscroll-behavior: none;
 }
 
+/* trymiles.app base (Nov 2, 2026): warm cream ground, ink text,
+   Archivo — the same first impression as the poster site. */
+body {
+  background-color: #f3ede1;
+  color: #15222d;
+  font-family: "Archivo", system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: #6d8a63;
+  color: #f3ede1;
+}
+
 .safe-bottom {
   padding-bottom: calc(0.75rem + var(--safe-area-bottom));
 }
