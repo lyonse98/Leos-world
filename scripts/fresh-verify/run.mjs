@@ -35,6 +35,11 @@ const extras = {
   CORRIDOR_SEGMENTS: engine.CORRIDOR_SEGMENTS,
   matchCorridor: engine.matchCorridor,
   resolveFillerRegion: engine.resolveFillerRegion,
+  accessGate: {
+    isTesterUnlocked: engine.isTesterUnlocked,
+    tryTesterUnlock: engine.tryTesterUnlock,
+    TESTER_ACCESS_CODE: engine.TESTER_ACCESS_CODE,
+  },
 };
 
 const args = process.argv.slice(2);

@@ -105,7 +105,7 @@ async function healthyOpening(world, audio, pos = UTC, speed = 8) {
 }
 
 export async function runScenarios(Tour, extras) {
-  const { CORRIDOR_SEGMENTS, matchCorridor, resolveFillerRegion } = extras;
+  const { CORRIDOR_SEGMENTS, matchCorridor, resolveFillerRegion, accessGate } = extras;
 
   // ---------------------------------------------------------- S-01 healthy start
   suite('S-01 healthy start / opener order');
@@ -2478,5 +2478,28 @@ export async function runScenarios(Tour, extras) {
     check('hosted segments keep serving from the working set', fp.length >= 9, `count=${fp.length}`);
     check('background top-up pinned beyond the initial working set', hostedCached() === 20, `cached=${hostedCached()}`);
     tour.endTour();
+  }
+
+  // ---------------------------------------------------------- AG-01 tester access gate
+  // The gate is a UI-layer concern (App renders the shell only after
+  // it passes — the harness has no React/bootstrap seam), but its
+  // decision module is pure and lives in src/core, so its semantics
+  // are exercised here against the harness's fake localStorage:
+  // locked by default, wrong/case-mangled/empty codes rejected and
+  // persisting nothing, the shared code unlocking + persisting.
+  suite('AG-01 tester access gate: locked by default, code unlocks + persists');
+  {
+    const { isTesterUnlocked, tryTesterUnlock, TESTER_ACCESS_CODE } = accessGate;
+    resetLocalStorage();
+    check('locked on a fresh device', isTesterUnlocked() === false);
+    check('wrong code rejected', tryTesterUnlock('wrong-code') === false);
+    check('wrong code persists nothing (still locked)', isTesterUnlocked() === false);
+    check('code is case-sensitive (Coast619 rejected)', tryTesterUnlock('Coast619') === false);
+    check('empty code rejected', tryTesterUnlock('') === false);
+    check('shared code is the spec value', TESTER_ACCESS_CODE === 'coast619', TESTER_ACCESS_CODE);
+    check('correct code unlocks (paste whitespace tolerated)', tryTesterUnlock(' coast619 ') === true);
+    check('unlock persists on the device', isTesterUnlocked() === true);
+    resetLocalStorage();
+    check('cleared storage locks again', isTesterUnlocked() === false);
   }
 }

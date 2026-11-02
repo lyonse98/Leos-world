@@ -15,6 +15,7 @@ import {
 import { Tour, type TourView } from './core/tour';
 import { createBrowserAudio } from './core/player';
 import { BUILD_ID } from './core/backend';
+import { isTesterUnlocked, tryTesterUnlock } from './core/accessGate';
 import { usePosition, useWakeLock } from './hooks';
 
 type Pose = 'idle' | 'speaking' | 'listening' | 'thinking' | 'wave' | 'pointing' | 'liked';
@@ -47,7 +48,91 @@ function WaveBars() {
   );
 }
 
+/**
+ * Tester access gate screen (Nov 2, 2026). Rendered INSTEAD of the
+ * tour shell while locked: nothing in MilesApp — no Tour, no landing
+ * warm, no position watch — mounts behind this screen, so a locked
+ * boot fires zero Gemini/Places traffic. Miles' landing styling.
+ */
+function AccessGate({ onUnlock }: { onUnlock: () => void }) {
+  const [code, setCode] = useState('');
+  const [error, setError] = useState(false);
+
+  const submit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (tryTesterUnlock(code)) onUnlock();
+    else setError(true);
+  };
+
+  return (
+    <div className="min-h-full overflow-y-auto bg-slate-950 text-slate-100">
+      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+        <div className="leo-float absolute -top-20 -left-20 h-72 w-72 rounded-full bg-sky-600/20 blur-3xl" />
+        <div className="leo-float-slow absolute top-1/3 -right-24 h-80 w-80 rounded-full bg-amber-500/10 blur-3xl" />
+      </div>
+      <main className="safe-top safe-bottom relative mx-auto flex min-h-full w-full max-w-xl flex-col items-center px-6 py-8">
+        <MilesFigure pose="wave" large />
+        <h1 className="leo-shimmer mt-2 bg-gradient-to-r from-sky-200 via-white to-amber-200 bg-clip-text text-center text-4xl font-bold text-transparent sm:text-5xl">
+          Miles
+        </h1>
+        <p className="mt-3 text-center text-sm leading-relaxed text-slate-300 sm:text-base">
+          Miles is in early testing right now. If someone sent you this link,
+          they&rsquo;ll have given you a tester code — pop it in and we&rsquo;ll roll.
+        </p>
+
+        <form onSubmit={submit} className="mt-8 w-full rounded-2xl border border-slate-800 bg-slate-900/60 p-4">
+          <input
+            value={code}
+            onChange={e => {
+              setCode(e.target.value);
+              setError(false);
+            }}
+            type="text"
+            placeholder="Tester code"
+            autoComplete="off"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            enterKeyHint="go"
+            aria-label="Tester code"
+            className="w-full rounded-xl border border-slate-700 bg-slate-900/70 px-4 py-3 text-center text-base tracking-widest text-slate-100 placeholder:normal-case placeholder:tracking-normal placeholder:text-slate-500 focus:outline-none"
+          />
+          {error && (
+            <p className="mt-2 text-center text-xs text-amber-300">
+              That code doesn&rsquo;t look right — check with whoever sent you the link.
+            </p>
+          )}
+          <button
+            type="submit"
+            className="mt-3 w-full rounded-xl bg-sky-500 px-4 py-3 text-sm font-semibold text-white transition hover:bg-sky-400 active:scale-[0.99]"
+          >
+            Unlock
+          </button>
+        </form>
+
+        <p className="mt-auto pt-8 text-center text-xs leading-relaxed text-slate-400">
+          Miles is an AI guide. Stories are drawn from public records and local history —
+          and like any good storyteller, he may occasionally get a detail wrong.
+        </p>
+      </main>
+    </div>
+  );
+}
+
 export default function App() {
+  // Tester gate first (Nov 2, 2026): the unlock check is a synchronous
+  // localStorage read in the state initializer, so the very first
+  // render already knows. Locked → the gate screen alone mounts;
+  // MilesApp (which constructs the Tour and warms the landing) never
+  // mounts, and no spend machinery starts. Unlocked → straight to
+  // the shell, exactly as before, gate never shown again on this
+  // device.
+  const [unlocked, setUnlocked] = useState<boolean>(() => isTesterUnlocked());
+  if (!unlocked) return <AccessGate onUnlock={() => setUnlocked(true)} />;
+  return <MilesApp />;
+}
+
+function MilesApp() {
   // One Tour instance per tour (C2 discipline): an ended engine is
   // never restarted — START constructs a fresh engine, so no
   // per-tour state (ledgers, timers, the player's teardown) can
