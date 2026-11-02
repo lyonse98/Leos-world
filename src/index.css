@@ -79,6 +79,10 @@ html, body, #root {
 }
 .leo-live { animation: leo-live 2s ease-in-out infinite; }
 
+/* In-tour Leo figure: a long-press is the (invisible) end-tour gesture,
+   so the OS must not hijack the press with a touch callout. */
+.leo-no-callout { -webkit-touch-callout: none; }
+
 /* ── Map contour overlay for hero ─────────────────────────── */
 .leo-grid {
   background-image:

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Eye, EyeOff, Play, MapPin, Wifi, WifiOff, Download, Clock, Compass, VolumeX, Moon, XCircle, Share2, Music, Send, Heart, AlertTriangle, Smartphone } from 'lucide-react';
+import { Eye, EyeOff, Play, Compass, Moon, XCircle, Share2, Send, AlertTriangle, Smartphone } from 'lucide-react';
 import { useVoice, StoryTiming, PlaybackSettle } from './hooks/useVoice';
 import { useGeolocation, Position } from './hooks/useGeolocation';
 import { useWakeLock } from './hooks/useWakeLock';
@@ -17,7 +17,6 @@ import { storyCoverage, landmarkSubjectKey, LANDMARK_ANGLES, angleFromTopic } fr
 import { latencyModel } from './services/latencyModel';
 import { calculateDistance, bearingDegrees, headingDelta } from './utils/geo';
 
-import { storyLikes } from './services/storyLikes';
 import { fillerLane } from './services/fillerLane';
 import { LEO_MODEL_ID, LEO_QA_MODEL_ID } from './services/leoPersona';
 import { geminiAudio } from './services/geminiAudio';
@@ -100,6 +99,14 @@ const RESUME_SESSION_TTL_MS = 30 * 60 * 1000;
 // every failure shape, including a holder that never releases.
 const ANSWER_GENERATION_FAILSAFE_MS = 150_000;
 
+// Q&A is OFF (Erik's ruling, Nov 2, 2026 — liability-driven, "for now").
+// Every question entry point is unwired: the ask dock renders only under
+// this flag, and submitQuestion refuses every call while it is false.
+// The answer pipeline itself (handleUserQuestion plus the serialization
+// machinery around it) is deliberately left intact and dormant —
+// flipping this one flag back to true is the whole restore.
+const QA_ENABLED = false;
+
 interface SavedTourSession {
   savedAt: number;
 }
@@ -148,8 +155,12 @@ function App() {
   const [cacheCount, setCacheCount] = useState<number>(0);
   const [missedQueueCount, setMissedQueueCount] = useState<number>(0);
   const [lastStorySource, setLastStorySource] = useState<'live' | 'cache' | 'library' | null>(null);
-  const [catchUpActive, setCatchUpActive] = useState<boolean>(false);
-  const [prefetching, setPrefetching] = useState<boolean>(false);
+  // These two flags' only reader was the tour-screen banner row, which
+  // the face-only tour screen (Nov 2, 2026) removed. The background
+  // machinery that sets them (catch-up playback, prefetch) is unchanged;
+  // only the unread values are elided.
+  const [, setCatchUpActive] = useState<boolean>(false);
+  const [, setPrefetching] = useState<boolean>(false);
   const [resumableSession, setResumableSession] = useState<SavedTourSession | null>(() => {
     try {
       const raw = localStorage.getItem(RESUME_SESSION_KEY);
@@ -165,19 +176,7 @@ function App() {
   const [pocketMode, setPocketMode] = useState<boolean>(false);
   const [geminiError, setGeminiError] = useState<string | null>(null);
   const [pipelineStatus, setPipelineStatus] = useState<string>('idle');
-  const [showSpotifyPrompt, setShowSpotifyPrompt] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('leo_spotify_prompted') !== 'true';
-    } catch {
-      return true;
-    }
-  });
-  // The story on air and what the listener has said about it. The control only
-  // ever rates the story that is actually playing, so a rating can never land
-  // on the wrong one.
   const [shareToast, setShareToast] = useState<string | null>(null);
-  const [hasLikedStory, setHasLikedStory] = useState<boolean>(false);
-  const [likeAnimating, setLikeAnimating] = useState<boolean>(false);
   const [backendBannerDismissed, setBackendBannerDismissed] = useState<boolean>(false);
 
   const voice = useVoice();
@@ -483,6 +482,7 @@ function App() {
   };
 
   const submitQuestion = (raw: string): boolean => {
+    if (!QA_ENABLED) return false; // Q&A off — see QA_ENABLED (Nov 2, 2026)
     const question = raw.trim();
     if (!question || isProcessingQuestion) return false;
     if (!geolocation.position) {
@@ -595,6 +595,44 @@ function App() {
     }
     setIsTourStarted(false);
     kickoffFiredRef.current = false;
+  };
+
+  // In-tour invisible gestures (Nov 2, 2026): the tour screen is Leo's
+  // face only — no buttons at all — so the two functions that used to
+  // be buttons there ride on Leo himself. A tap retries audio, but ONLY
+  // while audio is blocked or interrupted (any other tap does nothing);
+  // a long-press ends the tour. No chrome, nothing labelled, nothing
+  // rendered differently — these handlers are the entire surface.
+  const facePressTimerRef = useRef<number | null>(null);
+  const faceLongPressFiredRef = useRef(false);
+  const handleFacePressStart = () => {
+    faceLongPressFiredRef.current = false;
+    if (facePressTimerRef.current) window.clearTimeout(facePressTimerRef.current);
+    facePressTimerRef.current = window.setTimeout(() => {
+      faceLongPressFiredRef.current = true;
+      facePressTimerRef.current = null;
+      handleEndTour();
+    }, 1200);
+  };
+  const handleFacePressEnd = () => {
+    if (facePressTimerRef.current) {
+      window.clearTimeout(facePressTimerRef.current);
+      facePressTimerRef.current = null;
+    }
+    if (faceLongPressFiredRef.current) {
+      faceLongPressFiredRef.current = false;
+      return;
+    }
+    if (voice.audioBlocked || voice.wasInterrupted) {
+      handleUnlockAudio();
+    }
+  };
+  const handleFacePressCancel = () => {
+    if (facePressTimerRef.current) {
+      window.clearTimeout(facePressTimerRef.current);
+      facePressTimerRef.current = null;
+    }
+    faceLongPressFiredRef.current = false;
   };
 
   const handleUserQuestion = useCallback(async (question: string) => {
@@ -1458,7 +1496,6 @@ function App() {
       if (answerPhaseRef.current === 'awaiting-resume' && topic !== null) {
         releaseQuestionLock('story-resumed');
       }
-      setHasLikedStory(false);
 
       // When a location story starts playing, fetch the next story's text
       // during playback so generation overlaps with audio — the listener
@@ -1853,6 +1890,33 @@ function App() {
                 Share Leo's World
               </button>
             </div>
+            {/* Field controls, moved off the tour screen (Nov 2, 2026):
+                the in-tour screen is Leo's face only now, so the
+                diagnostics toggle and the pocket-mode switch live here,
+                before the tour starts. Diagnostics still overlays the
+                tour when enabled — it is Erik's field tool, off by
+                default — and pocket mode still blacks the tour screen
+                until it is tapped awake. */}
+            <div className="mt-3 flex items-center justify-center gap-2">
+              <button
+                onClick={() => setShowDiagnostics(!showDiagnostics)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800/60 border border-slate-700/60 text-slate-400 hover:text-slate-200 transition-all active:scale-95 text-xs font-medium"
+              >
+                {showDiagnostics ? <EyeOff size={14} /> : <Eye size={14} />}
+                Diagnostics
+              </button>
+              <button
+                onClick={() => setPocketMode(!pocketMode)}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border transition-all active:scale-95 text-xs font-medium ${
+                  pocketMode
+                    ? 'bg-slate-700 border-slate-600 text-slate-200'
+                    : 'bg-slate-800/60 border-slate-700/60 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Moon size={14} />
+                Pocket mode
+              </button>
+            </div>
             {!isInstalled && showInstallNudge && (
               <div className="mt-5 max-w-sm mx-auto w-full bg-slate-800/70 border border-amber-800/40 rounded-2xl px-4 py-3.5 text-left shadow-xl backdrop-blur-sm relative">
                 <button
@@ -1895,53 +1959,31 @@ function App() {
         </div>
       ) : (
         <>
-          {/* TOP ZONE — status pill + quick toggles */}
-          <div className="safe-top shrink-0 bg-slate-900/95 backdrop-blur-md border-b border-slate-800/80 px-4 pt-3 pb-2 relative z-20">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2 bg-slate-800/80 border border-amber-800/40 px-3 py-1.5 rounded-full shadow-md">
-                <span className="w-2 h-2 rounded-full bg-amber-500 leo-live" />
-                <span className="text-[11px] font-bold tracking-widest text-slate-200">LEO'S WORLD</span>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <div className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-full border transition-colors ${
-                  isOnline ? 'text-emerald-400 bg-emerald-950/60 border-emerald-800/60' : 'text-red-400 bg-red-950/60 border-red-800/60'
-                }`}>
-                  {isOnline ? <Wifi size={14} /> : <WifiOff size={14} />}
-                </div>
-                {geolocation.isTracking && (
-                  <div className="flex items-center gap-1.5 text-blue-400 bg-slate-800/80 border border-slate-700/60 px-2.5 py-1.5 rounded-full shadow-md">
-                    <MapPin size={14} className="animate-pulse" />
-                  </div>
-                )}
-                <button
-                  onClick={() => setPocketMode(!pocketMode)}
-                  title="Pocket Mode"
-                  className={`p-1.5 rounded-full transition-all border ${
-                    pocketMode
-                      ? 'bg-slate-700 border-slate-600 text-slate-200'
-                      : 'bg-slate-800/80 border-slate-700/60 text-slate-400 hover:bg-slate-700'
-                  }`}
-                >
-                  <Moon size={16} />
-                </button>
-                <button
-                  onClick={() => setShowDiagnostics(!showDiagnostics)}
-                  className="p-1.5 rounded-full bg-slate-800/80 border border-slate-700/60 hover:bg-slate-700 transition-all text-slate-400"
-                >
-                  {showDiagnostics ? <EyeOff size={16} /> : <Eye size={16} />}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* MIDDLE ZONE — narrative card */}
-          <div className="flex-1 relative flex items-center justify-center overflow-hidden px-3 sm:px-5" style={{ background: skyGradient }}>
+          {/* IN-TOUR — Leo's face only (Erik's ruling, Nov 2, 2026,
+              liability-driven). Once a tour is running, the screen
+              shows ONLY Leo: no buttons, no text, no transcript, no
+              now-playing card, no controls — nothing to tap and
+              nothing to read. Everything else — GPS tracking, story
+              selection and playback, the filler/bridge lanes, wake
+              lock, telemetry and diagnostics logging — keeps running
+              in the background exactly as before; only the display
+              changed.
+              Two functions that used to live on this screen MOVED
+              rather than disappearing (see handleFacePressStart):
+              tapping Leo retries audio while it is blocked or
+              interrupted, and a long-press on Leo ends the tour. The
+              initial audio unlock still rides the START TOUR tap,
+              before this screen exists. The diagnostics panel below
+              still renders here, but only when Erik has switched it
+              on from the landing screen — off by default, and
+              unreachable from this screen. */}
+          <div className="flex-1 relative flex items-center justify-center overflow-hidden" style={{ background: skyGradient }}>
             <div className="absolute inset-0 leo-grid opacity-50" />
             <SdBeach className="absolute bottom-0 left-0 w-full h-24 sm:h-28 text-slate-950/50 pointer-events-none" />
             <div className="absolute top-10 left-10 w-64 h-64 bg-amber-700 rounded-full opacity-[0.07] blur-[100px] leo-float" />
             <div className="absolute bottom-16 right-16 w-72 h-72 bg-cyan-600 rounded-full opacity-[0.05] blur-[100px] leo-float-slow" />
             <div className="absolute top-[40%] right-[20%] w-48 h-48 bg-amber-500 rounded-full opacity-[0.04] blur-[80px] leo-float" />
+
 
             {showDiagnostics && (
               <div className="absolute top-3 right-3 bg-slate-800/90 backdrop-blur-md border border-slate-700/70 p-3 rounded-xl z-30 text-xs max-w-[220px] shadow-2xl">
@@ -2013,214 +2055,67 @@ function App() {
                 </div>
               </div>
             )}
-
-            <div className="max-w-3xl w-full relative z-10 text-center">
-              {geolocation.error && (
-                <div className="mb-4 bg-red-950/70 backdrop-blur border border-red-800/70 p-3 rounded-xl">
-                  <p className="text-sm text-red-300">{geolocation.error}</p>
-                </div>
-              )}
-
-              {catchUpActive && (
-                <div className="flex items-center gap-2 justify-center mb-4 bg-amber-950/80 backdrop-blur border border-amber-800/70 px-4 py-2 rounded-xl">
-                  <Clock size={16} className="text-amber-500 animate-pulse" />
-                  <span className="text-xs font-semibold text-amber-400">Catching up...</span>
-                </div>
-              )}
-
-              {showSpotifyPrompt && isTourStarted && (
-                <div className="mb-4 bg-emerald-950/80 backdrop-blur border border-emerald-800/70 px-4 py-3 rounded-xl flex items-center gap-3">
-                  <Music size={18} className="text-emerald-400 shrink-0" />
-                  <div className="flex-1 text-left">
-                    <p className="text-xs font-semibold text-emerald-300">Want music while you tour?</p>
-                    <p className="text-[10px] text-emerald-500/80">Open Spotify and Leo will duck when he talks.</p>
-                  </div>
-                  <button
-                    onClick={() => {
-                      window.open('https://open.spotify.com', '_blank');
-                      try { localStorage.setItem('leo_spotify_prompted', 'true'); } catch { /* storage unavailable */ }
-                      setShowSpotifyPrompt(false);
-                    }}
-                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-colors active:scale-95 shrink-0"
-                  >
-                    Open
-                  </button>
-                  <button
-                    onClick={() => {
-                      try { localStorage.setItem('leo_spotify_prompted', 'true'); } catch { /* storage unavailable */ }
-                      setShowSpotifyPrompt(false);
-                    }}
-                    className="p-1.5 rounded-lg text-emerald-500/60 hover:text-emerald-400 transition-colors shrink-0"
-                  >
-                    <XCircle size={16} />
-                  </button>
-                </div>
-              )}
-
-              {!isOnline && (
-                <div className="flex items-center gap-2 justify-center mb-4 bg-red-950/80 backdrop-blur border border-red-800/70 px-4 py-2 rounded-xl">
-                  <WifiOff size={16} className="text-red-400" />
-                  <span className="text-xs font-semibold text-red-300">No signal — playing from cache</span>
-                </div>
-              )}
-
-              {voice.audioBlocked && (
-                <button
-                  onClick={handleUnlockAudio}
-                  className="w-full flex items-center gap-2 justify-center mb-4 bg-amber-950/80 backdrop-blur border border-amber-800/70 px-4 py-2.5 rounded-xl hover:bg-amber-900/80 transition-colors active:scale-95"
-                >
-                  <VolumeX size={16} className="text-amber-500 shrink-0" />
-                  <span className="text-xs font-semibold text-amber-300">
-                    {voice.audioBlockedKind === 'blocked'
-                      ? 'Sound is blocked — tap to turn it on.'
-                      : "Leo's voice hit a snag — tap to retry."}
-                  </span>
-                </button>
-              )}
-
-              {voice.wasInterrupted && !voice.audioBlocked && (
-                <button
-                  onClick={handleUnlockAudio}
-                  className="w-full flex items-center gap-2 justify-center mb-4 bg-cyan-950/80 backdrop-blur border border-cyan-800/70 px-4 py-2.5 rounded-xl hover:bg-cyan-900/80 transition-colors active:scale-95"
-                >
-                  <Play size={16} className="text-cyan-400 shrink-0" />
-                  <span className="text-xs font-semibold text-cyan-300">
-                    Audio paused — tap to continue.
-                  </span>
-                </button>
-              )}
-
-              {isOnline && cacheCount > 0 && (
-                <div className="flex items-center gap-1.5 justify-center mb-4 text-emerald-500">
-                  <Download size={12} className={prefetching ? 'animate-bounce' : ''} />
-                  <span className="text-[11px] font-medium">{cacheCount} stories ready offline</span>
-                </div>
-              )}
-
-              {/* Distraction-free by design: no story text on screen. Leo's
-                  pose and the orb carry the state so the listener never has
-                  to read. */}
-              {/* Leo stands basically full length — a row, not a stack,
-                  so his head can never slide under the header ribbon and
-                  the like/share row can never slide under the bottom
-                  dock, on phone or desktop alike. */}
-              <div className="flex flex-row items-center justify-center gap-2 sm:gap-6 w-full">
-                {/* Leo is the state indicator, not a control: his pose
-                    and the label beside him carry what he's doing, and
-                    questions go in the text box in the dock below.
-                    (Hold-to-talk was removed Oct 29, 2026 — Q&A is
-                    text-only, so Leo carries no mic badge and no press
-                    affordance.) */}
-                <div className="relative shrink-0 rounded-[2rem] select-none">
-                  <div className={`absolute inset-x-6 top-6 bottom-10 rounded-full blur-3xl transition-colors duration-700 ${leoStatus.glow}`} />
-                  <LeoFigure pose={poseFlash ?? leoStatus.pose} className="relative h-[44vh] sm:h-[56vh] min-h-[240px] max-h-[540px]" />
-                </div>
-                <div className="flex flex-col items-center min-w-0">
-                {voice.isSpeaking && (
-                  <div className="flex items-center gap-[3px] h-5 mb-4">
-                    {[0, 1, 2, 3, 4].map(i => (
-                      <span
-                        key={i}
-                        className="w-[3px] h-full bg-gradient-to-t from-amber-500 to-amber-300 rounded-full leo-wave-bar"
-                        style={{ animationDelay: `${i * 0.12}s` }}
-                      />
-                    ))}
-                  </div>
-                )}
-
-                <p className={`text-sm font-bold tracking-[0.22em] transition-colors duration-500 ${leoStatus.text}`}>
-                  {leoStatus.label}
-                </p>
-
-                <p className="mt-2.5 text-sm tracking-wide text-slate-400">
-                  Ask Leo a question — type it in the box below
-                </p>
-
-                <div className="mt-4 flex flex-wrap justify-center items-center gap-3">
-                  <button
-                    onClick={() => {
-                      if (hasLikedStory || likeAnimating) return;
-                      setHasLikedStory(true);
-                      setLikeAnimating(true);
-                      flashPose('liked', 2000);
-                      setTimeout(() => setLikeAnimating(false), 600);
-                      const topic = voice.getCurrentStoryTopic();
-                      const pos = geolocation.position;
-                      if (topic && pos) {
-                        const sessionId = sessionStorage.getItem('leo_session_id');
-                        storyLikes.record(topic, '', pos.lat, pos.lng, sessionId);
-                      }
-                    }}
-                    disabled={!voice.isSpeaking || hasLikedStory}
-                    className={`flex items-center gap-2 px-4 py-2 rounded-xl border transition-all active:scale-95 text-sm font-medium shadow-md disabled:opacity-30 disabled:cursor-not-allowed ${
-                      hasLikedStory
-                        ? 'bg-rose-600/20 border-rose-500/50 text-rose-300'
-                        : 'bg-slate-800/60 backdrop-blur-sm border-slate-700/60 text-slate-300 hover:bg-slate-700'
-                    } ${likeAnimating ? 'scale-110' : ''}`}
-                    title="Like this story"
-                  >
-                    <Heart size={16} className={hasLikedStory ? 'fill-rose-400 text-rose-400' : ''} />
-                    {hasLikedStory ? 'Liked' : 'Like'}
-                  </button>
-                  <button
-                    onClick={() => handleShare()}
-                    className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-800/60 backdrop-blur-sm border border-slate-700/60 text-slate-300 hover:bg-slate-700 transition-all active:scale-95 text-sm font-medium shadow-md"
-                  >
-                    <Share2 size={16} />
-                    Share
-                  </button>
-                </div>
-                </div>
-              </div>
+            <div
+              className="leo-no-callout relative shrink-0 rounded-[2rem] select-none touch-none"
+              onPointerDown={handleFacePressStart}
+              onPointerUp={handleFacePressEnd}
+              onPointerLeave={handleFacePressCancel}
+              onPointerCancel={handleFacePressCancel}
+              onContextMenu={(e) => e.preventDefault()}
+            >
+              <div className={`absolute inset-x-6 top-6 bottom-10 rounded-full blur-3xl transition-colors duration-700 ${leoStatus.glow}`} />
+              <LeoFigure pose={poseFlash ?? leoStatus.pose} className="relative h-[52vh] sm:h-[64vh] min-h-[280px] max-h-[640px]" />
             </div>
 
             {pocketMode && (
               <div
-                className="absolute inset-0 z-40 bg-black flex items-center justify-center"
+                className="absolute inset-0 z-40 bg-black"
                 onClick={() => setPocketMode(false)}
-              >
-                <div className="text-center">
-                  <Moon size={28} className="mx-auto mb-3 text-slate-700" />
-                  <p className="text-xs text-slate-600 tracking-wide">Pocket mode — tap anywhere to wake</p>
-                </div>
-              </div>
+              />
             )}
           </div>
 
-          {/* BOTTOM DOCK — ask Leo anything */}
-          <div className="bg-slate-950/95 backdrop-blur-md border-t border-slate-800/80 safe-bottom px-4 pt-3 pb-3 relative shrink-0 z-30">
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={userInput}
-                onChange={(e) => setUserInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') handleSubmitQuestion(); }}
-                placeholder="Ask Leo about this area…"
-                disabled={isProcessingQuestion}
-                className="flex-1 px-4 py-3 rounded-xl bg-slate-800/80 border border-slate-700/60 text-sm text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-amber-600/50 focus:ring-1 focus:ring-amber-500/30 transition-all"
-              />
-              <button
-                onClick={handleSubmitQuestion}
-                disabled={!userInput.trim() || isProcessingQuestion}
-                className="flex items-center justify-center w-12 h-12 rounded-xl bg-gradient-to-r from-amber-600 to-amber-500 text-white hover:from-amber-500 hover:to-amber-400 transition-all active:scale-95 shadow-lg disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
-              >
-                {isProcessingQuestion
-                  ? <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-                  : <Send size={18} />}
-              </button>
-            </div>
+          {/* ASK DOCK — renders ONLY if Q&A is restored (QA_ENABLED).
+              While the flag is false this mounts nothing: no input
+              exists in the DOM, no rendered path can call
+              handleSubmitQuestion, and submitQuestion itself refuses
+              every call. Flipping QA_ENABLED restores the dock in
+              this same layout slot, End Tour button included. */}
+          {QA_ENABLED && (
+            <div className="bg-slate-950/95 backdrop-blur-md border-t border-slate-800/80 safe-bottom px-4 pt-3 pb-3 relative shrink-0 z-30">
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={userInput}
+                  onChange={(e) => setUserInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') handleSubmitQuestion(); }}
+                  placeholder="Ask Leo about this area…"
+                  disabled={isProcessingQuestion}
+                  className="flex-1 px-4 py-3 rounded-xl bg-slate-800/80 border border-slate-700/60 text-sm text-slate-200 placeholder:text-slate-500 focus:outline-none focus:border-amber-600/50 focus:ring-1 focus:ring-amber-500/30 transition-all"
+                />
+                <button
+                  onClick={handleSubmitQuestion}
+                  disabled={!userInput.trim() || isProcessingQuestion}
+                  className="flex items-center justify-center w-12 h-12 rounded-xl bg-gradient-to-r from-amber-600 to-amber-500 text-white hover:from-amber-500 hover:to-amber-400 transition-all active:scale-95 shadow-lg disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                >
+                  {isProcessingQuestion
+                    ? <span className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                    : <Send size={18} />}
+                </button>
+              </div>
 
-            <div className="flex justify-center mt-3">
-              <button
-                onClick={handleEndTour}
-                title="End tour — Leo stops and GPS turns off"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-950/60 border border-red-900/60 text-red-400 hover:bg-red-900 transition-all active:scale-95 text-xs font-medium"
-              >
-                <XCircle size={14} />
-                <span>End Tour</span>
-              </button>
+              <div className="flex justify-center mt-3">
+                <button
+                  onClick={handleEndTour}
+                  title="End tour — Leo stops and GPS turns off"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-950/60 border border-red-900/60 text-red-400 hover:bg-red-900 transition-all active:scale-95 text-xs font-medium"
+                >
+                  <XCircle size={14} />
+                  <span>End Tour</span>
+                </button>
+              </div>
             </div>
-          </div>
+          )}
         </>
       )}
 
