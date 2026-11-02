@@ -1,22 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
-import {
-  Play,
-  Pause,
-  SkipForward,
-  Heart,
-  X,
-  Send,
-  VolumeX,
-  MapPin,
-  Gauge,
-  ChevronDown,
-  ChevronUp,
-} from 'lucide-react';
+import { Play, Send, MapPin } from 'lucide-react';
 import { Tour, type TourView } from './core/tour';
 import { createBrowserAudio } from './core/player';
-import { BUILD_ID } from './core/backend';
 import { isTesterUnlocked, tryTesterUnlock } from './core/accessGate';
 import { usePosition, useWakeLock } from './hooks';
+
+/**
+ * Q&A master switch for the APP LAYER (Erik, Nov 2, 2026 — liability
+ * ruling): while false, no question surface renders anywhere in the
+ * app and no component can reach the engine's question pipeline.
+ * The pipeline itself (Tour.submitQuestion and everything downstream
+ * of it, including the playback serialization it coordinates) is
+ * deliberately left intact and dormant in the engine — the
+ * fresh-verify harness still exercises it — so re-enabling Q&A is
+ * flipping this flag back, nothing more.
+ */
+const QA_ENABLED = false;
 
 type Pose = 'idle' | 'speaking' | 'listening' | 'thinking' | 'wave' | 'pointing' | 'liked';
 
@@ -34,17 +33,63 @@ function MilesFigure({ pose, large }: { pose: Pose; large?: boolean }) {
   );
 }
 
-function WaveBars() {
+/**
+ * The Q&A form — text only (Erik's Oct 29 decision). Rendered ONLY
+ * under QA_ENABLED (Nov 2, 2026): while the flag is off this
+ * component never mounts, so no question input, hint, or submit
+ * affordance exists anywhere in the app.
+ */
+function QuestionForm({
+  question,
+  qaLocked,
+  qaPhase,
+  onQuestionChange,
+  onFocusChange,
+  onSubmit,
+}: {
+  question: string;
+  qaLocked: boolean;
+  qaPhase: TourView['qaPhase'];
+  onQuestionChange: (q: string) => void;
+  onFocusChange: (focused: boolean) => void;
+  onSubmit: (e: React.FormEvent) => void;
+}) {
   return (
-    <div className="flex h-5 items-center gap-1" aria-hidden>
-      {[0, 1, 2, 3, 4].map(i => (
-        <span
-          key={i}
-          className="leo-wave-bar w-1 rounded bg-sky-300"
-          style={{ height: '100%', animationDelay: `${i * 0.12}s` }}
+    <form onSubmit={onSubmit} className="mt-5 w-full max-w-xl">
+      <div
+        className={`flex items-center gap-2 rounded-2xl border px-3 py-2 ${
+          qaLocked ? 'border-slate-800 bg-slate-900/40 opacity-60' : 'border-slate-700 bg-slate-900/70'
+        }`}
+      >
+        <input
+          value={question}
+          onChange={e => onQuestionChange(e.target.value)}
+          onFocus={() => onFocusChange(true)}
+          onBlur={() => onFocusChange(false)}
+          disabled={qaLocked}
+          placeholder={
+            qaLocked
+              ? qaPhase === 'generating'
+                ? 'Miles is answering…'
+                : 'One question at a time…'
+              : 'Ask Miles about this place…'
+          }
+          className="w-full bg-transparent text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none"
+          maxLength={300}
         />
-      ))}
-    </div>
+        <button
+          type="submit"
+          disabled={qaLocked || question.trim().length === 0}
+          aria-label="Ask"
+          className="rounded-full bg-sky-500 p-2 text-white transition enabled:hover:bg-sky-400 disabled:opacity-40"
+        >
+          <Send className="h-4 w-4" />
+        </button>
+      </div>
+      <p className="mt-1.5 text-center text-[11px] text-slate-500">
+        Type a question — Miles answers one at a time, then the tour rolls on.
+      </p>
+    </form>
   );
 }
 
@@ -157,7 +202,6 @@ function MilesApp() {
   const [resumeOffered, setResumeOffered] = useState<boolean>(() => Tour.hasResumableSession());
   const [question, setQuestion] = useState('');
   const [questionFocused, setQuestionFocused] = useState(false);
-  const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [tourSeconds, setTourSeconds] = useState(0);
   const warmedForRef = useRef<Tour | null>(null);
 
@@ -284,7 +328,27 @@ function MilesApp() {
 
   const submitQuestion = (e: React.FormEvent) => {
     e.preventDefault();
+    // QA_ENABLED gate (Nov 2, 2026): while Q&A is off, this handler
+    // refuses to reach the engine's question pipeline even if a
+    // question surface were somehow mounted.
+    if (!QA_ENABLED) return;
     if (engine.submitQuestion(question)) setQuestion('');
+  };
+
+  /**
+   * Face-only tour screen (Nov 2, 2026): a tap anywhere on the
+   * running tour is invisible chrome carrying the functions the old
+   * banners and transport buttons held — the sound-blocked gesture
+   * retry (bannerTap), resume after a platform interruption or an
+   * OS-level pause (resumeByUser), and otherwise the audio latch's
+   * gesture re-prime (noteGesture, the P2/P8 net). Nothing renders
+   * for any of these; Media Session handlers above cover transport
+   * from the lock screen / car.
+   */
+  const onTourTap = () => {
+    if (view.banner === 'blocked') engine.bannerTap();
+    else if (view.banner === 'interrupted' || view.userPaused) engine.resumeByUser();
+    else engine.noteGesture();
   };
 
   const isStandalone =
@@ -376,191 +440,36 @@ function MilesApp() {
   }
 
   // ------------------------------------------------------------ tour
-  const d = view.diagnostics;
+  // In-tour screen (Erik, Nov 2, 2026 — liability ruling): while a
+  // tour is RUNNING the screen is Miles's face and nothing else —
+  // no buttons, no text, no now-playing card, no controls of any
+  // kind. Every background system (GPS, selection and playback,
+  // the filler / bridge / hosted lanes, wake lock, telemetry and
+  // diagnostics state) keeps running exactly as before; only the
+  // display changed. The pre-tour landing above is untouched, the
+  // audio unlock still rides the START tap and the tap routing in
+  // onTourTap, and OS Media Session controls still work. Q&A
+  // mounts only under QA_ENABLED, which is off.
   return (
     <div
       className="flex min-h-full flex-col bg-slate-950 text-slate-100"
-      onPointerDown={() => engine.noteGesture()}
+      onPointerDown={onTourTap}
     >
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
         <div className="leo-float absolute -top-24 right-0 h-72 w-72 rounded-full bg-sky-600/15 blur-3xl" />
       </div>
 
-      <header className="safe-top relative flex items-center justify-between px-4 pt-2">
-        <div className="flex items-center gap-2 text-xs text-slate-400">
-          <Gauge className="h-4 w-4 text-sky-300" />
-          <span>
-            {Math.floor(tourSeconds / 60)}:{String(tourSeconds % 60).padStart(2, '0')}
-          </span>
-          {d.neighborhood && <span className="text-slate-300">· {d.neighborhood}</span>}
-        </div>
-        <button
-          onClick={() => engine.endTour()}
-          className="flex items-center gap-1 rounded-full border border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-300 transition hover:bg-slate-800"
-        >
-          <X className="h-3.5 w-3.5" /> End tour
-        </button>
-      </header>
-
-      <main className="relative flex flex-1 flex-col items-center px-5 pt-1">
-        <MilesFigure pose={pose} />
-
-        {view.banner === 'blocked' && (
-          <button
-            onClick={e => {
-              e.stopPropagation();
-              engine.bannerTap();
-            }}
-            className="mt-1 flex w-full max-w-md items-center justify-center gap-2 rounded-xl bg-amber-500 px-4 py-3 text-sm font-semibold text-amber-950 shadow-lg transition hover:bg-amber-400"
-          >
-            <VolumeX className="h-5 w-5" /> Sound is blocked — tap to turn it on.
-          </button>
-        )}
-        {view.banner === 'interrupted' && (
-          <button
-            onClick={e => {
-              e.stopPropagation();
-              engine.resumeByUser();
-            }}
-            className="mt-1 flex w-full max-w-md items-center justify-center gap-2 rounded-xl bg-sky-600 px-4 py-3 text-sm font-semibold text-white shadow-lg transition hover:bg-sky-500"
-          >
-            <Play className="h-5 w-5" /> Welcome back. Tap to keep the tour going.
-          </button>
-        )}
-
-        <div className="mt-2 flex h-6 items-center gap-3">
-          {view.nowPlaying ? <WaveBars /> : null}
-          <p className="text-center text-sm font-medium text-sky-100">
-            {view.nowPlaying
-              ? view.nowPlaying.label
-              : view.qaPhase === 'generating'
-                ? 'Miles is thinking…'
-                : 'Listening to the road…'}
-          </p>
-        </div>
-        {view.upNext && (
-          <p className="mt-0.5 text-center text-xs text-slate-400">Up next: {view.upNext}</p>
-        )}
-
-        {view.lastStory && (
-          <div className="mt-3 w-full max-w-xl rounded-2xl border border-slate-800 bg-slate-900/60 px-4 py-3 text-center">
-            <p className="text-sm font-semibold text-slate-100">{view.lastStory.label}</p>
-            <p className="mt-0.5 text-xs text-slate-400">
-              {
-                {
-                  origin: 'How it began',
-                  people: 'The people behind it',
-                  cultural: 'The culture it carries',
-                  building: 'The building itself',
-                  sports: 'The game and the grounds',
-                  surroundings: 'The land around it',
-                  role: 'What it does for the city',
-                  corridor: 'A story of the road',
-                  filler: 'A San Diego story',
-                }[view.lastStory.angle ?? '']
-                ?? 'A San Diego story'
-              }
-            </p>
-          </div>
-        )}
-
-        {/* Transport */}
-        <div className="mt-4 flex items-center gap-3">
-          <button
-            onClick={() => engine.likeCurrent()}
-            aria-label="Like this story"
-            className={`rounded-full border p-3 transition ${
-              view.likedSubject
-                ? 'border-rose-400 bg-rose-500/20 text-rose-300'
-                : 'border-slate-700 text-slate-300 hover:bg-slate-800'
-            }`}
-          >
-            <Heart className="h-5 w-5" fill={view.likedSubject ? 'currentColor' : 'none'} />
-          </button>
-          {view.userPaused ? (
-            <button
-              onClick={() => engine.resumeByUser()}
-              className="flex items-center gap-2 rounded-full bg-sky-500 px-6 py-3 text-sm font-semibold text-white transition hover:bg-sky-400"
-            >
-              <Play className="h-5 w-5" /> Resume
-            </button>
-          ) : (
-            <button
-              onClick={() => engine.pauseByUser()}
-              className="flex items-center gap-2 rounded-full border border-slate-600 px-6 py-3 text-sm font-semibold text-slate-100 transition hover:bg-slate-800"
-            >
-              <Pause className="h-5 w-5" /> Pause
-            </button>
-          )}
-          <button
-            onClick={() => engine.skip()}
-            aria-label="Skip this story"
-            className="rounded-full border border-slate-700 p-3 text-slate-300 transition hover:bg-slate-800"
-          >
-            <SkipForward className="h-5 w-5" />
-          </button>
-        </div>
-
-        {/* Q&A — text only (Erik's Oct 29 decision) */}
-        <form onSubmit={submitQuestion} className="mt-5 w-full max-w-xl">
-          <div
-            className={`flex items-center gap-2 rounded-2xl border px-3 py-2 ${
-              view.qaLocked ? 'border-slate-800 bg-slate-900/40 opacity-60' : 'border-slate-700 bg-slate-900/70'
-            }`}
-          >
-            <input
-              value={question}
-              onChange={e => setQuestion(e.target.value)}
-              onFocus={() => setQuestionFocused(true)}
-              onBlur={() => setQuestionFocused(false)}
-              disabled={view.qaLocked}
-              placeholder={
-                view.qaLocked
-                  ? view.qaPhase === 'generating'
-                    ? 'Miles is answering…'
-                    : 'One question at a time…'
-                  : 'Ask Miles about this place…'
-              }
-              className="w-full bg-transparent text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none"
-              maxLength={300}
-            />
-            <button
-              type="submit"
-              disabled={view.qaLocked || question.trim().length === 0}
-              aria-label="Ask"
-              className="rounded-full bg-sky-500 p-2 text-white transition enabled:hover:bg-sky-400 disabled:opacity-40"
-            >
-              <Send className="h-4 w-4" />
-            </button>
-          </div>
-          <p className="mt-1.5 text-center text-[11px] text-slate-500">
-            Type a question — Miles answers one at a time, then the tour rolls on.
-          </p>
-        </form>
-
-        {/* Diagnostics */}
-        <button
-          onClick={() => setShowDiagnostics(s => !s)}
-          className="mt-4 flex items-center gap-1 text-xs text-slate-500 transition hover:text-slate-300"
-        >
-          Diagnostics {showDiagnostics ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-        </button>
-        {showDiagnostics && (
-          <div className="safe-bottom mb-4 mt-2 w-full max-w-xl rounded-xl border border-slate-800 bg-slate-900/70 p-3 font-mono text-[11px] leading-relaxed text-slate-400">
-            <p>build: {BUILD_ID} · variant: fresh</p>
-            <p>
-              opening: {view.opening} · latch: {view.latch} · phase: {view.phase}
-            </p>
-            <p>
-              stories played {d.storiesPlayed} · dropped {d.storiesDropped} · fillers {d.fillersPlayed} ·
-              answers {d.questionsAnswered}
-            </p>
-            <p>
-              storm: {d.storm ? 'yes' : 'no'} · tts quota: {d.ttsQuota ? 'TRIPPED' : 'ok'} · text
-              quota: {d.storyQuota ? 'TRIPPED' : 'ok'} · prefetch buffer: {d.bufferCount}
-            </p>
-            <p>neighborhood: {d.neighborhood ?? '—'}</p>
-          </div>
+      <main className="safe-top safe-bottom relative flex flex-1 flex-col items-center justify-center px-5">
+        <MilesFigure pose={pose} large />
+        {QA_ENABLED && (
+          <QuestionForm
+            question={question}
+            qaLocked={view.qaLocked}
+            qaPhase={view.qaPhase}
+            onQuestionChange={setQuestion}
+            onFocusChange={setQuestionFocused}
+            onSubmit={submitQuestion}
+          />
         )}
       </main>
     </div>
