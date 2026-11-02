@@ -746,10 +746,19 @@ export async function runScenarios(Tour, extras) {
     // the pause; resume lets the story play.
     resetLocalStorage();
     const world = makeWorld(Tour, { candidates: [makeCandidate('Paused Place')], library: [] });
+    // The story in flight at pause time is a NAMED place revealed
+    // by the move below. (It used to be the generic `area:`
+    // fallback — the Nov 1 orientation slot now suppresses that
+    // serve once the area's WELCOME has sounded, which is the fix
+    // working, not this scenario's subject.)
     world.synthBehavior = () =>
       new Promise(res => world.clock.setTimeout(() => res(new Blob(['voice'])), 5_000));
     const audio = new FakeAudio(world.clock, okPolicy({ synth: 8_000 }));
     const { tour } = await healthyOpening(world, audio);
+    world.candidates = [
+      makeCandidate('Paused Place'),
+      makeCandidate('Late Place', { lat: UTC.lat + 0.003 }),
+    ];
     const logBase = audio.log.length; // opening sounds are not this check's business
     tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
     await world.clock.advance(1_000); // story minted, resolve in flight
@@ -1630,6 +1639,283 @@ export async function runScenarios(Tour, extras) {
     check('still no welcome while live stays down',
       welcomePlayed(world, 'welcome:university city').length === 0);
     check('the tour itself is unharmed', tour.view().phase === 'active', tour.view().phase);
+    tour.endTour();
+  }
+
+  // ---------------------------------------------------------- SL story-landing fixes (Nov 1)
+  // The Nov 1 field drive (Costa Verde / University City): a
+  // landmark generated twice and dropped twice behind stacked
+  // welcome + area serves, nested areas firing two welcome
+  // routines. Five fixes, one suite each.
+  const playbacksFor = (world, subject) =>
+    world.eventsOf('story_playback').filter(e => e.payload.subject === subject);
+  const dropsFor = (world, subject) =>
+    world.eventsOf('story_dropped').filter(e => e.payload.subject === subject);
+  const promptsFor = (world, fragment) =>
+    world.genStoryPrompts.filter(p => p.includes(fragment));
+
+  suite('SL-01 landmark displaces a WAITING welcome (deferral, not a drop)');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park')],
+      library: ['Alpha Park'],
+      intros: [],
+    });
+    // The Tier-1 text is long, as befits a marquee telling (and so
+    // the freshness judge still honors it after the queue drains —
+    // the fit check is SL-05's subject, not this suite's).
+    world.genStoryBehavior = prompt =>
+      prompt.includes('Tier Tower')
+        ? 'A very long story about a tall tower, told slowly and in full. '.repeat(24)
+        : 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 45_000, synth: 12_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    const labels = watchLabels(world, tour);
+    // Alpha (45 s library) is playing. Enter Clairemont: its live
+    // welcome takes the WAITING slot behind Alpha.
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(3_000);
+    check('the mid-tour welcome waits behind the playing story',
+      tour.view().upNext === 'Welcome to Clairemont', `upNext=${tour.view().upNext}`);
+    // A Tier-1 landmark appears: it must take the waiting slot.
+    world.candidates = [makeCandidate('Tier Tower', { tier1: true, lat: UTC.lat + 0.004 })];
+    tour.onPosition({ lat: UTC.lat + 0.0075, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(1_000);
+    check('the Tier-1 landmark takes the waiting slot',
+      tour.view().upNext === 'Tier Tower', `upNext=${tour.view().upNext}`);
+    check('the playing story is never cut', labels.join(',') === 'Alpha Park', labels.join(','));
+    check('the deferred welcome filed no story_dropped',
+      dropsFor(world, 'welcome:clairemont').length === 0,
+      JSON.stringify(dropsFor(world, 'welcome:clairemont').map(d => d.payload)));
+    check('the deferred welcome is not heard-marked',
+      !world.heard.includes('Welcome to Clairemont'), world.heard.join(' | '));
+    await world.clock.advance(120_000);
+    check('play order: Alpha completes, landmark next, welcome after',
+      labels.slice(0, 3).join(',') === 'Alpha Park,Tier Tower,Welcome to Clairemont', labels.join(','));
+    check('Alpha sounded to completion (never cut)',
+      playbacksFor(world, 'alpha park').some(e => e.payload.completed === true),
+      JSON.stringify(playbacksFor(world, 'alpha park').map(e => e.payload)));
+    check('the welcome later serves and sounds exactly once',
+      playbacksFor(world, 'welcome:clairemont').filter(e => e.payload.sounded === true).length === 1,
+      JSON.stringify(playbacksFor(world, 'welcome:clairemont').map(e => e.payload)));
+    check('the welcome is heard only after it sounds',
+      world.heard.includes('Welcome to Clairemont'), world.heard.join(' | '));
+    tour.endTour();
+  }
+
+  suite('SL-02 one orientation slot: a sounded welcome closes the area fallback');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: ['Clairemont'] });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(90_000);
+    check('the welcome sounded for the entered area',
+      playbacksFor(world, 'welcome:clairemont').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'welcome:clairemont').map(e => e.payload)));
+    check('no generic area story is ever committed for that area on this pass',
+      world.eventsOf('story_played').filter(e => e.payload.subject === 'area:clairemont').length === 0,
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    tour.endTour();
+  }
+
+  suite('SL-03 one orientation slot: an area story first discharges the entry welcome');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: [] });
+    let clairemontWelcomeAttempts = 0;
+    world.genStoryBehavior = prompt => {
+      if (prompt.includes('NEIGHBORHOOD WELCOME') && prompt.includes('Clairemont')) {
+        clairemontWelcomeAttempts += 1;
+        throw new Error('welcome generation down');
+      }
+      return 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+    };
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(2_000);
+    // A fresh serve cycle (the owed step stands down on its
+    // cooldown) is what reaches the generic area story.
+    tour.onPosition({ lat: UTC.lat + 0.007, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(30_000);
+    check('the failed entry welcome was attempted once and re-owed',
+      clairemontWelcomeAttempts === 1, `attempts=${clairemontWelcomeAttempts}`);
+    check('the generic area story sounded in its place',
+      playbacksFor(world, 'area:clairemont').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'area:clairemont').map(e => e.payload)));
+    await world.clock.advance(200_000); // cross the 180 s welcome cooldown
+    check('past the cooldown, the entry welcome is discharged — never retried',
+      clairemontWelcomeAttempts === 1, `attempts=${clairemontWelcomeAttempts}`);
+    check('the welcome never commits',
+      world.eventsOf('story_played').filter(e => e.payload.subject === 'welcome:clairemont').length === 0);
+    tour.endTour();
+  }
+
+  suite('SL-04 nested areas: parent welcome deferred, matures on parent-only dwell');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      intros: ['Costa Verde', 'University City'],
+    });
+    // The parent's generic area lane is down for this drive, so
+    // the deferred WELCOME is the orientation voice under test
+    // (the area-first composition is the next block).
+    world.genStoryBehavior = prompt => {
+      if (prompt.includes('University City') && !prompt.includes('NEIGHBORHOOD WELCOME')) {
+        throw new Error('area lane down for University City');
+      }
+      return 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+    };
+    world.area = { neighborhood: 'La Jolla', city: 'San Diego' };
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 20_000 }));
+    const tour = world.makeTour(audio);
+    tour.onPosition({ lat: 32.85, lng: -117.25, speedMps: 8, headingDeg: 180 });
+    tour.start(false);
+    await world.clock.advance(40_000); // opening welcome (La Jolla, live) done
+    // Enter the child (Costa Verde) at the fixture anchor: its
+    // shelf welcome sounds and becomes the nesting anchor.
+    world.area = { neighborhood: 'Costa Verde', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(40_000);
+    check('the child welcome sounded',
+      playbacksFor(world, 'welcome:costa verde').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'welcome:costa verde').map(e => e.payload)));
+    // Enter the parent ~890 m from the child anchor: nested —
+    // the parent welcome must NOT fire.
+    world.area = { neighborhood: 'University City', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.008, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(30_000);
+    check('the parent shelf was never consulted inside the child footprint',
+      !world.introFetches.includes('University City'), world.introFetches.join(','));
+    check('no parent welcome committed during the deferral',
+      welcomePlayed(world, 'welcome:university city').length === 0,
+      JSON.stringify(welcomePlayed(world, 'welcome:university city').map(e => e.payload)));
+    // Move beyond the child radius (~1.34 km from the anchor),
+    // still in the parent, and dwell past 75 s from entry.
+    tour.onPosition({ lat: UTC.lat + 0.012, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    await world.clock.advance(45_000);
+    check('after parent-only dwell, the parent welcome serves from the shelf',
+      world.introFetches.includes('University City'), world.introFetches.join(','));
+    check('the parent welcome sounds exactly once',
+      playbacksFor(world, 'welcome:university city').filter(e => e.payload.sounded === true).length === 1,
+      JSON.stringify(playbacksFor(world, 'welcome:university city').map(e => e.payload)));
+    tour.endTour();
+  }
+  {
+    // Composition with fix 2: if the parent's generic area story
+    // DOES sound during the deferral window, it spends the
+    // orientation slot and the deferred welcome is discharged —
+    // one orientation voice for the entry, never two.
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      intros: ['Costa Verde', 'University City'],
+    });
+    world.area = { neighborhood: 'La Jolla', city: 'San Diego' };
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 20_000 }));
+    const tour = world.makeTour(audio);
+    tour.onPosition({ lat: 32.85, lng: -117.25, speedMps: 8, headingDeg: 180 });
+    tour.start(false);
+    await world.clock.advance(40_000);
+    world.area = { neighborhood: 'Costa Verde', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(40_000);
+    world.area = { neighborhood: 'University City', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.008, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(30_000);
+    check('the generic area story sounded during the deferral window',
+      playbacksFor(world, 'area:university city').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'area:university city').map(e => e.payload)));
+    tour.onPosition({ lat: UTC.lat + 0.012, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(120_000); // dwell matures — but the slot is spent
+    check('the deferred welcome never fires after the area story sounded',
+      welcomePlayed(world, 'welcome:university city').length === 0,
+      JSON.stringify(welcomePlayed(world, 'welcome:university city').map(e => e.payload)));
+    check('the parent shelf was never consulted',
+      !world.introFetches.includes('University City'), world.introFetches.join(','));
+    tour.endTour();
+  }
+
+  suite('SL-05 fit check: no generation spent on a story that cannot land');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park')],
+      library: ['Alpha Park'],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 100_000, synth: 12_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    // Alpha (100 s library) is playing with most of its run left.
+    // Heading south: the Ruin is 3 km astern (already unlandable
+    // at the projected start), the Plaza ~530 m ahead (landable).
+    world.candidates = [
+      makeCandidate('Alpha Park'),
+      makeCandidate('Doomed Ruin', { lat: UTC.lat + 0.027 }),
+      makeCandidate('Good Plaza', { lat: UTC.lat - 0.0048 }),
+    ];
+    tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(30_000);
+    check('zero generation calls spent on the unlandable candidate',
+      promptsFor(world, 'Doomed Ruin').length === 0,
+      `prompts=${promptsFor(world, 'Doomed Ruin').length}`);
+    check('the landable candidate is generated instead',
+      promptsFor(world, 'Good Plaza').length >= 1,
+      `prompts=${promptsFor(world, 'Good Plaza').length}`);
+    check('the landable candidate commits',
+      world.eventsOf('story_played').some(e => e.payload.subject === 'good plaza'),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    tour.endTour();
+  }
+
+  suite('SL-06 salvage: a judge-dropped live story serves later from its banked text');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park')],
+      library: ['Alpha Park'],
+      // A long text (~100 s+ estimated): the distance judge, not
+      // the age gate, is the one that drops it (S-09's shape).
+      genStoryBehavior: () => 'A very long story about a fine old house, told slowly and in full. '.repeat(24),
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 30_000, synth: 12_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    const labels = watchLabels(world, tour);
+    // Alpha (30 s) is playing. The Munk House story generates and
+    // slots behind it.
+    world.candidates = [makeCandidate('Munk House', { lat: UTC.lat, lng: UTC.lng })];
+    tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(2_000);
+    check('the live story was generated once',
+      promptsFor(world, 'Munk House').length === 1, `prompts=${promptsFor(world, 'Munk House').length}`);
+    // Teleport 3 km north, heading away: at dequeue the judge
+    // drops the story stale-behind, unheard.
+    tour.onPosition({ lat: UTC.lat + 0.033, lng: UTC.lng, speedMps: 8, headingDeg: 0 });
+    await world.clock.advance(45_000);
+    check('the story was judge-dropped stale-behind',
+      dropsFor(world, 'munk house').some(d => d.payload.reason === 'stale-behind'),
+      JSON.stringify(dropsFor(world, 'munk house').map(d => d.payload)));
+    check('the dropped story never sounded', !labels.includes('Munk House'), labels.join(','));
+    check('the dropped subject is not in the heard set',
+      !world.heard.includes('Munk House'), world.heard.join(' | '));
+    // Re-approach the anchor: the banked text serves — no second
+    // generation spend.
+    tour.onPosition({ lat: UTC.lat + 0.001, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(30_000);
+    check('no second generation on re-approach',
+      promptsFor(world, 'Munk House').length === 1, `prompts=${promptsFor(world, 'Munk House').length}`);
+    check('the salvaged story sounds on re-approach',
+      playbacksFor(world, 'munk house').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'munk house').map(e => e.payload)));
+    check('the subject joins the heard set only once it sounds',
+      world.heard.includes('Munk House'), world.heard.join(' | '));
     tour.endTour();
   }
 }

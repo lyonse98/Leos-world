@@ -74,6 +74,17 @@ export interface AudibleItem {
   /** Tier-1 story (Q4) / reserved WELCOME (O8): displacement protection (Q6). */
   tier1?: boolean;
   reserved?: boolean;
+  /**
+   * A mid-tour WELCOME (Nov 1): reserved against ordinary
+   * displacement like any welcome, but DEFERRABLE by a Tier-1
+   * newcomer — the player withdraws it silently (no drop record,
+   * no §8 terminal) and the engine re-arms it as still owed via
+   * onDeferred. Only the waiting slot is ever involved; the
+   * playing story is never cut, deferred, or displaced.
+   */
+  deferrable?: boolean;
+  /** Set by the player when it defers this item (see offerStory). */
+  deferred?: boolean;
   // Story-carried fields (kind === 'story'); ignored otherwise.
   subject?: string;
   angleOf?: string;
@@ -122,6 +133,10 @@ export interface PlayerHooks {
   judgeStory(item: AudibleItem): { ok: true } | { ok: false; reason: string };
   /** Engine's displacement ruling (Q4/Q6). */
   mayDisplace(waiter: AudibleItem, newcomer: AudibleItem, kind: 'priority' | 'fresher'): boolean;
+  /** Engine's deferral ruling (Nov 1): may a Tier-1 newcomer defer this waiter (a deferrable WELCOME) — withdrawing it silently, still owed — instead of displacing it or queueing behind it? */
+  mayDefer(waiter: AudibleItem, newcomer: AudibleItem): boolean;
+  /** A deferrable waiter was withdrawn for a Tier-1 newcomer (its silent settle follows): the engine re-arms whatever the item was owed as. */
+  onDeferred(item: AudibleItem): void;
   /** The waiting slot emptied and nothing is pending: a serve cycle may refill it (S2). */
   onSlotEmpty(): void;
   /** A location story has been committed (§8 story_played): it took the waiting slot or the element. Fires exactly once per committed story. */
@@ -325,6 +340,37 @@ export class Player {
       return 'slotted';
     }
     if (tier1) {
+      // Deferral (Nov 1): a deferrable waiter (the mid-tour
+      // WELCOME) yields the slot to a Tier-1 newcomer WITHOUT a
+      // displacement settle — the welcome is not dropped, not
+      // heard, and files no §8 terminal; it stays owed, and the
+      // engine re-arms it from onDeferred. The settle below is
+      // the silent kind (the tour marks the item's handler path
+      // accordingly): coverage bookkeeping only.
+      if (
+        !this.holdActive() &&
+        this.waitingStory.deferrable &&
+        this.hooks.mayDefer(this.waitingStory, item)
+      ) {
+        const waiter = this.waitingStory;
+        this.waitingStory = item;
+        this.commitStory(item);
+        this.hooks.onWaiting(item);
+        waiter.deferred = true;
+        waiter.silent = true;
+        this.hooks.onDeferred(waiter);
+        this.settleItem(waiter, {
+          sounded: false,
+          completed: false,
+          soundedMs: 0,
+          failKind: 'none',
+          exhausted: false,
+          dropReason: null,
+          skipped: false,
+        });
+        this.hooks.onState();
+        return 'slotted';
+      }
       if (!this.holdActive() && this.hooks.mayDisplace(this.waitingStory, item, 'priority')) {
         const waiter = this.waitingStory;
         this.waitingStory = item;

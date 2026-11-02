@@ -204,6 +204,30 @@ const WELCOME_COOLDOWN_MS = 180_000;
  * value, named so the field can argue with it.
  */
 const WELCOME_LIVE_DEADLINE_MS = 12_000;
+/**
+ * Nested-area deferral (Nov 1): neighborhoods carry no polygons
+ * in this shell — reverse geocoding returns names, not shapes —
+ * so the honest geometry for "still inside the child" is the
+ * welcomed child's anchor plus a district-scale radius. 1,200 m
+ * is that scale (the curated named-area table's largest district
+ * radius, Liberty Station, is 1,250 m). A parent entry inside
+ * the radius defers; the welcome matures only once the driver is
+ * beyond the radius AND has dwelt in the parent for
+ * PARENT_DWELL_MS — genuinely out of the child, still in the
+ * parent.
+ */
+const NESTED_AREA_RADIUS_M = 1200;
+const PARENT_DWELL_MS = 75_000;
+/**
+ * Fit check (Nov 1): the duration estimate for a story that does
+ * not exist yet. Live tellings run in the 2–3 minute band (the
+ * interim length ceilings), so the floor is the band's short
+ * end: the pre-generation gate must stay at least as lenient as
+ * judgeStory would be for any in-band telling, or it would skip
+ * stories the judge itself would have played. Above the floor,
+ * the tour's own median sounded duration rules.
+ */
+const FIT_DURATION_FLOOR_S = 120;
 const QA_FAILSAFE_MS = 150_000;
 const QA_GRACE_MS = 45_000;
 const STORM_BASE_MS = 90_000;
@@ -262,8 +286,34 @@ export class Tour {
 
   // Neighborhood welcomes (O14/O15)
   private welcomed = new Set<string>();
-  private owedWelcome: { name: string; retryAt: number } | null = null;
+  /**
+   * The owed WELCOME record. `entry` marks an obligation born at
+   * an area ENTRY (trackNeighborhood, or a matured deferral): the
+   * one-orientation-slot rule discharges that kind when an `area:`
+   * story sounds first. The opening welcome's failure-retry is
+   * NOT entry-born — O15's owed first hello is senior to the slot.
+   */
+  private owedWelcome: { name: string; retryAt: number; entry: boolean } | null = null;
   private welcomeServing = false;
+  /**
+   * Orientation ledger (Nov 1): areas whose one orientation slot
+   * for this pass is spent — by a sounded WELCOME or a sounded
+   * generic `area:` story, whichever reached the listener first
+   * (area key → sounded-at ms). Re-opened on each fresh entry in
+   * trackNeighborhood. Tour-local: the cross-day heard rules and
+   * the P3 thread exclusion are untouched by it.
+   */
+  private orientationSpent = new Map<string, number>();
+  /**
+   * Nested-area deferral (Nov 1): the most recent ENTRY welcome's
+   * anchor (a sounded mid-tour welcome — the opening welcome
+   * never anchors; see trackNeighborhood), and a parent-area
+   * welcome deferred because its entry fell inside that anchor's
+   * footprint. Tour-local throughout: nothing here ever touches
+   * the cross-day heard set.
+   */
+  private entryWelcomeAnchor: { name: string; lat: number; lng: number } | null = null;
+  private deferredWelcome: { name: string; since: number } | null = null;
   /** An owed WELCOME has been generated and offered; it re-arms only when that item settles. */
   private welcomeOffered = false;
 
@@ -410,6 +460,8 @@ export class Tour {
       attemptCap: () => (this.clock.now() < this.stormUntil ? 1 : 3),
       judgeStory: item => this.judgeStory(item),
       mayDisplace: (waiter, newcomer, kind) => this.mayDisplace(waiter, newcomer, kind),
+      mayDefer: (waiter, newcomer) => this.mayDefer(waiter, newcomer),
+      onDeferred: item => this.onWelcomeDeferred(item),
       onSlotEmpty: () => {
         if (this.phase === 'active') void this.runServeCycle('slot-empty');
       },
@@ -912,7 +964,7 @@ export class Tour {
         }
       }
       this.welcomeState = 'none';
-      this.owedWelcome = { name, retryAt: this.clock.now() + WELCOME_COOLDOWN_MS };
+      this.owedWelcome = { name, retryAt: this.clock.now() + WELCOME_COOLDOWN_MS, entry: false };
       this.maybeOpenTour();
       return;
     }
@@ -946,7 +998,11 @@ export class Tour {
     }
   }
 
-  private async generateWelcome(name: string, at: Position): Promise<AudibleItem | null> {
+  private async generateWelcome(
+    name: string,
+    at: Position,
+    deferrable = false,
+  ): Promise<AudibleItem | null> {
     const pseudo: facts.Candidate = {
       name,
       lat: at.lat,
@@ -989,6 +1045,7 @@ export class Tour {
           generatedAt: this.clock.now(),
           text,
           reserved: true,
+          deferrable,
         },
       });
       return item;
@@ -1016,7 +1073,7 @@ export class Tour {
    * serves the first hello solely when live failed or missed its
    * deadline, and never when the area's intro is cross-day heard.
    */
-  private async shelfIntroItem(name: string): Promise<AudibleItem | null> {
+  private async shelfIntroItem(name: string, deferrable = false): Promise<AudibleItem | null> {
     const row = await this.seams.fetchIntroRow(name);
     if (!row || !row.audio_path) return null;
     const item = this.makeItem({
@@ -1034,6 +1091,7 @@ export class Tour {
         generatedAt: this.clock.now(),
         text: row.story_text,
         reserved: true,
+        deferrable,
       },
     });
     return item;
@@ -1052,17 +1110,85 @@ export class Tour {
     this.area = area;
     const name = area.neighborhood;
     if (!name || name === previous) return;
+    const key = name.toLowerCase();
+    // A fresh entry re-opens the area's orientation slot (Nov 1):
+    // whatever a previous pass spent does not bind this one.
+    this.orientationSpent.delete(key);
+    // A deferred parent welcome for any OTHER area dies with this
+    // entry: the deferral was a hypothesis about this ground, and
+    // the ground has answered otherwise. (A deferred record for
+    // THIS area cannot stand here — it is created only by entering
+    // it, and re-entering it is a new evaluation below.)
+    if (this.deferredWelcome && this.deferredWelcome.name.toLowerCase() !== key) {
+      this.deferredWelcome = null;
+    }
     // O14: entering an unwelcomed neighborhood creates an owed WELCOME.
     if (
       this.phase === 'active' &&
       (this.opening === 'open' || this.opening === 'failed') &&
-      !this.welcomed.has(name.toLowerCase()) &&
+      !this.welcomed.has(key) &&
       !this.welcomeServing
     ) {
-      this.owedWelcome = { name, retryAt: 0 };
-      void this.serveOwedWelcome();
+      // Nested-area deferral (Nov 1): an entry that falls inside
+      // the footprint of the area just welcomed on entry — the
+      // Costa Verde → University City shape, a district nested in
+      // its enclosing neighborhood — does not fire a second
+      // welcome routine for the same ground. The parent welcome
+      // defers (checkDeferredWelcome matures it): it becomes owed
+      // only if the driver leaves the child's footprint yet
+      // remains in the parent for a sustained dwell. The anchor
+      // is an ENTRY welcome's, never the opening welcome's: the
+      // start area is where every tour begins, and a genuine
+      // first move out of it (University City → Clairemont) is a
+      // new neighborhood, not a nesting artifact.
+      const anchor = this.entryWelcomeAnchor;
+      if (
+        anchor &&
+        anchor.name !== key &&
+        calculateDistance(pos.lat, pos.lng, anchor.lat, anchor.lng) < NESTED_AREA_RADIUS_M
+      ) {
+        this.deferredWelcome = { name, since: this.clock.now() };
+        // A serve cycle with the new area in hand: named places
+        // and corridors may serve as usual — only the area's
+        // orientation voices (its welcome, and the generic area
+        // story in serveAreaStory) hold for the deferral.
+        void this.runServeCycle('area-deferred');
+      } else {
+        this.owedWelcome = { name, retryAt: 0, entry: true };
+        void this.serveOwedWelcome();
+      }
     }
     this.notify();
+  }
+
+  /**
+   * Nested-area deferral maturity (Nov 1): a deferred parent
+   * welcome becomes owed only when the driver is genuinely out
+   * of the child — beyond its anchor's footprint radius — yet
+   * has remained in the parent for the full dwell. Judged on the
+   * 1 s tick against the last resolved area; any area change has
+   * already discharged or re-armed the record in
+   * trackNeighborhood.
+   */
+  private checkDeferredWelcome(): void {
+    const deferred = this.deferredWelcome;
+    if (!deferred || !this.position) return;
+    const current = this.area.neighborhood;
+    if (!current || current.toLowerCase() !== deferred.name.toLowerCase()) return;
+    if (this.clock.now() - deferred.since < PARENT_DWELL_MS) return;
+    const anchor = this.entryWelcomeAnchor;
+    if (
+      anchor &&
+      calculateDistance(this.position.lat, this.position.lng, anchor.lat, anchor.lng) <
+        NESTED_AREA_RADIUS_M
+    ) {
+      return; // still inside the child's footprint
+    }
+    this.deferredWelcome = null;
+    const key = deferred.name.toLowerCase();
+    if (this.welcomed.has(key) || this.welcomeServing || this.welcomeOffered) return;
+    this.owedWelcome = { name: deferred.name, retryAt: 0, entry: true };
+    void this.serveOwedWelcome();
   }
 
   private async serveOwedWelcome(): Promise<void> {
@@ -1081,6 +1207,19 @@ export class Tour {
       this.owedWelcome = null;
       return;
     }
+    // One orientation slot (Nov 1), the vice-versa direction: an
+    // entry-born obligation whose area's slot was already filled
+    // by a sounded `area:` story on this pass discharges —
+    // orientation happened, and a second orientation voice for
+    // the same entry is the stacking defect. The opening
+    // welcome's failure-retry never carries the entry mark (see
+    // the owedWelcome field note): O15's owed first hello is
+    // senior to the slot and still serves.
+    if (this.owedWelcome?.entry && this.orientationSpent.has(name.toLowerCase())) {
+      this.welcomed.add(name.toLowerCase());
+      this.owedWelcome = null;
+      return;
+    }
     this.welcomeServing = true;
     try {
       let item: AudibleItem | null;
@@ -1092,7 +1231,7 @@ export class Tour {
         // cannot produce it (failure, tripped breaker), the owed
         // record discharges silently rather than re-arming on a
         // cooldown and minting attempt after attempt.
-        item = await this.generateWelcome(name, this.position);
+        item = await this.generateWelcome(name, this.position, true);
         if (this.phase !== 'active') return;
         if (!item) {
           this.welcomed.add(name.toLowerCase());
@@ -1103,13 +1242,20 @@ export class Tour {
         // Shelf-first (Erik, Oct 30): the banked intro serves when
         // the shelf holds one; live generation is the fallback for
         // areas the shelf doesn't cover, with its O15 owed/cooldown
-        // semantics unchanged.
+        // semantics unchanged. Mid-tour welcomes are the
+        // deferrable kind (Nov 1): a Tier-1 newcomer may take
+        // their waiting slot without dropping them.
         item =
-          (await this.shelfIntroItem(name)) ?? (await this.generateWelcome(name, this.position));
+          (await this.shelfIntroItem(name, true)) ??
+          (await this.generateWelcome(name, this.position, true));
         if (this.phase !== 'active') return;
         if (!item) {
           // O15: an unheard failed WELCOME remains owed, on a cooldown.
-          this.owedWelcome = { name, retryAt: this.clock.now() + WELCOME_COOLDOWN_MS };
+          this.owedWelcome = {
+            name,
+            retryAt: this.clock.now() + WELCOME_COOLDOWN_MS,
+            entry: this.owedWelcome?.entry ?? true,
+          };
           return;
         }
       }
@@ -1378,6 +1524,11 @@ export class Tour {
     // Live generation stands down while a failure economy stands
     // (E3/E6): banked material above is the tour's voice meanwhile.
     if (this.liveStandDown()) return null;
+    // Fit check (Nov 1): do not spend a generation on a story
+    // whose projected start already fails the freshness geometry
+    // — it would be minted only to be dropped at dequeue. The
+    // cycle prefers the next candidate.
+    if (!this.generationWouldLand(candidate)) return null;
     // Live generation with a full fact pack (S7).
     const isRetell = candidate.tier1 && (this.toldCount.get(key) ?? 0) === 1;
     try {
@@ -1449,6 +1600,11 @@ export class Tour {
     const name = this.area.neighborhood ?? this.area.city;
     const subject = name ? `area:${name.toLowerCase()}` : 'area:the road';
     if (this.subjectBlocked(subject, null)) return;
+    // One orientation slot (Nov 1): if this area's WELCOME already
+    // sounded on this pass, the generic area story is the same act
+    // in a second voice — the stacking the field drive reported.
+    // Stand down; named places and the filler lane own the gap.
+    if (name && this.orientationSpent.has(name.toLowerCase())) return;
     try {
       const pseudo: facts.Candidate = {
         name: name ?? 'the road from here',
@@ -1712,7 +1868,15 @@ export class Tour {
       this.welcomeOffered = false;
       if (!rec.sounded) {
         const name = subject.slice('welcome:'.length);
-        this.owedWelcome = { name, retryAt: this.clock.now() + WELCOME_COOLDOWN_MS };
+        this.owedWelcome = {
+          name,
+          retryAt: this.clock.now() + WELCOME_COOLDOWN_MS,
+          // The re-arm preserves the standing record's origin (an
+          // entry-born obligation stays entry-born; the opening
+          // welcome's retry stays senior to the orientation slot).
+          entry:
+            this.owedWelcome?.name.toLowerCase() === name ? this.owedWelcome.entry : false,
+        };
         if (this.welcomeState === 'handed') this.welcomeState = 'none';
         this.maybeOpenTour();
       }
@@ -1729,6 +1893,43 @@ export class Tour {
         this.position
       ) {
         this.judgeDropSpots.set(subject, { lat: this.position.lat, lng: this.position.lng });
+        // Salvage (Nov 1): a judge-dropped LIVE story's text is
+        // banked in the private prefetch buffer, keyed by subject
+        // — the same shape the serve cycle's 'buffer' retention
+        // writes. The spend already happened; on a later approach
+        // serveCandidate's buffered gate re-serves the text
+        // instead of regenerating it. The subject stays unheard:
+        // this settle files no telling, and the drop-spot memo
+        // above still rests the subject HERE, so the salvage only
+        // becomes reachable once the driver has genuinely moved
+        // (≥250 m) and the subject unblocks — memo and salvage
+        // compose. Never the shared cache (the Miles containment
+        // in backend.ts forbids the write-back) and never a
+        // library/corridor item: the shelf is its own durable
+        // copy, and corridor consumption is Q11's separate rule.
+        if (item.storySource === 'live' && item.text && item.anchor) {
+          this.buffer.set(subject, {
+            subject,
+            text: item.text,
+            generatedAt: item.generatedAt ?? this.clock.now(),
+            candidate: {
+              name: item.label,
+              lat: item.anchor.lat,
+              lng: item.anchor.lng,
+              source: 'places',
+              types: [],
+              rating: null,
+              userRatings: null,
+              address: null,
+              tier1: item.tier1 ?? false,
+              score: 0,
+              registry: null,
+              distanceM: 0,
+            },
+            fetchMs: item.fetchMs ?? null,
+            signatureFact: item.signatureFact ?? null,
+          });
+        }
       }
       // §8: reason verbatim from the closed vocabulary. P1 salvage:
       // attempts + queue wait ride along (A's settle depth).
@@ -1873,6 +2074,32 @@ export class Tour {
             this.opening = 'open';
             if (this.backstopTimer !== null) this.clock.clearTimeout(this.backstopTimer);
           }
+        }
+        // One orientation slot (Nov 1): a sounded WELCOME spends
+        // this pass's orientation for its area — the generic
+        // `area:` fallback for the same area stands down in
+        // serveAreaStory.
+        this.orientationSpent.set(name, this.clock.now());
+        // Nested-area anchor (Nov 1): a sounded ENTRY welcome
+        // (deferrable — the mid-tour kind) is the child whose
+        // footprint later parent entries are judged against in
+        // trackNeighborhood. The opening welcome never anchors,
+        // by the same ruling that exempts its owed record from
+        // the orientation slot's discharge.
+        if (item.deferrable && item.anchor) {
+          this.entryWelcomeAnchor = { name, lat: item.anchor.lat, lng: item.anchor.lng };
+        }
+      }
+      if (subject.startsWith('area:')) {
+        // One orientation slot (Nov 1): a sounded `area:` story
+        // spends this pass's orientation for its area exactly as
+        // a sounded welcome does — and satisfies any parent
+        // welcome deferred for it (orientation happened; the
+        // deferred welcome's maturity check finds nothing owed).
+        const name = subject.slice('area:'.length);
+        this.orientationSpent.set(name, this.clock.now());
+        if (this.deferredWelcome?.name.toLowerCase() === name) {
+          this.deferredWelcome = null;
         }
       }
       this.lastStoryItem = item;
@@ -2035,6 +2262,97 @@ export class Tour {
     return dn + 150 < dw || (newcomer.generatedAt ?? 0) > (waiter.generatedAt ?? 0) + 30_000;
   }
 
+  private mayDefer(waiter: AudibleItem, newcomer: AudibleItem): boolean {
+    // Deferral (Nov 1): the mid-tour WELCOME yields its waiting
+    // slot to a Tier-1 newcomer under Q6's own discipline —
+    // opening complete, no Q&A lock (the player adds the hold
+    // gate). The OPENING welcome never defers: its items are not
+    // deferrable, and while the opening stands, storiesGated
+    // keeps location stories from being offered at all — so the
+    // opening gate's behavior is untouched by this path.
+    if (this.opening !== 'open' && this.opening !== 'failed') return false;
+    if (this.qaPhase !== 'idle') return false;
+    if (!waiter.deferrable) return false;
+    const subject = newcomer.subject ?? '';
+    return !subject.startsWith('welcome:');
+  }
+
+  /**
+   * The player deferred a waiting WELCOME for a Tier-1 newcomer
+   * (its silent settle follows in the player's hands): the
+   * welcome was never heard, so it stays OWED — re-armed for
+   * immediate eligibility, no cooldown (nothing failed; it was
+   * outranked). The tick re-serves it behind the landmark that
+   * took its slot, if the listener is still in the area. If a
+   * different area's owed record already stands, that record is
+   * senior — the move answered this welcome's question, and the
+   * deferred area discharges with it.
+   */
+  private onWelcomeDeferred(item: AudibleItem): void {
+    const subject = item.subject ?? '';
+    if (!subject.startsWith('welcome:')) return;
+    const name = item.label.startsWith('Welcome to ')
+      ? item.label.slice('Welcome to '.length)
+      : subject.slice('welcome:'.length);
+    this.welcomeOffered = false;
+    if (this.owedWelcome && this.owedWelcome.name.toLowerCase() !== name.toLowerCase()) {
+      return; // another area's record stands — this one discharges
+    }
+    this.owedWelcome = {
+      name,
+      retryAt: this.clock.now(),
+      entry: this.owedWelcome?.entry ?? true,
+    };
+    if (this.welcomeState === 'handed') this.welcomeState = 'none';
+    this.maybeOpenTour();
+  }
+
+  /**
+   * Fit check (Nov 1): judgeStory's geometry, run BEFORE a
+   * generation spend instead of only at dequeue. Project when
+   * the story would start — the rest of the current story, the
+   * waiting story whole (never cut), and the median fetch +
+   * synth the latency model already keeps — carry the listener
+   * along their heading to that moment, and ask whether the
+   * anchor still passes the reach test (Q9/Q10: duration ×
+   * speed; the behind-cut and out-of-reach share it) and the
+   * age bound there. A candidate that fails would be minted
+   * only to be dropped at dequeue; the caller prefers the next
+   * candidate instead. Pure arithmetic on samples already
+   * maintained — no new network calls, top candidates only.
+   * judgeStory itself is untouched: this moves its math
+   * upstream, nothing is loosened. `extraDelayS` is the
+   * caller's own depth (prefetch banks one story deeper, S9).
+   */
+  private generationWouldLand(candidate: facts.Candidate, extraDelayS = 0): boolean {
+    if (!this.position) return true;
+    const pos = this.position;
+    const speed = Math.max(pos.speedMps, 0.5);
+    const durationEst = Math.max(
+      this.durationSamples.length ? this.median(this.durationSamples) : 0,
+      FIT_DURATION_FLOOR_S,
+    );
+    const fetchS = this.median(this.fetchSamples) / 1000;
+    const synthS = this.median(this.synthSamples) / 1000;
+    let queueS = 0;
+    const current = this.player.current;
+    if (current && this.player.isPlaying()) {
+      const stamp = this.soundStamps.get(current.id);
+      const elapsedS = stamp ? (this.clock.now() - stamp.at) / 1000 : 0;
+      queueS += Math.max(0, current.durationSec - elapsedS);
+    }
+    if (this.player.waitingStory) queueS += this.player.waitingStory.durationSec;
+    const startS = queueS + fetchS + synthS + extraDelayS;
+    // The age bound (Q10) at the projected start: a story's age
+    // counts from its text completion, i.e. the start delay
+    // minus the fetch that produces the text.
+    if (startS - fetchS > durationEst * 1.5) return false;
+    const projected = this.projectAhead(pos, startS);
+    const dist = calculateDistance(projected.lat, projected.lng, candidate.lat, candidate.lng);
+    if (dist > durationEst * speed) return false;
+    return true;
+  }
+
   private onCommit(item: AudibleItem): void {
     void item;
     this.notify();
@@ -2174,6 +2492,11 @@ export class Tour {
           const key = backend.placeKeyOf(candidate.name);
           if (this.buffer.has(key) || this.subjectBlocked(key, candidate)) continue;
           if (this.libraryIndex.some(e => e.place_key === key)) continue; // banked beats generated
+          // Fit check (Nov 1): banked text is a generation spend
+          // too — do not bank a story whose projected start (one
+          // story deeper than the serve path, S9's depth) already
+          // fails the freshness geometry.
+          if (!this.generationWouldLand(candidate, depthS)) continue;
           try {
             const pack = await this.seams.buildFactPack(
               candidate,
@@ -2252,6 +2575,8 @@ export class Tour {
     if (this.owedWelcome && now >= this.owedWelcome.retryAt && !this.welcomeServing) {
       void this.serveOwedWelcome();
     }
+    // Nested-area deferral maturity (Nov 1).
+    this.checkDeferredWelcome();
     this.notify();
   }
 
