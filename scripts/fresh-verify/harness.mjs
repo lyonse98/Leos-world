@@ -297,6 +297,39 @@ export function makeWorld(Tour, opts = {}) {
       lng: -117.18,
     });
   }
+  // Greeting-variant intros (Nov 1): sibling rows keyed (name,
+  // 'neighborhood_intro_greet') — a greeting line ahead of the
+  // frozen plain body, at the -greet-v1 audio key.
+  const greetRows = new Map();
+  for (const entry of opts.greetIntros ?? []) {
+    const name = typeof entry === 'string' ? entry : entry.name;
+    const key = normalizeKeyA(name);
+    greetRows.set(key, {
+      place_key: key,
+      place_name: name,
+      angle: 'neighborhood_intro_greet',
+      story_text:
+        `Well hello — welcome to ${name}. ` +
+        `The banked intro to ${name}, its streets and its story. `.repeat(30),
+      audio_path: `library/${key.replace(/\s+/g, '-')}/neighborhood_intro-greet-v1.wav`,
+      lat: 32.853,
+      lng: -117.18,
+    });
+  }
+  // Production's library index carries EVERY row, intros included
+  // (keyed by area name) — the fixture mirrors that reachability
+  // so the tour's intro-angle guard is genuinely exercised, and
+  // the row store resolves intro angles for the same reason.
+  for (const row of [...introRows.values(), ...greetRows.values()]) {
+    libraryIndex.push({
+      place_key: row.place_key,
+      place_name: row.place_name,
+      angle: row.angle,
+      lat: row.lat,
+      lng: row.lng,
+    });
+    libraryRows.set(`${row.place_key}|${row.angle}`, row);
+  }
 
   const fillerRows = (opts.fillers ?? []).map(title => ({
     place_key: placeKeyOf(title),
@@ -314,6 +347,11 @@ export function makeWorld(Tour, opts = {}) {
     fetchIntroRow: async areaName => {
       world.introFetches.push(areaName);
       return introRows.get(normalizeKeyA(areaName)) ?? null;
+    },
+    fetchIntroRows: async areaName => {
+      world.introFetches.push(areaName);
+      const key = normalizeKeyA(areaName);
+      return { plain: introRows.get(key) ?? null, greet: greetRows.get(key) ?? null };
     },
     fetchFillerRows: async () => fillerRows,
     findCachedStory: async () => null,

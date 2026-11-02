@@ -191,6 +191,36 @@ export async function fetchIntroRow(areaName: string): Promise<LibraryRow | null
   return fetchLibraryRow(normalizePlaceKey(areaName), 'neighborhood_intro');
 }
 
+/** The two intro variants an area may hold on the shelf (Nov 1). */
+export interface IntroRows {
+  /** The plain intro: angle 'neighborhood_intro'. */
+  plain: LibraryRow | null;
+  /** The greeting intro: angle 'neighborhood_intro_greet' — the plain body behind a greeting line, rendered as its own row. */
+  greet: LibraryRow | null;
+}
+
+/**
+ * Both intro variants for an area in ONE query (Nov 1): the
+ * welcome serve chooses between them by the listener's cross-day
+ * heard state (first entry → greeting variant; re-entry → plain),
+ * and the choice must not cost a second round trip on the serve
+ * path. Either side is null when the shelf holds no such row.
+ */
+export async function fetchIntroRows(areaName: string): Promise<IntroRows> {
+  if (!BACKEND_CONFIGURED) return { plain: null, greet: null };
+  const { data, error } = await db
+    .from('story_library')
+    .select('*')
+    .eq('place_key', normalizePlaceKey(areaName))
+    .in('angle', ['neighborhood_intro', 'neighborhood_intro_greet']);
+  if (error || !data) return { plain: null, greet: null };
+  const rows = data as LibraryRow[];
+  return {
+    plain: rows.find(r => r.angle === 'neighborhood_intro') ?? null,
+    greet: rows.find(r => r.angle === 'neighborhood_intro_greet') ?? null,
+  };
+}
+
 /** The filler pool: story_library rows with angle = 'filler' (§8A). */
 export async function fetchFillerRows(): Promise<
   { place_key: string; place_name: string; audio_path: string }[]

@@ -65,7 +65,7 @@ export type ModeName = 'walking' | 'driving' | 'highway' | 'rural';
 export interface NetSeams {
   fetchLibraryIndex: typeof backend.fetchLibraryIndex;
   fetchLibraryRow: typeof backend.fetchLibraryRow;
-  fetchIntroRow: typeof backend.fetchIntroRow;
+  fetchIntroRows: typeof backend.fetchIntroRows;
   fetchFillerRows: typeof backend.fetchFillerRows;
   findCachedStory: typeof backend.findCachedStory;
   putCachedStory: typeof backend.putCachedStory;
@@ -92,7 +92,7 @@ export interface NetSeams {
 const realSeams: NetSeams = {
   fetchLibraryIndex: backend.fetchLibraryIndex,
   fetchLibraryRow: backend.fetchLibraryRow,
-  fetchIntroRow: backend.fetchIntroRow,
+  fetchIntroRows: backend.fetchIntroRows,
   fetchFillerRows: backend.fetchFillerRows,
   findCachedStory: backend.findCachedStory,
   putCachedStory: backend.putCachedStory,
@@ -204,6 +204,17 @@ const WELCOME_COOLDOWN_MS = 180_000;
  * value, named so the field can argue with it.
  */
 const WELCOME_LIVE_DEADLINE_MS = 12_000;
+/**
+ * The neighborhood-intro angles (Nov 1): orientation material,
+ * owned by the welcome lane alone. The library index carries
+ * these rows (keyed by AREA name), so the generic library finds
+ * must refuse them explicitly — an intro is never a landmark
+ * story for a like-named place candidate or corridor segment.
+ */
+const INTRO_ANGLES: ReadonlySet<string> = new Set([
+  'neighborhood_intro',
+  'neighborhood_intro_greet',
+]);
 /**
  * Nested-area deferral (Nov 1): neighborhoods carry no polygons
  * in this shell — reverse geocoding returns names, not shapes —
@@ -946,22 +957,28 @@ export class Tour {
     const item = await this.generateWelcomeBeforeDeadline(name, this.position);
     if (this.phase !== 'active') return;
     if (!item) {
-      // The stored fallback — with one exception: when the start
-      // area's intro sits in the cross-day heard set, the live
-      // attempt WAS the alternate-version chance (the doctrine the
-      // mid-tour lane follows in serveOwedWelcome), and re-serving
-      // the heard intro verbatim behind it would repeat the exact
-      // telling the listener already knows. There the historical
-      // owed/cooldown behavior stands instead.
-      if (this.subjectBlockReason(backend.placeKeyOf(name), null) !== 'crossday') {
-        const shelf = await this.shelfIntroItem(name);
-        if (this.phase !== 'active') return;
-        if (shelf) {
-          this.welcomeState = 'ready';
-          this.pendingWelcome = shelf;
-          this.afterDebtChange();
-          return;
-        }
+      // The stored fallback, variant-aware (Nov 1): an unheard
+      // intro serves its GREETING variant when the shelf holds
+      // one (else the plain row). A cross-day-heard intro serves
+      // its PLAIN variant when a greeting variant exists — the
+      // re-entry voice — and only there: without a greeting
+      // variant, the live attempt WAS the alternate-version
+      // chance (the doctrine the mid-tour lane follows in
+      // serveOwedWelcome), re-serving the heard intro verbatim
+      // behind it would repeat the exact telling the listener
+      // already knows, and the historical owed/cooldown behavior
+      // stands instead (shelfIntroItem returns null for that
+      // case, heardIntro=true without a greeting row).
+      const heardIntro =
+        this.subjectBlockReason(backend.placeKeyOf(name), null) === 'crossday' ||
+        this.introHeardCrossDay(name);
+      const shelf = await this.shelfIntroItem(name, false, heardIntro);
+      if (this.phase !== 'active') return;
+      if (shelf) {
+        this.welcomeState = 'ready';
+        this.pendingWelcome = shelf;
+        this.afterDebtChange();
+        return;
       }
       this.welcomeState = 'none';
       this.owedWelcome = { name, retryAt: this.clock.now() + WELCOME_COOLDOWN_MS, entry: false };
@@ -1071,10 +1088,42 @@ export class Tour {
    * OPENING welcome reaches here only as its fallback (Erik,
    * Oct 30): live is tried first there, always — this shelf item
    * serves the first hello solely when live failed or missed its
-   * deadline, and never when the area's intro is cross-day heard.
+   * deadline. (The Nov 1 variant rule below refines the heard
+   * case: a cross-day-heard intro with a greeting variant on the
+   * shelf serves its PLAIN row as the fallback; without one, the
+   * historical skip stands.)
    */
-  private async shelfIntroItem(name: string, deferrable = false): Promise<AudibleItem | null> {
-    const row = await this.seams.fetchIntroRow(name);
+  /**
+   * The shelf intro item, variant-aware (Nov 1): an area's intro
+   * exists in two variants — the GREETING row (angle
+   * 'neighborhood_intro_greet': a greeting line ahead of the
+   * frozen plain body) for a listener who has never heard the
+   * area's intro, and the PLAIN row (angle 'neighborhood_intro')
+   * for one who has. `heardIntro` carries the caller's cross-day
+   * ruling:
+   *  - unheard → the greeting variant when the shelf holds one,
+   *    else the plain row (the historical single-variant shelf);
+   *  - heard → the PLAIN variant, and only when a greeting
+   *    variant exists: the plain row is the re-entry voice, while
+   *    an area with no greeting variant keeps the live-alternate
+   *    doctrine, so this returns null there and the caller
+   *    generates.
+   * Both variants share the welcome subject, so welcomed/heard
+   * bookkeeping is one ledger; only the filed angle differs,
+   * honestly, in the §8 vocabulary. Null when the chosen variant
+   * has no row or no audio.
+   */
+  private async shelfIntroItem(
+    name: string,
+    deferrable = false,
+    heardIntro = false,
+  ): Promise<AudibleItem | null> {
+    const rows = await this.seams.fetchIntroRows(name);
+    const row = heardIntro
+      ? rows.greet
+        ? rows.plain
+        : null
+      : (rows.greet ?? rows.plain);
     if (!row || !row.audio_path) return null;
     const item = this.makeItem({
       kind: 'story',
@@ -1084,7 +1133,7 @@ export class Tour {
       onSettle: rec => this.onStorySettle(item, rec),
       story: {
         subject: `welcome:${name.toLowerCase()}`,
-        angleOf: 'neighborhood_intro',
+        angleOf: row.angle === 'neighborhood_intro_greet' ? 'neighborhood_intro_greet' : 'neighborhood_intro',
         storySource: 'library',
         anchor: { lat: row.lat, lng: row.lng },
         regionAnchored: true,
@@ -1095,6 +1144,24 @@ export class Tour {
       },
     });
     return item;
+  }
+
+  /**
+   * Has this listener heard the area's intro on a previous day?
+   * The cross-day ledger files tellings under the item's label
+   * (recordHeard): a WELCOME telling lands as 'Welcome to X',
+   * while a generic area story lands as the bare area name — the
+   * subject block check keys only the latter, so a welcome's own
+   * telling would never mark its area heard. Both filings mean
+   * the intro was heard; the variant rule consults both. An area
+   * welcomed THIS tour is an in-tour state, never a cross-day one.
+   */
+  private introHeardCrossDay(name: string): boolean {
+    if (this.welcomed.has(name.toLowerCase())) return false;
+    return (
+      this.heardTopics.has(backend.placeKeyOf(name)) ||
+      this.heardTopics.has(backend.placeKeyOf(`Welcome to ${name}`))
+    );
   }
 
   private async trackNeighborhood(pos: Position): Promise<void> {
@@ -1223,15 +1290,24 @@ export class Tour {
     this.welcomeServing = true;
     try {
       let item: AudibleItem | null;
-      if (block === 'crossday') {
-        // (ii) Blocked ONLY by the cross-day heard set: the banked
-        // intro is the version this listener already heard on a
-        // previous day, so the shelf is NOT re-served — the
-        // alternate version is a fresh live generation. If live
-        // cannot produce it (failure, tripped breaker), the owed
-        // record discharges silently rather than re-arming on a
-        // cooldown and minting attempt after attempt.
-        item = await this.generateWelcome(name, this.position, true);
+      // The cross-day ruling includes the welcome's own filing
+      // (introHeardCrossDay): a previous day's welcome telling
+      // marks the intro heard even though the subject block check
+      // keys only the bare area name.
+      const crossday = block === 'crossday' || this.introHeardCrossDay(name);
+      if (crossday) {
+        // (ii) Blocked ONLY by the cross-day heard set: the intro
+        // this listener heard was the GREETING variant (or, before
+        // variants existed, the single banked row) — it is not
+        // re-served. With a greeting variant on the shelf, the
+        // re-entry voice is the PLAIN row; without one, the
+        // alternate version is a fresh live generation, and if
+        // live cannot produce it (failure, tripped breaker), the
+        // owed record discharges silently rather than re-arming
+        // on a cooldown and minting attempt after attempt.
+        item =
+          (await this.shelfIntroItem(name, true, true)) ??
+          (await this.generateWelcome(name, this.position, true));
         if (this.phase !== 'active') return;
         if (!item) {
           this.welcomed.add(name.toLowerCase());
@@ -1308,7 +1384,10 @@ export class Tour {
       return;
     }
     const entry = this.libraryIndex.find(
-      e => e.place_key === backend.placeKeyOf(segment.displayName) && e.angle !== 'filler',
+      e =>
+        e.place_key === backend.placeKeyOf(segment.displayName) &&
+        e.angle !== 'filler' &&
+        !INTRO_ANGLES.has(e.angle),
     );
     if (!entry) {
       this.inflight.delete(subject);
@@ -1460,7 +1539,11 @@ export class Tour {
     // Library, place-first at any eligible undealt angle (S5).
     const dealt = this.dealtAngles.get(key) ?? new Set<string>();
     const entry = this.libraryIndex.find(
-      e => e.place_key === key && e.angle !== 'filler' && !dealt.has(e.angle),
+      e =>
+        e.place_key === key &&
+        e.angle !== 'filler' &&
+        !INTRO_ANGLES.has(e.angle) &&
+        !dealt.has(e.angle),
     );
     if (entry) {
       const row = await this.seams.fetchLibraryRow(entry.place_key, entry.angle);

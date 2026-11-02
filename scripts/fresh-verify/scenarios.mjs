@@ -1485,8 +1485,13 @@ export async function runScenarios(Tour, extras) {
     check('a live welcome was generated for the heard area',
       welcomePromptsFor(world, 'Clairemont').length === 1,
       `prompts=${welcomePromptsFor(world, 'Clairemont').length}`);
-    check('the shelf intro was never consulted for the heard area',
-      !world.introFetches.includes('Clairemont'), world.introFetches.join(','));
+    // (Nov 1: the engine now consults the shelf once to learn
+    // whether a greeting variant exists — none here — so the
+    // doctrine is asserted at the speaker: the heard shelf
+    // version never PLAYED.)
+    check('the heard shelf version never played',
+      !audio.log.some(e => typeof e.src === 'string' && e.src.endsWith('library/clairemont/neighborhood_intro.wav')),
+      JSON.stringify(audio.log.map(e => e.src)));
     check('the alternate sounded to completion',
       world.eventsOf('story_playback').some(e => e.payload.subject === 'welcome:clairemont' && e.payload.sounded === true));
     check('the tour itself is unharmed', tour.view().phase === 'active', tour.view().phase);
@@ -1513,8 +1518,9 @@ export async function runScenarios(Tour, extras) {
     check('the live alternate was attempted exactly once',
       welcomePromptsFor(world, 'Clairemont').length === 1,
       `prompts=${welcomePromptsFor(world, 'Clairemont').length}`);
-    check('the shelf intro was never consulted for the heard area',
-      !world.introFetches.includes('Clairemont'), world.introFetches.join(','));
+    check('the heard shelf version never played',
+      !audio.log.some(e => typeof e.src === 'string' && e.src.endsWith('library/clairemont/neighborhood_intro.wav')),
+      JSON.stringify(audio.log.map(e => e.src)));
     await world.clock.advance(240_000); // far past the 180 s welcome cooldown
     check('the owed record was discharged — no cooldown retry mints a second attempt',
       welcomePromptsFor(world, 'Clairemont').length === 1,
@@ -1916,6 +1922,226 @@ export async function runScenarios(Tour, extras) {
       JSON.stringify(playbacksFor(world, 'munk house').map(e => e.payload)));
     check('the subject joins the heard set only once it sounds',
       world.heard.includes('Munk House'), world.heard.join(' | '));
+    tour.endTour();
+  }
+
+  // ---------------------------------------------------------- WV two-variant welcomes (Nov 1)
+  // First entry serves the GREETING intro; re-entries serve the
+  // PLAIN intro. The plain rows are untouched; the greeting rows
+  // are siblings at angle 'neighborhood_intro_greet'.
+  suite('WV-01 first entry: the greeting variant serves, zero live generation');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      intros: ['Clairemont'],
+      greetIntros: ['Clairemont'],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    const played = welcomePlayed(world, 'welcome:clairemont');
+    check('welcome committed exactly once', played.length === 1, `n=${played.length}`);
+    check('the served variant is the greeting row (telemetry angle)',
+      played[0]?.payload.angle === 'neighborhood_intro_greet', JSON.stringify(played[0]?.payload));
+    check('the greeting audio is what played',
+      audio.log.some(e => typeof e.src === 'string' && e.src.endsWith('library/clairemont/neighborhood_intro-greet-v1.wav')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    check('zero live generation for the first-entry welcome',
+      welcomePromptsFor(world, 'Clairemont').length === 0,
+      `prompts=${welcomePromptsFor(world, 'Clairemont').length}`);
+    check('the greeting welcome sounded to completion',
+      playbacksFor(world, 'welcome:clairemont').some(e => e.payload.sounded === true));
+    tour.endTour();
+  }
+
+  suite('WV-02 re-entry: a cross-day-heard area with both variants serves PLAIN');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      intros: ['Clairemont'],
+      greetIntros: ['Clairemont'],
+    });
+    world.seams.fetchHeardTopics = async () => ['Clairemont'];
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    const played = welcomePlayed(world, 'welcome:clairemont');
+    check('welcome committed exactly once', played.length === 1, `n=${played.length}`);
+    check('the served variant is the plain row (telemetry angle)',
+      played[0]?.payload.angle === 'neighborhood_intro', JSON.stringify(played[0]?.payload));
+    check('the plain audio is what played',
+      audio.log.some(e => typeof e.src === 'string' && e.src.endsWith('library/clairemont/neighborhood_intro.wav')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    check('the greeting audio never played for the heard area',
+      !audio.log.some(e => typeof e.src === 'string' && e.src.endsWith('neighborhood_intro-greet-v1.wav')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    check('zero live generation — no alternate is minted when the plain row serves',
+      welcomePromptsFor(world, 'Clairemont').length === 0,
+      `prompts=${welcomePromptsFor(world, 'Clairemont').length}`);
+    tour.endTour();
+  }
+
+  suite('WV-03 heard area WITHOUT a greeting variant: live alternate preserved');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: ['Clairemont'] });
+    world.seams.fetchHeardTopics = async () => ['Clairemont'];
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    const played = welcomePlayed(world, 'welcome:clairemont');
+    check('the alternate welcome committed exactly once, sourced live',
+      played.length === 1 && played[0]?.payload.source === 'live',
+      JSON.stringify(played.map(e => e.payload)));
+    check('a live welcome was generated for the heard area',
+      welcomePromptsFor(world, 'Clairemont').length === 1,
+      `prompts=${welcomePromptsFor(world, 'Clairemont').length}`);
+    tour.endTour();
+  }
+
+  suite('WV-04 guard: an intro row never serves as a landmark story');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      // A place candidate whose key equals the area's key: the
+      // library index carries the intro rows under that key, and
+      // the generic candidate path must refuse them.
+      candidates: [makeCandidate('Clairemont')],
+      library: [],
+      intros: ['Clairemont'],
+      greetIntros: ['Clairemont'],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    const landmarkCommits = world
+      .eventsOf('story_played')
+      .filter(e => e.payload.subject === 'clairemont');
+    check('no library-sourced landmark serve of the intro row',
+      landmarkCommits.every(e => e.payload.source !== 'library'),
+      JSON.stringify(landmarkCommits.map(e => e.payload)));
+    check('no intro angle ever files under the place subject',
+      landmarkCommits.every(
+        e => e.payload.angle !== 'neighborhood_intro' && e.payload.angle !== 'neighborhood_intro_greet',
+      ),
+      JSON.stringify(landmarkCommits.map(e => e.payload)));
+    check('no intro audio ever played as a place story',
+      !audio.log.some(e => typeof e.src === 'string' && e.src.endsWith('neighborhood_intro-greet-v1.wav')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    tour.endTour();
+  }
+
+  suite('WV-05 two days: a greet serve files the area heard; day two serves plain');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      intros: ['Clairemont'],
+      greetIntros: ['Clairemont'],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    check('day one served the greeting variant',
+      welcomePlayed(world, 'welcome:clairemont').some(
+        e => e.payload.angle === 'neighborhood_intro_greet',
+      ),
+      JSON.stringify(welcomePlayed(world, 'welcome:clairemont').map(e => e.payload)));
+    check('the greet telling is filed in the heard ledger under its welcome label',
+      world.heard.includes('Welcome to Clairemont'), world.heard.join(' | '));
+    tour.endTour();
+    // Day two: a fresh tour; the cross-day ledger is yesterday's
+    // recordHeard output, verbatim.
+    resetLocalStorage();
+    world.seams.fetchHeardTopics = async () => [...world.heard];
+    world.area = { neighborhood: 'University City', city: 'San Diego' };
+    const audio2 = new FakeAudio(world.clock, okPolicy());
+    const tour2 = world.makeTour(audio2);
+    tour2.onPosition({ ...UTC, speedMps: 8, headingDeg: 180 });
+    tour2.start(false);
+    await world.clock.advance(40_000);
+    const promptsBefore = world.genStoryPrompts.length;
+    const commitsBefore = welcomePlayed(world, 'welcome:clairemont').length;
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    tour2.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    const dayTwo = welcomePlayed(world, 'welcome:clairemont').slice(commitsBefore);
+    check('day two commits the welcome exactly once', dayTwo.length === 1,
+      JSON.stringify(dayTwo.map(e => e.payload)));
+    check('day two serves the PLAIN variant',
+      dayTwo[0]?.payload.angle === 'neighborhood_intro', JSON.stringify(dayTwo[0]?.payload));
+    check('day two spends zero live generation on the welcome',
+      world.genStoryPrompts.slice(promptsBefore).filter(p => p.includes('NEIGHBORHOOD WELCOME') && p.includes('Clairemont')).length === 0,
+      `prompts=${world.genStoryPrompts.length - promptsBefore}`);
+    tour2.endTour();
+  }
+
+  suite('WV-06 opening fallback: unheard start area serves the greeting variant');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      intros: ['University City'],
+      greetIntros: ['University City'],
+    });
+    // Live generation is down: the opening welcome must fall back
+    // to the shelf — and the shelf's first-entry voice is the
+    // greeting variant.
+    world.genStoryBehavior = prompt => {
+      if (prompt.includes('NEIGHBORHOOD WELCOME')) throw new Error('welcome generation down');
+      return 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+    };
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    const played = welcomePlayed(world, 'welcome:university city');
+    check('the opening welcome committed from the shelf',
+      played.length === 1 && played[0]?.payload.source === 'library',
+      JSON.stringify(played.map(e => e.payload)));
+    check('the fallback variant is the greeting row',
+      played[0]?.payload.angle === 'neighborhood_intro_greet', JSON.stringify(played[0]?.payload));
+    check('the opening welcome sounded',
+      playbacksFor(world, 'welcome:university city').some(e => e.payload.sounded === true));
+    tour.endTour();
+  }
+
+  suite('WV-07 opening fallback: heard start area with variants serves PLAIN');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      intros: ['University City'],
+      greetIntros: ['University City'],
+    });
+    world.seams.fetchHeardTopics = async () => ['University City'];
+    world.genStoryBehavior = prompt => {
+      if (prompt.includes('NEIGHBORHOOD WELCOME')) throw new Error('welcome generation down');
+      return 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+    };
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    const played = welcomePlayed(world, 'welcome:university city');
+    check('the opening welcome committed from the shelf',
+      played.length === 1 && played[0]?.payload.source === 'library',
+      JSON.stringify(played.map(e => e.payload)));
+    check('the fallback variant is the plain row for a heard intro',
+      played[0]?.payload.angle === 'neighborhood_intro', JSON.stringify(played[0]?.payload));
+    check('the opening welcome sounded (no owed/cooldown detour)',
+      playbacksFor(world, 'welcome:university city').some(e => e.payload.sounded === true));
+    await world.clock.advance(200_000); // past the welcome cooldown
+    check('no owed retry ever minted a second live attempt',
+      welcomePromptsFor(world, 'University City').length === 1,
+      `prompts=${welcomePromptsFor(world, 'University City').length}`);
     tour.endTour();
   }
 }
