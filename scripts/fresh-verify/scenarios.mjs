@@ -2144,4 +2144,162 @@ export async function runScenarios(Tour, extras) {
       `prompts=${welcomePromptsFor(world, 'University City').length}`);
     tour.endTour();
   }
+
+  // ---------------------------------------------------------- Q&A discharge + playback-failure rest (Nov 1 follow-on)
+  // The Nov 1 evening drives: a Liberty Station question answered,
+  // then the owed Liberty Station welcome firing one second
+  // behind the answer (same subject twice); and Alice Clark
+  // House served three times in ~2.5 minutes on failing audio.
+
+  suite('QA-1 a question naming the area discharges its owed welcome');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park')],
+      library: ['Alpha Park'],
+      intros: ['Liberty Station'],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 45_000, synth: 12_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    const labels = watchLabels(world, tour);
+    // Alpha (45 s library) is playing. Enter Liberty Station: its
+    // shelf welcome takes the WAITING slot behind Alpha.
+    world.area = { neighborhood: 'Liberty Station', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(3_000);
+    check('the owed welcome waits behind the playing story',
+      tour.view().upNext === 'Welcome to Liberty Station', `upNext=${tour.view().upNext}`);
+    // The listener asks about the very place whose welcome waits.
+    check('the question is accepted', tour.submitQuestion('What is Liberty Station?') === true);
+    check('the waiting welcome is withdrawn at submission',
+      tour.view().upNext !== 'Welcome to Liberty Station', `upNext=${tour.view().upNext}`);
+    await world.clock.advance(180_000);
+    check('the answer sounded', world.eventsOf('question_playback').some(e => e.payload.completed === true && e.payload.voice === 'gemini'),
+      JSON.stringify(world.eventsOf('question_playback').map(e => e.payload)));
+    check('the discharged welcome never sounds',
+      !labels.includes('Welcome to Liberty Station'), labels.join(','));
+    check('the discharged welcome never reaches the element',
+      !audio.log.some(e => typeof e.src === 'string' && e.src.includes('liberty-station/neighborhood_intro.wav')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    check('the withdrawal filed no story_dropped for the welcome',
+      dropsFor(world, 'welcome:liberty station').length === 0,
+      JSON.stringify(dropsFor(world, 'welcome:liberty station').map(d => d.payload)));
+    check('no generic area story stacks behind the answer either',
+      world.eventsOf('story_played').filter(e => e.payload.subject === 'area:liberty station').length === 0,
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    check('the welcome is not in the heard ledger (it was never told)',
+      !world.heard.includes('Welcome to Liberty Station'), world.heard.join(' | '));
+    tour.endTour();
+  }
+
+  suite('QA-2 a question naming an unrelated place leaves the owed welcome standing');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park')],
+      library: ['Alpha Park'],
+      intros: ['Liberty Station'],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 45_000, synth: 12_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    const labels = watchLabels(world, tour);
+    world.area = { neighborhood: 'Liberty Station', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(3_000);
+    check('the owed welcome waits behind the playing story',
+      tour.view().upNext === 'Welcome to Liberty Station', `upNext=${tour.view().upNext}`);
+    check('the question is accepted', tour.submitQuestion('What is Balboa Park known for?') === true);
+    check('the welcome still waits after an unrelated question',
+      tour.view().upNext === 'Welcome to Liberty Station', `upNext=${tour.view().upNext}`);
+    await world.clock.advance(240_000);
+    check('the answer sounded', world.eventsOf('question_playback').some(e => e.payload.completed === true && e.payload.voice === 'gemini'));
+    check('the welcome serves and sounds normally afterward',
+      labels.includes('Welcome to Liberty Station'), labels.join(','));
+    check('the welcome completes and is heard-filed as usual',
+      playbacksFor(world, 'welcome:liberty station').some(e => e.payload.sounded === true) &&
+        world.heard.includes('Welcome to Liberty Station'),
+      world.heard.join(' | '));
+    tour.endTour();
+  }
+
+  suite('QA-3 a question naming the area does not cut its PLAYING welcome');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      intros: ['Liberty Station'],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 30_000, synth: 12_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Liberty Station', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(5_000);
+    check('the welcome is playing when the question lands',
+      tour.view().nowPlaying?.label === 'Welcome to Liberty Station',
+      `nowPlaying=${tour.view().nowPlaying?.label}`);
+    check('the question is accepted', tour.submitQuestion('Tell me about Liberty Station') === true);
+    check('the playing welcome is not cut by the submission',
+      tour.view().nowPlaying?.label === 'Welcome to Liberty Station',
+      `nowPlaying=${tour.view().nowPlaying?.label}`);
+    await world.clock.advance(180_000);
+    check('the playing welcome completed',
+      playbacksFor(world, 'welcome:liberty station').some(e => e.payload.completed === true),
+      JSON.stringify(playbacksFor(world, 'welcome:liberty station').map(e => e.payload)));
+    check('the welcome committed exactly once (no second orientation serve)',
+      world.eventsOf('story_played').filter(e => e.payload.subject === 'welcome:liberty station').length === 1,
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    check('no generic area story follows it on this pass',
+      world.eventsOf('story_played').filter(e => e.payload.subject === 'area:liberty station').length === 0);
+    check('the answer sounded behind the welcome',
+      world.eventsOf('question_playback').some(e => e.payload.completed === true && e.payload.voice === 'gemini'));
+    tour.endTour();
+  }
+
+  suite('AF-1 an attempts-exhausted drop rests the subject until the driver moves on');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Fragile House'), makeCandidate('Steady Park')],
+      library: ['Fragile House', 'Steady Park'],
+    });
+    let failFragile = true;
+    const audio = new FakeAudio(world.clock, ({ cls, src }) =>
+      failFragile && cls === 'library' && typeof src === 'string' && src.includes('fragile-house')
+        ? { action: 'reject', name: 'NotSupportedError' }
+        : { action: 'ok', durationMs: DUR[cls] ?? 5000 });
+    const { tour } = await healthyOpening(world, audio);
+    await world.clock.advance(30_000);
+    check('the failing story dropped attempts-exhausted',
+      dropsFor(world, 'fragile house').some(d => d.payload.reason === 'attempts-exhausted'),
+      JSON.stringify(dropsFor(world, 'fragile house').map(d => d.payload)));
+    check('the rested subject was committed exactly once at this spot',
+      world.eventsOf('story_played').filter(e => e.payload.subject === 'fragile house').length === 1,
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    check('the other candidate served in its place',
+      playbacksFor(world, 'steady park').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'steady park').map(e => e.payload)));
+    check('the failed subject is not heard-filed',
+      !world.heard.includes('Fragile House'), world.heard.join(' | '));
+    // A nudge that triggers serve cycles but stays inside the
+    // 250 m rest radius: the subject must remain rested.
+    tour.onPosition({ lat: UTC.lat + 0.002, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(30_000);
+    check('still rested after in-radius serve cycles',
+      world.eventsOf('story_played').filter(e => e.payload.subject === 'fragile house').length === 1,
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    // Beyond the radius, with the failure gone, the subject is
+    // eligible again and lands.
+    failFragile = false;
+    tour.onPosition({ lat: UTC.lat + 0.005, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    check('past the radius the subject serves again',
+      world.eventsOf('story_played').filter(e => e.payload.subject === 'fragile house').length === 2,
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    check('the recovered serve sounds to completion',
+      playbacksFor(world, 'fragile house').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'fragile house').map(e => e.payload)));
+    check('the subject is heard-filed only after it sounds',
+      world.heard.includes('Fragile House'), world.heard.join(' | '));
+    tour.endTour();
+  }
 }

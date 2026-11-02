@@ -331,15 +331,20 @@ export class Tour {
   // Telling ledger (§3)
   private inflight = new Set<string>();
   /**
-   * Judge-drop context markers: a story dropped at dequeue for
+   * Drop-spot context markers: a story dropped at dequeue for
    * stale-age / stale-behind / out-of-reach failed a deterministic
    * function of (anchor, position, heading, speed, age) — at the
    * same context it would fail again with certainty, and the
    * settle→cycle→serve→drop loop is pure microtask spin. The
    * subject therefore rests until the driver has genuinely moved
-   * (≥ 250 m). This is serve-context memoization, NOT a telling
-   * rule: nothing is told, consumed, or spent (Q12/Q13 intact),
-   * and displacement/failure settles never rest a subject.
+   * (≥ 250 m). An attempts-exhausted (playback-failure) drop rests
+   * on the same memo (Nov 1 follow-on): not a freshness judgment,
+   * but the unrested re-serve loop it prevents is the same spin,
+   * and the rest is what lets a transient failure recover only
+   * after the driver has moved on. This is serve-context
+   * memoization, NOT a telling rule: nothing is told, consumed,
+   * or spent (Q12/Q13 intact), and displacement settles never
+   * rest a subject.
    */
   private judgeDropSpots = new Map<string, { lat: number; lng: number }>();
   private toldCount = new Map<string, number>();
@@ -956,6 +961,18 @@ export class Tour {
     // the first hello the way it did before this fallback existed.
     const item = await this.generateWelcomeBeforeDeadline(name, this.position);
     if (this.phase !== 'active') return;
+    // Q&A discharge (Nov 1 follow-on): the listener asked about
+    // the start area while its welcome was warming — the question
+    // was the orientation, so no welcome of either kind hands
+    // over behind the answer. (At this point in the opening the
+    // orientation slot can only have been spent by that
+    // discharge: no welcome or area settle can precede the first
+    // welcome, and area stories are gated behind the opening.)
+    if (this.orientationSpent.has(name.toLowerCase())) {
+      this.welcomeState = 'none';
+      this.maybeOpenTour();
+      return;
+    }
     if (!item) {
       // The stored fallback, variant-aware (Nov 1): an unheard
       // intro serves its GREETING variant when the shelf holds
@@ -1334,6 +1351,19 @@ export class Tour {
           };
           return;
         }
+      }
+      // Q&A discharge race (Nov 1 follow-on): the listener may
+      // have asked about this very area while its welcome was
+      // generating — the discharge cleared the owed record
+      // mid-flight. An obligation that no longer stands is not
+      // offered: the item settles silently, uncommitted, exactly
+      // like a buffer withdrawal. (Nothing else clears this
+      // record mid-flight: area entries and deferral maturity
+      // both stand down while welcomeServing.)
+      if (!this.owedWelcome || this.owedWelcome.name.toLowerCase() !== name.toLowerCase()) {
+        item.silent = true;
+        this.player.abandon(item);
+        return;
       }
       // The owed record clears only on a SOUNDED settle (O15): an
       // unheard serve re-arms it from onStorySettle. Until that
@@ -2013,6 +2043,22 @@ export class Tour {
             signatureFact: item.signatureFact ?? null,
           });
         }
+      }
+      // Playback-failure rest (Nov 1 follow-on): an attempts-
+      // exhausted drop is not a freshness judgment — the audio
+      // simply would not play — but an unrested subject is
+      // re-served by the very next cycle and fails the same way
+      // (the field drive served Alice Clark House three times in
+      // ~2.5 minutes, two of them attempts-exhausted drops). It
+      // rests on the same drop-spot memo, same 250 m semantics:
+      // near the spot the cycle picks other candidates; beyond
+      // it the subject is eligible again, so a transient failure
+      // can recover after moving on. The subject stays unheard
+      // and untold — this files no telling. Synthesis-exhausted
+      // settles surface under the same reason at this layer and
+      // rest identically.
+      if (rec.dropReason === 'attempts-exhausted' && this.position) {
+        this.judgeDropSpots.set(subject, { lat: this.position.lat, lng: this.position.lng });
       }
       // §8: reason verbatim from the closed vocabulary. P1 salvage:
       // attempts + queue wait ride along (A's settle depth).
@@ -2981,6 +3027,73 @@ export class Tour {
 
   // ------------------------------------------------------------ Q&A (§6) — text input only
 
+  /**
+   * Q&A welcome discharge (Nov 1 follow-on): a question ABOUT a
+   * neighborhood is its own orientation — the listener is asking
+   * about the place, so the place's owed welcome must not fire
+   * in the resume slot behind the answer and tell the same
+   * subject twice back-to-back (the field shape: a Liberty
+   * Station question, the answer, then the owed Liberty Station
+   * welcome one second later). Matching is plain string work in
+   * the name-normalization family the place keys use — no model
+   * call: the area's normalized name appearing in the normalized
+   * question is a confident match. Candidates are the current
+   * area, any area with an owed or deferred welcome right now,
+   * and areas welcomed/entered this tour. A question naming no
+   * area (a landmark question included) changes nothing.
+   */
+  private questionAreaMatch(question: string): { key: string; name: string } | null {
+    const q = backend.normalizePlaceKey(question);
+    if (!q) return null;
+    const names: { key: string; name: string }[] = [];
+    const push = (name: string | null | undefined) => {
+      if (!name) return;
+      const key = name.toLowerCase();
+      if (!names.some(n => n.key === key)) names.push({ key, name });
+    };
+    push(this.area.neighborhood);
+    push(this.owedWelcome?.name);
+    push(this.deferredWelcome?.name);
+    push(this.entryWelcomeAnchor?.name);
+    for (const key of this.welcomed) push(key);
+    for (const n of names) {
+      const needle = backend.normalizePlaceKey(n.name);
+      if (needle && q.includes(needle)) return n;
+    }
+    return null;
+  }
+
+  /**
+   * Discharge one area's welcome for this pass (see
+   * questionAreaMatch): the owed/deferred records clear, the
+   * area's orientation slot is spent (so the generic `area:`
+   * story cannot stack a second orientation behind the answer
+   * either), a still-pending opening welcome for the area is
+   * discarded before its handover, and a WAITING welcome item
+   * withdraws silently — never heard, no drop filed. A welcome
+   * that is PLAYING is never cut; it completes, and the spent
+   * slot is what keeps it the pass's only orientation voice.
+   * Tour-local throughout: nothing here writes the cross-day
+   * heard ledger — the intro was never told, so a future day's
+   * first entry still earns its greeting-variant welcome.
+   */
+  private dischargeWelcomeForQuestion(match: { key: string; name: string }): void {
+    const { key } = match;
+    const subject = `welcome:${key}`;
+    this.orientationSpent.set(key, this.clock.now());
+    if (this.owedWelcome?.name.toLowerCase() === key) this.owedWelcome = null;
+    if (this.deferredWelcome?.name.toLowerCase() === key) this.deferredWelcome = null;
+    if (this.pendingWelcome?.subject === subject) {
+      this.pendingWelcome = null;
+      if (this.welcomeState === 'ready') this.welcomeState = 'none';
+    }
+    if (this.player.withdrawWaiting(subject)) {
+      this.welcomeOffered = false;
+      if (this.welcomeState === 'handed') this.welcomeState = 'none';
+    }
+    this.maybeOpenTour();
+  }
+
   /** Submit a typed question. Returns false when the lock is held (A2). */
   submitQuestion(raw: string): boolean {
     const question = raw.trim();
@@ -2993,6 +3106,12 @@ export class Tour {
     // the text rides the sealed row only — the grading view's
     // allowlist excludes it by design).
     this.emit('question_asked', { question: question.slice(0, 500), model: LEO_QA_MODEL_ID });
+    // Q&A welcome discharge (Nov 1 follow-on): a question naming
+    // an area discharges that area's welcome for this pass,
+    // synchronously at submission — before the answer exists, so
+    // the welcome cannot be the story that resumes behind it.
+    const areaMatch = this.questionAreaMatch(question);
+    if (areaMatch) this.dischargeWelcomeForQuestion(areaMatch);
     // A4: the failsafe runs from submission, before generation.
     this.qaFailsafe = this.clock.setTimeout(() => this.qaGenerationFailed(), QA_FAILSAFE_MS);
     void this.runAnswerGeneration(question);

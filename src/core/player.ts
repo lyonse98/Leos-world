@@ -423,6 +423,52 @@ export class Player {
     });
   }
 
+  /**
+   * Withdraw a WAITING story by subject at the engine's direction
+   * (the Q&A welcome discharge, Nov 1 follow-on): the item leaves
+   * the waiting slot or the pending-priority queue and settles
+   * silently — no drop record, no §8 terminal, never heard — the
+   * deferral path's settle discipline, reused. The CURRENT item
+   * is never touched: an item that has taken the element is
+   * playing, and playing stories are never cut. Returns true
+   * when an item withdrew.
+   */
+  withdrawWaiting(subject: string): boolean {
+    const silentSettle = (item: AudibleItem) => {
+      item.silent = true;
+      this.settleItem(item, {
+        sounded: false,
+        completed: false,
+        soundedMs: 0,
+        failKind: 'none',
+        exhausted: false,
+        dropReason: null,
+        skipped: false,
+      });
+    };
+    if (this.waitingStory && this.waitingStory.subject === subject) {
+      const item = this.waitingStory;
+      this.waitingStory = null;
+      silentSettle(item);
+      // The slot frees exactly as it does after a dequeue drop:
+      // the senior pending Tier-1 refills it (committing as it
+      // takes the slot); an unfilled slot is the engine's cue to
+      // run a serve cycle.
+      this.refillSlotFromPending();
+      if (!this.waitingStory) this.hooks.onSlotEmpty();
+      this.hooks.onState();
+      return true;
+    }
+    const idx = this.pendingPriority.findIndex(i => i.subject === subject);
+    if (idx >= 0) {
+      const [item] = this.pendingPriority.splice(idx, 1);
+      silentSettle(item);
+      this.hooks.onState();
+      return true;
+    }
+    return false;
+  }
+
   // ---------------------------------------------------------- primes & latch (P5–P10)
 
   /**
