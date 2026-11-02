@@ -19,16 +19,84 @@ const QA_ENABLED = false;
 
 type Pose = 'idle' | 'speaking' | 'listening' | 'thinking' | 'wave' | 'pointing' | 'liked';
 
-function MilesFigure({ pose, large }: { pose: Pose; large?: boolean }) {
+/**
+ * Miles in his world (Erik, Nov 2, 2026 ~12:03 — UI/presentation
+ * only): the pose assets are square RGB renders with a baked-in
+ * background and no alpha, so dropping one into a flex slot read as
+ * "a box with Miles in it" — a JPG in a frame. The fix is all
+ * presentation: the image is nested in two feather masks (horizontal
+ * + vertical, see index.css) so every edge of the square dissolves
+ * before it can read as a rectangle — no drop-shadow either, since a
+ * shadow on an opaque square traces the box — and he stands inside a
+ * layered CSS/SVG scene (sky wash, sun disc, sage hill silhouettes,
+ * a road ribbon and ground plane with a soft contact shadow) that is
+ * shared by the gate, the landing, and the tour screen. Pose
+ * selection and every behavior around this component are unchanged.
+ */
+function MilesFigure({ pose, large, tour }: { pose: Pose; large?: boolean; tour?: boolean }) {
+  const sizeClass = tour ? 'h-[min(62vh,36rem)]' : large ? 'h-64 sm:h-80' : 'h-44 sm:h-56';
   return (
-    <div className={`relative ${large ? 'h-52 sm:h-72' : 'h-36 sm:h-48'} flex items-end justify-center`}>
-      <div className="absolute bottom-0 h-24 w-24 rounded-full bg-sage/30 blur-2xl" />
-      <img
-        src={`/miles/miles-${pose}.webp`}
-        alt="Miles, your tour guide"
-        className="relative max-h-full w-auto object-contain drop-shadow-2xl"
-        draggable={false}
-      />
+    <div className={`relative w-full ${sizeClass}`}>
+      {/* The world he stands in — decorative only, pointer-events
+          none throughout. The clip layer keeps the scene's bleed
+          from ever widening the page, and its own radial mask
+          dissolves the scene's edges into the app ground. */}
+      <div aria-hidden="true" className="pointer-events-none absolute -inset-x-5 top-0 bottom-0 z-0 sm:-inset-x-8">
+        <div className="miles-scene-clip absolute inset-0 overflow-hidden">
+          <div className="miles-sky absolute -inset-x-[10%] -top-[14%] bottom-[4%]" />
+          <div
+            className={`miles-sun absolute rounded-full ${
+              tour ? 'top-[1%] right-[4%] h-48 w-48' : 'top-[3%] right-[8%] h-32 w-32'
+            }`}
+          />
+          <svg
+            className={`absolute left-1/2 -translate-x-1/2 ${tour ? 'bottom-[8%] w-[175%]' : 'bottom-[10%] w-[155%]'}`}
+            viewBox="0 0 600 180"
+            preserveAspectRatio="none"
+            aria-hidden="true"
+          >
+            <path
+              d="M0 112 C70 74 148 122 228 94 C308 66 388 114 468 86 C528 65 572 84 600 74 L600 180 L0 180 Z"
+              fill="#6d8a63"
+              fillOpacity="0.16"
+            />
+            <path
+              d="M0 140 C86 106 168 150 258 126 C348 102 430 148 518 120 C556 108 584 116 600 110 L600 180 L0 180 Z"
+              fill="#4f6b47"
+              fillOpacity="0.2"
+            />
+          </svg>
+          <div className="miles-ground absolute -bottom-[8%] left-1/2 h-[36%] w-[135%] -translate-x-1/2" />
+          <div
+            className={`miles-road absolute -bottom-[5%] left-1/2 -translate-x-1/2 ${
+              tour ? 'h-[34%] w-[58%]' : 'h-[30%] w-[52%] opacity-80'
+            }`}
+          />
+          <div className="absolute bottom-[2.5%] left-1/2 h-[6%] w-[54%] -translate-x-1/2 rounded-[100%] bg-ink/20 blur-md" />
+        </div>
+      </div>
+
+      {/* The figure itself: two nested feather masks (x, then y)
+          multiply, so the square's left/right/top/bottom edges all
+          fade into the scene while his head and torso — well inside
+          the frame — stay fully opaque. The mask frame bleeds above
+          and below the layout box so he stands IN the layout at a
+          larger scale instead of sitting in a slot. */}
+      <div className="miles-mask-x absolute -top-[9%] -bottom-[3%] inset-x-0 z-10">
+        <div className="miles-mask-y absolute inset-0 flex items-end justify-center">
+          <img
+            src={`/miles/miles-${pose}.webp`}
+            alt="Miles, your tour guide"
+            className="relative h-full w-auto max-w-none object-contain select-none"
+            draggable={false}
+          />
+        </div>
+      </div>
+
+      {/* Foreground blend: a whisper of the app ground over his
+          lower edge, so figure, ground plane, and whatever sits
+          below (title, transport bar) share one world. */}
+      <div aria-hidden="true" className="miles-fade-bottom pointer-events-none absolute inset-x-0 bottom-0 z-20 h-[16%]" />
     </div>
   );
 }
@@ -131,7 +199,7 @@ function AccessGate({ onUnlock }: { onUnlock: () => void }) {
   };
 
   return (
-    <div className="relative min-h-full overflow-y-auto bg-cream text-ink">
+    <div className="miles-app-bg relative min-h-full overflow-y-auto bg-cream text-ink">
       <PosterBackdrop />
       <main className="safe-top safe-bottom relative mx-auto flex min-h-full w-full max-w-xl flex-col items-center px-6 py-8">
         <MilesFigure pose="wave" large />
@@ -397,7 +465,7 @@ function MilesApp() {
   // ------------------------------------------------------------ landing
   if (view.phase !== 'active') {
     return (
-      <div className="relative min-h-full overflow-y-auto bg-cream text-ink">
+      <div className="miles-app-bg relative min-h-full overflow-y-auto bg-cream text-ink">
         <PosterBackdrop />
         <main className="safe-top safe-bottom relative mx-auto flex min-h-full w-full max-w-xl flex-col items-center px-6 py-8">
           <MilesFigure pose="wave" large />
@@ -491,7 +559,7 @@ function MilesApp() {
   // is off.
   return (
     <div
-      className="relative flex min-h-full flex-col bg-cream text-ink"
+      className="miles-app-bg relative flex min-h-full flex-col bg-cream text-ink"
       onPointerDown={onTourTap}
     >
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
@@ -500,8 +568,8 @@ function MilesApp() {
       </div>
 
       <main className="safe-top safe-bottom relative flex flex-1 flex-col items-center px-5">
-        <div className="flex w-full flex-1 flex-col items-center justify-center">
-          <MilesFigure pose={pose} large />
+        <div className="flex w-full flex-1 flex-col items-center justify-end">
+          <MilesFigure pose={pose} large tour />
           {QA_ENABLED && (
             <QuestionForm
               question={question}

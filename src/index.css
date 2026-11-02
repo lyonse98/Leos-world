@@ -26,6 +26,57 @@ body {
   color: #f3ede1;
 }
 
+/* ── Miles in his world (Nov 2, 2026 — presentation only) ───
+   The pose renders are square RGB images with a baked background
+   and no alpha channel. These classes dissolve the square into a
+   scene: a shared sky-gradient ground for all three surfaces, two
+   nested feather masks on the figure (x then y — nested masks
+   multiply, so all four edges fade while the subject, well inside
+   the frame, stays opaque), a radial-masked scene clip so the
+   CSS/SVG environment (sky wash, sun, hills, road, ground) bleeds
+   without ever widening the page, and a foreground fade that ties
+   his lower edge to the surface below him. */
+.miles-app-bg {
+  background: linear-gradient(180deg, #f8f2e4 0%, #f3ede1 48%, #eee2cb 100%);
+}
+.miles-mask-x {
+  -webkit-mask-image: linear-gradient(to right, transparent 0%, #000 12%, #000 88%, transparent 100%);
+  -webkit-mask-repeat: no-repeat;
+  mask-image: linear-gradient(to right, transparent 0%, #000 12%, #000 88%, transparent 100%);
+  mask-repeat: no-repeat;
+}
+.miles-mask-y {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 6%, #000 84%, transparent 99%);
+  -webkit-mask-repeat: no-repeat;
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 6%, #000 84%, transparent 99%);
+  mask-repeat: no-repeat;
+}
+.miles-scene-clip {
+  -webkit-mask-image: radial-gradient(ellipse 78% 88% at 50% 46%, #000 55%, transparent 88%);
+  mask-image: radial-gradient(ellipse 78% 88% at 50% 46%, #000 55%, transparent 88%);
+}
+.miles-sky {
+  background:
+    radial-gradient(ellipse 55% 50% at 50% 40%, rgba(255, 253, 246, 0.95) 0%, rgba(255, 253, 246, 0) 70%),
+    radial-gradient(ellipse 42% 38% at 80% 16%, rgba(247, 216, 152, 0.38) 0%, rgba(247, 216, 152, 0) 70%),
+    radial-gradient(ellipse 48% 40% at 16% 24%, rgba(109, 138, 99, 0.22) 0%, rgba(109, 138, 99, 0) 72%);
+}
+.miles-sun {
+  background: radial-gradient(circle, rgba(250, 226, 165, 0.85) 0%, rgba(250, 226, 165, 0.35) 42%, rgba(250, 226, 165, 0) 70%);
+}
+.miles-ground {
+  background: radial-gradient(ellipse 52% 50% at 50% 50%, rgba(238, 229, 207, 0.95) 0%, rgba(238, 229, 207, 0) 70%);
+}
+.miles-road {
+  clip-path: polygon(43% 0, 57% 0, 97% 100%, 3% 100%);
+  background: linear-gradient(to bottom, rgba(61, 76, 89, 0) 0%, rgba(61, 76, 89, 0.14) 55%, rgba(61, 76, 89, 0.22) 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, #000 42%);
+  mask-image: linear-gradient(to bottom, transparent 0%, #000 42%);
+}
+.miles-fade-bottom {
+  background: linear-gradient(to bottom, rgba(243, 237, 225, 0) 0%, rgba(243, 237, 225, 0.5) 100%);
+}
+
 .safe-bottom {
   padding-bottom: calc(0.75rem + var(--safe-area-bottom));
 }
