@@ -21,22 +21,25 @@ type Pose = 'idle' | 'speaking' | 'listening' | 'thinking' | 'wave' | 'pointing'
 
 /**
  * Miles in his world (Erik, Nov 2, 2026 ~12:03 — UI/presentation
- * only): the pose assets are square RGB renders with a baked-in
- * background and no alpha, so dropping one into a flex slot read as
- * "a box with Miles in it" — a JPG in a frame. The fix is all
- * presentation: the image is nested in two feather masks (horizontal
- * + vertical, see index.css) so every edge of the square dissolves
- * before it can read as a rectangle — no drop-shadow either, since a
- * shadow on an opaque square traces the box — and he stands inside a
- * layered CSS/SVG scene (sky wash, sun disc, sage hill silhouettes,
- * a road ribbon and ground plane with a soft contact shadow) that is
- * shared by the gate, the landing, and the tour screen. Pose
- * selection and every behavior around this component are unchanged.
+ * only): the pose renders started life as square RGB images with a
+ * baked-in background and no alpha, so dropping one into a flex slot
+ * read as "a box with Miles in it" — a JPG in a frame. First pass
+ * dissolved the square in feather masks; this pass removes the
+ * background for real: MilesFigure renders the transparent CUTOUTS
+ * (public/miles/miles-<pose>-cut.webp, generated from the approved
+ * renders by scripts/assets/make-cutouts.py — same art, alpha
+ * channel, cropped to the full head-to-waist bust). No masks remain
+ * on the figure: a soft drop shadow is legitimate again because it
+ * now traces HIM, not a rectangle. He stands inside a layered
+ * CSS/SVG scene (sky wash, sun disc, sage hill silhouettes, a road
+ * ribbon and ground plane with a soft contact shadow) shared by the
+ * gate, the landing, and the tour screen. Pose selection and every
+ * behavior around this component are unchanged.
  */
 function MilesFigure({ pose, large, tour }: { pose: Pose; large?: boolean; tour?: boolean }) {
   const sizeClass = tour ? 'h-[min(62vh,36rem)]' : large ? 'h-64 sm:h-80' : 'h-44 sm:h-56';
   return (
-    <div className={`relative w-full ${sizeClass}`}>
+    <div className={`relative w-full overflow-x-clip ${sizeClass}`}>
       {/* The world he stands in — decorative only, pointer-events
           none throughout. The clip layer keeps the scene's bleed
           from ever widening the page, and its own radial mask
@@ -76,27 +79,20 @@ function MilesFigure({ pose, large, tour }: { pose: Pose; large?: boolean; tour?
         </div>
       </div>
 
-      {/* The figure itself: two nested feather masks (x, then y)
-          multiply, so the square's left/right/top/bottom edges all
-          fade into the scene while his head and torso — well inside
-          the frame — stay fully opaque. The mask frame bleeds above
-          and below the layout box so he stands IN the layout at a
-          larger scale instead of sitting in a slot. */}
-      <div className="miles-mask-x absolute -top-[9%] -bottom-[3%] inset-x-0 z-10">
-        <div className="miles-mask-y absolute inset-0 flex items-end justify-center">
-          <img
-            src={`/miles/miles-${pose}.webp`}
-            alt="Miles, your tour guide"
-            className="relative h-full w-auto max-w-none object-contain select-none"
-            draggable={false}
-          />
-        </div>
+      {/* The figure himself: the transparent cutout, bottom-anchored
+          at full height so the whole head-to-waist bust is always
+          visible — the container never crops his torso. The drop
+          shadow follows his silhouette (hair, arms, pointing hand),
+          which is what grounds him in the scene; the elliptical
+          contact shadow in the scene layer sits under his waist. */}
+      <div className="absolute inset-0 z-10 flex items-end justify-center">
+        <img
+          src={`/miles/miles-${pose}-cut.webp`}
+          alt="Miles, your tour guide"
+          className="relative h-full w-auto max-w-none object-contain select-none [filter:drop-shadow(0_10px_16px_rgba(21,34,45,0.22))]"
+          draggable={false}
+        />
       </div>
-
-      {/* Foreground blend: a whisper of the app ground over his
-          lower edge, so figure, ground plane, and whatever sits
-          below (title, transport bar) share one world. */}
-      <div aria-hidden="true" className="miles-fade-bottom pointer-events-none absolute inset-x-0 bottom-0 z-20 h-[16%]" />
     </div>
   );
 }
@@ -162,10 +158,24 @@ function QuestionForm({
 }
 
 /**
- * trymiles.app poster backdrop (Nov 2, 2026 friendliness pass):
- * soft sage + warm-sand light blobs and the site's giant outlined
- * MILES behind everything — warm cream ground via the root's
- * bg-cream. Purely decorative; pointer-events-none throughout.
+ * trymiles.app poster backdrop (Nov 2, 2026 friendliness pass;
+ * composition adjusted the same day for the cutouts): soft sage +
+ * warm-sand light blobs and the site's giant outlined MILES behind
+ * everything — warm cream ground via the root's bg-cream.
+ *
+ * Poster composition (Erik, Nov 2, 2026 ~12:11 — "i dont like how
+ * image is opaque over the 'miles' text. either rearrange or change
+ * opacity"): the text band is pinned to the TOP of the screen, so it
+ * sits behind the figure's head-and-shoulders zone rather than
+ * centered behind his torso, and the figure — rendered later, in
+ * <main>'s relative stacking context — is unambiguously in front.
+ * With the opaque square this arrangement failed because the whole
+ * rectangle swallowed the letters; with the transparent cutouts
+ * only his silhouette crosses the outline text, which is the
+ * trymiles poster look. The stroke opacity also drops a notch
+ * (0.10 → 0.08) so the band reads as backdrop, not a headline
+ * competing with him. Purely decorative; pointer-events-none
+ * throughout.
  */
 function PosterBackdrop() {
   return (
@@ -174,7 +184,7 @@ function PosterBackdrop() {
       <div className="leo-float-slow absolute top-1/3 -right-24 h-80 w-80 rounded-full bg-amber-200/40 blur-3xl" />
       <div
         aria-hidden="true"
-        className="absolute top-2 left-1/2 -translate-x-1/2 text-[6.5rem] leading-none font-black tracking-wide whitespace-nowrap text-transparent select-none [-webkit-text-stroke:2px_rgba(21,34,45,0.10)] sm:text-[9rem]"
+        className="absolute top-1 left-1/2 -translate-x-1/2 text-[6.5rem] leading-none font-black tracking-wide whitespace-nowrap text-transparent select-none [-webkit-text-stroke:2px_rgba(21,34,45,0.08)] sm:text-[9rem]"
       >
         MILES
       </div>
