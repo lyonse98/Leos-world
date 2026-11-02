@@ -221,6 +221,26 @@ export async function fetchIntroRows(areaName: string): Promise<IntroRows> {
   };
 }
 
+/**
+ * The HOSTED filler pool (Nov 2, 2026): story_library rows with
+ * angle = 'filler_hosted' — bridge + story merged into one authored
+ * segment, location-agnostic by design. story_text rides along so
+ * the lane can estimate each segment's duration from its word
+ * count. Invisible to A·Leo: the avatar lane reads only 'filler'.
+ */
+export async function fetchHostedFillerRows(): Promise<
+  { place_key: string; place_name: string; audio_path: string; story_text: string }[]
+> {
+  if (!BACKEND_CONFIGURED) return [];
+  const { data, error } = await db
+    .from('story_library')
+    .select('place_key, place_name, audio_path, story_text')
+    .eq('angle', 'filler_hosted')
+    .limit(500);
+  if (error || !data) return [];
+  return data as { place_key: string; place_name: string; audio_path: string; story_text: string }[];
+}
+
 /** The filler pool: story_library rows with angle = 'filler' (§8A). */
 export async function fetchFillerRows(): Promise<
   { place_key: string; place_name: string; audio_path: string }[]

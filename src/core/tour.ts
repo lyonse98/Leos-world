@@ -67,6 +67,7 @@ export interface NetSeams {
   fetchLibraryRow: typeof backend.fetchLibraryRow;
   fetchIntroRows: typeof backend.fetchIntroRows;
   fetchFillerRows: typeof backend.fetchFillerRows;
+  fetchHostedFillerRows: typeof backend.fetchHostedFillerRows;
   findCachedStory: typeof backend.findCachedStory;
   putCachedStory: typeof backend.putCachedStory;
   fetchHeardTopics: typeof backend.fetchHeardTopics;
@@ -94,6 +95,7 @@ const realSeams: NetSeams = {
   fetchLibraryRow: backend.fetchLibraryRow,
   fetchIntroRows: backend.fetchIntroRows,
   fetchFillerRows: backend.fetchFillerRows,
+  fetchHostedFillerRows: backend.fetchHostedFillerRows,
   findCachedStory: backend.findCachedStory,
   putCachedStory: backend.putCachedStory,
   fetchHeardTopics: backend.fetchHeardTopics,
@@ -230,6 +232,17 @@ const INTRO_ANGLES: ReadonlySet<string> = new Set([
 const NESTED_AREA_RADIUS_M = 1200;
 const PARENT_DWELL_MS = 75_000;
 /**
+ * Hosted filler tier (Nov 2, 2026; approved hosted plan, Oct 30):
+ * the full hosted pool is ≈600 MB and is never pinned whole. The
+ * lane pins a working set of ~14 segments (≈75 MB at library WAV
+ * rates for ~2-minute cuts) at tour start and tops up in the
+ * background when the ready count drops below 6. Pinning this
+ * lane's own working set is the only speculative download the
+ * filler lane performs.
+ */
+const HOSTED_PIN_TARGET = 14;
+const HOSTED_TOPUP_BELOW = 6;
+/**
  * Fit check (Nov 1): the duration estimate for a story that does
  * not exist yet. Live tellings run in the 2–3 minute band (the
  * interim length ceilings), so the floor is the band's short
@@ -266,6 +279,8 @@ interface FillerEntry {
   placeKey: string;
   title: string;
   audioPath: string;
+  /** Hosted segments only: duration estimated from the row's text. */
+  durationSec?: number;
 }
 
 export class Tour {
@@ -421,6 +436,13 @@ export class Tour {
   private fillerOrder: FillerEntry[] = [];
   private fillerSpent = new Set<string>();
   private fillerReady = false;
+  // Hosted tier (Nov 2): segments in shuffled serve order, plus
+  // the set of audio paths CONFIRMED on-device. A hosted segment
+  // may fire only while its path is in hostedPinned; spent
+  // discipline is the shared fillerSpent set, as with legacy.
+  private hostedOrder: FillerEntry[] = [];
+  private hostedPinned = new Set<string>();
+  private hostedPinning = false;
   // Colour commentary lane (B·Miles only, Oct 29, 2026): pre-rendered
   // bank, conservative caps, yields instantly to any committed story.
   private commentarySpent = new Set<string>();
@@ -695,6 +717,8 @@ export class Tour {
     void this.serveOpeningWelcome();
     // The filler pool loads and pins in the background (F4).
     void this.loadFillerPool();
+    // The hosted tier loads and pins its working set alongside.
+    void this.loadHostedPool();
     // The commentary bank loads, pins, and checks its kill-switch.
     void this.loadCommentary();
     // Landing-warmed prefetch continues in-tour (S9/S10).
@@ -2732,6 +2756,80 @@ export class Tour {
     this.fillerReady = true;
   }
 
+  /**
+   * Hosted tier load (Nov 2): fetch the filler_hosted rows, fix a
+   * shuffled serve order for the tour, and pin the working set.
+   * Any failure leaves the hosted tier dark and the legacy lane
+   * exactly as it was.
+   */
+  private async loadHostedPool(): Promise<void> {
+    try {
+      const rows = await this.seams.fetchHostedFillerRows();
+      const order = rows.map(r => ({
+        placeKey: r.place_key,
+        title: r.place_name,
+        audioPath: r.audio_path,
+        durationSec: r.story_text ? estimateSpeechDurationS(r.story_text) : 120,
+      }));
+      for (let i = order.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [order[i], order[j]] = [order[j], order[i]];
+      }
+      this.hostedOrder = order;
+      await this.pinHostedBatch();
+    } catch {
+      /* hosted tier dark; the legacy lane is untouched */
+    }
+  }
+
+  /**
+   * Pin the next slice of the hosted working set: unspent,
+   * not-yet-pinned segments, until HOSTED_PIN_TARGET are ready.
+   * A path joins hostedPinned only when the cache confirms it —
+   * a failed pin leaves the segment unready, never fired from
+   * the network. Guarded so load and top-up never overlap.
+   */
+  private async pinHostedBatch(): Promise<void> {
+    if (this.hostedPinning) return;
+    this.hostedPinning = true;
+    try {
+      const want = this.hostedOrder.filter(
+        f => !this.fillerSpent.has(f.placeKey) && !this.hostedPinned.has(f.audioPath),
+      );
+      const batch = want.slice(0, Math.max(0, HOSTED_PIN_TARGET - this.readyHosted().length));
+      await Promise.all(
+        batch.map(async f => {
+          await this.seams.pinBucketAudio(f.audioPath);
+          if (await this.seams.audioCacheHas(f.audioPath)) this.hostedPinned.add(f.audioPath);
+        }),
+      );
+    } catch {
+      /* a failed pin simply leaves the segment unready */
+    } finally {
+      this.hostedPinning = false;
+    }
+  }
+
+  /** Hosted segments that may fire right now: unspent AND on-device. */
+  private readyHosted(): FillerEntry[] {
+    return this.hostedOrder.filter(
+      f => !this.fillerSpent.has(f.placeKey) && this.hostedPinned.has(f.audioPath),
+    );
+  }
+
+  /** Background top-up: refill the working set as segments are spent. */
+  private maybeTopUpHosted(): void {
+    if (this.readyHosted().length >= HOSTED_TOPUP_BELOW) return;
+    if (
+      !this.hostedOrder.some(
+        f => !this.fillerSpent.has(f.placeKey) && !this.hostedPinned.has(f.audioPath),
+      )
+    ) {
+      return;
+    }
+    void this.pinHostedBatch();
+  }
+
   private trueSilence(): boolean {
     if (this.phase !== 'active') return false;
     if (this.opening !== 'open' && this.opening !== 'failed') return false; // F12
@@ -2788,10 +2886,6 @@ export class Tour {
     let enqueued = false;
     try {
       const unspent = this.fillerOrder.filter(f => !this.fillerSpent.has(f.placeKey));
-      if (unspent.length === 0) {
-        this.laneStoodDown = true; // F10
-        return;
-      }
       // F3's one exception: after a failed opening with debt
       // outstanding, a pair may attempt while the latch is not
       // earned (unearned, or lost mid-tour with a failed opening)
@@ -2799,6 +2893,53 @@ export class Tour {
       const proofPath =
         this.opening === 'failed' && this.player.latch !== 'earned' && this.debt.size > 0;
       if (this.player.latch !== 'earned' && !proofPath) return;
+
+      // Hosted tier first (Nov 2): when a hosted segment is ready
+      // on-device, the lane fires ONE hosted segment — no bridge,
+      // the segment carries its own lead-in — and the legacy pair
+      // stands by. Location-agnostic by design: no region gating,
+      // no location check. Readiness is synchronous (the pinned
+      // set), so the silence snapshot the tick validated still
+      // holds at enqueue. The F3 proof path is the one exception:
+      // the unlock proof is a bridge+filler pair by construction,
+      // so it keeps the legacy pair.
+      if (!proofPath) {
+        const hosted = this.readyHosted()[0];
+        if (hosted) {
+          const hostedItem = this.makeItem({
+            kind: 'filler',
+            label: hosted.title,
+            source: { kind: 'url', url: this.seams.bucketUrl(hosted.audioPath) },
+            durationSec: hosted.durationSec ?? 120,
+            onSettle: rec => {
+              if (rec.sounded) this.fillerSpent.add(hosted.placeKey);
+              this.counts.fillersPlayed += rec.sounded ? 1 : 0;
+              if (rec.sounded) {
+                this.emit('filler_played', { title: hosted.title, region: null, matched: 'hosted' });
+              }
+              this.pairOutstanding = false;
+              this.silenceMs = 0; // F9: every fire re-arms the clock
+              this.maybeTopUpHosted();
+              this.notify();
+            },
+          });
+          this.player.enqueuePromised(hostedItem);
+          enqueued = true;
+          this.chainCount += 1; // F7: a real story still ends the episode
+          return;
+        }
+        this.maybeTopUpHosted();
+      }
+
+      if (unspent.length === 0) {
+        // Legacy pool spent. The lane stands down (F10) only when
+        // the hosted tier is spent too; hosted segments still
+        // pinning keep the lane armed for a later fire.
+        if (this.hostedOrder.every(f => this.fillerSpent.has(f.placeKey))) {
+          this.laneStoodDown = true;
+        }
+        return;
+      }
 
       const region: FillerRegion | null = this.position
         ? resolveFillerRegion(this.position.lat, this.position.lng)

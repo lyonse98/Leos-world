@@ -98,6 +98,7 @@ export class FakeAudio {
     if (src.includes('stall-phrases/')) return 'stall';
     if (src.includes('fillers/bridges/')) return 'bridge';
     if (src.includes('fillers/audio/')) return 'filler';
+    if (src.includes('fillers/hosted/')) return 'filler';
     if (src.includes('library/')) return 'library';
     if (src.includes('openers/')) return 'opener';
     if (src.startsWith('blob:')) return blobSizes.get(src) === 3244 ? 'sample-prime' : 'synth';
@@ -258,6 +259,7 @@ export function makeWorld(Tour, opts = {}) {
     likes: [],
     cachedStories: [],
     fillerPinFails: opts.fillerPinFails ?? false,
+    hostedPinFails: opts.hostedPinFails ?? false,
   };
 
   const libraryRows = new Map();
@@ -341,6 +343,19 @@ export function makeWorld(Tour, opts = {}) {
     lng: 0,
   }));
 
+  // Hosted tier fixtures (Nov 2): filler_hosted rows, ~270 words
+  // of text each (the real batch's median) so the lane's duration
+  // estimate lands in the ~2-minute band.
+  const hostedRows = (opts.hostedFillers ?? []).map(title => ({
+    place_key: placeKeyOf(title),
+    place_name: title,
+    angle: 'filler_hosted',
+    story_text: `The hosted segment about ${title}, told as one flowing piece. `.repeat(24),
+    audio_path: `fillers/hosted/${placeKeyOf(title).replace(/[^a-z0-9]+/g, '-')}.wav`,
+    lat: 0,
+    lng: 0,
+  }));
+
   const seams = {
     fetchLibraryIndex: async () => libraryIndex,
     fetchLibraryRow: async (key, angle) => libraryRows.get(`${key}|${angle}`) ?? null,
@@ -354,6 +369,7 @@ export function makeWorld(Tour, opts = {}) {
       return { plain: introRows.get(key) ?? null, greet: greetRows.get(key) ?? null };
     },
     fetchFillerRows: async () => fillerRows,
+    fetchHostedFillerRows: async () => hostedRows,
     findCachedStory: async () => null,
     putCachedStory: async rec => {
       world.cachedStories.push(rec);
@@ -371,6 +387,7 @@ export function makeWorld(Tour, opts = {}) {
     },
     pinBucketAudio: async path => {
       if (world.fillerPinFails && path.includes('fillers/')) return;
+      if (world.hostedPinFails && path.includes('fillers/hosted/')) return;
       world.cache.set(path, new Blob(['audio']));
     },
     audioCacheGet: async key => world.cache.get(key) ?? null,

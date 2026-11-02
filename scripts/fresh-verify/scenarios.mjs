@@ -2302,4 +2302,181 @@ export async function runScenarios(Tour, extras) {
       world.heard.includes('Fragile House'), world.heard.join(' | '));
     tour.endTour();
   }
+
+  // ---------------------------------------------------------- HF hosted filler tier (Nov 2, 2026)
+  suite('HF-1 hosted preferred when pinned and ready; legacy pair is the fallback after');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      fillers: ['San Diego Weather Patterns'],
+      hostedFillers: ['The Table Stories', 'Water Stories'],
+      genStoryBehavior: () => {
+        throw new Error('quota');
+      },
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour, runs } = await healthyOpening(world, audio, BALBOA);
+    await world.clock.advance(30_000);
+    const fp = world.eventsOf('filler_played');
+    check('a filler fires in silence with hosted rows present', fp.length >= 1, JSON.stringify(fp.map(f => f.payload)));
+    if (fp.length >= 1) {
+      check('the first fire is a HOSTED segment (matched=hosted)', fp[0].payload.matched === 'hosted', JSON.stringify(fp[0].payload));
+      check('the hosted title is one of the hosted pool', ['The Table Stories', 'Water Stories'].includes(fp[0].payload.title), fp[0].payload.title);
+      check('hosted files region=null (location-agnostic)', fp[0].payload.region === null, `region=${fp[0].payload.region}`);
+    }
+    const seq = kindSeq(runs);
+    const firstFiller = seq.indexOf('filler');
+    check('no bridge precedes the hosted segment (it carries its own lead-in)',
+      firstFiller >= 0 && !seq.slice(0, firstFiller).includes('bridge'), seq.join(','));
+    await world.clock.advance(150_000);
+    const fpAll = world.eventsOf('filler_played');
+    check('both hosted segments serve before any legacy filler', fpAll.length >= 3 && fpAll[0].payload.matched === 'hosted' && fpAll[1].payload.matched === 'hosted', JSON.stringify(fpAll.map(f => f.payload)));
+    if (fpAll.length >= 3) {
+      check('once the hosted pool is spent, the legacy pair takes over', fpAll[2].payload.title === 'San Diego Weather Patterns' && fpAll[2].payload.matched !== 'hosted', JSON.stringify(fpAll[2].payload));
+    }
+    tour.endTour();
+  }
+
+  suite('HF-2 legacy fallback when no hosted segment is ready (pins failed)');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      fillers: ['San Diego Weather Patterns', 'The Kumeyaay Homeland'],
+      hostedFillers: ['The Table Stories'],
+      hostedPinFails: true,
+      genStoryBehavior: () => {
+        throw new Error('quota');
+      },
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour, runs } = await healthyOpening(world, audio, BALBOA);
+    await world.clock.advance(30_000);
+    const fp = world.eventsOf('filler_played');
+    check('a filler still fires when hosted pins fail', fp.length >= 1, JSON.stringify(fp.map(f => f.payload)));
+    if (fp.length >= 1) {
+      check('the fire is the legacy pair, not hosted', fp[0].payload.matched !== 'hosted' && ['San Diego Weather Patterns', 'The Kumeyaay Homeland'].includes(fp[0].payload.title), JSON.stringify(fp[0].payload));
+    }
+    const seq = kindSeq(runs);
+    check('the legacy pair keeps its bridge', seq.indexOf('bridge') >= 0 && seq.indexOf('filler') === seq.indexOf('bridge') + 1, seq.join(','));
+    check('no hosted audio reached the device', ![...world.cache.keys()].some(k => k.includes('fillers/hosted/')), [...world.cache.keys()].join(','));
+    tour.endTour();
+  }
+
+  suite('HF-3 hosted never cuts a playing story');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park')],
+      library: ['Balboa Park'],
+      fillers: [],
+      hostedFillers: ['The Table Stories'],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    await world.clock.advance(120_000);
+    const pb = playbackFor(world, 'balboa park');
+    check('the library story sounded to completion (never cut by the hosted lane)',
+      pb !== undefined && pb.payload.sounded === true && pb.payload.completed === true, JSON.stringify(pb?.payload));
+    const playedIdx = world.eventsOf('story_played').map(e => e.payload.subject).indexOf('balboa park');
+    const pbEvent = world.eventsOf('story_playback')[playedIdx];
+    const fp = world.eventsOf('filler_played');
+    check('the hosted lane did fire later, into genuine silence', fp.length >= 1 && fp[0].payload.matched === 'hosted', JSON.stringify(fp.map(f => f.payload)));
+    if (fp.length >= 1 && pbEvent) {
+      check('the first hosted fire starts only after the story settled', fp[0].at >= pbEvent.at, `filler_at=${fp[0].at} story_settled_at=${pbEvent.at}`);
+    }
+    tour.endTour();
+  }
+
+  suite('HF-4 silence trigger timing unchanged with the hosted tier armed (10 s)');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      fillers: [],
+      hostedFillers: ['The Table Stories', 'Water Stories'],
+      genStoryBehavior: () => {
+        throw new Error('quota');
+      },
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, BALBOA);
+    // Measure the F9 re-arm window: from the last poll where the
+    // first hosted segment was still sounding to the first poll
+    // where the second one starts. That window is pure true
+    // silence, so it isolates the 10 s trigger from opening
+    // transaction timing.
+    let firstLabel = null;
+    let secondStartAt = null;
+    let lastBusyAt = null;
+    world.clock.setInterval(() => {
+      const np = tour.view().nowPlaying;
+      if (np === null) return;
+      if (np.kind === 'filler') {
+        if (firstLabel === null) {
+          firstLabel = np.label;
+        } else if (np.label !== firstLabel && secondStartAt === null) {
+          secondStartAt = world.clock.now();
+          return;
+        }
+      }
+      if (secondStartAt === null) lastBusyAt = world.clock.now();
+    }, 200);
+    for (let i = 0; i < 300 && secondStartAt === null; i++) {
+      await world.clock.advance(1_000);
+    }
+    check('a second hosted segment fires after the first (re-arm path exercised)', secondStartAt !== null, `secondStartAt=${secondStartAt}`);
+    if (secondStartAt !== null && lastBusyAt !== null) {
+      const gapMs = secondStartAt - lastBusyAt;
+      check('the fire waits ~10 s of true silence (not sooner, not doubled)', gapMs >= 9_500 && gapMs <= 13_500, `gap=${gapMs}ms`);
+    }
+    tour.endTour();
+  }
+
+  suite('HF-5 hosted spent discipline, working-set pin cap, background top-up');
+  {
+    // No immediate repeat, then stand-down when the hosted pool is spent.
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      fillers: [],
+      hostedFillers: ['The Table Stories', 'Water Stories', 'Lost San Diego Stories'],
+      genStoryBehavior: () => {
+        throw new Error('quota');
+      },
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio, BALBOA);
+    await world.clock.advance(180_000);
+    const fp = world.eventsOf('filler_played');
+    check('all three hosted segments serve', fp.length === 3, JSON.stringify(fp.map(f => f.payload.title)));
+    check('no hosted subject repeats', new Set(fp.map(f => f.payload.title)).size === fp.length, JSON.stringify(fp.map(f => f.payload.title)));
+    await world.clock.advance(60_000);
+    check('hosted pool spent → lane stands down', world.eventsOf('filler_played').length === 3, `count=${world.eventsOf('filler_played').length}`);
+    tour.endTour();
+  }
+  {
+    // Pin cap: 20 hosted rows, only the ~14-segment working set is
+    // pinned at start; spending below the ready floor tops up.
+    resetLocalStorage();
+    const titles = Array.from({ length: 20 }, (_, i) => `Hosted Segment ${i + 1}`);
+    const world = makeWorld(Tour, {
+      candidates: [],
+      fillers: [],
+      hostedFillers: titles,
+      genStoryBehavior: () => {
+        throw new Error('quota');
+      },
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio, BALBOA);
+    const hostedCached = () => [...world.cache.keys()].filter(k => k.includes('fillers/hosted/')).length;
+    check('working set pinned at tour start is the capped slice (14 of 20)', hostedCached() === 14, `cached=${hostedCached()}`);
+    await world.clock.advance(300_000);
+    const fp = world.eventsOf('filler_played');
+    check('hosted segments keep serving from the working set', fp.length >= 9, `count=${fp.length}`);
+    check('background top-up pinned beyond the initial working set', hostedCached() === 20, `cached=${hostedCached()}`);
+    tour.endTour();
+  }
 }
