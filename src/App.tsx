@@ -4,6 +4,45 @@ import { Tour, type TourView } from './core/tour';
 import { createBrowserAudio } from './core/player';
 import { isTesterUnlocked, tryTesterUnlock } from './core/accessGate';
 import { usePosition, useWakeLock } from './hooks';
+import {
+  budgetSecFor,
+  composeRoutePlan,
+  computeRoute,
+  distanceToPathM,
+  estimateDurationSec,
+  geocodeDestination,
+  isRouteModeEnabled,
+  parseRouteInput,
+  progressAlongPath,
+  ROUTE_TONES,
+  ROUTE_TOPICS,
+  type LibraryUnit,
+  type TourMode,
+} from './core/routeMode';
+import { RoutePlanRunner, type RouteRunnerView } from './core/routePlayback';
+import { tagsFor } from './data/routeTags';
+import {
+  deviceKey,
+  emitEvent,
+  fetchHeardTopics,
+  fetchHostedFillerRows,
+  fetchLibraryIndex,
+  fetchLibraryRow,
+  recordHeard,
+} from './core/backend';
+import { synthesizeSpeech } from './core/gemini';
+
+/**
+ * Route-mode flag (v16.1, Nov 2, 2026): defaults ON on this branch
+ * so Erik's branch-switch publish shows the mode box with no env
+ * fiddling; VITE_ROUTE_MODE=0 restores the exact v15 landing (no
+ * mode box, no intake form, freeform only). The freeform engine is
+ * never touched by route code — route tours run on RoutePlanRunner,
+ * a thin shell over the same Player.
+ */
+const ROUTE_MODE_ENABLED = isRouteModeEnabled(
+  import.meta.env.VITE_ROUTE_MODE as string | undefined,
+);
 
 /**
  * Q&A master switch for the APP LAYER (Erik, Nov 2, 2026 — liability
@@ -321,10 +360,55 @@ function MilesApp() {
     return engine.subscribe(() => setView(engine.view()));
   }, [engine]);
 
-  const { position, error: locationError, granted } = usePosition(pos =>
-    engineRef.current?.onPosition(pos),
-  );
-  useWakeLock(view.phase === 'active');
+  // ---- route mode state (v16.1; all inert unless ROUTE_MODE_ENABLED) ----
+  const [tourMode, setTourMode] = useState<TourMode>('driving');
+  const [routeFormOpen, setRouteFormOpen] = useState(false);
+  const [routeDest, setRouteDest] = useState('');
+  const [routeArrival, setRouteArrival] = useState('');
+  const [routeTone, setRouteTone] = useState('');
+  const [routeTopics, setRouteTopics] = useState<string[]>([]);
+  const [routeStatus, setRouteStatus] = useState('');
+  const [routeBuilding, setRouteBuilding] = useState(false);
+  const [routeRunner, setRouteRunner] = useState<RoutePlanRunner | null>(null);
+  const [routeView, setRouteView] = useState<RouteRunnerView | null>(null);
+  const [routeActive, setRouteActive] = useState(false);
+  const [owedLine, setOwedLine] = useState<string | null>(null);
+  const routeRunnerRef = useRef<RoutePlanRunner | null>(null);
+  const routeSessionRef = useRef('');
+  const positionRef = useRef<{ lat: number; lng: number } | null>(null);
+
+  const { position, error: locationError, granted } = usePosition(pos => {
+    engineRef.current?.onPosition(pos);
+    positionRef.current = { lat: pos.lat, lng: pos.lng };
+    routeRunnerRef.current?.onPosition({ lat: pos.lat, lng: pos.lng });
+  });
+  useWakeLock(view.phase === 'active' || routeActive);
+
+  useEffect(() => {
+    if (!routeRunner) return;
+    setRouteView(routeRunner.view());
+    return routeRunner.subscribe(() => setRouteView(routeRunner.view()));
+  }, [routeRunner]);
+
+  // Route closeout transition: only once the closeout line has
+  // sounded (or failed) does the App move on — overrun resumes
+  // freeform for the tail; arrival ends on the landing with the
+  // 'Miles owes you' line as post-tour state (a line, not a screen).
+  useEffect(() => {
+    if (!routeActive || !routeView?.closeoutDone || !routeView.endedKind) return;
+    const owed = routeView.owed;
+    const tail = routeView.freeformTail;
+    setRouteActive(false);
+    routeRunnerRef.current = null;
+    if (owed) setOwedLine(owed);
+    if (tail) {
+      setResumeOffered(false);
+      const fresh = new Tour({ audio: createBrowserAudio(), clipUrls: engineRef.current?.clipUrls });
+      engineRef.current = fresh;
+      setEngine(fresh);
+      fresh.start(false);
+    }
+  }, [routeActive, routeView]);
 
   const [resumeOffered, setResumeOffered] = useState<boolean>(() => Tour.hasResumableSession());
   const [question, setQuestion] = useState('');
@@ -404,6 +488,40 @@ function MilesApp() {
     };
   }, [engine, view.nowPlaying]);
 
+  // Media Session for route tours: same OS controls, wired to the
+  // runner instead of the freeform engine. Face-only screen + these
+  // controls are the whole route chrome (spec: OS Media Session
+  // controls unaffected in both modes).
+  useEffect(() => {
+    if (!routeActive || !routeRunner || !('mediaSession' in navigator)) return;
+    if (routeView?.nowPlaying) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: routeView.nowPlaying.label,
+        artist: 'Miles',
+        album: 'Miles — AI Guide for the Road',
+      });
+    }
+    const set = (action: MediaSessionAction, fn: (() => void) | null) => {
+      try {
+        navigator.mediaSession.setActionHandler(action, fn);
+      } catch {
+        /* unsupported action on this platform */
+      }
+    };
+    set('play', () => routeRunner.resumeByUser());
+    set('pause', () => routeRunner.pauseByUser());
+    set('seekbackward', () => routeRunner.seekBy(-30));
+    set('seekforward', () => routeRunner.seekBy(30));
+    set('nexttrack', () => routeRunner.skip());
+    return () => {
+      set('play', null);
+      set('pause', null);
+      set('seekbackward', null);
+      set('seekforward', null);
+      set('nexttrack', null);
+    };
+  }, [routeActive, routeRunner, routeView?.nowPlaying]);
+
   const pose: Pose = view.likedSubject
     ? 'liked'
     : view.banner
@@ -451,6 +569,156 @@ function MilesApp() {
   const startOnKeyboardClick = (resume: boolean) => (e: React.MouseEvent) => {
     if (e.detail !== 0) return; // a real tap already started on pointerdown
     startTour(resume);
+  };
+
+  /**
+   * Route build (v16.1): ONE static composition pass at departure.
+   * Live calls, exactly three per build: one Gemini parse (local
+   * fallback), one Places text search, one Routes computeRoutes.
+   * Library rows are fetched only for corridor candidates in route
+   * order (bounded at 60), so a build costs reads, not a shelf scan.
+   * Heard exclusion keys on the heard ledger's own vocabulary
+   * (place names — heard_stories.topic records labels, not keys).
+   */
+  const buildRoute = async () => {
+    const origin = positionRef.current ?? (position ? { lat: position.lat, lng: position.lng } : null);
+    if (!origin) {
+      setRouteStatus('Miles needs your location first — wait for the “Located” line above.');
+      return;
+    }
+    if (routeDest.trim().length === 0) {
+      setRouteStatus('Tell Miles where you’re headed.');
+      return;
+    }
+    setRouteBuilding(true);
+    setRouteStatus('Building your route…');
+    try {
+      const nowMs = Date.now();
+      const parsed = await parseRouteInput(
+        routeDest,
+        nowMs,
+        import.meta.env.VITE_GEMINI_API_KEY as string | undefined,
+      );
+      const arrivalMs = routeArrival ? Date.parse(routeArrival) : null;
+      const input = {
+        ...parsed,
+        arrivalTimeMs: Number.isFinite(arrivalMs) && (arrivalMs as number) > nowMs ? (arrivalMs as number) : parsed.arrivalTimeMs,
+        tone: routeTone || parsed.tone,
+        topics: routeTopics.length > 0 ? routeTopics : parsed.topics,
+      };
+      const placesKey =
+        (import.meta.env.VITE_GOOGLE_PLACES_API_KEY as string | undefined) ??
+        (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined) ??
+        '';
+      const geocoded = await geocodeDestination(input.destinationText, placesKey);
+      if (!geocoded) {
+        setRouteStatus('Couldn’t find that place — try a fuller name (e.g. “Balboa Park, San Diego”).');
+        return;
+      }
+      const route = await computeRoute(origin, geocoded.location, placesKey);
+      if (!route) {
+        setRouteStatus('Couldn’t compute a route — check the drive and try again.');
+        return;
+      }
+      const budget = budgetSecFor(input, nowMs, route.durationSec);
+      const index = await fetchLibraryIndex();
+      const candidates = index
+        .map(e => ({
+          entry: e,
+          progress: progressAlongPath({ lat: e.lat, lng: e.lng }, route.path),
+          near:
+            distanceToPathM({ lat: e.lat, lng: e.lng }, route.path) <= 1500 ||
+            Math.hypot(e.lat - geocoded.location.lat, e.lng - geocoded.location.lng) < 0.02,
+        }))
+        .filter(c => c.near)
+        .sort((a, b) => a.progress - b.progress)
+        .slice(0, 60);
+      const heardLabels = new Set(await fetchHeardTopics(deviceKey()));
+      const units: LibraryUnit[] = [];
+      for (const c of candidates) {
+        const row = await fetchLibraryRow(c.entry.place_key, c.entry.angle);
+        if (!row) continue;
+        const tags = tagsFor(row.place_key, row.angle);
+        units.push({
+          id: `${row.place_key}|${row.angle}`,
+          placeKey: row.place_key,
+          placeName: row.place_name,
+          angle: row.angle,
+          lat: row.lat,
+          lng: row.lng,
+          durationSec: estimateDurationSec(row.story_text),
+          topics: tags.topics,
+          tone: tags.tone,
+          toneSecondary: tags.toneSecondary,
+          audioPath: row.audio_path,
+          storyText: row.story_text,
+        });
+      }
+      const heardKeys = new Set(
+        units.filter(u => heardLabels.has(u.placeName)).map(u => u.id),
+      );
+      const hosted = await fetchHostedFillerRows();
+      const fillerUnits: LibraryUnit[] = hosted.slice(0, 10).map(f => ({
+        id: `${f.place_key}|filler_hosted`,
+        placeKey: f.place_key,
+        placeName: f.place_name,
+        angle: 'filler_hosted',
+        lat: geocoded.location.lat,
+        lng: geocoded.location.lng,
+        durationSec: estimateDurationSec(f.story_text),
+        topics: [],
+        tone: null,
+        toneSecondary: null,
+        audioPath: f.audio_path,
+        storyText: f.story_text,
+      }));
+      const plan = composeRoutePlan(units, route.path, geocoded.location, geocoded.name, input, {
+        nowMs,
+        heardKeys,
+        fillerUnits,
+        budgetSecOverride: budget,
+      });
+      plan.driveSec = route.durationSec;
+      plan.budgetSec = budget;
+      const plannedIds = new Set(plan.items.map(it => it.id));
+      plan.shelfTease = units.find(u => !plannedIds.has(u.id) && !heardKeys.has(u.id)) ?? null;
+      const sessionId = `route-${Date.now()}`;
+      routeSessionRef.current = sessionId;
+      const runner = new RoutePlanRunner({
+        audio: createBrowserAudio(),
+        synthUrl: async text => {
+          const blob = await synthesizeSpeech(text);
+          return URL.createObjectURL(blob);
+        },
+        onStoryHeard: unit => {
+          void recordHeard(sessionId, deviceKey(), unit.placeName, unit.storyText, unit.lat, unit.lng);
+        },
+        onEvent: (type, payload) => {
+          const pos = positionRef.current;
+          void emitEvent(sessionId, type, payload, { lat: pos?.lat ?? null, lng: pos?.lng ?? null, movementMode: tourMode });
+        },
+      });
+      routeRunnerRef.current = runner;
+      setRouteRunner(runner);
+      setRouteActive(true);
+      setRouteFormOpen(false);
+      setRouteStatus('');
+      await runner.start(plan);
+    } catch {
+      setRouteStatus('Something went wrong building the route — try again.');
+    } finally {
+      setRouteBuilding(false);
+    }
+  };
+
+  const endRoute = () => {
+    // The runner keeps any closeout 'Miles owes you' state it
+    // already set; ending from the bar is a plain user end.
+    if (routeRunnerRef.current?.view().owed) setOwedLine(routeRunnerRef.current.view().owed);
+    routeRunnerRef.current?.endTour();
+    setRouteActive(false);
+    routeRunnerRef.current = null;
+    setRouteRunner(null);
   };
 
   const submitQuestion = (e: React.FormEvent) => {
@@ -504,7 +772,10 @@ function MilesApp() {
       (navigator as Navigator & { standalone?: boolean }).standalone === true);
 
   // ------------------------------------------------------------ landing
-  if (view.phase !== 'active') {
+  // (routeActive skips the landing: the route screen below owns the
+  // frame while a route tour runs, even though the freeform engine
+  // is idle — route tours never construct a freeform Tour.)
+  if (view.phase !== 'active' && !routeActive) {
     return (
       <div className="miles-app-bg relative min-h-full overflow-y-auto bg-cream text-ink">
         <PosterBackdrop />
@@ -530,6 +801,48 @@ function MilesApp() {
               <span>Finding you…</span>
             )}
           </div>
+
+          {/* Route mode (v16.1): the mode box comes FIRST in the
+              pre-tour flow — Passenger/Walking vs Driving, declared
+              before Start Tour and never changeable mid-drive.
+              Route mode and freeform both sit behind it. When the
+              flag is off, none of this renders: the v15 landing. */}
+          {ROUTE_MODE_ENABLED && (
+            <div className="mt-8 w-full rounded-[2rem] bg-white/70 p-5 shadow-xl shadow-ink/10">
+              <p className="text-sm font-bold text-ink">How are you riding?</p>
+              <div className="mt-3 flex gap-3">
+                <button
+                  type="button"
+                  onClick={() => setTourMode('passenger')}
+                  aria-pressed={tourMode === 'passenger'}
+                  className={`flex-1 rounded-full px-4 py-3 text-sm font-bold transition ${
+                    tourMode === 'passenger' ? 'bg-ink text-cream shadow-lg shadow-ink/20' : 'bg-cream2 text-ink hover:bg-sage/25'
+                  }`}
+                >
+                  Passenger / Walking
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTourMode('driving')}
+                  aria-pressed={tourMode === 'driving'}
+                  className={`flex-1 rounded-full px-4 py-3 text-sm font-bold transition ${
+                    tourMode === 'driving' ? 'bg-ink text-cream shadow-lg shadow-ink/20' : 'bg-cream2 text-ink hover:bg-sage/25'
+                  }`}
+                >
+                  Driving
+                </button>
+              </div>
+              <p className="mt-2 text-center text-[11px] text-inksoft">
+                This stays set for the whole ride — it can’t change mid-drive.
+              </p>
+            </div>
+          )}
+
+          {owedLine && (
+            <p className="mt-6 w-full rounded-[2rem] bg-white/70 p-4 text-center text-sm font-bold text-ink shadow-lg shadow-ink/10">
+              {owedLine}
+            </p>
+          )}
 
           {resumeOffered && view.phase === 'idle' ? (
             <div className="mt-8 w-full rounded-[2rem] bg-white/70 p-5 text-center shadow-xl shadow-ink/10">
@@ -563,6 +876,88 @@ function MilesApp() {
             </button>
           )}
 
+          {ROUTE_MODE_ENABLED && (
+            <div className="mt-4 w-full">
+              <button
+                type="button"
+                onClick={() => setRouteFormOpen(v => !v)}
+                className="w-full rounded-full bg-cream2 px-6 py-3.5 text-sm font-bold text-ink transition hover:bg-sage/25"
+              >
+                {routeFormOpen ? 'Hide route planner' : 'Plan a route instead'}
+              </button>
+              {routeFormOpen && (
+                <div className="mt-3 rounded-[2rem] bg-white/70 p-5 shadow-xl shadow-ink/10">
+                  <label className="block text-sm font-bold text-ink" htmlFor="route-dest">
+                    Where to?
+                  </label>
+                  <input
+                    id="route-dest"
+                    value={routeDest}
+                    onChange={e => setRouteDest(e.target.value)}
+                    placeholder="e.g. Balboa Park"
+                    className="mt-2 w-full rounded-full border-2 border-sage/30 bg-white px-5 py-3 text-base text-ink placeholder:text-inksoft/50 focus:border-sagedeep focus:outline-none"
+                  />
+                  <label className="mt-4 block text-sm font-bold text-ink" htmlFor="route-arrival">
+                    Arrive by (optional)
+                  </label>
+                  <input
+                    id="route-arrival"
+                    type="datetime-local"
+                    value={routeArrival}
+                    onChange={e => setRouteArrival(e.target.value)}
+                    className="mt-2 w-full rounded-full border-2 border-sage/30 bg-white px-5 py-3 text-base text-ink focus:border-sagedeep focus:outline-none"
+                  />
+                  <label className="mt-4 block text-sm font-bold text-ink" htmlFor="route-tone">
+                    Mood for the ride (optional)
+                  </label>
+                  <select
+                    id="route-tone"
+                    value={routeTone}
+                    onChange={e => setRouteTone(e.target.value)}
+                    className="mt-2 w-full rounded-full border-2 border-sage/30 bg-white px-5 py-3 text-base text-ink focus:border-sagedeep focus:outline-none"
+                  >
+                    <option value="">Any mood</option>
+                    {ROUTE_TONES.map(t => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="mt-4 text-sm font-bold text-ink">Topics (optional)</p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {ROUTE_TOPICS.map(t => (
+                      <button
+                        key={t}
+                        type="button"
+                        aria-pressed={routeTopics.includes(t)}
+                        onClick={() =>
+                          setRouteTopics(prev => (prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t]))
+                        }
+                        className={`rounded-full px-3 py-1.5 text-xs font-bold transition ${
+                          routeTopics.includes(t) ? 'bg-ink text-cream' : 'bg-cream2 text-ink hover:bg-sage/25'
+                        }`}
+                      >
+                        {t}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void buildRoute()}
+                    disabled={routeBuilding}
+                    className="mt-5 w-full rounded-full bg-ink px-4 py-3.5 text-sm font-bold text-cream shadow-lg shadow-ink/20 transition hover:bg-sagedeep disabled:opacity-50"
+                  >
+                    {routeBuilding ? 'Building…' : 'Build my route'}
+                  </button>
+                  {routeStatus && <p className="mt-3 text-center text-xs leading-relaxed text-inksoft">{routeStatus}</p>}
+                  <p className="mt-2 text-center text-[11px] text-inksoft">
+                    One route, composed at departure from stories you haven’t heard — no re-planning mid-drive.
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+
           {!isStandalone && (
             <div className="mt-6 w-full rounded-[2rem] bg-white/70 p-5 shadow-lg shadow-ink/10">
               <p className="text-sm font-bold text-ink">Add Miles to your home screen</p>
@@ -579,6 +974,55 @@ function MilesApp() {
             and like any good storyteller, he may occasionally get a detail wrong.
           </p>
           <LegalLinks />
+        </main>
+      </div>
+    );
+  }
+
+  // ------------------------------------------------------------ route tour
+  // Route in-tour screen (v16.1): face-only, exactly like freeform
+  // — Miles's face plus ONE minimal transport bar. No mode control
+  // (the mode was declared pre-tour and never changes mid-drive),
+  // no now-playing card, no route map, no summary screen. The
+  // 'Miles owes you' tease lands on the landing as one line.
+  if (routeActive && routeRunner) {
+    const rView = routeView;
+    const routeNeedsResume = Boolean(rView?.userPaused || rView?.guardPaused);
+    return (
+      <div
+        className="miles-app-bg relative flex min-h-full flex-col bg-cream text-ink"
+        onPointerDown={() => routeRunner.noteGesture()}
+      >
+        <div className="pointer-events-none absolute inset-0 overflow-hidden">
+          <div className="leo-float absolute -top-24 right-0 h-72 w-72 rounded-full bg-sage/25 blur-3xl" />
+          <div className="leo-float-slow absolute -bottom-24 -left-24 h-72 w-72 rounded-full bg-amber-200/40 blur-3xl" />
+        </div>
+        <main className="safe-top safe-bottom relative flex flex-1 flex-col items-center px-5">
+          <div className="flex w-full flex-1 flex-col items-center justify-end">
+            <MilesFigure pose={rView?.nowPlaying ? 'speaking' : 'idle'} large tour />
+          </div>
+          <div className="w-full max-w-xl pb-1" onPointerDown={e => e.stopPropagation()}>
+            <div className="flex items-center gap-2 rounded-full bg-white/75 p-2 shadow-xl shadow-ink/15 backdrop-blur">
+              <button
+                type="button"
+                onClick={() => (routeNeedsResume ? routeRunner.resumeByUser() : routeRunner.pauseByUser())}
+                aria-label={routeNeedsResume ? 'Resume route' : 'Pause route'}
+                className="flex flex-1 items-center justify-center gap-2 rounded-full bg-ink px-5 py-3.5 text-base font-bold text-cream shadow-md shadow-ink/20 transition hover:bg-sagedeep active:scale-[0.99]"
+              >
+                {routeNeedsResume ? <Play className="h-5 w-5" /> : <Pause className="h-5 w-5" />}
+                {routeNeedsResume ? 'Resume' : 'Pause'}
+              </button>
+              <button
+                type="button"
+                onClick={endRoute}
+                aria-label="End route"
+                className="flex items-center justify-center gap-2 rounded-full bg-cream2 px-5 py-3.5 text-base font-bold text-ink transition hover:bg-sage/25 active:scale-[0.99]"
+              >
+                <Square className="h-4 w-4" />
+                End route
+              </button>
+            </div>
+          </div>
         </main>
       </div>
     );
