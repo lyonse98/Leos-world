@@ -8,9 +8,10 @@
 //   - Nothing in src/core/tour.ts is imported or modified here.
 //   - The freeform engine never sees a RoutePlan; the App mounts
 //     the route runner only after the user chooses a route tour.
-//   - Phase 2 (Q&A behind the declared mode) is NOT built here:
-//     routeQaAvailable() exists only so the phase-2 switch has one
-//     place to read the ruling from; App keeps QA_ENABLED false.
+//   - Phase 2 (Q&A behind the declared mode) reads its ruling
+//     from routeQaAvailable()/qaGateOpen() below; the App mounts
+//     question surfaces only when the gate is open, and the route
+//     runner receives its answer generator only then.
 //
 // Budget discipline: the only live calls this module makes are the
 // ones that build one route — one Gemini parse (with a local-parse
@@ -20,11 +21,23 @@
 
 export type TourMode = 'passenger' | 'driving';
 
-/** Phase-2 ruling, recorded now, enforced later: Q&A is available
- *  in Passenger/Walking and unavailable in Driving. While
- *  QA_ENABLED is false in App.tsx this function gates nothing. */
+/** Phase-2 ruling (Erik, Nov 2, 2026; activated Nov 3): Q&A is
+ *  available in Passenger/Walking and unavailable in Driving.
+ *  The gate reads the DECLARED mode only — never inferred speed
+ *  or movement. */
 export function routeQaAvailable(mode: TourMode): boolean {
   return mode === 'passenger';
+}
+
+/**
+ * The full Q&A gate the App layer enforces (v16 phase 2): the
+ * route-mode flag must be on AND the declared mode must be
+ * Passenger/Walking. Flag off means no mode was ever declared
+ * (the v15 landing has no mode box), so Q&A stays off there too —
+ * the gate is closed by construction, not by a second switch.
+ */
+export function qaGateOpen(flagEnabled: boolean, mode: TourMode): boolean {
+  return flagEnabled && routeQaAvailable(mode);
 }
 
 /**

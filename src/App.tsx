@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Play, Pause, Square, Send, MapPin } from 'lucide-react';
+import { Play, Pause, Square, Send, MapPin, MessageCircle } from 'lucide-react';
 import { Tour, type TourView } from './core/tour';
 import { createBrowserAudio } from './core/player';
 import { isTesterUnlocked, tryTesterUnlock } from './core/accessGate';
@@ -13,6 +13,7 @@ import {
   geocodeDestination,
   isRouteModeEnabled,
   parseRouteInput,
+  qaGateOpen,
   progressAlongPath,
   ROUTE_TONES,
   ROUTE_TOPICS,
@@ -30,7 +31,8 @@ import {
   fetchLibraryRow,
   recordHeard,
 } from './core/backend';
-import { synthesizeSpeech } from './core/gemini';
+import { generateAnswerText, synthesizeSpeech } from './core/gemini';
+import { LEO_QA_MODEL_ID } from './services/leoPersona';
 
 /**
  * Route-mode flag (v16.1, Nov 2, 2026): defaults ON on this branch
@@ -45,16 +47,21 @@ const ROUTE_MODE_ENABLED = isRouteModeEnabled(
 );
 
 /**
- * Q&A master switch for the APP LAYER (Erik, Nov 2, 2026 — liability
- * ruling): while false, no question surface renders anywhere in the
- * app and no component can reach the engine's question pipeline.
- * The pipeline itself (Tour.submitQuestion and everything downstream
- * of it, including the playback serialization it coordinates) is
- * deliberately left intact and dormant in the engine — the
- * fresh-verify harness still exercises it — so re-enabling Q&A is
- * flipping this flag back, nothing more.
+ * Q&A gate (v16 phase 2 — Erik, Nov 3, 2026, activating the Nov 2
+ * mode ruling): Q&A is available if and only if the ride's DECLARED
+ * mode is Passenger/Walking. The Nov 2 liability suspension lifted
+ * for passengers and walkers only; Driving keeps the suspension's
+ * exact behavior — no question surface anywhere, and no component
+ * can reach the question pipeline (the submit handlers refuse, and
+ * a driving route runner never receives an answer generator).
+ * The gate is qaGateOpen(ROUTE_MODE_ENABLED, rideMode) from
+ * routeMode.ts: flag off (the v15 landing has no mode box, so no
+ * mode is ever declared) also keeps Q&A off. The freeform pipeline
+ * itself (Tour.submitQuestion and everything downstream, including
+ * serialization and the welcome discharge) was left intact and
+ * dormant in the engine through the suspension; phase 2 only
+ * re-wires the App layer to it under this gate.
  */
-const QA_ENABLED = false;
 
 type Pose = 'idle' | 'speaking' | 'listening' | 'thinking' | 'wave' | 'pointing' | 'liked';
 
@@ -137,10 +144,14 @@ function MilesFigure({ pose, large, tour }: { pose: Pose; large?: boolean; tour?
 }
 
 /**
- * The Q&A form — text only (Erik's Oct 29 decision). Rendered ONLY
- * under QA_ENABLED (Nov 2, 2026): while the flag is off this
- * component never mounts, so no question input, hint, or submit
- * affordance exists anywhere in the app.
+ * The Q&A form — text only (Erik's Oct 29 decision; voice /
+ * hold-to-talk stays removed). Rendered ONLY when the phase-2
+ * declared-mode gate is open (Passenger/Walking), inside the Ask
+ * sheet on the tour screens. In Driving mode — and on the
+ * flag-off v15 landing's tours — this component never mounts, so
+ * no question input, hint, or submit affordance exists. Styling
+ * follows the Nov 2 friendliness pass (cream card, pill input,
+ * ink button), replacing the pre-suspension dark chrome.
  */
 function QuestionForm({
   question,
@@ -158,10 +169,10 @@ function QuestionForm({
   onSubmit: (e: React.FormEvent) => void;
 }) {
   return (
-    <form onSubmit={onSubmit} className="mt-5 w-full max-w-xl">
+    <form onSubmit={onSubmit} className="w-full">
       <div
-        className={`flex items-center gap-2 rounded-2xl border px-3 py-2 ${
-          qaLocked ? 'border-slate-800 bg-slate-900/40 opacity-60' : 'border-slate-700 bg-slate-900/70'
+        className={`flex items-center gap-2 rounded-full border-2 bg-white py-1.5 pr-1.5 pl-5 ${
+          qaLocked ? 'border-sage/20 opacity-60' : 'border-sage/30'
         }`}
       >
         <input
@@ -177,19 +188,19 @@ function QuestionForm({
                 : 'One question at a time…'
               : 'Ask Miles about this place…'
           }
-          className="w-full bg-transparent text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none"
+          className="w-full bg-transparent text-sm text-ink placeholder:text-inksoft/50 focus:outline-none"
           maxLength={300}
         />
         <button
           type="submit"
           disabled={qaLocked || question.trim().length === 0}
           aria-label="Ask"
-          className="rounded-full bg-sky-500 p-2 text-white transition enabled:hover:bg-sky-400 disabled:opacity-40"
+          className="rounded-full bg-ink p-2.5 text-cream shadow-md shadow-ink/20 transition enabled:hover:bg-sagedeep disabled:opacity-40"
         >
           <Send className="h-4 w-4" />
         </button>
       </div>
-      <p className="mt-1.5 text-center text-[11px] text-slate-500">
+      <p className="mt-1.5 text-center text-[11px] text-inksoft">
         Type a question — Miles answers one at a time, then the tour rolls on.
       </p>
     </form>
@@ -362,6 +373,16 @@ function MilesApp() {
 
   // ---- route mode state (v16.1; all inert unless ROUTE_MODE_ENABLED) ----
   const [tourMode, setTourMode] = useState<TourMode>('driving');
+  // The mode snapshot for the ride actually running (v16 phase 2):
+  // tourMode is the landing's declared choice; rideMode copies it
+  // at the moment a tour starts (freeform or route) and is what
+  // the Q&A gate reads in-tour. It defaults to 'driving' — the
+  // closed position — and the mode box is the only way it ever
+  // becomes 'passenger', so a flag-off build can never open the
+  // gate. The Ask sheet's open state lives here too.
+  const [rideMode, setRideMode] = useState<TourMode>('driving');
+  const [askOpen, setAskOpen] = useState(false);
+  const qaOpen = qaGateOpen(ROUTE_MODE_ENABLED, rideMode);
   const [routeFormOpen, setRouteFormOpen] = useState(false);
   const [routeDest, setRouteDest] = useState('');
   const [routeArrival, setRouteArrival] = useState('');
@@ -538,6 +559,9 @@ function MilesApp() {
 
   const startTour = (resume: boolean) => {
     setResumeOffered(false);
+    // Snapshot the declared mode for this ride (phase-2 Q&A gate).
+    setRideMode(tourMode);
+    setAskOpen(false);
     // A fresh engine per tour, constructed and started inside the
     // tap: the GREETING's attempt is the handler's first media
     // action (O1), and no state from a previous tour can leak in.
@@ -684,12 +708,25 @@ function MilesApp() {
       plan.shelfTease = units.find(u => !plannedIds.has(u.id) && !heardKeys.has(u.id)) ?? null;
       const sessionId = `route-${Date.now()}`;
       routeSessionRef.current = sessionId;
+      // Phase-2 Q&A wiring: the runner receives the answer
+      // generator ONLY when the declared-mode gate is open for
+      // this ride. A driving route runner has no generator dep at
+      // all — the Q&A pipeline is unreachable in it, not hidden.
+      const qaAtBuild = qaGateOpen(ROUTE_MODE_ENABLED, tourMode);
+      setRideMode(tourMode);
+      setAskOpen(false);
       const runner = new RoutePlanRunner({
         audio: createBrowserAudio(),
         synthUrl: async text => {
           const blob = await synthesizeSpeech(text);
           return URL.createObjectURL(blob);
         },
+        ...(qaAtBuild
+          ? {
+              generateAnswer: (prompt: string) => generateAnswerText(prompt),
+              answerModelLabel: LEO_QA_MODEL_ID,
+            }
+          : {}),
         onStoryHeard: unit => {
           void recordHeard(sessionId, deviceKey(), unit.placeName, unit.storyText, unit.lat, unit.lng);
         },
@@ -723,11 +760,28 @@ function MilesApp() {
 
   const submitQuestion = (e: React.FormEvent) => {
     e.preventDefault();
-    // QA_ENABLED gate (Nov 2, 2026): while Q&A is off, this handler
-    // refuses to reach the engine's question pipeline even if a
-    // question surface were somehow mounted.
-    if (!QA_ENABLED) return;
-    if (engine.submitQuestion(question)) setQuestion('');
+    // Phase-2 gate (Nov 3, 2026): while the declared mode is
+    // Driving (or no mode was declared), this handler refuses to
+    // reach the engine's question pipeline even if a question
+    // surface were somehow mounted — the Nov 2 suspension's
+    // discipline, scoped by the mode ruling.
+    if (!qaOpen) return;
+    if (engine.submitQuestion(question)) {
+      setQuestion('');
+      setAskOpen(false);
+    }
+  };
+
+  const submitRouteQuestion = (e: React.FormEvent) => {
+    e.preventDefault();
+    // Same gate, route side: the runner additionally has no
+    // generator dep at all on a driving ride, so this is the
+    // second of two closed doors.
+    if (!qaOpen) return;
+    if (routeRunnerRef.current?.submitQuestion(question)) {
+      setQuestion('');
+      setAskOpen(false);
+    }
   };
 
   /**
@@ -985,6 +1039,9 @@ function MilesApp() {
   // (the mode was declared pre-tour and never changes mid-drive),
   // no now-playing card, no route map, no summary screen. The
   // 'Miles owes you' tease lands on the landing as one line.
+  // Phase 2 adds ONE thing, Passenger/Walking rides only: an Ask
+  // pill in the bar opening the question sheet. Driving route
+  // tours render exactly the phase-1 screen.
   if (routeActive && routeRunner) {
     const rView = routeView;
     const routeNeedsResume = Boolean(rView?.userPaused || rView?.guardPaused);
@@ -999,9 +1056,25 @@ function MilesApp() {
         </div>
         <main className="safe-top safe-bottom relative flex flex-1 flex-col items-center px-5">
           <div className="flex w-full flex-1 flex-col items-center justify-end">
-            <MilesFigure pose={rView?.nowPlaying ? 'speaking' : 'idle'} large tour />
+            <MilesFigure
+              pose={rView?.qaPhase === 'generating' ? 'thinking' : rView?.nowPlaying ? 'speaking' : 'idle'}
+              large
+              tour
+            />
           </div>
           <div className="w-full max-w-xl pb-1" onPointerDown={e => e.stopPropagation()}>
+            {qaOpen && askOpen && (
+              <div className="mb-2 rounded-[2rem] bg-white/80 p-4 shadow-xl shadow-ink/15 backdrop-blur">
+                <QuestionForm
+                  question={question}
+                  qaLocked={(rView?.qaPhase ?? 'idle') !== 'idle'}
+                  qaPhase={rView?.qaPhase ?? 'idle'}
+                  onQuestionChange={setQuestion}
+                  onFocusChange={setQuestionFocused}
+                  onSubmit={submitRouteQuestion}
+                />
+              </div>
+            )}
             <div className="flex items-center gap-2 rounded-full bg-white/75 p-2 shadow-xl shadow-ink/15 backdrop-blur">
               <button
                 type="button"
@@ -1012,6 +1085,18 @@ function MilesApp() {
                 {routeNeedsResume ? <Play className="h-5 w-5" /> : <Pause className="h-5 w-5" />}
                 {routeNeedsResume ? 'Resume' : 'Pause'}
               </button>
+              {qaOpen && (
+                <button
+                  type="button"
+                  onClick={() => setAskOpen(v => !v)}
+                  aria-label="Ask Miles a question"
+                  aria-expanded={askOpen}
+                  className="flex items-center justify-center gap-2 rounded-full bg-sage/25 px-5 py-3.5 text-base font-bold text-ink transition hover:bg-sage/40 active:scale-[0.99]"
+                >
+                  <MessageCircle className="h-5 w-5" />
+                  Ask
+                </button>
+              )}
               <button
                 type="button"
                 onClick={endRoute}
@@ -1041,8 +1126,10 @@ function MilesApp() {
   // before. The pre-tour landing above is untouched, the audio
   // unlock still rides the START tap, the tap-anywhere surface
   // (onTourTap) still works as a backup, and OS Media Session
-  // controls still work. Q&A mounts only under QA_ENABLED, which
-  // is off.
+  // controls still work. Phase 2 (Nov 3, 2026): Passenger/Walking
+  // rides add an Ask pill in the bar + the question sheet (the
+  // mode gate above); Driving rides render exactly this screen
+  // as it stood under the suspension — face + transport bar.
   return (
     <div
       className="miles-app-bg relative flex min-h-full flex-col bg-cream text-ink"
@@ -1056,16 +1143,6 @@ function MilesApp() {
       <main className="safe-top safe-bottom relative flex flex-1 flex-col items-center px-5">
         <div className="flex w-full flex-1 flex-col items-center justify-end">
           <MilesFigure pose={pose} large tour />
-          {QA_ENABLED && (
-            <QuestionForm
-              question={question}
-              qaLocked={view.qaLocked}
-              qaPhase={view.qaPhase}
-              onQuestionChange={setQuestion}
-              onFocusChange={setQuestionFocused}
-              onSubmit={submitQuestion}
-            />
-          )}
         </div>
 
         {/* Visible transport bar. The bar swallows its own
@@ -1076,6 +1153,18 @@ function MilesApp() {
             safe-area padding lives on <main> (.safe-bottom), so
             the bar clears the home indicator. */}
         <div className="w-full max-w-xl pb-1" onPointerDown={e => e.stopPropagation()}>
+          {qaOpen && askOpen && (
+            <div className="mb-2 rounded-[2rem] bg-white/80 p-4 shadow-xl shadow-ink/15 backdrop-blur">
+              <QuestionForm
+                question={question}
+                qaLocked={view.qaLocked}
+                qaPhase={view.qaPhase}
+                onQuestionChange={setQuestion}
+                onFocusChange={setQuestionFocused}
+                onSubmit={submitQuestion}
+              />
+            </div>
+          )}
           <div className="flex items-center gap-2 rounded-full bg-white/75 p-2 shadow-xl shadow-ink/15 backdrop-blur">
             <button
               type="button"
@@ -1086,6 +1175,18 @@ function MilesApp() {
               {transportNeedsResume ? <Play className="h-5 w-5" /> : <Pause className="h-5 w-5" />}
               {transportNeedsResume ? 'Resume' : 'Pause'}
             </button>
+            {qaOpen && (
+              <button
+                type="button"
+                onClick={() => setAskOpen(v => !v)}
+                aria-label="Ask Miles a question"
+                aria-expanded={askOpen}
+                className="flex items-center justify-center gap-2 rounded-full bg-sage/25 px-5 py-3.5 text-base font-bold text-ink transition hover:bg-sage/40 active:scale-[0.99]"
+              >
+                <MessageCircle className="h-5 w-5" />
+                Ask
+              </button>
+            )}
             <button
               type="button"
               onClick={() => engine.endTour()}

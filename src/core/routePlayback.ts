@@ -14,11 +14,21 @@
 // Bridges are rendered at plan time in start(): a bridge whose
 // synthesis fails is dropped before anything plays (skip-fallback),
 // exactly as routeMode.applyBridgeFallback prescribes.
+//
+// Phase 2 (Nov 3, 2026): Q&A for Passenger/Walking route tours.
+// The runner accepts an answer generator ONLY when the App's
+// declared-mode gate is open (driving tours never receive one, so
+// the pipeline is unreachable there — not merely unrendered).
+// A question never re-plans anything: the current plan item
+// finishes, the answer plays next (head of the promised FIFO via
+// Player.enqueueNext), and the plan resumes at the next unplayed
+// item. One question at a time, mirroring freeform's lock.
 
 import { Player, type AudibleItem, type AudioPort, systemClock } from './player';
 import { bucketUrl } from './backend';
 import {
   decideCloseout,
+  estimateDurationSec,
   hasArrived,
   isOffCorridor,
   owedLine,
@@ -41,12 +51,25 @@ export interface RouteRunnerView {
   freeformTail: boolean;
   /** True once the closeout line has sounded (or failed): the App may transition then. */
   closeoutDone: boolean;
+  /** Phase-2 Q&A state: 'idle' accepts a question; anything else locks the form. */
+  qaPhase: 'idle' | 'generating' | 'answering';
+  /** Answers that actually sounded this route tour. */
+  questionsAnswered: number;
 }
 
 export interface RouteRunnerDeps {
   audio: AudioPort;
   /** Synthesize text → playable blob URL (App wires gemini.synthesizeSpeech). */
   synthUrl: (text: string) => Promise<string>;
+  /**
+   * Phase-2 Q&A answer generation — the SAME generation path the
+   * freeform engine uses (gemini.generateAnswerText), wired by the
+   * App ONLY when the declared-mode gate is open. Absent = Q&A is
+   * unreachable in this runner, whatever the UI does.
+   */
+  generateAnswer?: (prompt: string) => Promise<string>;
+  /** Model label filed on question_asked, matching freeform's payload. */
+  answerModelLabel?: string;
   /** Best-effort heard recording for a sounded story (App wires backend.recordHeard). */
   onStoryHeard?: (unit: LibraryUnit) => void;
   /** Best-effort telemetry (App wires backend.emitEvent). */
@@ -76,6 +99,8 @@ export class RoutePlanRunner {
   private endedKind: string | null = null;
   private freeformTailFlag = false;
   private closeoutDoneFlag = false;
+  private qaPhase: RouteRunnerView['qaPhase'] = 'idle';
+  private questionsAnsweredCount = 0;
 
   constructor(deps: RouteRunnerDeps) {
     this.deps = deps;
@@ -124,6 +149,8 @@ export class RoutePlanRunner {
       endedKind: this.endedKind,
       freeformTail: this.freeformTailFlag,
       closeoutDone: this.closeoutDoneFlag,
+      qaPhase: this.qaPhase,
+      questionsAnswered: this.questionsAnsweredCount,
     };
   }
 
@@ -331,8 +358,19 @@ export class RoutePlanRunner {
       unheardShelfUnits: plan.shelfTease ? [plan.shelfTease] : [],
     });
     // Drop everything still queued so the closeout line is next,
-    // not after five unplayed stories.
-    for (const item of [...this.player.promised]) this.player.abandon(item);
+    // not after five unplayed stories. The items must LEAVE the
+    // promised FIFO as they settle: abandon() alone settles an
+    // item in place, and a settled husk still sitting in the FIFO
+    // deadlocks the player when the pump later shifts it (its
+    // drive returns instantly, so it becomes `current` forever
+    // and nothing behind it — including this closeout — ever
+    // plays). That husk deadlock fired on any arrival-owed
+    // closeout with items queued (found by the phase-2 runner
+    // harness, Nov 3, 2026); the phase-1 harness never drove the
+    // runner, so it shipped unseen. Splice first, then settle.
+    const queued = [...this.player.promised];
+    this.player.promised.length = 0;
+    for (const item of queued) this.player.abandon(item);
     this.endedKind = kind;
     this.freeformTailFlag = kind === 'overrun';
     if (closeout) {
@@ -360,7 +398,89 @@ export class RoutePlanRunner {
     } else {
       this.closeoutDoneFlag = true;
     }
-    this.deps.onEvent?.('route_plan_ended', { kind, owed: this.owed });
+    this.deps.onEvent?.('route_plan_ended', { kind, owed: this.owed, questions: this.questionsAnsweredCount });
+    this.notify();
+  }
+
+  /**
+   * Phase-2 Q&A (Passenger/Walking only — the generator dep is
+   * the gate: no generator, no question). Returns false when a
+   * question is already in flight (one at a time, like freeform),
+   * when the tour is over, or when Q&A is not wired. The current
+   * plan item is never cut: the answer inserts at the head of the
+   * promised FIFO and plays when the current item settles, ahead
+   * of the next unplayed plan item. Nothing re-plans.
+   */
+  submitQuestion(raw: string): boolean {
+    const question = raw.trim();
+    if (!question || !this.plan || this.closed || this.endedKind !== null) return false;
+    if (!this.deps.generateAnswer || this.qaPhase !== 'idle') return false;
+    this.qaPhase = 'generating';
+    this.deps.onEvent?.('question_asked', {
+      question: question.slice(0, 500),
+      ...(this.deps.answerModelLabel ? { model: this.deps.answerModelLabel } : {}),
+    });
+    void this.runAnswer(question);
+    this.notify();
+    return true;
+  }
+
+  private async runAnswer(question: string): Promise<void> {
+    let text: string;
+    try {
+      const current = this.player.snapshot().currentLabel;
+      const lastLine = current ? ` The story playing now is "${current}".` : '';
+      text = await this.deps.generateAnswer!(
+        `QUESTION FROM THE LISTENER: ${question}\n\nThe listener is on a planned drive to ${this.plan?.destinationName ?? 'their destination'} in San Diego County, hearing stories tiled along the route.${lastLine}`,
+      );
+    } catch {
+      // Generation failed: release the lock, plan untouched —
+      // freeform's grace machinery is engine business, not the
+      // runner's; a dumb immediate release is the route rule.
+      this.qaPhase = 'idle';
+      this.notify();
+      return;
+    }
+    if (this.closed || this.endedKind !== null) {
+      // The tour ended while the answer was being made; there is
+      // no queue left to join and nothing to file against.
+      this.qaPhase = 'idle';
+      return;
+    }
+    let url: string;
+    try {
+      url = await this.deps.synthUrl(text);
+    } catch {
+      this.qaPhase = 'idle';
+      this.notify();
+      return;
+    }
+    if (this.closed || this.endedKind !== null) {
+      this.qaPhase = 'idle';
+      return;
+    }
+    const item: AudibleItem = {
+      id: `route-answer-${++runnerSeq}`,
+      kind: 'answer',
+      label: `Answer — ${question.slice(0, 60)}`,
+      source: { kind: 'url', url },
+      durationSec: estimateDurationSec(text),
+      attempts: 0,
+      settled: false,
+      onSettle: rec => {
+        this.deps.onEvent?.('question_playback', {
+          completed: rec.completed,
+          voice: rec.sounded ? 'gemini' : 'none',
+          sounded_ms: Math.round(rec.soundedMs),
+          attempts: item.attempts,
+        });
+        if (rec.sounded) this.questionsAnsweredCount += 1;
+        this.qaPhase = 'idle';
+        this.notify();
+      },
+    };
+    this.qaPhase = 'answering';
+    this.player.enqueueNext(item);
     this.notify();
   }
 

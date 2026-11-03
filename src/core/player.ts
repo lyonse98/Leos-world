@@ -313,6 +313,35 @@ export class Player {
   }
 
   /**
+   * Head-of-FIFO insert (v16 phase 2): the item plays next, after
+   * whatever is current — ahead of everything already promised.
+   * Built for a route-tour Q&A answer: the plan's remaining items
+   * all sit in the promised FIFO, so a tail-appended answer would
+   * play only after the whole plan; the answer belongs between
+   * the current item and the next plan item. Same settle
+   * discipline as enqueuePromised (a dead player settles the item
+   * immediately and exactly once). No existing caller changes.
+   */
+  enqueueNext(item: AudibleItem): void {
+    if (this.tornDown) {
+      this.settleItem(item, {
+        sounded: false,
+        completed: false,
+        soundedMs: 0,
+        failKind: 'none',
+        exhausted: false,
+        dropReason: item.kind === 'story' ? 'teardown' : null,
+        skipped: false,
+      });
+      return;
+    }
+    this.promised.unshift(item);
+    this.markHeldIfNeeded();
+    this.pump();
+    this.hooks.onState();
+  }
+
+  /**
    * Offer a location story. Returns where it landed:
    * 'slotted' (the one waiting slot), 'pending' (Tier-1 awaiting the
    * slot), or 'buffer' (the engine keeps it as a prefetch candidate).
