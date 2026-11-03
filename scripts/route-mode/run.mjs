@@ -206,6 +206,137 @@ await checkAsync('gemini parse: failure falls back to local parse', async () => 
   assert.ok(p.arrivalTimeMs !== null);
 });
 
+// ---- composer v2 (Nov 3, 2026): fairness, weighting, openers, portals, windows, elastic bridges ----
+// A dense path (21 points) so progress is fine-grained; on the
+// 3-point fixture every point collapses to a segment midpoint.
+const densePath = Array.from({ length: 21 }, (_, i) => ({ lat: 32.7 + i * 0.01, lng: -117.25 }));
+const denseDest = { lat: 32.9, lng: -117.25 };
+const storyItems = plan => plan.items.filter(i => i.kind === 'story');
+
+check('v2 fairness: dense start cannot crowd out later buckets', () => {
+  const units = [];
+  for (let i = 0; i < 10; i++) units.push(unit(`dense${i}|landmark_origin`, 32.7 + i * 0.001));
+  units.push(unit('mid|landmark_origin', 32.81));
+  units.push(unit('end|landmark_origin', 32.895));
+  const plan = rm.composeRoutePlan(units, densePath, denseDest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: NOW + 370 * 1000, tone: null, topics: [] }, { nowMs: NOW, heardKeys: new Set() });
+  const ids = storyItems(plan).map(i => i.id);
+  assert.ok(ids.includes('mid|landmark_origin'), 'mid-route bucket contributed');
+  assert.ok(ids.includes('end|landmark_origin'), 'final bucket contributed');
+  assert.ok(ids.filter(id => id.startsWith('dense')).length <= 2, `early bucket took ${ids.filter(id => id.startsWith('dense')).length} slots`);
+});
+
+check('v2 fetch fairness: selectFetchCandidates round-robins buckets under the bound', () => {
+  const entries = [];
+  for (let i = 0; i < 30; i++) entries.push({ place_key: `geo${i}`, angle: 'landmark_origin', lat: 32.7005 + i * 0.0003, lng: -117.25 });
+  for (let i = 0; i < 5; i++) entries.push({ place_key: `late${i}`, angle: 'landmark_origin', lat: 32.845 + i * 0.0002, lng: -117.25 });
+  entries.push({ place_key: 'port1', angle: 'landmark_origin', lat: 32.8, lng: -117.05 });
+  entries.push({ place_key: 'port2', angle: 'landmark_origin', lat: 32.8, lng: -117.05 });
+  const tagsOf = pk => ({ topics: pk === 'port2' ? ['Sport'] : ['Coast'] });
+  const picked = rm.selectFetchCandidates(entries, densePath, denseDest, tagsOf, { geoLimit: 12 });
+  const geoPicked = picked.filter(e => e.place_key.startsWith('geo') || e.place_key.startsWith('late'));
+  assert.equal(geoPicked.length, 12);
+  assert.equal(geoPicked.filter(e => e.place_key.startsWith('late')).length, 5, 'all late-bucket entries made the bounded cut');
+  assert.ok(picked.some(e => e.place_key === 'port1'), 'topic-connected portal candidate fetched');
+  assert.ok(!picked.some(e => e.place_key === 'port2'), 'unconnected portal candidate not fetched');
+});
+
+check('v2 weighting: landmark beats corridor at the same anchor (no user topics)', () => {
+  const units = [unit('corr|corridor', 32.75, { angle: 'corridor' }), unit('mark|landmark_origin', 32.75)];
+  const tight = rm.composeRoutePlan(units, path, dest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: NOW + 130 * 1000, tone: null, topics: [] }, { nowMs: NOW, heardKeys: new Set() });
+  assert.deepEqual(storyItems(tight).map(i => i.id), ['mark|landmark_origin']);
+  const wide = rm.composeRoutePlan(units, path, dest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] }, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000 });
+  assert.deepEqual(storyItems(wide).map(i => i.id), ['mark|landmark_origin', 'corr|corridor']);
+});
+
+check('v2 openers: chapter heads cap at 3 and precede their area stories', () => {
+  const units = [];
+  [32.72, 32.77, 32.82, 32.87].forEach((lat, i) => {
+    units.push(unit(`area${i + 1}|neighborhood_intro`, lat, { angle: 'neighborhood_intro', durationSec: 60 }));
+    units.push(unit(`story${i + 1}|landmark_origin`, lat + 0.005));
+  });
+  const plan = rm.composeRoutePlan(units, densePath, denseDest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] }, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000 });
+  const openers = plan.items.filter(i => i.opener);
+  assert.equal(openers.length, 3, 'opener cap is 3 per plan');
+  for (const op of openers) {
+    const at = plan.items.indexOf(op);
+    const nextStory = plan.items.slice(at + 1).find(i => i.kind === 'story');
+    assert.ok(nextStory && nextStory.anchorProgress >= op.anchorProgress - 0.001, 'opener precedes its area story');
+  }
+});
+
+check('v2 openers: heard intro is excluded, cap does not bind the rest', () => {
+  const units = [];
+  [32.72, 32.77, 32.82, 32.87].forEach((lat, i) => {
+    units.push(unit(`area${i + 1}|neighborhood_intro`, lat, { angle: 'neighborhood_intro', durationSec: 60 }));
+    units.push(unit(`story${i + 1}|landmark_origin`, lat + 0.005));
+  });
+  const plan = rm.composeRoutePlan(units, densePath, denseDest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] }, { nowMs: NOW, heardKeys: new Set(['area2|neighborhood_intro']), budgetSecOverride: 100000 });
+  const openerIds = plan.items.filter(i => i.opener).map(i => i.id);
+  assert.deepEqual(openerIds, ['area1|neighborhood_intro', 'area3|neighborhood_intro', 'area4|neighborhood_intro']);
+});
+
+const portalUnits = heardP1 => {
+  const units = [
+    unit('g1|landmark_origin', 32.72, { topics: ['Coast'] }),
+    unit('g2|landmark_origin', 32.77, { topics: ['Food & Drink', 'Coast'] }),
+    unit('g3|landmark_origin', 32.82, { topics: ['Coast'] }),
+    unit('g4|landmark_origin', 32.87, { topics: ['Sport'] }),
+    unit('p1|landmark_origin', 32.8, { lng: -117.05, topics: ['Food & Drink', 'Coast'] }),
+    unit('p2|landmark_origin', 32.8, { lng: -117.05, topics: ['Coast'] }),
+    unit('p3|landmark_origin', 32.8, { lng: -117.05, topics: ['Music'] }),
+  ];
+  const heard = new Set(heardP1 ? ['p1|landmark_origin'] : []);
+  return rm.composeRoutePlan(units, densePath, denseDest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] }, { nowMs: NOW, heardKeys: heard, budgetSecOverride: 100000 });
+};
+check('v2 portals: cap ≤25%, best connection wins, portal directly follows its parent', () => {
+  const plan = portalUnits(false);
+  const stories = storyItems(plan);
+  const portals = plan.items.filter(i => i.portal);
+  assert.equal(portals.length, 1, 'floor(4 geo / 3) = 1 portal');
+  assert.ok(portals.length / stories.length <= 0.25, 'portal share within cap');
+  assert.equal(portals[0].id, 'p1|landmark_origin');
+  assert.equal(portals[0].portalParentId, 'g2|landmark_origin');
+  const storyOrder = stories.map(i => i.id);
+  assert.equal(storyOrder.indexOf('p1|landmark_origin'), storyOrder.indexOf('g2|landmark_origin') + 1, 'portal directly follows parent among stories');
+  assert.ok(!plan.items.some(i => i.id === 'p3|landmark_origin'), 'unconnected candidate never hops');
+});
+check('v2 portals: heard portal candidate is never picked', () => {
+  const plan = portalUnits(true);
+  const portals = plan.items.filter(i => i.portal);
+  assert.equal(portals.length, 1);
+  assert.equal(portals[0].id, 'p2|landmark_origin');
+  assert.equal(portals[0].portalParentId, 'g1|landmark_origin');
+  assert.ok(!plan.items.some(i => i.id === 'p1|landmark_origin'), 'heard portal absent entirely');
+});
+
+check('v2 windows: storyWindow math + composer stamps the window on story items', () => {
+  const w = rm.storyWindow(0.5, 120, 1000);
+  assert.ok(Math.abs(w.release - 0.48) < 1e-9 && Math.abs(w.expire - 0.62) < 1e-9, `window ${JSON.stringify(w)}`);
+  const plan = rm.composeRoutePlan([unit('w|landmark_origin', 32.8)], densePath, denseDest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] }, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 1000 });
+  const item = storyItems(plan)[0];
+  assert.ok(item.releaseProgress >= 0.43 && item.releaseProgress <= 0.48, `release ${item.releaseProgress}`);
+  assert.ok(item.expireProgress >= 0.57 && item.expireProgress <= 0.62, `expire ${item.expireProgress}`);
+});
+
+check('v2 bridges: elastic target follows the anchor gap', () => {
+  const far = rm.composeRoutePlan(
+    [unit('f1|landmark_origin', 32.71, { durationSec: 60 }), unit('f2|landmark_origin', 32.85, { durationSec: 60 })],
+    densePath, denseDest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 2000 },
+  );
+  const farBridge = far.items.find(i => i.kind === 'bridge');
+  assert.equal(farBridge.targetDurationSec, 90, 'long gap clamps to the bridge ceiling');
+  assert.ok(farBridge.durationSec >= 40, `elastic text composed toward the target (got ${farBridge.durationSec}s)`);
+  const near = rm.composeRoutePlan(
+    [unit('n1|landmark_origin', 32.71, { durationSec: 60 }), unit('n2|landmark_origin', 32.715, { durationSec: 60 })],
+    densePath, denseDest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 2000 },
+  );
+  const nearBridge = near.items.find(i => i.kind === 'bridge');
+  assert.ok(nearBridge.targetDurationSec <= 25, `short gap target ${nearBridge.targetDurationSec}`);
+  assert.ok(nearBridge.durationSec < farBridge.durationSec, 'elastic bridges actually differ in length');
+});
+
 // ---- Monte Carlo invariants ----
 check('monte carlo: 200 random plans hold the invariants', () => {
   let seed = 12345;
@@ -213,14 +344,20 @@ check('monte carlo: 200 random plans hold the invariants', () => {
     seed = (seed * 1103515245 + 12345) & 0x7fffffff;
     return seed / 0x7fffffff;
   };
+  const angleCycle = ['landmark_origin', 'landmark_origin', 'landmark_origin', 'corridor', 'neighborhood_intro'];
+  const topicSets = [[], ['Coast'], ['Food & Drink'], ['Coast', 'Food & Drink']];
   for (let iter = 0; iter < 200; iter++) {
     const n = 5 + Math.floor(rnd() * 25);
     const units = [];
     for (let i = 0; i < n; i++) {
+      const angle = angleCycle[Math.floor(rnd() * angleCycle.length)];
+      const offPath = rnd() < 0.25;
       units.push(
-        unit(`u${i}|landmark_origin`, 32.7 + rnd() * 0.2, {
+        unit(`u${i}|${angle}`, 32.7 + rnd() * 0.2, {
+          angle,
+          lng: offPath ? -117.05 : -117.25,
           durationSec: 60 + Math.floor(rnd() * 240),
-          topics: rnd() < 0.4 ? ['Food & Drink'] : [],
+          topics: topicSets[Math.floor(rnd() * topicSets.length)],
           tone: rnd() < 0.5 ? 'warm' : 'light',
         }),
       );
@@ -247,6 +384,15 @@ check('monte carlo: 200 random plans hold the invariants', () => {
     assert.ok(reactions <= Math.ceil(stories / 3), `too many reactions: ${reactions} for ${stories} stories`);
     const bridges = plan.items.filter(i => i.kind === 'bridge').length;
     assert.ok(bridges <= Math.max(0, stories - 1), 'bridge count exceeds story pairs');
+    // v2 invariants: portal share + adjacency, opener cap.
+    const portals = plan.items.filter(i => i.portal);
+    assert.ok(portals.length / Math.max(1, stories) <= 0.25, `portal share ${portals.length}/${stories} exceeds 25%`);
+    for (const p of portals) {
+      const at = plan.items.indexOf(p);
+      const prevStory = [...plan.items.slice(0, at)].reverse().find(i => i.kind === 'story');
+      assert.ok(prevStory && prevStory.id === p.portalParentId, 'portal does not directly follow its parent');
+    }
+    assert.ok(plan.items.filter(i => i.opener).length <= 3, 'chapter opener cap exceeded');
   }
 });
 
@@ -412,6 +558,54 @@ await checkAsync('qa runner: passenger question → answer after current item, p
   assert.equal(ended.length, 1);
   assert.equal(ended[0].p.questions, 1);
   runner.endTour();
+});
+
+// ---- composer v2 runner: position-anchored release (real timers, dense path) ----
+const anchorPlan = () =>
+  rm.composeRoutePlan(
+    [
+      unit('a|landmark_origin', 32.71),
+      unit('b|landmark_origin', 32.78),
+      unit('c|landmark_origin', 32.87),
+    ],
+    densePath,
+    { lat: 32.9, lng: -117.25 },
+    'Dest',
+    { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 2000 },
+  );
+await checkAsync('v2 runner: a story does not sound before its window opens', async () => {
+  const audio = new RealFakeAudio();
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onStoryHeard: () => {},
+  });
+  await runner.start(anchorPlan());
+  await new Promise(r => setTimeout(r, 1600)); // story A (~400ms) + its bridge settle with progress still 0
+  assert.ok(audio.played.some(u => u.includes('a%7Clandmark_origin')), 'departure story played');
+  assert.ok(!audio.played.some(u => u.includes('b%7Clandmark_origin')), 'story B sounded before its window');
+  runner.onPosition({ lat: 32.78, lng: -117.25 }); // progress ≈ 0.375, inside B's window [0.365, 0.435]
+  await until(() => audio.played.some(u => u.includes('b%7Clandmark_origin')), 'story B released once its window opened');
+  await runner.endTour();
+});
+await checkAsync('v2 runner: an outrun story drops stale and the closeout still owes it', async () => {
+  const audio = new RealFakeAudio();
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onStoryHeard: () => {},
+    onEvent: (kind, payload) => events.push({ kind, payload }),
+  });
+  await runner.start(anchorPlan());
+  runner.onPosition({ lat: 32.8, lng: -117.25 }); // progress ≈ 0.475 — past B's window end, short of C's window
+  await until(() => events.some(e => e.kind === 'story_dropped' && e.payload.subject === 'b|landmark_origin'), 'stale drop event for the outrun story');
+  assert.ok(!audio.played.some(u => u.includes('b%7Clandmark_origin')), 'outrun story never sounded');
+  runner.onPosition({ lat: 32.9, lng: -117.25 }); // arrival
+  await until(() => runner.view().closeoutDone, 'arrival closeout completed');
+  assert.equal(runner.view().endedKind, 'arrival-owed');
+  assert.ok(runner.view().owed && runner.view().owed.includes('b|landmark_origin'), `owed tease names the dropped story (got: ${runner.view().owed})`);
 });
 
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);

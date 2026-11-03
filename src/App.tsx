@@ -8,13 +8,12 @@ import {
   budgetSecFor,
   composeRoutePlan,
   computeRoute,
-  distanceToPathM,
   estimateDurationSec,
   geocodeDestination,
   isRouteModeEnabled,
   parseRouteInput,
   qaGateOpen,
-  progressAlongPath,
+  selectFetchCandidates,
   ROUTE_TONES,
   ROUTE_TOPICS,
   type LibraryUnit,
@@ -596,11 +595,15 @@ function MilesApp() {
   };
 
   /**
-   * Route build (v16.1): ONE static composition pass at departure.
-   * Live calls, exactly three per build: one Gemini parse (local
-   * fallback), one Places text search, one Routes computeRoutes.
-   * Library rows are fetched only for corridor candidates in route
-   * order (bounded at 60), so a build costs reads, not a shelf scan.
+   * Route build (v16.1; composer v2, Nov 3, 2026): ONE static
+   * composition pass at departure. Live calls, exactly three per
+   * build: one Gemini parse (local fallback), one Places text
+   * search, one Routes computeRoutes. Library rows are fetched
+   * for the FAIR fetch set (selectFetchCandidates: round-robin
+   * across the whole path's progress deciles, ≤120 geographic +
+   * ≤30 topic-connected portal candidates), read in parallel
+   * chunks — a build costs bounded reads, not a shelf scan, and
+   * no stretch of the drive is crowded out by a dense start.
    * Heard exclusion keys on the heard ledger's own vocabulary
    * (place names — heard_stories.topic records labels, not keys).
    */
@@ -646,37 +649,34 @@ function MilesApp() {
       }
       const budget = budgetSecFor(input, nowMs, route.durationSec);
       const index = await fetchLibraryIndex();
-      const candidates = index
-        .map(e => ({
-          entry: e,
-          progress: progressAlongPath({ lat: e.lat, lng: e.lng }, route.path),
-          near:
-            distanceToPathM({ lat: e.lat, lng: e.lng }, route.path) <= 1500 ||
-            Math.hypot(e.lat - geocoded.location.lat, e.lng - geocoded.location.lng) < 0.02,
-        }))
-        .filter(c => c.near)
-        .sort((a, b) => a.progress - b.progress)
-        .slice(0, 60);
+      const fetchSet = selectFetchCandidates(index, route.path, geocoded.location, (pk, ang) => tagsFor(pk, ang), {
+        userTopics: input.topics,
+      });
       const heardLabels = new Set(await fetchHeardTopics(deviceKey()));
       const units: LibraryUnit[] = [];
-      for (const c of candidates) {
-        const row = await fetchLibraryRow(c.entry.place_key, c.entry.angle);
-        if (!row) continue;
-        const tags = tagsFor(row.place_key, row.angle);
-        units.push({
-          id: `${row.place_key}|${row.angle}`,
-          placeKey: row.place_key,
-          placeName: row.place_name,
-          angle: row.angle,
-          lat: row.lat,
-          lng: row.lng,
-          durationSec: estimateDurationSec(row.story_text),
-          topics: tags.topics,
-          tone: tags.tone,
-          toneSecondary: tags.toneSecondary,
-          audioPath: row.audio_path,
-          storyText: row.story_text,
-        });
+      // Row reads are independent: fetch the bounded set in
+      // parallel chunks of 12 rather than one round trip at a time.
+      for (let i = 0; i < fetchSet.length; i += 12) {
+        const chunk = fetchSet.slice(i, i + 12);
+        const rows = await Promise.all(chunk.map(e => fetchLibraryRow(e.place_key, e.angle)));
+        for (const row of rows) {
+          if (!row) continue;
+          const tags = tagsFor(row.place_key, row.angle);
+          units.push({
+            id: `${row.place_key}|${row.angle}`,
+            placeKey: row.place_key,
+            placeName: row.place_name,
+            angle: row.angle,
+            lat: row.lat,
+            lng: row.lng,
+            durationSec: estimateDurationSec(row.story_text),
+            topics: tags.topics,
+            tone: tags.tone,
+            toneSecondary: tags.toneSecondary,
+            audioPath: row.audio_path,
+            storyText: row.story_text,
+          });
+        }
       }
       const heardKeys = new Set(
         units.filter(u => heardLabels.has(u.placeName)).map(u => u.id),
@@ -701,6 +701,7 @@ function MilesApp() {
         heardKeys,
         fillerUnits,
         budgetSecOverride: budget,
+        driveSec: route.durationSec,
       });
       plan.driveSec = route.durationSec;
       plan.budgetSec = budget;

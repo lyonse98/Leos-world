@@ -18,6 +18,16 @@
 // fallback, so a parse failure never blocks a build), one Places
 // text search for the destination, one Routes computeRoutes call.
 // No live calls happen at import time, in tests, or in the harness.
+//
+// Composer v2 (Erik, Nov 3, 2026): full-path fetch with segment
+// fairness (no first-60 early-route bias), position-anchored
+// release (a story sounds inside its ground's window, never just
+// because it is next in a list), elastic plan-time bridges sized
+// to the anchor gap they span, mix weighting toward the landmark
+// shelf with neighborhood intros admitted as capped chapter
+// openers, and portal hops — tag-connected stories from off the
+// corridor, capped at a quarter of the plan. Still ONE static
+// pass: no reordering, no recomposition, dumb guards only.
 
 export type TourMode = 'passenger' | 'driving';
 
@@ -339,6 +349,146 @@ export function estimateDurationSec(text: string | null, fallbackSec = 150): num
   return Math.max(20, Math.round((words / 150) * 60));
 }
 
+// ------------------------------------------------------------ composer v2: fairness, windows, fetch plan
+
+/** Path-progress deciles the fairness rounds sweep (item 1). */
+export const FAIRNESS_BUCKETS = 10;
+
+export function progressBucket(progress: number): number {
+  return Math.max(0, Math.min(FAIRNESS_BUCKETS - 1, Math.floor(progress * FAIRNESS_BUCKETS)));
+}
+
+/**
+ * Angle-class preference at similar progress (item 3a): Erik's
+ * lean-away direction — landmark/place stories first, corridor
+ * narration last. (Chapter openers travel their own lane.)
+ */
+export function angleClassRank(angle: string): number {
+  return angle === 'corridor' ? 1 : 0;
+}
+
+/** Lead time before a story's anchor at which its release window opens. */
+export const WINDOW_LEAD_SEC = 20;
+
+export interface StoryWindow {
+  release: number;
+  expire: number;
+}
+
+/**
+ * A story's release window, in path-progress units, on the plan's
+ * uniform expected-time map (progress × drive duration = expected
+ * seconds into the drive). The window opens WINDOW_LEAD_SEC of
+ * expected travel before the anchor — the story starts just ahead
+ * of its ground, the way a rider would point it out — and closes
+ * once the driver is a full story-length of expected travel past
+ * the anchor, when starting it would mean narrating ground a
+ * whole story behind (the route form of told-late).
+ */
+export function storyWindow(anchorProgress: number, durationSec: number, driveDurSec: number): StoryWindow {
+  const dur = Math.max(1, driveDurSec);
+  return {
+    release: Math.max(0, anchorProgress - WINDOW_LEAD_SEC / dur),
+    expire: Math.min(1, anchorProgress + Math.max(1, durationSec) / dur),
+  };
+}
+
+/** Elastic bridge bounds: never shorter than the phase-1 line, never a story in disguise. */
+export const BRIDGE_MIN_SEC = 8;
+export const BRIDGE_MAX_SEC = 90;
+/** Chapter openers per plan at most (item 3b), and at most one per named area. */
+export const CHAPTER_OPENER_MAX = 3;
+/** Portal share cap (item 4): portals ≤ ¼ of the plan's story items ⟺ portals ≤ geoStories / 3. */
+export const PORTAL_CAP_DIVISOR = 3;
+
+/** Departure row-read bounds (item 1 + item 4): see selectFetchCandidates. */
+export const FETCH_GEO_LIMIT = 120;
+export const FETCH_PORTAL_LIMIT = 30;
+
+export interface FetchIndexEntry {
+  place_key: string;
+  angle: string;
+  lat: number;
+  lng: number;
+}
+
+const FETCH_EXCLUDED_ANGLES = new Set(['neighborhood_intro_greet', 'filler', 'filler_hosted']);
+
+/**
+ * The departure fetch plan: which library rows the App reads for
+ * one route build, in fetch order. Pure given a tags lookup, so
+ * the harness proves the fairness on synthetic shelves.
+ *
+ * Geographic candidates (story angles + plain intros inside the
+ * corridor radius) are ordered FAIRLY — round-robin across
+ * path-progress deciles — so a dense route start cannot crowd
+ * out the back half of the drive the way the phase-1 first-60
+ * cap did. Portal candidates (story angles OUTSIDE the corridor)
+ * are ranked by topic overlap with the geographic pool's topics
+ * plus any user-chosen topics; at least one shared topic is
+ * required, and only enough are fetched to feed the composer's
+ * portal cap.
+ *
+ * Bounds: ≤120 geographic + ≤30 portal row reads. Each read is
+ * one small PostgREST round trip and the App fetches them in
+ * parallel chunks, so the worst case adds a few seconds at
+ * departure on a maximally dense route — the price of seeing
+ * the whole path instead of its first sixty rows.
+ */
+export function selectFetchCandidates(
+  entries: FetchIndexEntry[],
+  path: GeoPoint[],
+  destination: GeoPoint,
+  tagsOf: (placeKey: string, angle: string) => { topics: string[] },
+  opts: { geoLimit?: number; portalLimit?: number; userTopics?: string[] } = {},
+): FetchIndexEntry[] {
+  const geoLimit = opts.geoLimit ?? FETCH_GEO_LIMIT;
+  const portalLimit = opts.portalLimit ?? FETCH_PORTAL_LIMIT;
+  const near = (e: FetchIndexEntry) =>
+    distanceToPathM({ lat: e.lat, lng: e.lng }, path) <= 1500 ||
+    haversineM({ lat: e.lat, lng: e.lng }, destination) <= 1500;
+  const geo: { e: FetchIndexEntry; p: number }[] = [];
+  const offPath: FetchIndexEntry[] = [];
+  for (const e of entries) {
+    if (FETCH_EXCLUDED_ANGLES.has(e.angle)) continue;
+    if (near(e)) geo.push({ e, p: progressAlongPath({ lat: e.lat, lng: e.lng }, path) });
+    else if (e.angle !== 'neighborhood_intro') offPath.push(e);
+  }
+  const buckets = new Map<number, { e: FetchIndexEntry; p: number }[]>();
+  for (const g of geo) {
+    const b = progressBucket(g.p);
+    const list = buckets.get(b) ?? [];
+    list.push(g);
+    buckets.set(b, list);
+  }
+  for (const list of buckets.values()) list.sort((a, b) => a.p - b.p);
+  const ordered: FetchIndexEntry[] = [];
+  for (let round = 0; ordered.length < geoLimit; round++) {
+    let took = false;
+    for (let b = 0; b < FAIRNESS_BUCKETS && ordered.length < geoLimit; b++) {
+      const cand = buckets.get(b)?.[round];
+      if (cand) {
+        ordered.push(cand.e);
+        took = true;
+      }
+    }
+    if (!took) break;
+  }
+  const seedTopics = new Set<string>(opts.userTopics ?? []);
+  for (const g of geo) for (const t of tagsOf(g.e.place_key, g.e.angle).topics) seedTopics.add(t);
+  const portals = offPath
+    .map(e => ({
+      e,
+      shared: tagsOf(e.place_key, e.angle).topics.filter(t => seedTopics.has(t)).length,
+      d: distanceToPathM({ lat: e.lat, lng: e.lng }, path),
+    }))
+    .filter(c => c.shared >= 1)
+    .sort((a, b) => b.shared - a.shared || a.d - b.d)
+    .slice(0, portalLimit)
+    .map(c => c.e);
+  return [...ordered, ...portals];
+}
+
 export type PlanItemKind = 'story' | 'bridge' | 'reaction' | 'filler' | 'signoff' | 'handoff';
 
 export interface PlanItem {
@@ -355,6 +505,25 @@ export interface PlanItem {
   text?: string;
   /** False when its plan-time render failed → skip-fallback drops it. */
   ready: boolean;
+  /** Stories: the unit's progress along the path (its anchor). */
+  anchorProgress?: number;
+  /**
+   * Stories: the release window in progress units — the runner
+   * may start the story once the driver's progress reaches
+   * releaseProgress, and drops it stale past expireProgress.
+   * Absent on bridges/reactions/fillers and on portal stories
+   * (a portal releases right after its parent, by plan order).
+   */
+  releaseProgress?: number;
+  expireProgress?: number;
+  /** Portal hop (item 4): an off-corridor story tied by topic to a chosen story. */
+  portal?: boolean;
+  /** For a portal item: the chosen story unit id it hangs off. */
+  portalParentId?: string;
+  /** Chapter opener (item 3b): a neighborhood intro heading an area's chapter. */
+  opener?: boolean;
+  /** Bridges: the elastic target the text was composed toward, seconds. */
+  targetDurationSec?: number;
 }
 
 export interface RoutePlan {
@@ -394,23 +563,47 @@ export interface ComposeOptions {
    * maxStories; callers should always pass it.
    */
   budgetSecOverride?: number;
+  /**
+   * The Routes drive-time estimate, seconds. The composer maps
+   * path progress to expected time with it (release windows,
+   * elastic bridge targets). When absent, the tiling budget is
+   * the proxy — it is the drive time in the no-arrival case and
+   * the travel window in the arrival case.
+   */
+  driveSec?: number | null;
 }
 
 /**
  * ONE static composition pass at departure (v16.1: no re-planning,
- * no live bridge generation). Library-first tiling:
- *  1. drop heard units and non-story angles — never served, ever;
- *  2. prefer topic matches, then tone matches, in ROUTE order
- *     (progress along the path), not popularity order;
- *  3. fill greedily until the budget is covered; a story that
- *     would overshoot the budget by more than its own length is
- *     skipped in favour of a shorter fit, and hosted filler
- *     spackles a remainder under 60 s;
- *  4. pair-specific bridges between consecutive stories, composed
- *     here at plan time; a bridge whose render fails is dropped
- *     by applyBridgeFallback (skip straight into the next story);
- *  5. the pre-rendered reaction bank, sparingly: at most one
- *     reaction per three stories, at planned points only.
+ * no live bridge generation; v2: fairness, windows, portals).
+ * Library-first tiling:
+ *  1. partition the shelf — geographic stories (inside the 1.5 km
+ *     corridor), chapter openers (plain neighborhood intros in
+ *     the corridor), portal candidates (stories outside it);
+ *     heard units and the greet/filler angles are never served;
+ *  2. SELECTION IS FAIR ACROSS THE PATH: candidates are bucketed
+ *     by progress decile and picked round-robin — every stretch
+ *     of the drive contributes before any stretch gets a second
+ *     story — under the arrival/drive-time budget (a story that
+ *     would overshoot the budget by more than half again is
+ *     passed over for a shorter fit in its bucket);
+ *  3. within a bucket, rank is tone match first (a user-chosen
+ *     tone outranks angle class), then landmark angles over
+ *     corridor angles (Erik's lean-away), then progress. A
+ *     user-topic pool restriction applies before all of it, as
+ *     in phase 1;
+ *  4. chapter openers head the first story at-or-after their
+ *     area's ground (≤1 per area, ≤3 per plan, heard-excluded);
+ *  5. portal hops: off-corridor units tied by shared topics to a
+ *     chosen story, ≤ geoStories/3 (a quarter of story items),
+ *     one per parent, inserted directly after the parent;
+ *  6. bridges between consecutive units are ELASTIC — their
+ *     target length comes from the anchor gap they span on the
+ *     expected-time map — and every story carries its release
+ *     window for the runner's position-anchored release;
+ *  7. the pre-rendered reaction bank, sparingly: at most one
+ *     reaction per three stories, at planned points only; a
+ *     hosted filler still spackles a sub-60 s remainder.
  * The plan is a value, not a promise: nothing here touches the
  * network, so the harness can prove every invariant offline.
  */
@@ -423,36 +616,49 @@ export function composeRoutePlan(
   opts: ComposeOptions,
 ): RoutePlan {
   const maxStories = opts.maxStories ?? 40;
-  const corridor: LibraryUnit[] = [];
+  const progressCache = new Map<string, number>();
+  const prog = (u: LibraryUnit): number => {
+    let p = progressCache.get(u.id);
+    if (p === undefined) {
+      p = progressAlongPath({ lat: u.lat, lng: u.lng }, path);
+      progressCache.set(u.id, p);
+    }
+    return p;
+  };
+  // Corridor membership: within 1.5 km of the path (generous —
+  // the shelf is place-anchored, not path-anchored), or the
+  // destination itself.
+  const inCorridor = (u: LibraryUnit): boolean =>
+    distanceToPathM({ lat: u.lat, lng: u.lng }, path) <= 1500 ||
+    haversineM({ lat: u.lat, lng: u.lng }, destination) <= 1500;
+
   let skippedHeard = 0;
+  const geoAll: LibraryUnit[] = [];
+  const openerAll: LibraryUnit[] = [];
+  const portalAll: LibraryUnit[] = [];
   for (const u of units) {
-    if (NON_STORY_ANGLES.has(u.angle)) continue;
+    // The route composer's own partition (freeform never reads
+    // this): the greet variant is a welcome, not a chapter head,
+    // and the filler lanes are not stories. Plain intros are the
+    // one NON_STORY_ANGLES member whose handling changed — they
+    // moved to the chapter-opener lane below.
+    if (u.angle === 'neighborhood_intro_greet' || u.angle === 'filler' || u.angle === 'filler_hosted') continue;
     if (opts.heardKeys.has(u.id)) {
       skippedHeard += 1;
       continue;
     }
-    // Corridor membership: within 1.5 km of the path (generous —
-    // the shelf is place-anchored, not path-anchored), or the
-    // destination itself.
-    const near = distanceToPathM({ lat: u.lat, lng: u.lng }, path) <= 1500;
-    if (!near && haversineM({ lat: u.lat, lng: u.lng }, destination) > 1500) continue;
-    corridor.push(u);
+    if (u.angle === 'neighborhood_intro') {
+      if (inCorridor(u)) openerAll.push(u);
+      continue;
+    }
+    if (inCorridor(u)) geoAll.push(u);
+    else portalAll.push(u);
   }
 
   const topicSet = new Set(input.topics);
-  const topicMatches = topicSet.size > 0 ? corridor.filter(u => u.topics.some(t => topicSet.has(t))) : [];
-  const pool = topicMatches.length > 0 ? topicMatches : corridor;
+  const topicMatches = topicSet.size > 0 ? geoAll.filter(u => u.topics.some(t => topicSet.has(t))) : [];
+  const pool = topicMatches.length > 0 ? topicMatches : geoAll;
   const topicsMatched = topicMatches.length > 0;
-
-  // Route order first; within equal progress, tone matches first.
-  const ordered = [...pool].sort((a, b) => {
-    const pa = progressAlongPath({ lat: a.lat, lng: a.lng }, path);
-    const pb = progressAlongPath({ lat: b.lat, lng: b.lng }, path);
-    if (Math.abs(pa - pb) > 0.02) return pa - pb;
-    const ta = input.tone && (a.tone === input.tone || a.toneSecondary === input.tone) ? 0 : 1;
-    const tb = input.tone && (b.tone === input.tone || b.toneSecondary === input.tone) ? 0 : 1;
-    return ta - tb;
-  });
 
   // Budget: arrival budget when given, else the caller-supplied
   // drive-time budget (budgetSecFor); without either, maxStories
@@ -461,19 +667,157 @@ export function composeRoutePlan(
     input.arrivalTimeMs !== null
       ? Math.max(60, Math.round((input.arrivalTimeMs - opts.nowMs) / 1000))
       : (opts.budgetSecOverride ?? Number.POSITIVE_INFINITY);
+  // Expected-time map for windows + elastic bridges: the Routes
+  // drive time when the caller passes it, else the budget (the
+  // drive time in the no-arrival case, the travel window in the
+  // arrival case), else a floor under the pool's own length.
+  const driveDur =
+    opts.driveSec ?? (Number.isFinite(budgetSec) ? budgetSec : Math.max(600, pool.reduce((s, u) => s + u.durationSec, 0)));
 
+  // Rank within a bucket: tone match (user-chosen) → angle class
+  // → progress.
+  const toneRank = (u: LibraryUnit): number =>
+    input.tone && (u.tone === input.tone || u.toneSecondary === input.tone) ? 0 : 1;
+  const byRank = (a: LibraryUnit, b: LibraryUnit): number =>
+    toneRank(a) - toneRank(b) || angleClassRank(a.angle) - angleClassRank(b.angle) || prog(a) - prog(b);
+
+  // Fair selection: round-robin across progress deciles. An
+  // overshoot-skipped candidate yields to its bucket's next fit.
+  const buckets = new Map<number, LibraryUnit[]>();
+  for (const u of pool) {
+    const b = progressBucket(prog(u));
+    const list = buckets.get(b) ?? [];
+    list.push(u);
+    buckets.set(b, list);
+  }
+  for (const list of buckets.values()) list.sort(byRank);
   const chosen: LibraryUnit[] = [];
   let total = 0;
-  for (const u of ordered) {
-    if (chosen.length >= maxStories) break;
-    if (Number.isFinite(budgetSec)) {
-      if (total >= budgetSec) break;
-      // Overshoot guard: skip a story that would blow the budget
-      // by more than half again; a shorter later story may fit.
-      if (total + u.durationSec > budgetSec * 1.5 && chosen.length > 0) continue;
+  const pointers = new Map<number, number>();
+  let sweeping = true;
+  while (sweeping && chosen.length < maxStories) {
+    sweeping = false;
+    for (let b = 0; b < FAIRNESS_BUCKETS; b++) {
+      if (chosen.length >= maxStories) break;
+      const list = buckets.get(b);
+      if (!list) continue;
+      let idx = pointers.get(b) ?? 0;
+      while (idx < list.length) {
+        const cand = list[idx];
+        idx += 1;
+        if (Number.isFinite(budgetSec)) {
+          if (total >= budgetSec) {
+            idx = list.length;
+            break;
+          }
+          if (total + cand.durationSec > budgetSec * 1.5 && chosen.length > 0) continue;
+        }
+        chosen.push(cand);
+        total += cand.durationSec;
+        sweeping = true;
+        break;
+      }
+      pointers.set(b, idx);
     }
-    chosen.push(u);
-    total += u.durationSec;
+  }
+  // Playback order is route order; rank breaks near-ties.
+  chosen.sort((a, b) => prog(a) - prog(b) || byRank(a, b));
+
+  const toneMatched =
+    input.tone !== null && chosen.some(u => u.tone === input.tone || u.toneSecondary === input.tone);
+
+  // The playback sequence: chosen stories, then chapter openers,
+  // then portal hops spliced after their parents.
+  interface SeqEntry {
+    unit: LibraryUnit;
+    opener?: boolean;
+    portal?: boolean;
+    portalParentId?: string;
+    sharedTopic?: string;
+  }
+  const sequence: SeqEntry[] = chosen.map(u => ({ unit: u }));
+
+  // Chapter openers (item 3b): the first story at-or-after the
+  // area's ground gets the area's intro as its chapter head.
+  const openerByKey = new Map<string, LibraryUnit>();
+  for (const u of openerAll) if (!openerByKey.has(u.placeKey)) openerByKey.set(u.placeKey, u);
+  const openers = [...openerByKey.values()].sort((a, b) => prog(a) - prog(b));
+  let openersUsed = 0;
+  for (const op of openers) {
+    if (openersUsed >= CHAPTER_OPENER_MAX || sequence.length === 0) break;
+    if (Number.isFinite(budgetSec) && total + op.durationSec > budgetSec * 1.5) continue;
+    let at = sequence.findIndex(s => prog(s.unit) >= prog(op) - 1e-9);
+    if (at === -1) at = sequence.length;
+    sequence.splice(at, 0, { unit: op, opener: true });
+    total += op.durationSec;
+    openersUsed += 1;
+  }
+
+  // Portal hops (item 4): connection = shared topics with a
+  // chosen geographic story; user-chosen topics strengthen the
+  // score; tone is the last tiebreak. One hop per parent.
+  const maxPortals = Math.floor(chosen.length / PORTAL_CAP_DIVISOR);
+  if (maxPortals > 0 && portalAll.length > 0 && chosen.length > 0) {
+    interface PortalScore {
+      cand: LibraryUnit;
+      parent: LibraryUnit;
+      shared: number;
+      userOverlap: number;
+      toneTie: number;
+      topic: string;
+    }
+    const scored: PortalScore[] = [];
+    for (const cand of portalAll) {
+      let best: PortalScore | null = null;
+      for (const g of chosen) {
+        const sharedTopics = cand.topics.filter(t => g.topics.includes(t));
+        if (sharedTopics.length === 0) continue;
+        const entry: PortalScore = {
+          cand,
+          parent: g,
+          shared: sharedTopics.length,
+          userOverlap: cand.topics.filter(t => topicSet.has(t)).length,
+          toneTie:
+            input.tone && (cand.tone === input.tone || cand.toneSecondary === input.tone)
+              ? 1
+              : g.tone !== null && cand.tone === g.tone
+                ? 1
+                : 0,
+          topic: sharedTopics[0],
+        };
+        if (
+          !best ||
+          entry.shared > best.shared ||
+          (entry.shared === best.shared && entry.userOverlap > best.userOverlap) ||
+          (entry.shared === best.shared && entry.userOverlap === best.userOverlap && entry.toneTie > best.toneTie)
+        ) {
+          best = entry;
+        }
+      }
+      if (best) scored.push(best);
+    }
+    scored.sort(
+      (a, b) =>
+        b.shared - a.shared || b.userOverlap - a.userOverlap || b.toneTie - a.toneTie || prog(a.parent) - prog(b.parent),
+    );
+    const usedParents = new Set<string>();
+    let portalsAdded = 0;
+    for (const s of scored) {
+      if (portalsAdded >= maxPortals) break;
+      if (usedParents.has(s.parent.id)) continue;
+      if (Number.isFinite(budgetSec) && total + s.cand.durationSec > budgetSec * 1.5) continue;
+      const at = sequence.findIndex(x => x.unit.id === s.parent.id);
+      if (at === -1) continue;
+      sequence.splice(at + 1, 0, {
+        unit: s.cand,
+        portal: true,
+        portalParentId: s.parent.id,
+        sharedTopic: s.topic,
+      });
+      usedParents.add(s.parent.id);
+      total += s.cand.durationSec;
+      portalsAdded += 1;
+    }
   }
 
   // Hosted-filler spackle: a remainder under 60 s gets one filler
@@ -482,42 +826,60 @@ export function composeRoutePlan(
   const fillers = (opts.fillerUnits ?? []).filter(f => !opts.heardKeys.has(f.id));
   if (Number.isFinite(budgetSec) && fillers.length > 0 && total < budgetSec && budgetSec - total < 60) {
     const f = fillers[0];
-    chosen.push(f);
+    sequence.push({ unit: f });
     total += f.durationSec;
   }
 
-  const toneMatched =
-    input.tone !== null && chosen.some(u => u.tone === input.tone || u.toneSecondary === input.tone);
-
-  // Interleave plan-time bridges + sparing reactions.
+  // Interleave elastic plan-time bridges + sparing reactions,
+  // and stamp each story with its release window.
   const items: PlanItem[] = [];
   let storiesSinceReaction = 0;
-  chosen.forEach((u, i) => {
+  sequence.forEach((entry, i) => {
+    const u = entry.unit;
     // Bridges join story → story only: a filler spackle gets no
     // pair bridge (it is not a place the bridge can name).
-    if (i > 0 && u.angle !== 'filler_hosted' && chosen[i - 1].angle !== 'filler_hosted') {
-      const prev = chosen[i - 1];
+    if (i > 0 && u.angle !== 'filler_hosted' && sequence[i - 1].unit.angle !== 'filler_hosted') {
+      const prev = sequence[i - 1].unit;
+      // Elastic target: the expected travel time from the
+      // previous story's END to this story's window opening,
+      // clamped to the bridge bounds.
+      const gapSec = Math.max(0, (prog(u) - prog(prev)) * driveDur - prev.durationSec);
+      const target = Math.max(
+        BRIDGE_MIN_SEC,
+        Math.min(BRIDGE_MAX_SEC, Math.round(gapSec - WINDOW_LEAD_SEC)),
+      );
+      const text = bridgeTextFor(prev, u, {
+        targetSec: target,
+        portalTopic: entry.portal ? entry.sharedTopic : undefined,
+      });
       items.push({
         kind: 'bridge',
         id: `bridge:${prev.id}>${u.id}`,
         label: `Bridge — ${prev.placeName} to ${u.placeName}`,
-        durationSec: 8,
+        durationSec: spokenSec(text),
         prevUnitId: prev.id,
         nextUnitId: u.id,
-        text: bridgeTextFor(prev, u),
+        text,
         ready: true,
+        targetDurationSec: target,
       });
     }
+    const isFiller = u.angle === 'filler_hosted';
+    const win = !isFiller && !entry.portal ? storyWindow(prog(u), u.durationSec, driveDur) : null;
     items.push({
-      kind: u.angle === 'filler_hosted' ? 'filler' : 'story',
+      kind: isFiller ? 'filler' : 'story',
       id: u.id,
       label: u.placeName,
       durationSec: u.durationSec,
       unit: u,
       ready: true,
+      anchorProgress: prog(u),
+      ...(win ? { releaseProgress: win.release, expireProgress: win.expire } : {}),
+      ...(entry.portal ? { portal: true, portalParentId: entry.portalParentId } : {}),
+      ...(entry.opener ? { opener: true } : {}),
     });
     storiesSinceReaction += 1;
-    if (storiesSinceReaction >= 3 && i < chosen.length - 1) {
+    if (storiesSinceReaction >= 3 && i < sequence.length - 1) {
       const reaction = REACTION_BANK[(Math.floor(i / 3)) % REACTION_BANK.length];
       items.push({
         kind: 'reaction',
@@ -546,9 +908,66 @@ export function composeRoutePlan(
   };
 }
 
-/** Pair-specific bridge text, composed at plan time, Miles-solo. */
-export function bridgeTextFor(prev: LibraryUnit, next: LibraryUnit): string {
-  return `From ${prev.placeName} we keep rolling — just ahead is ${next.placeName}, and it has its own story to tell.`;
+/** Unfloored spoken-length estimate for short composed lines (bridges). */
+function spokenSec(text: string): number {
+  const words = text.trim().split(/\s+/).filter(Boolean).length;
+  return Math.max(3, Math.round((words / 150) * 60));
+}
+
+/**
+ * Authored connective sentences for elastic bridges (item 2).
+ * Place-free by design — a bridge may stretch over any ground,
+ * so these lines carry the drive, never facts about a place.
+ * The pair-specific head line carries the names; these carry
+ * the time.
+ */
+export const BRIDGE_CONNECTIVE_LINES: string[] = [
+  'The road has a way of stitching this county together, one valley at a time.',
+  'Keep your eyes up — the landscape is about to change its mind again.',
+  'This is the part of the drive where the city starts showing its layers.',
+  "Every mile out here has somebody's whole life folded into it.",
+  'The map says one thing; the ground underneath remembers another.',
+  'We are crossing ground that generations have crossed before us.',
+  'San Diego does this — it hides its best stories in plain sight, right along the commute.',
+  'Plenty of road behind us now, and the good stuff has a habit of clustering up ahead.',
+  'If you have done this drive a hundred times, this is the stretch worth looking at fresh.',
+  'The hills, the canyons, the bay pulling at the edge of everything — this county never just sits there.',
+  'Settle in for a moment. The next story is worth arriving at properly.',
+  'This is Miles, riding shotgun — pointing at the things the road forgets to mention.',
+];
+
+/**
+ * Pair-specific bridge text, composed at plan time, Miles-solo.
+ * Elastic (item 2): given a target, connective sentences are
+ * appended — in a rotation seeded by the pair, so a given bridge
+ * is stable across rebuilds but pairs differ — until the spoken
+ * estimate reaches the target or the bank runs out (a bridge
+ * composes TOWARD its target; the authored bank tops out around
+ * a minute, and longer anchor gaps are window-wait, by design).
+ * A portal hop's bridge names the connection that earned the hop.
+ */
+export function bridgeTextFor(
+  prev: LibraryUnit,
+  next: LibraryUnit,
+  opts: { targetSec?: number; portalTopic?: string } = {},
+): string {
+  const target = opts.targetSec ?? BRIDGE_MIN_SEC;
+  let text = opts.portalTopic
+    ? `From ${prev.placeName}, there is a thread worth following — ${opts.portalTopic} ties it to ${next.placeName}, a little way off our road, and the connection is too good to skip.`
+    : `From ${prev.placeName} we keep rolling — just ahead is ${next.placeName}, and it has its own story to tell.`;
+  if (spokenSec(text) < target) {
+    let seed = 0;
+    const key = `${prev.id}>${next.id}`;
+    for (let i = 0; i < key.length; i++) seed = (seed * 31 + key.charCodeAt(i)) & 0x7fffffff;
+    let idx = seed % BRIDGE_CONNECTIVE_LINES.length;
+    let guard = 0;
+    while (spokenSec(text) < target && guard < BRIDGE_CONNECTIVE_LINES.length) {
+      text += ` ${BRIDGE_CONNECTIVE_LINES[idx % BRIDGE_CONNECTIVE_LINES.length]}`;
+      idx += 1;
+      guard += 1;
+    }
+  }
+  return text;
 }
 
 /** Pre-rendered reaction bank lines (Miles-solo, voice-only — no music, no archival stingers). */

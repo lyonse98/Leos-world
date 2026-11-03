@@ -15,6 +15,21 @@
 // synthesis fails is dropped before anything plays (skip-fallback),
 // exactly as routeMode.applyBridgeFallback prescribes.
 //
+// Composer v2 (Nov 3, 2026): POSITION-ANCHORED RELEASE. The
+// runner no longer pours the whole plan into the Player at
+// start. It renders every item at plan time, then FEEDS the
+// Player one item ahead at most: bridges, reactions and fillers
+// (the wait-cover) release freely, but a geographic story is
+// fed only once the driver's progress reaches its release
+// window (the composer stamped release/expire progress on the
+// item). A story whose window expires while it waits is dropped
+// stale — silently, unplayed, and still counted among the
+// unplayed for the arrival tease. Portal stories carry no
+// window: plan order puts them directly after their parent, so
+// they release as soon as the parent settles. Items still play
+// strictly in plan order — anchored release is a feed gate, not
+// re-planning.
+//
 // Phase 2 (Nov 3, 2026): Q&A for Passenger/Walking route tours.
 // The runner accepts an answer generator ONLY when the App's
 // declared-mode gate is open (driving tours never receive one, so
@@ -32,6 +47,7 @@ import {
   hasArrived,
   isOffCorridor,
   owedLine,
+  progressAlongPath,
   type GeoPoint,
   type LibraryUnit,
   type PlanItem,
@@ -84,9 +100,17 @@ export class RoutePlanRunner {
   private plan: RoutePlan | null = null;
   private listeners = new Set<() => void>();
   private playedStoryIds = new Set<string>();
-  private settledPlanItems = 0;
-  /** Items actually enqueued (bridge render failures drop before enqueue, so this — not the plan length — is the exhaustion denominator). */
-  private enqueuedCount = 0;
+  /** Rendered plan items in plan order (render failures never land here — skip-fallback). */
+  private rendered: { planItem: PlanItem; audible: AudibleItem }[] = [];
+  /** Next rendered entry the feed gate will consider. Entry 0 is begun directly by start(). */
+  private feedIndex = 0;
+  /** Rendered entries resolved: settled after feeding, or dropped stale / bridge-orphaned at the gate. The exhaustion numerator. */
+  private resolvedCount = 0;
+  /** Stories dropped at the feed gate for an expired window (their outgoing bridges are skipped too). */
+  private droppedStoryIds = new Set<string>();
+  /** Last known path progress (0 until the first GPS feed). */
+  private lastProgress = 0;
+  private begun = false;
   private renderingDone = false;
   private closing = false;
   private closed = false;
@@ -155,30 +179,33 @@ export class RoutePlanRunner {
   }
 
   /**
-   * Plan-time bridge render + queue build. The first playable
-   * item begins at once (it is the audio prime carrier, and it
-   * must start as close to the user's tap as possible); the rest
-   * render while it plays and enqueue as they resolve. A bridge
-   * whose render fails is dropped before enqueue (skip-fallback)
-   * — it never reaches the queue, so playback goes straight
-   * into the next Miles story.
+   * Plan-time render of every item. The first playable item
+   * begins at once (it is the audio prime carrier, and it must
+   * start as close to the user's tap as possible — the departure
+   * story is exempt from window gating by construction: the
+   * plan starts where the driver is). The rest render into the
+   * held list while it plays; the feed gate (maybeFeed) releases
+   * them under the anchored-release rules. A bridge whose render
+   * fails never lands in the held list (skip-fallback) — it can
+   * never wedge the gate, and playback goes straight into the
+   * next Miles story when its window opens.
    */
   async start(plan: RoutePlan): Promise<void> {
     this.plan = plan;
-    let started = false;
     for (const it of plan.items) {
+      if (this.closed) break; // a closeout landed mid-render: stop building a dead plan
       const item = await this.toAudibleItem(it);
       if (!item) continue; // render failure → dropped, never wedged
-      if (!started) {
+      this.rendered.push({ planItem: it, audible: item });
+      if (!this.begun) {
         this.player.beginWithItem(item);
-        started = true;
-      } else {
-        this.player.enqueuePromised(item);
+        this.begun = true;
+        this.feedIndex = 1;
       }
-      this.enqueuedCount += 1;
+      this.maybeFeed();
     }
     this.renderingDone = true;
-    if (!started) {
+    if (!this.begun) {
       // Empty plan (all heard / nothing near the route): the
       // handoff line is still owed — never dead air, never a
       // silent screen. The App treats this as an overrun tail.
@@ -190,17 +217,70 @@ export class RoutePlanRunner {
     }
     this.deps.onEvent?.('route_plan_started', {
       destination: plan.destinationName,
-      items: this.enqueuedCount,
+      items: this.rendered.length,
+      portals: plan.items.filter(i => i.portal).length,
       budget_sec: plan.budgetSec,
     });
+    this.maybeFeed();
     this.maybeExhaust();
     this.notify();
   }
 
-  /** Plan exhaustion, evaluated only once rendering is done (bridges still rendering are not yet countable). */
+  /**
+   * The anchored-release feed gate. The Player starts whatever
+   * sits in its promised FIFO the moment the current item
+   * settles, so anything enqueued is effectively RELEASED: the
+   * gate therefore keeps the FIFO empty and considers the head
+   * held entry only —
+   *   - a bridge whose parent story was dropped stale is
+   *     skipped silently (it names ground never heard);
+   *   - a geographic story past its expire progress is dropped
+   *     stale (story_dropped, reason 'stale-window'); a story
+   *     before its release progress HOLDS the gate — the Player
+   *     idles on bridges/fillers already played, never on the
+   *     story sounded early;
+   *   - everything else (bridges, reactions, fillers, portal
+   *     stories) feeds.
+   * Feeding one entry can empty the FIFO instantly (an idle
+   * Player takes it as current), so the loop re-checks.
+   */
+  private maybeFeed(): void {
+    if (!this.plan || this.closed || this.closing || !this.begun) return;
+    while (this.feedIndex < this.rendered.length) {
+      if (this.player.promised.length > 0) return;
+      const entry = this.rendered[this.feedIndex];
+      const it = entry.planItem;
+      if (it.kind === 'bridge' && it.prevUnitId && this.droppedStoryIds.has(it.prevUnitId)) {
+        this.feedIndex += 1;
+        this.resolvedCount += 1;
+        continue;
+      }
+      if (it.kind === 'story' && !it.portal) {
+        const release = it.releaseProgress ?? 0;
+        const expire = it.expireProgress ?? Number.POSITIVE_INFINITY;
+        if (this.lastProgress > expire) {
+          this.feedIndex += 1;
+          this.resolvedCount += 1;
+          this.droppedStoryIds.add(it.id);
+          this.deps.onEvent?.('story_dropped', {
+            subject: it.unit?.placeName ?? it.label,
+            reason: 'stale-window',
+            mode: 'route',
+          });
+          continue;
+        }
+        if (this.lastProgress < release) return; // window not open yet: wait for the ground
+      }
+      this.player.enqueuePromised(entry.audible);
+      this.feedIndex += 1;
+    }
+    this.maybeExhaust();
+  }
+
+  /** Plan exhaustion, evaluated only once rendering is done (items still rendering are not yet countable). */
   private maybeExhaust(): void {
     if (!this.renderingDone || this.closed) return;
-    if (this.settledPlanItems < this.enqueuedCount) return;
+    if (this.resolvedCount < this.rendered.length) return;
     if (this.arrivedFlag) {
       void this.close('arrival-signoff');
     } else {
@@ -280,7 +360,8 @@ export class RoutePlanRunner {
       this.deps.onStoryHeard?.(it.unit);
     }
     if (this.closing) return; // settles caused by the closeout itself
-    this.settledPlanItems += 1;
+    this.resolvedCount += 1;
+    this.maybeFeed();
     this.maybeExhaust();
     this.notify();
   }
@@ -288,10 +369,11 @@ export class RoutePlanRunner {
   /** GPS feed (App's usePosition already drives this). Dumb guards only. */
   onPosition(pos: GeoPoint): void {
     if (!this.plan || this.closed) return;
+    this.lastProgress = progressAlongPath(pos, this.plan.path);
     // Arrival check first: it outranks the corridor guard.
     if (!this.arrivedFlag && hasArrived(pos, this.plan.destination, this.plan.path)) {
       this.arrivedFlag = true;
-      const exhausted = this.renderingDone && this.settledPlanItems >= this.enqueuedCount;
+      const exhausted = this.renderingDone && this.resolvedCount >= this.rendered.length;
       void this.close(exhausted ? 'arrival-signoff' : 'arrival-owed');
       return;
     }
@@ -307,6 +389,9 @@ export class RoutePlanRunner {
       this.player.resumeByUser();
       this.deps.onEvent?.('route_on_corridor_resume', {});
     }
+    // A position update is also a window event: it can open the
+    // head story's window (feed it) or close it (drop it stale).
+    this.maybeFeed();
     this.notify();
   }
 
