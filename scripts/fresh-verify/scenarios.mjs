@@ -1819,11 +1819,16 @@ export async function runScenarios(Tour, extras) {
     // Composition with fix 2: if the parent's generic area story
     // DOES sound during the deferral window, it spends the
     // orientation slot and the deferred welcome is discharged —
-    // one orientation voice for the entry, never two.
+    // one orientation voice for the entry, never two. (Nov 2:
+    // University City carries NO intro in this block — since the
+    // Clairemont/Bay Ho fix, an area WITH a shelf intro never
+    // generates the generic area story at all, so this
+    // composition now lives in the no-intro population, which is
+    // where area stories still exist.)
     resetLocalStorage();
     const world = makeWorld(Tour, {
       candidates: [],
-      intros: ['Costa Verde', 'University City'],
+      intros: ['Costa Verde'],
     });
     world.area = { neighborhood: 'La Jolla', city: 'San Diego' };
     const audio = new FakeAudio(world.clock, okPolicy({ library: 20_000 }));
@@ -2501,5 +2506,306 @@ export async function runScenarios(Tour, extras) {
     check('unlock persists on the device', isTesterUnlocked() === true);
     resetLocalStorage();
     check('cleared storage locks again', isTesterUnlocked() === false);
+  }
+
+  // ---------------------------------------------------------- A: Clairemont / Bay Ho fixes (Nov 2)
+  // Field evidence (published build, Nov 2 afternoon): in
+  // Clairemont — whose shelf is intro + greeting variant ONLY —
+  // the library welcome completed and a LIVE generic area story
+  // ('The story of Clairemont') completed two minutes later: the
+  // same overview twice, the area story having been generated
+  // 146 s before the welcome served. And in Bay Ho — ZERO shelf
+  // rows — the live welcome's ~85 s pipeline at 21.6 m/s sounded
+  // 1,616 m past its subject. Three fixes: (1) no generic live
+  // area story for an area that HAS a shelf intro; (2) a queued
+  // live area story whose area's orientation slot a welcome has
+  // since spent is discharged at dequeue, its text salvaged;
+  // (3) live welcomes are fit-gated (pre-generation projection +
+  // play-time reach), shelf welcomes exempt.
+
+  suite('A1 shelf-intro area: zero live area-story generation (unheard + cross-day heard)');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: ['Clairemont'] });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(90_000);
+    check('the shelf welcome sounded for the entered area',
+      playbacksFor(world, 'welcome:clairemont').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'welcome:clairemont').map(e => e.payload)));
+    check('zero live area-story generation calls for the intro area',
+      promptsFor(world, 'AREA STORY').length === 0,
+      `prompts=${promptsFor(world, 'AREA STORY').length}`);
+    check('no area story ever committed for the area',
+      world.eventsOf('story_played').filter(e => e.payload.subject === 'area:clairemont').length === 0);
+    tour.endTour();
+  }
+  {
+    // Heard state is not a back door: a cross-day-heard intro
+    // area (greeting variant on the shelf, so the re-entry
+    // welcome is the plain row) still gets NO generic area
+    // story — and spends no generation on the area at all.
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      intros: ['Clairemont'],
+      greetIntros: ['Clairemont'],
+    });
+    world.seams.fetchHeardTopics = async () => ['Clairemont'];
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(90_000);
+    check('the re-entry (plain) welcome sounded for the heard area',
+      playbacksFor(world, 'welcome:clairemont').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'welcome:clairemont').map(e => e.payload)));
+    check('zero live area-story generation calls for the heard intro area',
+      promptsFor(world, 'AREA STORY').length === 0,
+      `prompts=${promptsFor(world, 'AREA STORY').length}`);
+    check('zero welcome generation calls either (the plain row served)',
+      welcomePromptsFor(world, 'Clairemont').length === 0,
+      `prompts=${welcomePromptsFor(world, 'Clairemont').length}`);
+    tour.endTour();
+  }
+
+  suite('A2 orientation race: queued area story discharged at dequeue, text salvaged + re-served from the bank');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: [] });
+    const AREA_TEXT = 'AREA-TEXT the whole story of the Clairemont mesa, its grids and its canyons. '.repeat(2);
+    world.genStoryBehavior = prompt => {
+      if (prompt.includes('NEIGHBORHOOD WELCOME') && prompt.includes('Clairemont')) {
+        // The welcome's generation is SLOW (6 s): the window in
+        // which the race opens. The text is a full paragraph
+        // (~54 s of speech, as a real generated welcome runs):
+        // at 8 m/s its reach still covers the ground the ship
+        // covers while it is being made, so it lands and sounds.
+        return new Promise(res =>
+          world.clock.setTimeout(
+            () => res('A generated welcome to Clairemont, told warmly at the curb. '.repeat(12)),
+            6_000,
+          ),
+        );
+      }
+      if (prompt.includes('AREA STORY')) {
+        // The area story's generation is SLOWER (22 s): it
+        // completes into a world where the welcome has sounded.
+        return new Promise(res => world.clock.setTimeout(() => res(AREA_TEXT), 22_000));
+      }
+      return 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+    };
+    const audio = new FakeAudio(world.clock, okPolicy());
+    // Enter Clairemont the moment the opening welcome has
+    // sounded: the player is idle but the silence lane has not
+    // yet fired a filler into the window the race needs.
+    const tour = await startAt(world, audio, UTC);
+    for (
+      let i = 0;
+      i < 40 &&
+      !world.eventsOf('story_playback').some(
+        e => e.payload.subject === 'welcome:university city' && e.payload.sounded,
+      );
+      i++
+    ) {
+      await world.clock.advance(1_000);
+    }
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    // Let the area update land and the welcome's generation
+    // begin (it completes at +6 s), then a >200 m movement step
+    // (the serve cycle's trigger threshold) inside that window
+    // reaches the area fallback: the generic area story starts
+    // generating while the welcome is still being made — the
+    // field race's exact shape.
+    await world.clock.advance(1_000);
+    tour.onPosition({ lat: UTC.lat + 0.007, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    check('the welcome sounded (it won the orientation slot)',
+      playbacksFor(world, 'welcome:clairemont').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'welcome:clairemont').map(e => e.payload)));
+    check('the area story was generated exactly once (no regeneration loop)',
+      world.genStoryPrompts.filter(p => p.includes('AREA STORY') && p.includes('Clairemont')).length === 1,
+      `prompts=${world.genStoryPrompts.filter(p => p.includes('AREA STORY') && p.includes('Clairemont')).length}`);
+    check('the area story never sounded on the welcome’s pass',
+      !playbacksFor(world, 'area:clairemont').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'area:clairemont').map(e => e.payload)));
+    check('the area story filed story_dropped as orientation-spent',
+      dropsFor(world, 'area:clairemont').length === 1 &&
+        dropsFor(world, 'area:clairemont')[0]?.payload.reason === 'orientation-spent',
+      JSON.stringify(dropsFor(world, 'area:clairemont').map(e => e.payload)));
+    check('the area subject stayed unheard',
+      !world.heard.includes('The story of Clairemont'), world.heard.join(' | '));
+    check('the generated text was salvaged into the private buffer',
+      tour['buffer'].get('area:clairemont')?.text === AREA_TEXT,
+      tour['buffer'].get('area:clairemont')?.text?.slice(0, 40) ?? 'none');
+    // A later pass (leave, return — each leg >300 m, the area
+    // re-resolution threshold): the area is welcomed already, so
+    // no new welcome is owed; the slot is open again and the
+    // BANKED text voices the area story — no second generation.
+    world.area = { neighborhood: 'University City', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.011, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(10_000);
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(90_000);
+    check('on the return pass the banked area text sounds, sourced buffered',
+      world.eventsOf('story_played').some(
+        e => e.payload.subject === 'area:clairemont' && e.payload.source === 'buffered',
+      ) &&
+        playbacksFor(world, 'area:clairemont').some(e => e.payload.sounded === true),
+      JSON.stringify(world.eventsOf('story_played').filter(e => e.payload.subject === 'area:clairemont').map(e => e.payload)));
+    check('still exactly one Clairemont area-story generation (the bank paid, not a new spend)',
+      world.genStoryPrompts.filter(p => p.includes('AREA STORY') && p.includes('Clairemont')).length === 1,
+      `prompts=${world.genStoryPrompts.filter(p => p.includes('AREA STORY') && p.includes('Clairemont')).length}`);
+    tour.endTour();
+  }
+
+  suite('A3 Bay Ho acceptance: live welcome outrun at freeway speed discharges silently');
+  {
+    resetLocalStorage();
+    const LJ = { lat: 32.85, lng: -117.25 };
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: LJ.lat, lng: LJ.lng })],
+      library: [{ name: 'Alpha Park', lat: LJ.lat, lng: LJ.lng }],
+      intros: [],
+    });
+    world.genStoryBehavior = prompt => {
+      if (prompt.includes('NEIGHBORHOOD WELCOME') && prompt.includes('Bay Ho')) {
+        // The field pipeline: ~25 s of text generation (the
+        // field case measured 26.7 s fetch + 25.8 s synth).
+        return new Promise(res =>
+          world.clock.setTimeout(
+            () =>
+              res(
+                'Welcome to Bay Ho, a small bayside neighborhood above the bay, ' +
+                  'where the streets step down toward the water and the evening light comes in low over the marina.',
+              ),
+            25_000,
+          ),
+        );
+      }
+      return 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+    };
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 60_000, synth: 12_000 }));
+    const { tour } = await healthyOpening(world, audio, LJ);
+    // Enter Bay Ho at 21.6 m/s (the field speed) with Alpha
+    // (60 s) still playing: the welcome generates into the
+    // waiting slot and is judged only when Alpha ends — by then
+    // the ship is ~900 m past the anchor, beyond the reach of a
+    // ~30 s telling at this speed.
+    world.area = { neighborhood: 'Bay Ho', city: 'San Diego' };
+    let lat = LJ.lat + 0.01;
+    tour.onPosition({ lat, lng: LJ.lng, speedMps: 21.6, headingDeg: 180 });
+    for (let i = 0; i < 48; i++) {
+      await world.clock.advance(5_000);
+      lat += 0.00097; // 21.6 m/s × 5 s ≈ 108 m per step
+      tour.onPosition({ lat, lng: LJ.lng, speedMps: 21.6, headingDeg: 180 });
+    }
+    check('the live welcome was generated exactly once (no retry loop after discharge)',
+      welcomePromptsFor(world, 'Bay Ho').length === 1,
+      `prompts=${welcomePromptsFor(world, 'Bay Ho').length}`);
+    check('the outrun welcome never sounded',
+      !playbacksFor(world, 'welcome:bay ho').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'welcome:bay ho').map(e => e.payload)));
+    check('the discharge filed no story_dropped for the welcome',
+      dropsFor(world, 'welcome:bay ho').length === 0,
+      JSON.stringify(dropsFor(world, 'welcome:bay ho').map(e => e.payload)));
+    check('the welcome is not heard-marked',
+      !world.heard.includes('Welcome to Bay Ho'), world.heard.join(' | '));
+    tour.endTour();
+  }
+
+  suite('A4 long-tail lane intact: live welcome for a zero-row area still lands at low speed');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: [] });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Bay Ho', city: 'San Diego' };
+    let lat = UTC.lat + 0.004;
+    tour.onPosition({ lat, lng: UTC.lng, speedMps: 1.2, headingDeg: 180 });
+    for (let i = 0; i < 12; i++) {
+      await world.clock.advance(5_000);
+      lat += 0.00005; // 1.2 m/s × 5 s = 6 m per step — dwelling pace
+      tour.onPosition({ lat, lng: UTC.lng, speedMps: 1.2, headingDeg: 180 });
+    }
+    check('the live welcome generated once and sounded',
+      welcomePromptsFor(world, 'Bay Ho').length === 1 &&
+        playbacksFor(world, 'welcome:bay ho').some(e => e.payload.sounded === true),
+      `prompts=${welcomePromptsFor(world, 'Bay Ho').length} played=${JSON.stringify(playbacksFor(world, 'welcome:bay ho').map(e => e.payload))}`);
+    check('the welcome completed (not cut by its own gate)',
+      playbacksFor(world, 'welcome:bay ho').some(e => e.payload.completed === true),
+      JSON.stringify(playbacksFor(world, 'welcome:bay ho').map(e => e.payload)));
+    tour.endTour();
+  }
+
+  suite('A5 fit gate scope: shelf welcome exempt at speed; opening doctrine unchanged');
+  {
+    // The A3 geometry with a SHELF welcome: it waits behind the
+    // same 60 s story at the same 21.6 m/s and is judged ~900 m
+    // from its pin — and sounds, because a shelf welcome is
+    // instant and anchored; the gate binds live generation only.
+    resetLocalStorage();
+    const LJ = { lat: 32.85, lng: -117.25 };
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: LJ.lat, lng: LJ.lng })],
+      library: [{ name: 'Alpha Park', lat: LJ.lat, lng: LJ.lng }],
+      intros: ['Clairemont'],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 60_000, synth: 12_000 }));
+    const { tour } = await healthyOpening(world, audio, LJ);
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    let lat = LJ.lat + 0.01;
+    tour.onPosition({ lat, lng: LJ.lng, speedMps: 21.6, headingDeg: 180 });
+    for (let i = 0; i < 24; i++) {
+      await world.clock.advance(5_000);
+      lat += 0.00097;
+      tour.onPosition({ lat, lng: LJ.lng, speedMps: 21.6, headingDeg: 180 });
+    }
+    check('the shelf welcome sounded under the geometry that discharges a live one',
+      playbacksFor(world, 'welcome:clairemont').some(
+        e => e.payload.sounded === true && e.payload.source === 'library',
+      ),
+      JSON.stringify(playbacksFor(world, 'welcome:clairemont').map(e => e.payload)));
+    tour.endTour();
+  }
+  {
+    // Opening doctrine, zero-row start area: live is attempted
+    // first and sounds (the gate does not reach the opening's
+    // live attempt at the origin).
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: [] });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    check('the opening welcome attempted live generation for the zero-row start area',
+      welcomePromptsFor(world, 'University City').length >= 1,
+      `prompts=${welcomePromptsFor(world, 'University City').length}`);
+    check('the opening welcome sounded, sourced live',
+      playbacksFor(world, 'welcome:university city').some(
+        e => e.payload.sounded === true && e.payload.source === 'live',
+      ),
+      JSON.stringify(playbacksFor(world, 'welcome:university city').map(e => e.payload)));
+    tour.endTour();
+  }
+  {
+    // Opening doctrine, shelf start area with live generation
+    // down: the stored intro is the fallback and sounds.
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: ['University City'] });
+    world.genStoryBehavior = prompt => {
+      if (prompt.includes('NEIGHBORHOOD WELCOME')) throw new Error('welcome generation down');
+      return 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+    };
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    check('the opening welcome fell back to the shelf intro and sounded',
+      playbacksFor(world, 'welcome:university city').some(
+        e => e.payload.sounded === true && e.payload.source === 'library',
+      ),
+      JSON.stringify(playbacksFor(world, 'welcome:university city').map(e => e.payload)));
+    tour.endTour();
   }
 }

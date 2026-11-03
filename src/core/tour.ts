@@ -1346,9 +1346,17 @@ export class Tour {
         // live cannot produce it (failure, tripped breaker), the
         // owed record discharges silently rather than re-arming
         // on a cooldown and minting attempt after attempt.
-        item =
-          (await this.shelfIntroItem(name, true, true)) ??
-          (await this.generateWelcome(name, this.position, true));
+        item = await this.shelfIntroItem(name, true, true);
+        if (!item && !this.welcomeWouldLand()) {
+          // Fit gate (Nov 2): the live alternate is projected to
+          // land beyond its ground — it is not generated at all,
+          // and the pass discharges silently, exactly like a
+          // failed alternate (no retry, no owed record).
+          this.welcomed.add(name.toLowerCase());
+          this.owedWelcome = null;
+          return;
+        }
+        if (!item) item = await this.generateWelcome(name, this.position, true);
         if (this.phase !== 'active') return;
         if (!item) {
           this.welcomed.add(name.toLowerCase());
@@ -1362,9 +1370,20 @@ export class Tour {
         // semantics unchanged. Mid-tour welcomes are the
         // deferrable kind (Nov 1): a Tier-1 newcomer may take
         // their waiting slot without dropping them.
-        item =
-          (await this.shelfIntroItem(name, true)) ??
-          (await this.generateWelcome(name, this.position, true));
+        item = await this.shelfIntroItem(name, true);
+        if (!item && !this.welcomeWouldLand()) {
+          // Fit gate (Nov 2): a live welcome projected to land
+          // beyond its ground is not generated at all — the pass
+          // discharges silently (the area counts as welcomed; no
+          // re-arm, no retry loop). A welcome that FAILS to
+          // generate keeps its O15 owed/cooldown semantics below;
+          // a welcome that cannot LAND is a spent pass, not a
+          // failure.
+          this.welcomed.add(name.toLowerCase());
+          this.owedWelcome = null;
+          return;
+        }
+        if (!item) item = await this.generateWelcome(name, this.position, true);
         if (this.phase !== 'active') return;
         if (!item) {
           // O15: an unheard failed WELCOME remains owed, on a cooldown.
@@ -1732,6 +1751,26 @@ export class Tour {
     return item;
   }
 
+  /**
+   * Does the shelf hold an intro row for this area (either
+   * variant)? Read from the tour's library index: the index is
+   * fetched once at tour start and carries the intro rows keyed
+   * by area name (the same rows fetchIntroRows would return —
+   * the INTRO_ANGLES note at the top of this file), so the
+   * area-story path can ask without a network round trip on a
+   * hot serve path, and without consulting the welcome lane's
+   * seam during a nested-area deferral (SL-04's invariant). An
+   * empty index (backend unconfigured, fetch failed) answers
+   * no — the live area-story lane keeps its long-tail behavior.
+   */
+  private areaHasShelfIntro(name: string): boolean {
+    const written = backend.normalizePlaceKey(name);
+    const spoken = backend.placeKeyOf(name);
+    return this.libraryIndex.some(
+      e => (e.place_key === written || e.place_key === spoken) && INTRO_ANGLES.has(e.angle),
+    );
+  }
+
   private async serveAreaStory(): Promise<void> {
     if (!this.position) return;
     const name = this.area.neighborhood ?? this.area.city;
@@ -1742,6 +1781,56 @@ export class Tour {
     // in a second voice — the stacking the field drive reported.
     // Stand down; named places and the filler lane own the gap.
     if (name && this.orientationSpent.has(name.toLowerCase())) return;
+    // No generic area story for a shelf-intro area (Nov 2): the
+    // banked intro IS that area's overview, and the welcome path
+    // owns it in every heard state (first entry → greeting
+    // variant, re-entry → plain, cross-day → live alternate).
+    // The generic live area story duplicating it was the
+    // Clairemont field defect — two overviews of the same
+    // neighborhood back to back — and this path is not a back
+    // door around the welcome doctrine. Zero generation spend
+    // here for such areas; areas with NO intro row keep the
+    // live area story (the long-tail lane working as intended).
+    if (name && this.areaHasShelfIntro(name)) return;
+    // Banked orientation text (Nov 2): an area story discharged
+    // at dequeue by the orientation race was salvaged into the
+    // private buffer unheard (see onStorySettle); on a later
+    // pass whose slot is open again it serves from the bank
+    // instead of spending a second generation — the SL-06
+    // salvage contract, area lane. (For a shelf-intro area the
+    // stand-down above wins: the banked text simply never
+    // re-serves, which is correct — it should never have been
+    // generated.)
+    if (name) {
+      const banked = this.buffer.get(subject);
+      if (banked) {
+        this.buffer.delete(subject);
+        const item = this.makeItem({
+          kind: 'story',
+          label: `The story of ${name}`,
+          source: { kind: 'synth', text: banked.text },
+          durationSec: estimateSpeechDurationS(banked.text),
+          onSettle: rec => this.onStorySettle(item, rec),
+          story: {
+            subject,
+            storySource: 'buffered',
+            anchor: null,
+            regionAnchored: true,
+            generatedAt: banked.generatedAt,
+            text: banked.text,
+            fetchMs: banked.fetchMs ?? null,
+          },
+        });
+        this.inflight.add(subject);
+        const landed = this.player.offerStory(item, false);
+        if (landed === 'buffer') {
+          this.inflight.delete(subject);
+          item.silent = true;
+          this.player.abandon(item);
+        }
+        return;
+      }
+    }
     try {
       const pseudo: facts.Candidate = {
         name: name ?? 'the road from here',
@@ -2003,6 +2092,27 @@ export class Tour {
     // O15: an unheard WELCOME remains owed, on the 180 s cooldown.
     if (subject.startsWith('welcome:')) {
       this.welcomeOffered = false;
+      if (!rec.sounded && rec.dropReason === 'welcome-outrun') {
+        // Fit discharge (Nov 2): a live welcome turned away by
+        // the play-time fit gate (judgeStory 'welcome-outrun')
+        // is DISCHARGED, not re-armed — the driver has left the
+        // ground it was generated for, so the pass is spent: the
+        // area counts as welcomed, the owed record clears, and
+        // the settle returns before the generic unsounded branch
+        // can file a story_dropped or count a drop. A handed
+        // OPENING welcome discharges the same way (its play-time
+        // staleness is judged like any other live welcome): the
+        // tour opens without its first hello rather than
+        // sounding it a mile behind.
+        const name = subject.slice('welcome:'.length);
+        this.welcomed.add(name);
+        this.owedWelcome = null;
+        this.commitStamps.delete(item.id);
+        this.soundStamps.delete(item.id);
+        if (this.welcomeState === 'handed') this.welcomeState = 'none';
+        this.maybeOpenTour();
+        return;
+      }
       if (!rec.sounded) {
         const name = subject.slice('welcome:'.length);
         this.owedWelcome = {
@@ -2067,6 +2177,49 @@ export class Tour {
             signatureFact: item.signatureFact ?? null,
           });
         }
+      }
+      // Orientation discharge salvage (Nov 2): a live AREA story
+      // turned away at dequeue because its area's welcome spent
+      // the orientation slot (judgeStory 'orientation-spent')
+      // banks its text in the private buffer under the area
+      // subject, unheard — the same salvage contract as the
+      // judge-drop bank above, in the shape area items allow:
+      // they carry no anchor (region-anchored), so there is no
+      // drop-spot memo (the slot ledger, not geography, governs
+      // re-serving) and the banked candidate stands at the
+      // driver's settle-time position, the area's own ground.
+      // serveAreaStory voices the banked text on a later pass
+      // whose slot is open instead of regenerating. Never the
+      // shared cache.
+      if (
+        rec.dropReason === 'orientation-spent' &&
+        item.storySource === 'live' &&
+        item.text &&
+        this.position
+      ) {
+        this.buffer.set(subject, {
+          subject,
+          text: item.text,
+          generatedAt: item.generatedAt ?? this.clock.now(),
+          candidate: {
+            name: item.label.startsWith('The story of ')
+              ? item.label.slice('The story of '.length)
+              : item.label,
+            lat: this.position.lat,
+            lng: this.position.lng,
+            source: 'places',
+            types: ['area'],
+            rating: null,
+            userRatings: null,
+            address: null,
+            tier1: false,
+            score: 0,
+            registry: null,
+            distanceM: 0,
+          },
+          fetchMs: item.fetchMs ?? null,
+          signatureFact: item.signatureFact ?? null,
+        });
       }
       // Playback-failure rest (Nov 1 follow-on): an attempts-
       // exhausted drop is not a freshness judgment — the audio
@@ -2314,6 +2467,48 @@ export class Tour {
         return { ok: true };
       }
     }
+    const subject = item.subject ?? '';
+    // Live-welcome fit gate (Nov 2): welcomes are judge-exempt
+    // below (reserved) because a SHELF welcome is instant and
+    // anchored — but a LIVE welcome (a zero-row area, or the
+    // cross-day alternate) was generated for the ground the
+    // driver stood on when generation began, and a slow pipeline
+    // plus a fast driver strands it: the Bay Ho field case
+    // sounded 1,616 m past its subject at 21.6 m/s. The test is
+    // this judge's own reach geometry — the item's duration at
+    // the current speed is the ground a telling may span from
+    // its anchor (the same expression the reach test below
+    // applies to anchored stories, with the same duration
+    // floor). No parallel thresholds. Discharge semantics live
+    // in onStorySettle (silent: the pass is spent, no filing).
+    if (item.storySource === 'live' && subject.startsWith('welcome:') && item.anchor) {
+      const dist = calculateDistance(
+        this.position.lat,
+        this.position.lng,
+        item.anchor.lat,
+        item.anchor.lng,
+      );
+      if (dist > Math.max(item.durationSec, 5) * speed) {
+        return { ok: false, reason: 'welcome-outrun' };
+      }
+    }
+    // Orientation race discharge (Nov 2): a LIVE area story
+    // generated BEFORE its area's orientation slot was spent by
+    // a sounded welcome still reaches this judge queued behind
+    // it — the Clairemont field case (the area story was
+    // enqueued 146 s before the welcome served, then played
+    // anyway: the same overview twice). Serve-time checks
+    // cannot see this race; at dequeue the slot ledger is the
+    // truth. If the welcome spent this pass's slot, the area
+    // story stands down; its text is salvaged unheard in
+    // onStorySettle.
+    if (
+      item.storySource === 'live' &&
+      subject.startsWith('area:') &&
+      this.orientationSpent.has(subject.slice('area:'.length))
+    ) {
+      return { ok: false, reason: 'orientation-spent' };
+    }
     if (item.reserved) return { ok: true };
     const duration = Math.max(item.durationSec, 5);
     const ageS = (now - (item.generatedAt ?? now)) / 1000;
@@ -2458,6 +2653,47 @@ export class Tour {
     };
     if (this.welcomeState === 'handed') this.welcomeState = 'none';
     this.maybeOpenTour();
+  }
+
+  /**
+   * Welcome fit projection (Nov 2): the pre-generation half of
+   * the live-welcome fit gate. It runs generationWouldLand's
+   * exact tests — the Q10 age bound and the Q9 reach bound, on
+   * the same latency samples and the same duration floor — but
+   * composed for a SELF-anchored item: a welcome's anchor is the
+   * driver's position at the moment generation STARTS
+   * (generateWelcome anchors there), so the queue ahead of the
+   * serve delays the generation, not the anchor, and cannot
+   * strand the telling. What strands a live welcome before it
+   * exists is its own PIPELINE: the fetch + synth the driver
+   * outruns while the item is being made (the Bay Ho case:
+   * ~53 s of pipeline at 21.6 m/s). The wait AFTER generation
+   * (behind a playing story) is the play-time half's
+   * jurisdiction (judgeStory 'welcome-outrun'), where the
+   * anchor is real and the reach test measures true distance.
+   * Folding the queue in here would discharge every welcome
+   * owed behind two long stories at any speed — the deferral
+   * design (SL-01) exists precisely so that welcome still
+   * serves. No position yet → nothing to project against.
+   */
+  private welcomeWouldLand(): boolean {
+    if (!this.position) return true;
+    const pos = this.position;
+    const speed = Math.max(pos.speedMps, 0.5);
+    const durationEst = Math.max(
+      this.durationSamples.length ? this.median(this.durationSamples) : 0,
+      FIT_DURATION_FLOOR_S,
+    );
+    const fetchS = this.median(this.fetchSamples) / 1000;
+    const synthS = this.median(this.synthSamples) / 1000;
+    const pipelineS = fetchS + synthS;
+    // The age bound (Q10) at the projected start, as in
+    // generationWouldLand: age counts from text completion.
+    if (pipelineS - fetchS > durationEst * 1.5) return false;
+    const projected = this.projectAhead(pos, pipelineS);
+    const dist = calculateDistance(projected.lat, projected.lng, pos.lat, pos.lng);
+    if (dist > durationEst * speed) return false;
+    return true;
   }
 
   /**

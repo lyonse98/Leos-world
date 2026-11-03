@@ -31,7 +31,11 @@ function clsOf(src) {
 const okDur = src => ({ action: 'ok', durationMs: DUR[clsOf(src)] ?? 5000 });
 
 const LIB = ['Alpha Park', 'Beta Museum', 'Gamma Garden', 'Delta Pier', 'Epsilon Hall', 'Zeta Tower'];
-const DROP_VOCAB = new Set(['displaced-priority', 'displaced-fresher', 'stale-age', 'stale-behind', 'out-of-reach', 'stale_highway', 'attempts-exhausted', 'teardown']);
+// 'orientation-spent' (Nov 2): a live area story discharged at
+// dequeue because its area's welcome spent the orientation slot
+// first. 'welcome-outrun' is deliberately absent: a
+// fit-discharged live welcome files no story_dropped at all.
+const DROP_VOCAB = new Set(['displaced-priority', 'displaced-fresher', 'stale-age', 'stale-behind', 'out-of-reach', 'stale_highway', 'attempts-exhausted', 'teardown', 'orientation-spent']);
 
 async function runCell(Tour, extras, cell, runIdx) {
   resetLocalStorage();
