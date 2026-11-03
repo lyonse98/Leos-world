@@ -193,6 +193,36 @@ function PosterBackdrop() {
 }
 
 /**
+ * Legal links footer (Nov 2, 2026): Terms of Use + Privacy Policy,
+ * live at trymiles.app/terms and trymiles.app/privacy. Shown on the
+ * access gate and the pre-tour landing only — the in-tour screen
+ * stays face-only with nothing tappable beyond the transport bar.
+ */
+function LegalLinks() {
+  return (
+    <p className="pt-3 text-center text-xs text-inksoft/70">
+      <a
+        href="https://trymiles.app/terms"
+        target="_blank"
+        rel="noreferrer"
+        className="underline underline-offset-2"
+      >
+        Terms
+      </a>
+      {' · '}
+      <a
+        href="https://trymiles.app/privacy"
+        target="_blank"
+        rel="noreferrer"
+        className="underline underline-offset-2"
+      >
+        Privacy
+      </a>
+    </p>
+  );
+}
+
+/**
  * Tester access gate screen (Nov 2, 2026). Rendered INSTEAD of the
  * tour shell while locked: nothing in MilesApp — no Tour, no landing
  * warm, no position watch — mounts behind this screen, so a locked
@@ -255,6 +285,7 @@ function AccessGate({ onUnlock }: { onUnlock: () => void }) {
           Miles is an AI guide. Stories are drawn from public records and local history —
           and like any good storyteller, he may occasionally get a detail wrong.
         </p>
+        <LegalLinks />
       </main>
     </div>
   );
@@ -547,6 +578,7 @@ function MilesApp() {
             Miles is an AI guide. Stories are drawn from public records and local history —
             and like any good storyteller, he may occasionally get a detail wrong.
           </p>
+          <LegalLinks />
         </main>
       </div>
     );
