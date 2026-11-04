@@ -434,6 +434,265 @@ check('v2 bridges: elastic target follows the anchor gap', () => {
   assert.ok(nearBridge.durationSec < farBridge.durationSec, 'elastic bridges actually differ in length');
 });
 
+// ---- through-line (route differentiator 2, Nov 3, 2026): thread
+// detection, the rank nudge, the reserved climax, bridge contexts
+// (the first bridge is the spoken episode preview), the
+// "Previously on Miles" nod, and the closeout thread wrap ----
+const navy = (id, lat, extra = {}) => unit(id, lat, { topics: ['Navy Century'], ...extra });
+const noTopics = { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] };
+const composeDense = (units, input = noTopics, opts = {}) =>
+  rm.composeRoutePlan(units, densePath, denseDest, 'Dest', input, {
+    nowMs: NOW,
+    heardKeys: new Set(),
+    budgetSecOverride: 100000,
+    driveSec: 2000,
+    ...opts,
+  });
+
+check('thread: three members along the path sustain a thread', () => {
+  const plan = composeDense([navy('n1|landmark_origin', 32.72), navy('n2|landmark_origin', 32.76), navy('n3|landmark_origin', 32.82)]);
+  assert.equal(plan.thread?.topic, 'Navy Century');
+  assert.deepEqual([...plan.thread.memberIds].sort(), ['n1|landmark_origin', 'n2|landmark_origin', 'n3|landmark_origin']);
+  assert.equal(plan.thread.score, 3);
+});
+check('thread: two members do not reach the threshold', () => {
+  const plan = composeDense([navy('n1|landmark_origin', 32.72), navy('n2|landmark_origin', 32.76), unit('x|landmark_origin', 32.82)]);
+  assert.equal(plan.thread, null);
+  assert.equal(rm.detectRouteThread([navy('a|landmark_origin', 32.72), navy('b|landmark_origin', 32.76)], denseDest, []), null);
+});
+check('thread: a destination-area member counts double — the thread can end at the destination', () => {
+  const shore = navy('shore|landmark_origin', 32.75); // score 1
+  const gate = navy('gate|landmark_origin', 32.895); // ~550 m from the pin: score 2
+  const t = rm.detectRouteThread([shore, gate], denseDest, []);
+  assert.ok(t, 'weighted score 3 qualifies');
+  assert.equal(t.score, 3);
+  assert.equal(t.memberIds.length, 2);
+});
+check('thread: a user-chosen topic wins over a stronger unpicked thread', () => {
+  const units = [
+    unit('c1|landmark_origin', 32.72, { topics: ['Coast'] }),
+    unit('c2|landmark_origin', 32.76, { topics: ['Coast'] }),
+    unit('c3|landmark_origin', 32.8, { topics: ['Coast'] }),
+    unit('f1|landmark_origin', 32.73, { topics: ['Food & Drink'] }),
+    unit('f2|landmark_origin', 32.77, { topics: ['Food & Drink'] }),
+    unit('f3|landmark_origin', 32.81, { topics: ['Food & Drink'] }),
+    unit('f4|landmark_origin', 32.84, { topics: ['Food & Drink'] }),
+  ];
+  const plan = composeDense(units, { ...noTopics, topics: ['Coast', 'Food & Drink'] });
+  assert.equal(plan.thread?.topic, 'Coast', "the user's first qualifying pick wins");
+});
+check('thread: topics picked but none qualify → no forced theme', () => {
+  const units = [unit('c1|landmark_origin', 32.72, { topics: ['Coast'] }), unit('c2|landmark_origin', 32.76, { topics: ['Coast'] }), unit('c3|landmark_origin', 32.8, { topics: ['Coast'] })];
+  const forced = composeDense(units, { ...noTopics, topics: ['Sport'] });
+  assert.equal(forced.topicsMatched, false);
+  assert.equal(forced.thread, null, 'a qualifying unpicked thread is not substituted');
+  const free = composeDense(units);
+  assert.equal(free.thread?.topic, 'Coast', 'the same shelf threads freely when nothing was picked');
+});
+check('thread: membership nudges selection inside a bucket (landmark class does not outrank the thread)', () => {
+  // plain + member share one progress segment (same bucket, same
+  // anchor); maxStories leaves room for only one of them.
+  const threaded = composeDense(
+    [
+      unit('plain|landmark_origin', 32.721),
+      unit('member|corridor', 32.724, { topics: ['Navy Century'] }),
+      navy('m2|landmark_origin', 32.76),
+      navy('m3|landmark_origin', 32.82),
+    ],
+    noTopics,
+    { maxStories: 3 },
+  );
+  const threadedIds = storyItems(threaded).map(s => s.id);
+  assert.ok(threadedIds.includes('member|corridor'), 'the thread member wins its bucket');
+  assert.ok(!threadedIds.includes('plain|landmark_origin'), 'the non-member yields under the cap');
+  const control = composeDense(
+    [
+      unit('plain|landmark_origin', 32.721),
+      unit('member|corridor', 32.724),
+      unit('m2|landmark_origin', 32.76),
+      unit('m3|landmark_origin', 32.82),
+    ],
+    noTopics,
+    { maxStories: 3 },
+  );
+  assert.equal(control.thread, null);
+  const controlIds = storyItems(control).map(s => s.id);
+  assert.ok(controlIds.includes('plain|landmark_origin'), 'without a thread, angle class decides as in v2');
+  assert.ok(!controlIds.includes('member|corridor'));
+});
+check('climax: the destination flagship is reserved as the final story, anchored in the approach', () => {
+  const units = [
+    unit('m1|landmark_origin', 32.72),
+    unit('m2|landmark_origin', 32.78),
+    unit('hq|landmark_origin', 32.887, { durationSec: 300 }),
+    unit('annex|landmark_origin', 32.897),
+  ];
+  const plan = composeDense(units);
+  assert.equal(plan.climaxUnitId, 'hq|landmark_origin');
+  assert.equal(plan.climaxReserved, true);
+  assert.equal(plan.climaxReleased, false);
+  const stories = storyItems(plan);
+  const last = stories[stories.length - 1];
+  assert.equal(last.id, 'hq|landmark_origin', 'the flagship closes the plan, not the later-anchored annex');
+  assert.equal(last.climax, true);
+  assert.ok(last.anchorProgress >= 0.75, `flagship anchored in the final stretch (got ${last.anchorProgress})`);
+  assert.ok(last.releaseProgress >= 0.7, 'its window opens in the approach');
+  assert.ok(!stories.some(s => s.climax && s.id !== 'hq|landmark_origin'), 'exactly one climax');
+});
+check('climax: reservation released when the flagship is the only early coverage (coverage beats drama)', () => {
+  const loopPath = [
+    { lat: 32.7, lng: -117.25 },
+    { lat: 32.9, lng: -117.25 },
+    { lat: 32.78, lng: -117.2 },
+  ];
+  const loopDest = { lat: 32.9, lng: -117.25 };
+  const hq = unit('hq|landmark_origin', 32.895, { durationSec: 300 });
+  hq.lng = -117.25;
+  const late = unit('late|landmark_origin', 32.8, {});
+  late.lng = -117.2;
+  const released = rm.composeRoutePlan([hq, late], loopPath, loopDest, 'Dest', noTopics, {
+    nowMs: NOW,
+    heardKeys: new Set(),
+    budgetSecOverride: 100000,
+    driveSec: 2000,
+  });
+  assert.equal(released.climaxUnitId, 'hq|landmark_origin');
+  assert.equal(released.climaxReleased, true);
+  assert.equal(released.climaxReserved, false);
+  const stories = storyItems(released);
+  assert.equal(stories[stories.length - 1].id, 'late|landmark_origin', 'natural order kept — the flagship stays on its own early ground');
+  assert.ok(!stories.some(s => s.climax), 'no climax marking on a released reservation');
+  // Control: one more early story and the same geometry reserves.
+  const mid = unit('mid|landmark_origin', 32.78, {});
+  const held = rm.composeRoutePlan([hq, mid, late], loopPath, loopDest, 'Dest', noTopics, {
+    nowMs: NOW,
+    heardKeys: new Set(),
+    budgetSecOverride: 100000,
+    driveSec: 2000,
+  });
+  assert.equal(held.climaxReserved, true);
+  assert.equal(storyItems(held)[storyItems(held).length - 1].id, 'hq|landmark_origin');
+});
+check('no-thread parity: items, order and non-opening bridges are exactly composer v2', () => {
+  const units = [
+    unit('a|landmark_origin', 32.72),
+    unit('b|landmark_origin', 32.76, { topics: ['Coast'] }),
+    unit('c|landmark_origin', 32.8, { topics: ['Coast'] }),
+    unit('d|landmark_origin', 32.86),
+  ];
+  const plan = composeDense(units);
+  assert.equal(plan.thread, null, 'two Coast members are below the thread threshold');
+  const stories = storyItems(plan);
+  const anchors = stories.map(s => s.anchorProgress);
+  for (let i = 1; i < anchors.length; i++) assert.ok(anchors[i] >= anchors[i - 1], 'story order is progress order, as in v2');
+  const bridges = plan.items.filter(i => i.kind === 'bridge');
+  assert.ok(bridges.length >= 2, 'fixture carries several bridges');
+  bridges.forEach((b, idx) => {
+    const prev = units.find(u => u.id === b.prevUnitId);
+    const next = units.find(u => u.id === b.nextUnitId);
+    const baseline = rm.bridgeTextFor(prev, next, { targetSec: b.targetDurationSec });
+    if (idx === 0) {
+      // The opening bridge is the preview (Erik's addendum): its
+      // head is the v2 line; the preview sentences ride after it.
+      assert.ok(b.text.startsWith(baseline.split(' — ')[0]) || b.text.startsWith('From '), 'preview keeps the v2 pair head');
+      assert.ok(b.text.includes('stories between here and there'), 'no-thread preview states the story count');
+      assert.ok(b.text.includes('the last of them is'), 'no-thread preview names the closing story');
+    } else {
+      assert.equal(b.text, baseline, `bridge ${idx} is byte-identical to the context-free v2 bridge`);
+    }
+  });
+});
+check('preview (thread): the opening bridge names the thread, the destination, the closing story, and one mid-drive hook', () => {
+  const units = [
+    navy('n1|landmark_origin', 32.72),
+    navy('n2|landmark_origin', 32.78),
+    navy('n3|landmark_origin', 32.84),
+    navy('hq|landmark_origin', 32.887, { durationSec: 300 }),
+  ];
+  const plan = composeDense(units);
+  assert.equal(plan.thread?.topic, 'Navy Century');
+  const firstBridge = plan.items.find(i => i.kind === 'bridge');
+  assert.ok(firstBridge.text.includes('Navy Century'), 'preview names the thread');
+  assert.ok(firstBridge.text.includes('reach Dest'), 'preview names the destination');
+  assert.ok(firstBridge.text.includes('hq|landmark_origin'), 'preview teases the closing flagship by subject');
+  assert.ok(firstBridge.text.includes('halfway there'), 'preview hooks one mid-drive subject');
+  assert.ok(firstBridge.text.includes('n2|landmark_origin'), 'the hook is the mid-drive story');
+  const payoff = plan.items.filter(i => i.kind === 'bridge').find(b => b.nextUnitId === 'hq|landmark_origin');
+  assert.ok(payoff, 'a bridge leads into the flagship');
+  assert.ok(payoff.text.includes('I pointed at this one when we set out'), 'the bridge into the flagship pays off the preview promise');
+});
+check('bridge context: mid-bridge subjects come only from earlier in the plan; the opening preview is the one exception', () => {
+  const u1 = navy('u1|landmark_origin', 32.72);
+  const u2 = navy('u2|landmark_origin', 32.76);
+  const u3 = navy('u3|landmark_origin', 32.8);
+  const u4 = navy('u4|landmark_origin', 32.86);
+  const thread = { topic: 'Navy Century', memberIds: [u1.id, u2.id, u3.id, u4.id], score: 4 };
+  const base = {
+    prev: u2,
+    next: u3,
+    closing: u4,
+    mid: null,
+    storyCount: 4,
+    thread,
+    isClimaxBridge: false,
+    destinationName: 'Dest',
+    promiseMade: true,
+  };
+  const mid = rm.buildBridgeContext({ ...base, earlier: [u1, u2], isFirstBridge: false });
+  assert.equal(mid.role, 'mid');
+  assert.ok(mid.callbackSubject === u1.placeName || mid.callbackSubject === u2.placeName, 'callback is an earlier item');
+  assert.ok(!JSON.stringify(mid).includes(u4.placeName), 'a later item never appears in a mid-bridge context');
+  const opening = rm.buildBridgeContext({ ...base, earlier: [u1], prev: u1, next: u2, isFirstBridge: true });
+  assert.equal(opening.role, 'opening');
+  assert.equal(opening.closingSubject, u4.placeName, 'the preview names the closing story by design');
+  assert.equal(opening.storyCount, 4);
+  assert.equal(opening.previouslyHeardSubject, undefined, 'no nod without heard input');
+  const nod = rm.buildBridgeContext({ ...base, earlier: [u1], prev: u1, next: u2, isFirstBridge: true, previouslyHeardSubject: 'Old Fort' });
+  assert.equal(nod.previouslyHeardSubject, 'Old Fort', 'the nod appears only when the heard input carries it');
+});
+check('previously on Miles: the nod names a real heard subject on this ground — and only then', () => {
+  const heardOnRoute = unit('old|landmark_origin', 32.8);
+  const heardOffRoute = unit('far|landmark_origin', 32.8, { lng: -117.05 });
+  const fresh = [navy('n1|landmark_origin', 32.72), navy('n2|landmark_origin', 32.78), navy('n3|landmark_origin', 32.84)];
+  const withNod = composeDense([...fresh, heardOnRoute], noTopics, { heardKeys: new Set(['old|landmark_origin']) });
+  const firstBridge = withNod.items.find(i => i.kind === 'bridge');
+  assert.ok(firstBridge.text.includes('Last time we came this way'), 'the preview carries the continuity nod');
+  assert.ok(firstBridge.text.includes('old|landmark_origin'), 'the nod names the heard subject');
+  const noNod = composeDense([...fresh, heardOffRoute], noTopics, { heardKeys: new Set(['far|landmark_origin']) });
+  assert.ok(!noNod.items.some(i => i.text && i.text.includes('Last time we came this way')), 'a heard subject off this ground earns no nod');
+  const clean = composeDense(fresh);
+  assert.ok(!clean.items.some(i => i.text && i.text.includes('Last time we came this way')), 'no heard input, no nod — never invented');
+});
+check('previously on Miles: a destination-area heard subject is the nod when several qualify', () => {
+  const corridorHeard = unit('corridor-old|landmark_origin', 32.74);
+  const destHeard = unit('dest-old|landmark_origin', 32.89);
+  const fresh = [navy('n1|landmark_origin', 32.72), navy('n2|landmark_origin', 32.78), navy('n3|landmark_origin', 32.84)];
+  const plan = composeDense([...fresh, corridorHeard, destHeard], noTopics, {
+    heardKeys: new Set(['corridor-old|landmark_origin', 'dest-old|landmark_origin']),
+  });
+  const firstBridge = plan.items.find(i => i.kind === 'bridge');
+  assert.ok(firstBridge.text.includes('dest-old|landmark_origin'), 'the destination-area subject carries the nod');
+  assert.ok(!firstBridge.text.includes('corridor-old|landmark_origin'), 'exactly one nod subject');
+});
+check('closeout payoff: the thread wrap needs two played members and an arrival', () => {
+  const base = { planExhausted: true, unplayedPlanUnits: [], unheardShelfUnits: [] };
+  const wrapped = rm.decideCloseout({ ...base, arrived: true, thread: { topic: 'Navy Century', playedNames: ['Alpha', 'Beta'] } });
+  assert.ok(wrapped.threadLine && wrapped.threadLine.includes('Navy Century'), 'wrap names the thread');
+  assert.ok(wrapped.threadLine.includes('Alpha') && wrapped.threadLine.includes('Beta'), 'wrap runs first played to last played');
+  const collapsed = rm.decideCloseout({ ...base, arrived: true, thread: { topic: 'Navy Century', playedNames: ['Alpha'] } });
+  assert.equal(collapsed.threadLine, null, 'a thread that collapsed to one played member is not claimed');
+  const overrun = rm.decideCloseout({ ...base, arrived: false, thread: { topic: 'Navy Century', playedNames: ['Alpha', 'Beta'] } });
+  assert.equal(overrun.threadLine, null, 'no wrap on the overrun handoff');
+  const owed = rm.decideCloseout({ arrived: true, planExhausted: false, unplayedPlanUnits: [unit('z|landmark_origin', 32.88)], unheardShelfUnits: [], thread: { topic: 'Navy Century', playedNames: ['Alpha', 'Beta'] } });
+  assert.equal(owed.kind, 'arrival-owed');
+  assert.ok(owed.threadLine, 'the wrap rides an arrival-owed closeout too');
+  assert.equal(owed.teaseUnitId, 'z|landmark_origin', 'the owed tease proceeds as usual');
+});
+check('gist: first sentence, capped; no text, no gist', () => {
+  assert.equal(rm.storyGist(unit('g|landmark_origin', 32.7, { storyText: 'First sentence here. Second follows.' })), 'First sentence here.');
+  assert.equal(rm.storyGist(unit('g|landmark_origin', 32.7, { storyText: null })), null);
+});
+
 // ---- Monte Carlo invariants ----
 check('monte carlo: 200 random plans hold the invariants', () => {
   let seed = 12345;
@@ -703,6 +962,68 @@ await checkAsync('v2 runner: an outrun story drops stale and the closeout still 
   await until(() => runner.view().closeoutDone, 'arrival closeout completed');
   assert.equal(runner.view().endedKind, 'arrival-owed');
   assert.ok(runner.view().owed && runner.view().owed.includes('b|landmark_origin'), `owed tease names the dropped story (got: ${runner.view().owed})`);
+});
+
+// ---- through-line runner: the closeout wrap is earned by played members ----
+const threadPlan = () =>
+  rm.composeRoutePlan(
+    [navy('n1|landmark_origin', 32.71), navy('n2|landmark_origin', 32.78), navy('n3|landmark_origin', 32.87)],
+    densePath,
+    denseDest,
+    'Dest',
+    noTopics,
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 2000 },
+  );
+await checkAsync('thread runner: two played members → the arrival closeout wraps the thread', async () => {
+  const plan = threadPlan();
+  assert.equal(plan.thread?.topic, 'Navy Century', 'fixture plan is threaded');
+  const audio = new RealFakeAudio(300);
+  const synthTexts = [];
+  const heard = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => {
+      synthTexts.push(t);
+      return 'blob:audio/' + encodeURIComponent(t.slice(0, 16));
+    },
+    onStoryHeard: u => heard.push(u.id),
+    onEvent: () => {},
+  });
+  await runner.start(plan);
+  await until(() => heard.includes('n1|landmark_origin'), 'first thread member sounded');
+  runner.onPosition({ lat: 32.78, lng: -117.25 }); // inside n2's window
+  await until(() => heard.includes('n2|landmark_origin'), 'second thread member sounded');
+  runner.onPosition(denseDest); // arrival, n3 unplayed
+  await until(() => runner.view().closeoutDone, 'arrival closeout');
+  assert.equal(runner.view().endedKind, 'arrival-owed');
+  const closeoutText = synthTexts.find(t => t.includes("that's our stop"));
+  assert.ok(closeoutText, 'the closeout line was synthesized');
+  assert.ok(closeoutText.includes('thread of this drive'), 'the wrap rides the closeout synthesis');
+  assert.ok(closeoutText.includes('Navy Century'), 'the wrap names the thread');
+  runner.endTour();
+});
+await checkAsync('thread runner: a thread collapsed to one played member is never claimed at closeout', async () => {
+  const audio = new RealFakeAudio(300);
+  const synthTexts = [];
+  const heard = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => {
+      synthTexts.push(t);
+      return 'blob:audio/' + encodeURIComponent(t.slice(0, 16));
+    },
+    onStoryHeard: u => heard.push(u.id),
+    onEvent: () => {},
+  });
+  await runner.start(threadPlan());
+  await until(() => heard.includes('n1|landmark_origin'), 'first thread member sounded');
+  runner.onPosition(denseDest); // arrival with only n1 played — n2/n3 never sounded
+  await until(() => runner.view().closeoutDone, 'arrival closeout');
+  const closeoutText = synthTexts.find(t => t.includes("that's our stop"));
+  assert.ok(closeoutText, 'the closeout line was synthesized');
+  assert.ok(!closeoutText.includes('thread of this drive'), 'no wrap claimed for a collapsed thread');
+  assert.ok(runner.view().owed && runner.view().owed.includes('Miles owes you'), 'the owed tease proceeds as usual');
+  runner.endTour();
 });
 
 // ---- first-sound discipline (Nov 3, 2026): prime at the tap, honest state ----

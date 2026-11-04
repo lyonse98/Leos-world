@@ -300,6 +300,12 @@ export class RoutePlanRunner {
       items: this.rendered.length,
       portals: plan.items.filter(i => i.portal).length,
       budget_sec: plan.budgetSec,
+      // Through-line (differentiator 2): the thread the plan was
+      // composed around, and whether the destination flagship
+      // is being held for the approach (or had to be released).
+      thread: plan.thread ? { topic: plan.thread.topic, members: plan.thread.memberIds } : null,
+      climax_reserved: plan.climaxReserved ?? false,
+      climax_released: plan.climaxReleased ?? false,
     });
     this.maybeFeed();
     this.maybeExhaust();
@@ -542,11 +548,28 @@ export class RoutePlanRunner {
     const unplayed = plan.items
       .filter(it => it.kind === 'story' && it.unit && !this.playedStoryIds.has(it.unit.id))
       .map(it => it.unit as LibraryUnit);
+    // Through-line wrap (differentiator 2): the thread members
+    // that ACTUALLY sounded, in plan order. decideCloseout
+    // claims the thread only when at least two played — drops
+    // that collapsed the thread leave the closeout exactly as
+    // it was, owed tease included.
+    const threadPlayedNames = plan.thread
+      ? plan.items
+          .filter(
+            it =>
+              it.kind === 'story' &&
+              it.unit &&
+              plan.thread!.memberIds.includes(it.unit.id) &&
+              this.playedStoryIds.has(it.unit.id),
+          )
+          .map(it => (it.unit as LibraryUnit).placeName)
+      : [];
     const closeout = decideCloseout({
       arrived: kind !== 'overrun',
       planExhausted: kind !== 'arrival-owed',
       unplayedPlanUnits: unplayed,
       unheardShelfUnits: plan.shelfTease ? [plan.shelfTease] : [],
+      ...(plan.thread ? { thread: { topic: plan.thread.topic, playedNames: threadPlayedNames } } : {}),
     });
     // Drop everything still queued so the closeout line is next,
     // not after five unplayed stories. The items must LEAVE the
@@ -567,7 +590,11 @@ export class RoutePlanRunner {
     if (closeout) {
       this.owed = owedLine(closeout.teaseLabel);
       try {
-        const url = await this.deps.synthUrl(closeout.line);
+        // The thread wrap rides the same synthesis as the
+        // sign-off line — one closeout item, no extra live call.
+        const url = await this.deps.synthUrl(
+          closeout.threadLine ? `${closeout.line} ${closeout.threadLine}` : closeout.line,
+        );
         this.player.enqueuePromised({
           id: `route-close-${++runnerSeq}`,
           kind: 'greeting',

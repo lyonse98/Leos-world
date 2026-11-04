@@ -28,6 +28,20 @@
 // openers, and portal hops — tag-connected stories from off the
 // corridor, capped at a quarter of the plan. Still ONE static
 // pass: no reordering, no recomposition, dumb guards only.
+//
+// The through-line (route differentiator 2, Erik, Nov 3, 2026):
+// route mode should feel like ONE episode with a subject — dots
+// connected from beginning to end — not a queue of unrelated
+// stories. When the selectable shelf shares a topic thread the
+// route can sustain (see detectRouteThread), the composer leans
+// into it (a weighting nudge, never an override), reserves the
+// destination's flagship story for the approach, and gives the
+// bridges real connective context: the opening bridge names the
+// thread and promises the closing story, mid bridges may call
+// back an earlier story on the same thread, the bridge into the
+// flagship pays the promise off, and the arrival closeout wraps
+// the thread — but only when it actually played. No thread →
+// composition is exactly composer v2, bridges included.
 
 export type TourMode = 'passenger' | 'driving';
 
@@ -516,6 +530,8 @@ export interface PlanItem {
    */
   releaseProgress?: number;
   expireProgress?: number;
+  /** The reserved destination flagship (differentiator 2): the plan's closing story. */
+  climax?: boolean;
   /** Portal hop (item 4): an off-corridor story tied by topic to a chosen story. */
   portal?: boolean;
   /** For a portal item: the chosen story unit id it hangs off. */
@@ -541,11 +557,97 @@ export interface RoutePlan {
   topicsMatched: boolean;
   toneMatched: boolean;
   /**
+   * Through-line (differentiator 2): the route's thematic
+   * thread when the shelf sustains one, else null — and with a
+   * null thread the plan is exactly what composer v2 built.
+   */
+  thread: RouteThread | null;
+  /** The destination flagship unit id, when the plan has one. */
+  climaxUnitId: string | null;
+  /** True when the flagship is held for the approach as the final story. */
+  climaxReserved: boolean;
+  /** True when a flagship existed but coverage released the reservation. */
+  climaxReleased: boolean;
+  /**
    * Optional shelf tease for the arrival-signoff closeout, set by
    * the App after composing (an unheard, unplanned shelf unit).
    * The pure composer cannot know the shelf beyond its inputs.
    */
   shelfTease?: LibraryUnit | null;
+}
+
+// ------------------------------------------------------------ through-line (differentiator 2)
+
+export interface RouteThread {
+  /** The shared topic tag (routeTags vocabulary, e.g. 'Navy Century'). */
+  topic: string;
+  /** Unit ids of the selectable units carrying the topic — the thread's cast. */
+  memberIds: string[];
+  /** Members count once each, destination-area members twice (they let the thread END at the destination). */
+  score: number;
+}
+
+/** A thread must be sustainable: a weighted score of at least 3. */
+export const THREAD_MIN_SCORE = 3;
+/** The final stretch of the drive: a reserved flagship is anchored at or beyond this progress. */
+export const CLIMAX_STRETCH_START = 0.75;
+/** Destination-area radius — the same 1.5 km the corridor test grants the destination pin. */
+export const DESTINATION_AREA_M = 1500;
+
+export function isDestinationArea(u: LibraryUnit, destination: GeoPoint): boolean {
+  return haversineM({ lat: u.lat, lng: u.lng }, destination) <= DESTINATION_AREA_M;
+}
+
+/**
+ * Thread detection (offline, pure): from the units the composer
+ * can choose among, find a topic thread the route can sustain —
+ * a topic whose weighted score reaches THREAD_MIN_SCORE, with
+ * destination-area members counting double so the thread can
+ * end at the destination. At least two distinct member units:
+ * a lone unit, however weighted, is not a thread.
+ *
+ * Preference: a user-chosen topic that qualifies wins (in the
+ * user's own order). When the user picked topics but NONE of
+ * theirs qualifies, there is no thread — no theme is ever
+ * forced over the listener's own picks. With no user topics,
+ * the strongest thread wins (score, then cast size, then topic
+ * name for determinism). The caller passes the composer's
+ * pool, so a thread can only ever be found among units the
+ * composer may actually select.
+ */
+export function detectRouteThread(
+  candidates: LibraryUnit[],
+  destination: GeoPoint,
+  userTopics: string[],
+): RouteThread | null {
+  const byTopic = new Map<string, { members: LibraryUnit[]; score: number }>();
+  for (const u of candidates) {
+    const weight = isDestinationArea(u, destination) ? 2 : 1;
+    for (const t of u.topics) {
+      const entry = byTopic.get(t) ?? { members: [], score: 0 };
+      entry.members.push(u);
+      entry.score += weight;
+      byTopic.set(t, entry);
+    }
+  }
+  const qualifying = [...byTopic.entries()]
+    .filter(([, e]) => e.score >= THREAD_MIN_SCORE && e.members.length >= 2)
+    .map(([topic, e]) => ({ topic, memberIds: e.members.map(u => u.id), score: e.score }))
+    // Topics were picked and none of them qualify → no forced theme.
+    .filter(t => userTopics.length === 0 || userTopics.includes(t.topic));
+  if (qualifying.length === 0) return null;
+  const userRank = (topic: string): number => {
+    const i = userTopics.indexOf(topic);
+    return i === -1 ? Number.POSITIVE_INFINITY : i;
+  };
+  qualifying.sort(
+    (a, b) =>
+      userRank(a.topic) - userRank(b.topic) ||
+      b.score - a.score ||
+      b.memberIds.length - a.memberIds.length ||
+      (a.topic < b.topic ? -1 : a.topic > b.topic ? 1 : 0),
+  );
+  return qualifying[0];
 }
 
 export interface ComposeOptions {
@@ -606,6 +708,19 @@ export interface ComposeOptions {
  *  7. the pre-rendered reaction bank, sparingly: at most one
  *     reaction per three stories, at planned points only; a
  *     hosted filler still spackles a sub-60 s remainder.
+ * Through-line (differentiator 2) layers onto the same pass,
+ * never against it: thread detection on the pool (a rank nudge
+ * beside tone in byRank — heard exclusion, budget tiling,
+ * anchored windows and the portal/opener caps are untouched),
+ * the destination flagship reserved as the closing story
+ * (released when it is the early drive's only coverage), and
+ * bridge contexts carrying the thread + real plan facts into
+ * the elastic bridge text — the first bridge doubling as the
+ * spoken episode preview, with a continuity nod only when the
+ * heard ledger holds a subject on this route's ground. With
+ * no thread, the plan's items, order and windows are exactly
+ * composer v2's; only the opening bridge's text differs (the
+ * preview is its job in every plan).
  * The plan is a value, not a promise: nothing here touches the
  * network, so the harness can prove every invariant offline.
  */
@@ -638,6 +753,12 @@ export function composeRoutePlan(
   const geoAll: LibraryUnit[] = [];
   const openerAll: LibraryUnit[] = [];
   const portalAll: LibraryUnit[] = [];
+  // Heard STORY units on this route's own ground (corridor or
+  // destination area), collected at partition for the opening
+  // preview's "Previously on Miles" nod (Erik, Nov 3, 2026):
+  // real heard-ledger subjects only — a unit lands here solely
+  // because its id is in the caller's heard set.
+  const priorHeard: LibraryUnit[] = [];
   for (const u of units) {
     // The route composer's own partition (freeform never reads
     // this): the greet variant is a welcome, not a chapter head,
@@ -647,6 +768,7 @@ export function composeRoutePlan(
     if (u.angle === 'neighborhood_intro_greet' || u.angle === 'filler' || u.angle === 'filler_hosted') continue;
     if (opts.heardKeys.has(u.id)) {
       skippedHeard += 1;
+      if (u.angle !== 'neighborhood_intro' && inCorridor(u)) priorHeard.push(u);
       continue;
     }
     if (u.angle === 'neighborhood_intro') {
@@ -661,6 +783,14 @@ export function composeRoutePlan(
   const topicMatches = topicSet.size > 0 ? geoAll.filter(u => u.topics.some(t => topicSet.has(t))) : [];
   const pool = topicMatches.length > 0 ? topicMatches : geoAll;
   const topicsMatched = topicMatches.length > 0;
+
+  // Through-line (differentiator 2): detect the thread on the
+  // selectable pool, before selection — its only powers are a
+  // rank nudge below and the bridge context at item build time.
+  // It never touches heard exclusion, the budget, the windows,
+  // or the caps.
+  const thread = detectRouteThread(pool, destination, input.topics);
+  const threadMemberIds = new Set(thread?.memberIds ?? []);
 
   // Budget: the caller-supplied drive-time budget (budgetSecFor)
   // wins whenever present — since Nov 3, 2026 it is the ONLY
@@ -683,8 +813,12 @@ export function composeRoutePlan(
   // → progress.
   const toneRank = (u: LibraryUnit): number =>
     input.tone && (u.tone === input.tone || u.toneSecondary === input.tone) ? 0 : 1;
+  const threadRank = (u: LibraryUnit): number => (threadMemberIds.has(u.id) ? 0 : 1);
   const byRank = (a: LibraryUnit, b: LibraryUnit): number =>
-    toneRank(a) - toneRank(b) || angleClassRank(a.angle) - angleClassRank(b.angle) || prog(a) - prog(b);
+    toneRank(a) - toneRank(b) ||
+    threadRank(a) - threadRank(b) ||
+    angleClassRank(a.angle) - angleClassRank(b.angle) ||
+    prog(a) - prog(b);
 
   // Fair selection: round-robin across progress deciles. An
   // overshoot-skipped candidate yields to its bucket's next fit.
@@ -731,6 +865,50 @@ export function composeRoutePlan(
   const toneMatched =
     input.tone !== null && chosen.some(u => u.tone === input.tone || u.toneSecondary === input.tone);
 
+  // Destination climax (differentiator 2): the destination's
+  // flagship — landmark class first, then the composer's rank
+  // weight (tone, thread), then the longest telling — is the
+  // plan's closing story. When the reservation holds, the
+  // flagship moves to the end of the chosen order and its
+  // window is re-anchored into the final stretch (its ground is
+  // destination-area by definition, so sounding it on the
+  // approach is geographically honest). The reservation is
+  // RELEASED when the flagship is the drive's only coverage of
+  // the ground before the final stretch — coverage beats drama,
+  // the Coverage Guarantee's values in code — and when the plan
+  // holds a single story there is nothing to reserve against.
+  let climaxUnitId: string | null = null;
+  let climaxReserved = false;
+  let climaxReleased = false;
+  let climaxAnchor: number | null = null;
+  const destChosen = chosen.filter(u => isDestinationArea(u, destination));
+  if (destChosen.length > 0) {
+    const flagship = [...destChosen].sort(
+      (a, b) =>
+        angleClassRank(a.angle) - angleClassRank(b.angle) ||
+        toneRank(a) - toneRank(b) ||
+        threadRank(a) - threadRank(b) ||
+        b.durationSec - a.durationSec ||
+        prog(b) - prog(a),
+    )[0];
+    climaxUnitId = flagship.id;
+    const soleEarlyCoverage =
+      prog(flagship) < CLIMAX_STRETCH_START &&
+      !chosen.some(u => u.id !== flagship.id && prog(u) < CLIMAX_STRETCH_START);
+    if (chosen.length >= 2 && !soleEarlyCoverage) {
+      climaxReserved = true;
+      const at = chosen.findIndex(u => u.id === flagship.id);
+      chosen.splice(at, 1);
+      chosen.push(flagship);
+      climaxAnchor = Math.max(
+        prog(flagship),
+        Math.min(0.98, Math.max(CLIMAX_STRETCH_START, 1 - flagship.durationSec / driveDur)),
+      );
+    } else if (chosen.length >= 2) {
+      climaxReleased = true;
+    }
+  }
+
   // The playback sequence: chosen stories, then chapter openers,
   // then portal hops spliced after their parents.
   interface SeqEntry {
@@ -753,6 +931,12 @@ export function composeRoutePlan(
     if (Number.isFinite(budgetSec) && total + op.durationSec > budgetSec * 1.5) continue;
     let at = sequence.findIndex(s => prog(s.unit) >= prog(op) - 1e-9);
     if (at === -1) at = sequence.length;
+    // A chapter opener never lands after a reserved climax —
+    // nothing heads a chapter beyond the closing story.
+    if (climaxReserved && climaxUnitId) {
+      const flagshipAt = sequence.findIndex(s => s.unit.id === climaxUnitId);
+      if (flagshipAt >= 0 && at > flagshipAt) at = flagshipAt;
+    }
     sequence.splice(at, 0, { unit: op, opener: true });
     total += op.durationSec;
     openersUsed += 1;
@@ -775,6 +959,9 @@ export function composeRoutePlan(
     for (const cand of portalAll) {
       let best: PortalScore | null = null;
       for (const g of chosen) {
+        // A reserved climax never parents a portal: the hop
+        // would sound after the closing story.
+        if (climaxReserved && g.id === climaxUnitId) continue;
         const sharedTopics = cand.topics.filter(t => g.topics.includes(t));
         if (sharedTopics.length === 0) continue;
         const entry: PortalScore = {
@@ -839,6 +1026,46 @@ export function composeRoutePlan(
   // and stamp each story with its release window.
   const items: PlanItem[] = [];
   let storiesSinceReaction = 0;
+  // Through-line bridge bookkeeping: the plan's closing story
+  // (the reserved flagship when there is one, else the last
+  // non-filler entry) is what the opening bridge promises, and
+  // the payoff line may only claim a promise that was actually
+  // composed — tracked here, as the bridges are built in order.
+  const closingEntry = [...sequence].reverse().find(e => e.unit.angle !== 'filler_hosted');
+  let firstBridgeSeen = false;
+  let promiseMade = false;
+  // The opening bridge is the spoken episode preview (Erik,
+  // Nov 3, 2026): it draws the listener in with the destination,
+  // the closing story, and ONE mid-drive subject to listen for.
+  // The mid hook is a real story entry strictly between the
+  // departure story and the closing story, nearest the drive's
+  // midpoint (a thread member wins a near tie — the middle
+  // chapter is best on-theme).
+  const storyEntries = sequence.filter(e => e.unit.angle !== 'filler_hosted');
+  const midEntry =
+    storyEntries.length > 2
+      ? storyEntries
+          .slice(1)
+          .filter(e => e !== closingEntry)
+          .sort(
+            (a, b) =>
+              Math.abs(prog(a.unit) - 0.5) - Math.abs(prog(b.unit) - 0.5) ||
+              threadRank(a.unit) - threadRank(b.unit) ||
+              prog(a.unit) - prog(b.unit),
+          )[0]
+      : undefined;
+  // "Previously on Miles": ONE previously-heard subject from
+  // this route's own ground — destination-area subjects first
+  // (the strongest "we came this way" signal), then earliest
+  // along the drive. Null when the ledger holds nothing here:
+  // the nod is never invented.
+  const priorHeardSubject =
+    [...priorHeard].sort(
+      (a, b) =>
+        Number(isDestinationArea(b, destination)) - Number(isDestinationArea(a, destination)) ||
+        prog(a) - prog(b) ||
+        (a.id < b.id ? -1 : 1),
+    )[0]?.placeName ?? null;
   sequence.forEach((entry, i) => {
     const u = entry.unit;
     // Bridges join story → story only: a filler spackle gets no
@@ -853,9 +1080,32 @@ export function composeRoutePlan(
         BRIDGE_MIN_SEC,
         Math.min(BRIDGE_MAX_SEC, Math.round(gapSec - WINDOW_LEAD_SEC)),
       );
+      // Portal bridges keep their authored connection line and
+      // take no thread context; every other bridge in a threaded
+      // plan gets real connective context (thread, the pair, and
+      // — for callbacks — only items earlier in THIS plan).
+      const context = entry.portal
+        ? undefined
+        : buildBridgeContext({
+            earlier: sequence.slice(0, i).map(e => e.unit),
+            prev,
+            next: u,
+            closing: closingEntry?.unit ?? null,
+            mid: midEntry?.unit ?? null,
+            storyCount: storyEntries.length,
+            previouslyHeardSubject: priorHeardSubject,
+            thread,
+            isFirstBridge: !firstBridgeSeen,
+            isClimaxBridge: climaxUnitId !== null && u.id === climaxUnitId,
+            destinationName,
+            promiseMade,
+          });
+      if (context?.role === 'opening' && context.closingSubject) promiseMade = true;
+      firstBridgeSeen = true;
       const text = bridgeTextFor(prev, u, {
         targetSec: target,
         portalTopic: entry.portal ? entry.sharedTopic : undefined,
+        context,
       });
       items.push({
         kind: 'bridge',
@@ -870,7 +1120,9 @@ export function composeRoutePlan(
       });
     }
     const isFiller = u.angle === 'filler_hosted';
-    const win = !isFiller && !entry.portal ? storyWindow(prog(u), u.durationSec, driveDur) : null;
+    const isClimax = climaxReserved && climaxUnitId !== null && u.id === climaxUnitId;
+    const anchor = isClimax && climaxAnchor !== null ? climaxAnchor : prog(u);
+    const win = !isFiller && !entry.portal ? storyWindow(anchor, u.durationSec, driveDur) : null;
     items.push({
       kind: isFiller ? 'filler' : 'story',
       id: u.id,
@@ -878,8 +1130,9 @@ export function composeRoutePlan(
       durationSec: u.durationSec,
       unit: u,
       ready: true,
-      anchorProgress: prog(u),
+      anchorProgress: anchor,
       ...(win ? { releaseProgress: win.release, expireProgress: win.expire } : {}),
+      ...(isClimax ? { climax: true } : {}),
       ...(entry.portal ? { portal: true, portalParentId: entry.portalParentId } : {}),
       ...(entry.opener ? { opener: true } : {}),
     });
@@ -910,6 +1163,10 @@ export function composeRoutePlan(
     skippedHeard,
     topicsMatched,
     toneMatched,
+    thread,
+    climaxUnitId,
+    climaxReserved,
+    climaxReleased,
   };
 }
 
@@ -941,6 +1198,123 @@ export const BRIDGE_CONNECTIVE_LINES: string[] = [
   'This is Miles, riding shotgun — pointing at the things the road forgets to mention.',
 ];
 
+/** One-line gist of a story: its first sentence, capped. Null when the unit carries no text. */
+export function storyGist(unit: LibraryUnit): string | null {
+  const text = unit.storyText?.trim();
+  if (!text) return null;
+  const m = text.match(/^[^.!?]+[.!?]/);
+  const gist = (m ? m[0] : text).trim();
+  if (!gist) return null;
+  return gist.length > 160 ? `${gist.slice(0, 157).trimEnd()}…` : gist;
+}
+
+/**
+ * The real context a bridge is composed with (differentiator
+ * 2): the thread (when the plan has one), the previous story's
+ * subject + one-line gist, the next story's subject. Subjects
+ * from later in the plan appear in exactly one place — the
+ * OPENING bridge, the spoken episode preview (Erik, Nov 3,
+ * 2026): it names the destination, the closing story, and one
+ * mid-drive subject, because drawing the listener in IS its
+ * job. A mid bridge's callback subject is always an item
+ * EARLIER in this same plan. The preview's continuity nod
+ * names a previously-heard subject only when the caller's
+ * heard input actually contains one from this route's ground —
+ * it is never invented.
+ */
+export interface BridgeContext {
+  threadTopic: string | null;
+  prevSubject: string;
+  prevGist: string | null;
+  nextSubject: string;
+  role: 'opening' | 'mid' | 'payoff';
+  /** Opening role only: the closing story the preview promises. */
+  closingSubject?: string;
+  /** Opening role only: where the drive ends. */
+  destinationName?: string;
+  /** Opening role only: how many stories the plan carries. */
+  storyCount?: number;
+  /** Opening role only: one mid-drive subject to listen for (thread plans). */
+  midSubject?: string;
+  /** Opening role only: the mid subject's own first line, when short enough to hook with. */
+  midGist?: string;
+  /** Opening role only: a real previously-heard subject on this route's ground, when the ledger has one. */
+  previouslyHeardSubject?: string;
+  /** Mid role only: an earlier plan item this bridge may call back. */
+  callbackSubject?: string;
+  /** Payoff role only: whether the opening promise was actually composed earlier in this plan. */
+  promiseMade?: boolean;
+}
+
+export function buildBridgeContext(args: {
+  /** Every plan entry before the next story, in plan order (prev is the last of these). */
+  earlier: LibraryUnit[];
+  prev: LibraryUnit;
+  next: LibraryUnit;
+  /** The plan's closing story unit (the reserved flagship when there is one). */
+  closing: LibraryUnit | null;
+  /** The plan's mid-drive hook subject (a real story entry between departure and closing). */
+  mid: LibraryUnit | null;
+  /** How many stories the plan carries. */
+  storyCount: number;
+  /** A previously-heard subject on this route's ground, drawn from the caller's heard input only. */
+  previouslyHeardSubject?: string | null;
+  thread: RouteThread | null;
+  isFirstBridge: boolean;
+  isClimaxBridge: boolean;
+  destinationName: string;
+  promiseMade: boolean;
+}): BridgeContext {
+  const {
+    earlier,
+    prev,
+    next,
+    closing,
+    mid,
+    storyCount,
+    previouslyHeardSubject,
+    thread,
+    isFirstBridge,
+    isClimaxBridge,
+    destinationName,
+    promiseMade,
+  } = args;
+  // The first bridge is always the preview — even when it is
+  // also the bridge into the flagship (a two-story plan has
+  // only the one bridge, and it has to do the drawing-in).
+  const role: BridgeContext['role'] = isFirstBridge ? 'opening' : thread && isClimaxBridge ? 'payoff' : 'mid';
+  const ctx: BridgeContext = {
+    threadTopic: thread?.topic ?? null,
+    prevSubject: prev.placeName,
+    prevGist: storyGist(prev),
+    nextSubject: next.placeName,
+    role,
+  };
+  if (role === 'opening') {
+    ctx.destinationName = destinationName;
+    ctx.storyCount = storyCount;
+    if (closing) ctx.closingSubject = closing.placeName;
+    if (thread && mid && mid.placeName !== ctx.closingSubject) {
+      ctx.midSubject = mid.placeName;
+      const gist = storyGist(mid);
+      if (gist && gist.length <= 110) ctx.midGist = gist;
+    }
+    if (previouslyHeardSubject) ctx.previouslyHeardSubject = previouslyHeardSubject;
+  }
+  if (!thread) return ctx;
+  if (role === 'payoff') ctx.promiseMade = promiseMade;
+  if (role === 'mid') {
+    // Callbacks reference ONLY items actually earlier in this
+    // plan (the most recent first), and the connection must be
+    // real: the thread topic, or a topic shared with what's next.
+    const nextTopics = new Set(next.topics);
+    const shares = (u: LibraryUnit) => u.topics.includes(thread.topic) || u.topics.some(t => nextTopics.has(t));
+    const cb = [...earlier].reverse().find(u => u.id !== next.id && shares(u));
+    if (cb) ctx.callbackSubject = cb.placeName;
+  }
+  return ctx;
+}
+
 /**
  * Pair-specific bridge text, composed at plan time, Miles-solo.
  * Elastic (item 2): given a target, connective sentences are
@@ -950,16 +1324,55 @@ export const BRIDGE_CONNECTIVE_LINES: string[] = [
  * composes TOWARD its target; the authored bank tops out around
  * a minute, and longer anchor gaps are window-wait, by design).
  * A portal hop's bridge names the connection that earned the hop.
+ * Through-line (differentiator 2): the opening bridge is the
+ * spoken episode preview — it draws the listener in with the
+ * thread (when the plan has one), the destination, the closing
+ * story, and a mid-drive hook; a mid bridge may call back an
+ * earlier story on the thread; and the bridge into the flagship
+ * pays the preview's promise off. The authored lines are built
+ * only from the context's real plan facts, and elastic fill
+ * composes around them. Without a context, the text is exactly
+ * the composer-v2 bridge.
  */
 export function bridgeTextFor(
   prev: LibraryUnit,
   next: LibraryUnit,
-  opts: { targetSec?: number; portalTopic?: string } = {},
+  opts: { targetSec?: number; portalTopic?: string; context?: BridgeContext } = {},
 ): string {
   const target = opts.targetSec ?? BRIDGE_MIN_SEC;
   let text = opts.portalTopic
     ? `From ${prev.placeName}, there is a thread worth following — ${opts.portalTopic} ties it to ${next.placeName}, a little way off our road, and the connection is too good to skip.`
     : `From ${prev.placeName} we keep rolling — just ahead is ${next.placeName}, and it has its own story to tell.`;
+  const ctx = opts.context;
+  if (ctx && !opts.portalTopic) {
+    if (ctx.role === 'opening') {
+      // The spoken episode preview (Erik, Nov 3, 2026): this
+      // bridge's job is to draw the listener in. With a thread,
+      // it names the thread, the destination, the closing story
+      // it promises, and one mid-drive subject to listen for;
+      // without one, the destination, how many stories are
+      // coming, and the closing story. A continuity nod rides
+      // when the context carries a real previously-heard
+      // subject — and only then.
+      if (ctx.threadTopic && ctx.closingSubject) {
+        text += ` Here's the thread to listen for on this drive: ${ctx.threadTopic}. It runs under this whole road — and by the time we reach ${ctx.destinationName ?? 'the end'}, I'll tell you about ${ctx.closingSubject}, where it all comes together.`;
+        if (ctx.midSubject) {
+          text += ` And halfway there, ${ctx.midSubject} is waiting${ctx.midGist ? ` — ${ctx.midGist.replace(/\.$/, '')}` : ''}.`;
+        }
+      } else if (ctx.closingSubject) {
+        text += ` We're headed to ${ctx.destinationName ?? 'the end'} — ${ctx.storyCount ?? 0} stories between here and there, and the last of them is ${ctx.closingSubject}.`;
+      }
+      if (ctx.previouslyHeardSubject) {
+        text += ` Last time we came this way, you heard about ${ctx.previouslyHeardSubject} — today, new ground.`;
+      }
+    } else if (ctx.threadTopic && ctx.role === 'payoff') {
+      text += ctx.promiseMade
+        ? ` And here it is — ${ctx.nextSubject}. I pointed at this one when we set out: this drive's ${ctx.threadTopic} thread lands here.`
+        : ` And here it is — ${ctx.nextSubject}, where this drive's ${ctx.threadTopic} thread comes together.`;
+    } else if (ctx.threadTopic && ctx.role === 'mid' && ctx.callbackSubject) {
+      text += ` There's that ${ctx.threadTopic} thread again — ${ctx.callbackSubject} and ${ctx.nextSubject} are two ends of the same story.`;
+    }
+  }
   if (spokenSec(text) < target) {
     let seed = 0;
     const key = `${prev.id}>${next.id}`;
@@ -1031,6 +1444,14 @@ export interface Closeout {
   teaseLabel: string | null;
   /** Overrun only: the freeform engine resumes the tail. */
   freeformTail: boolean;
+  /**
+   * Through-line wrap (differentiator 2): on ARRIVAL only, and
+   * only when at least two thread members actually played — a
+   * line naming the thread and the played members it ran
+   * through, first to last. A thread that collapsed through
+   * drops is never claimed; the owed tease proceeds as usual.
+   */
+  threadLine: string | null;
 }
 
 /**
@@ -1051,8 +1472,19 @@ export function decideCloseout(args: {
   planExhausted: boolean;
   unplayedPlanUnits: LibraryUnit[];
   unheardShelfUnits: LibraryUnit[];
+  /**
+   * The plan's thread + the thread members that ACTUALLY
+   * played, in plan order (differentiator 2). The wrap line is
+   * composed from these facts only.
+   */
+  thread?: { topic: string; playedNames: string[] } | null;
 }): Closeout | null {
   const { arrived, planExhausted, unplayedPlanUnits, unheardShelfUnits } = args;
+  const playedNames = args.thread?.playedNames ?? [];
+  const threadLine =
+    arrived && args.thread && playedNames.length >= 2
+      ? `And that was the thread of this drive — ${args.thread.topic}, from ${playedNames[0]} all the way to ${playedNames[playedNames.length - 1]}.`
+      : null;
   if (arrived && !planExhausted) {
     const tease = unplayedPlanUnits[0] ?? null;
     return {
@@ -1061,6 +1493,7 @@ export function decideCloseout(args: {
       teaseUnitId: tease ? tease.id : null,
       teaseLabel: tease ? tease.placeName : null,
       freeformTail: false,
+      threadLine,
     };
   }
   if (arrived && planExhausted) {
@@ -1071,6 +1504,7 @@ export function decideCloseout(args: {
       teaseUnitId: tease ? tease.id : null,
       teaseLabel: tease ? tease.placeName : null,
       freeformTail: false,
+      threadLine,
     };
   }
   if (!arrived && planExhausted) {
@@ -1080,6 +1514,7 @@ export function decideCloseout(args: {
       teaseUnitId: null,
       teaseLabel: null,
       freeformTail: true,
+      threadLine: null,
     };
   }
   return null;
