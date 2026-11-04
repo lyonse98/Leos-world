@@ -386,6 +386,19 @@ export interface LibraryUnit {
   /** Bucket audio path, when the row carries one (library rows do). */
   audioPath: string | null;
   storyText: string | null;
+  /**
+   * Woven eligibility (Nov 4, 2026 — seated members): the
+   * story's presence register lets it be heard OFF its ground
+   * as a through-line member (the presence audit's weave-safe
+   * + mixed classes, Protected register excluded). Baked in by
+   * the caller from the bundled presence data (src/data/
+   * routePresence, keyed place_key|angle exactly like the
+   * route tags), the same way topics/tone ride in. Absent =
+   * not eligible: geo tiling never reads this field, and a
+   * unit without it can never seat as a woven member or lend
+   * the thread its support.
+   */
+  wovenEligible?: boolean;
 }
 
 /** Spoken English ≈ 150 wpm; a shelf story's duration estimate. */
@@ -865,6 +878,13 @@ export interface PlanItem {
   portal?: boolean;
   /** For a portal item: the chosen story unit id it hangs off. */
   portalParentId?: string;
+  /**
+   * Woven member (Nov 4, 2026): an off-route, woven-eligible
+   * story seated into a silent gap as a member of the plan's
+   * through-line (seatWovenMembers). Windowless like a portal
+   * — it releases by plan order — and never the climax.
+   */
+  woven?: boolean;
   /** Bridges: the elastic target the text was composed toward, seconds. */
   targetDurationSec?: number;
 }
@@ -949,6 +969,17 @@ export interface RoutePlan {
    */
   corridorRetiredStretches: number | null;
   /**
+   * Woven members seated into this plan (Nov 4, 2026):
+   * seatWovenMembers' record — how many off-route thread
+   * members the plan carries, the thread topic they were
+   * seated under, and their unit ids. The composer seats
+   * none, so a composed plan carries the empty record; the
+   * runner files it in the route_plan_started decisions
+   * record. Always present (never null) so telemetry has one
+   * shape.
+   */
+  wovenMembers: WovenMembers;
+  /**
    * Optional shelf tease for the arrival-signoff closeout, set by
    * the App after composing (an unheard, unplanned shelf unit).
    * The pure composer cannot know the shelf beyond its inputs.
@@ -974,6 +1005,16 @@ export interface RoutePlan {
    * falls back to the standing closeout line exactly.
    */
   wrapUp?: { text: string; audioUrl: string } | null;
+}
+
+/** The woven members seated into a plan (see RoutePlan.wovenMembers). */
+export interface WovenMembers {
+  /** Member story items seated (0..WOVEN_MEMBER_CAP). */
+  count: number;
+  /** The thread topic the members were seated under ([] when none). */
+  topics: string[];
+  /** The seated members' unit ids, in plan order. */
+  unitIds: string[];
 }
 
 // ------------------------------------------------------------ through-line (differentiator 2)
@@ -1240,6 +1281,17 @@ export interface ComposeOptions {
  * landmark he keeps passing wins the slot over a fourth
  * telling of a highway stretch. Both are partition/fetch
  * predicates; the ladder below them is unchanged.
+ *
+ * Woven thread support (Erik, Nov 4, 2026): thread
+ * detection's pool is the selectable geo pool UNION the
+ * woven-eligible off-route units — an eligible story on a
+ * topic is real support for that topic's thread even though
+ * it can never tile the corridor, because the seated-
+ * members pass (seatWovenMembers, which runs after the
+ * Coverage Guarantee in the build staging) can seat it as
+ * an episode member, and the portal-climax rung can crown
+ * it. Detection with no eligibility flags anywhere is
+ * exactly the pre-feature detection.
  * The plan is a value, not a promise: nothing here touches the
  * network, so the harness can prove every invariant offline.
  */
@@ -1334,7 +1386,22 @@ export function composeRoutePlan(
   // rank nudge below and the bridge context at item build time.
   // It never touches heard exclusion, the budget, the windows,
   // or the caps.
-  const thread = detectRouteThread(pool, input.topics);
+  //
+  // Woven support (Nov 4, 2026 — seated members): the
+  // detection pool also carries the WOVEN-ELIGIBLE off-route
+  // units (the fetched portal pool's presence-cleared
+  // members). A thread is something the EPISODE can sustain,
+  // and since the seated-members build an eligible off-route
+  // story on the thread's topic is real episode material —
+  // it can hold a seat in a silent gap (seatWovenMembers,
+  // after the Coverage Guarantee) and contest the portal
+  // climax. The union is exactly the support the v3.1 woven
+  // simulations (commits F + the seated follow-up) modeled:
+  // thread detection over corridor ∪ woven. Units without
+  // the eligibility flag (every pre-feature caller) add
+  // nothing, so detection is unchanged for them.
+  const wovenSupport = portalAll.filter(u => u.wovenEligible === true);
+  const thread = detectRouteThread([...pool, ...wovenSupport], input.topics);
   const threadMemberIds = new Set(thread?.memberIds ?? []);
 
   // "Previously on Miles", drive level (addendum 2): with the
@@ -2098,6 +2165,342 @@ export function composeRoutePlan(
     openingSubject: openingUnit?.placeName ?? null,
     actsSummary,
     corridorRetiredStretches: opts.corridorTellingCounts ? retiredStretches.size : null,
+    // The composer seats no woven members itself — seating is
+    // the post-guarantee pass (seatWovenMembers), so a freshly
+    // composed plan carries the empty record.
+    wovenMembers: { count: 0, topics: [], unitIds: [] },
+  };
+}
+
+/**
+ * Hard cap on woven members per episode (Nov 4, 2026): the
+ * seated-members simulation's winning configuration. The cap
+ * is a COUNT, never a seconds share — the sim proved a
+ * 25–40% woven-seconds cap arithmetically inert (a substantive
+ * episode needs ≥ half the budget covered, and a capped share
+ * below that line can never cross it in a corridor-dead
+ * drive), so no seconds cap exists here by design.
+ */
+export const WOVEN_MEMBER_CAP = 4;
+
+/** One sounding span of a plan, in expected travel seconds (a story or a filler). */
+interface SoundingSpan {
+  item: PlanItem;
+  start: number;
+  end: number;
+}
+
+/**
+ * When each story SOUNDS, in expected travel seconds — the
+ * Coverage Guarantee's interval model (routeGapFill's
+ * storyIntervalsSec, mirrored, the way this codebase mirrors
+ * shared geometry across the seam): a windowed story sounds
+ * across [release, expire]; a windowless one (portal, woven
+ * member, hosted filler) sounds at its anchor for its
+ * duration. Bridges, reactions and the preview are tissue,
+ * never coverage.
+ */
+function soundingSpans(items: PlanItem[], driveSec: number): SoundingSpan[] {
+  const out: SoundingSpan[] = [];
+  for (const it of items) {
+    if ((it.kind !== 'story' && it.kind !== 'filler') || !it.unit) continue;
+    const anchorSec = (it.anchorProgress ?? 0) * driveSec;
+    const start = it.releaseProgress !== undefined ? it.releaseProgress * driveSec : anchorSec;
+    const end = it.expireProgress !== undefined ? it.expireProgress * driveSec : start + it.durationSec;
+    out.push({
+      item: it,
+      start: Math.max(0, Math.min(driveSec, start)),
+      end: Math.max(0, Math.min(driveSec, end)),
+    });
+  }
+  return out.sort((a, b) => a.start - b.start);
+}
+
+interface MemberGap {
+  /** The silent span, in expected travel seconds. */
+  start: number;
+  end: number;
+  /** The sounding items bounding the span (null at the drive's edges). */
+  prev: PlanItem | null;
+  next: PlanItem | null;
+}
+
+/**
+ * The plan's silent gaps: the complement of the sounding
+ * spans inside [0, driveSec], in drive order, each carrying
+ * the items that bound it (bridge surgery needs the pair).
+ * Two closures: when the plan has a climax item, gaps at or
+ * after the climax's own span are closed — a member never
+ * sounds after the closing story; and the departure edge
+ * (the silence before the first sounding story) is closed —
+ * the episode opens with the preview and the road's own
+ * first story, and a member needs a sounding story before
+ * it for its bridge in to hang from.
+ */
+function memberGaps(items: PlanItem[], driveSec: number): MemberGap[] {
+  const spans = soundingSpans(items, driveSec);
+  const climaxItem = items.find(i => i.climax) ?? null;
+  const climaxStart = climaxItem
+    ? (spans.find(s => s.item === climaxItem)?.start ?? Number.POSITIVE_INFINITY)
+    : Number.POSITIVE_INFINITY;
+  const gaps: MemberGap[] = [];
+  let cursor = 0;
+  let prev: PlanItem | null = null;
+  for (const span of spans) {
+    if (span.start > cursor) gaps.push({ start: cursor, end: span.start, prev, next: span.item });
+    cursor = Math.max(cursor, span.end);
+    prev = span.item;
+  }
+  if (cursor < driveSec) gaps.push({ start: cursor, end: driveSec, prev, next: null });
+  return gaps.filter(g => g.prev !== null && g.start < climaxStart);
+}
+
+/**
+ * Woven seated members (Nov 4, 2026, Erik's ruling on the
+ * seated-members simulation): the production form of the
+ * sim's winning configuration (≤4 members/episode at
+ * presence-audit eligibility — 26 substantive thread-bearing
+ * episodes of 40 in the sim, vs 9 climax-only).
+ *
+ * A plan with a through-line thread gains up to
+ * WOVEN_MEMBER_CAP additional stories: OFF-ROUTE units from
+ * the build's fetched set that are woven-eligible (presence
+ * audit: weave-safe + mixed, Protected excluded — the flag
+ * the caller baked in from src/data/routePresence), carry
+ * the thread's topic, and are landmark-class (the sim's pool
+ * was landmark-class by construction, and the portal climax's
+ * standing rule). They seat as members of the episode —
+ * IN ADDITION TO their climax candidacy in compose, never
+ * instead of it: the climax is already settled when this
+ * pass runs, and the climax unit itself is excluded here,
+ * so a story is never both.
+ *
+ * ORDER IN THE BUILD (the Coverage Guarantee's precedence):
+ * this pass runs AFTER fillRouteGaps in the App's staging —
+ * the guarantee's library-first fills and generated stories
+ * claim their ground first, and members seat only into the
+ * silence that remains. A member therefore never displaces
+ * sounding material of any kind: it is placed at the start
+ * of the largest silent gap it fits ENTIRELY inside, as a
+ * windowless insert (it releases by plan order, like a
+ * portal), with honest bridges on both sides where the
+ * plan's bridge pattern calls for them — the bridge in
+ * frames the range along the thread (narration seam:
+ * BridgeContext.wovenSubject), never proximity. Heard
+ * exclusion is story-level, exactly as everywhere (a member
+ * that plays burns from the ledger like any story — the
+ * caller's next build hears it gone), one telling per place
+ * per plan holds, and the corridor lifetime cap is untouched
+ * (members are off-route by construction).
+ *
+ * Pure and deterministic — no network, no clock — so the
+ * harness and the grader run the very code the App runs.
+ * Returns the plan unchanged (same object) when nothing
+ * seats: no thread, no eligible candidate, or no gap a
+ * candidate fits.
+ */
+export function seatWovenMembers(
+  plan: RoutePlan,
+  units: LibraryUnit[],
+  opts: { heardKeys: Set<string>; maxMembers?: number },
+): RoutePlan {
+  const thread = plan.thread;
+  if (!thread) return plan;
+  const driveSec = plan.driveSec ?? plan.budgetSec;
+  if (!(driveSec > 0)) return plan;
+  const cap = opts.maxMembers ?? WOVEN_MEMBER_CAP;
+  if (cap <= 0) return plan;
+
+  const inCorridor = (u: LibraryUnit): boolean =>
+    haversineM({ lat: u.lat, lng: u.lng }, plan.destination) <= DESTINATION_RADIUS_M ||
+    distanceToPathM({ lat: u.lat, lng: u.lng }, plan.path) <= LANDMARK_PATH_RADIUS_M;
+
+  const usedIds = new Set<string>();
+  const usedPlaces = new Set<string>();
+  for (const it of plan.items) {
+    if (it.kind === 'story' && it.unit) {
+      usedIds.add(it.unit.id);
+      usedPlaces.add(it.unit.placeKey);
+    }
+  }
+  // Strongest first — the composer's standing weight (the
+  // telling's length), id as the deterministic tiebreak.
+  const candidates = units
+    .filter(
+      u =>
+        u.angle.startsWith('landmark') &&
+        u.wovenEligible === true &&
+        u.topics.includes(thread.topic) &&
+        !opts.heardKeys.has(u.id) &&
+        u.id !== plan.climaxUnitId &&
+        !usedIds.has(u.id) &&
+        !usedPlaces.has(u.placeKey) &&
+        !inCorridor(u),
+    )
+    .sort((a, b) => b.durationSec - a.durationSec || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  if (candidates.length === 0) return plan;
+
+  let items: PlanItem[] = [...plan.items];
+  const seated: LibraryUnit[] = [];
+  // The units sounding before a boundary item, for bridge
+  // callbacks (the composer's own convention: every entry
+  // before the next story, its prev included) — recomputed
+  // per seat from the working items.
+  const earlierUnits = (boundary: PlanItem | null): LibraryUnit[] => {
+    const out: LibraryUnit[] = [];
+    for (const it of items) {
+      if (boundary !== null && it === boundary) break;
+      if ((it.kind === 'story' || it.kind === 'filler') && it.unit) out.push(it.unit);
+    }
+    return out;
+  };
+
+  for (const cand of candidates) {
+    if (seated.length >= cap) break;
+    if (usedIds.has(cand.id) || usedPlaces.has(cand.placeKey)) continue;
+    // The largest silent gap this candidate fits entirely
+    // inside (earliest first on a tie) — the sim's placement
+    // rule, recomputed per seat because each member splits
+    // the gap it took.
+    const gap =
+      memberGaps(items, driveSec)
+        .filter(g => g.end - g.start >= cand.durationSec)
+        .sort((a, b) => b.end - b.start - (a.end - a.start) || a.start - b.start)[0] ?? null;
+    if (!gap) continue;
+
+    const memberItem: PlanItem = {
+      kind: 'story',
+      id: cand.id,
+      label: cand.placeName,
+      durationSec: cand.durationSec,
+      unit: cand,
+      ready: true,
+      anchorProgress: gap.start / driveSec,
+      woven: true,
+    };
+    const bridgeTarget = (fromAnchorSec: number, fromDur: number, toAnchorSec: number): number =>
+      Math.max(
+        BRIDGE_MIN_SEC,
+        Math.min(
+          BRIDGE_MAX_SEC,
+          Math.round(Math.max(0, toAnchorSec - fromAnchorSec - fromDur) - WINDOW_LEAD_SEC),
+        ),
+      );
+    const memberAnchorSec = gap.start;
+    const insert: PlanItem[] = [];
+    // The bridge IN — only where the plan's own pattern has
+    // one: a story (not a filler) sounding before the member.
+    if (gap.prev && gap.prev.kind === 'story' && gap.prev.unit) {
+      const prev = gap.prev.unit;
+      const context = buildBridgeContext({
+        earlier: earlierUnits(gap.next),
+        prev,
+        next: cand,
+        thread,
+        isClimaxBridge: false,
+        promiseMade: false,
+        nextWoven: true,
+      });
+      const target = bridgeTarget(
+        (gap.prev.anchorProgress ?? 0) * driveSec,
+        prev.durationSec,
+        memberAnchorSec,
+      );
+      const text = bridgeTextFor(prev, cand, { targetSec: target, context });
+      insert.push({
+        kind: 'bridge',
+        id: `bridge:${prev.id}>${cand.id}`,
+        label: `Bridge — ${prev.placeName} to ${cand.placeName}`,
+        durationSec: spokenSec(text),
+        prevUnitId: prev.id,
+        nextUnitId: cand.id,
+        text,
+        ready: true,
+        targetDurationSec: target,
+      });
+    }
+    insert.push(memberItem);
+    // The bridge OUT — back to the road's next story, when
+    // there is one and it is a story (not filler spackle).
+    // When that story is the plan's climax, this bridge is
+    // the payoff bridge and is composed as one (an off-route
+    // portal climax keeps its honest hop framing).
+    if (gap.next && gap.next.kind === 'story' && gap.next.unit) {
+      const next = gap.next.unit;
+      const isClimaxNext = plan.climaxUnitId !== null && next.id === plan.climaxUnitId;
+      const context = buildBridgeContext({
+        earlier: [...earlierUnits(gap.next), cand],
+        prev: cand,
+        next,
+        thread,
+        isClimaxBridge: isClimaxNext,
+        climaxLast: plan.climaxMode !== 'natural',
+        promiseMade: plan.previewFacts !== null && plan.climaxUnitId !== null,
+        offRoute: gap.next.portalClimax === true,
+      });
+      const target = bridgeTarget(
+        memberAnchorSec,
+        cand.durationSec,
+        (gap.next.anchorProgress ?? 0) * driveSec,
+      );
+      const text = bridgeTextFor(cand, next, { targetSec: target, context });
+      insert.push({
+        kind: 'bridge',
+        id: `bridge:${cand.id}>${next.id}`,
+        label: `Bridge — ${cand.placeName} to ${next.placeName}`,
+        durationSec: spokenSec(text),
+        prevUnitId: cand.id,
+        nextUnitId: next.id,
+        text,
+        ready: true,
+        targetDurationSec: target,
+      });
+    }
+    // Splice: before the next sounding item — or at its
+    // incoming bridge, which the two new bridges replace (it
+    // named a pair that no longer stands adjacent).
+    let at = gap.next ? items.indexOf(gap.next) : items.length;
+    if (gap.prev && gap.next && at > 0) {
+      const before = items[at - 1];
+      if (
+        before.kind === 'bridge' &&
+        before.prevUnitId === gap.prev.unit?.id &&
+        before.nextUnitId === gap.next.unit?.id
+      ) {
+        items.splice(at - 1, 1);
+        at -= 1;
+      }
+    }
+    items.splice(at, 0, ...insert);
+    seated.push(cand);
+    usedIds.add(cand.id);
+    usedPlaces.add(cand.placeKey);
+  }
+  if (seated.length === 0) return plan;
+
+  // The acts summary recounts from the final items, exactly
+  // as the composer counted the composed plan (story items by
+  // anchor act; the floor flags are the sweep's and carry).
+  const actsSummary: ActsSummary = {
+    opening: { ...plan.actsSummary.opening, stories: 0, landmark: 0, corridor: 0 },
+    middle: { ...plan.actsSummary.middle, stories: 0, landmark: 0, corridor: 0 },
+    climax: { ...plan.actsSummary.climax, stories: 0, landmark: 0, corridor: 0 },
+  };
+  const actLines = [actsSummary.opening, actsSummary.middle, actsSummary.climax];
+  for (const it of items) {
+    if (it.kind !== 'story' || !it.unit) continue;
+    const line = actLines[actIndexForProgress(it.anchorProgress ?? 0)];
+    line.stories += 1;
+    if (it.unit.angle.startsWith('landmark')) line.landmark += 1;
+    else if (it.unit.angle === 'corridor') line.corridor += 1;
+  }
+  const unitIds = items.filter(i => i.woven && i.unit).map(i => (i.unit as LibraryUnit).id);
+  return {
+    ...plan,
+    items,
+    totalSec: items.reduce((s, it) => s + it.durationSec, 0),
+    actsSummary,
+    wovenMembers: { count: seated.length, topics: [thread.topic], unitIds },
   };
 }
 
@@ -2139,8 +2542,15 @@ export function buildBridgeContext(args: {
   promiseMade: boolean;
   /** True when the next story is the off-route portal climax (consolidation §4). */
   offRoute?: boolean;
+  /**
+   * True when the next story is a woven member (Nov 4, 2026):
+   * an off-route through-line member seated in a silent gap.
+   * The bridge into it must frame the hop honestly — the host
+   * ranging along the thread — never as ground ahead.
+   */
+  nextWoven?: boolean;
 }): BridgeContext {
-  const { earlier, prev, next, thread, isClimaxBridge, climaxLast, promiseMade, offRoute } = args;
+  const { earlier, prev, next, thread, isClimaxBridge, climaxLast, promiseMade, offRoute, nextWoven } = args;
   // The bridge into a SEQUENCED climax is the payoff, thread
   // or not: it owes the preview its closing beat. Every other
   // bridge is a mid bridge.
@@ -2156,6 +2566,10 @@ export function buildBridgeContext(args: {
     ctx.promiseMade = promiseMade;
     if (offRoute) ctx.offRouteSubject = next.placeName;
   }
+  // A woven member is never the climax, so its incoming bridge
+  // is always a mid bridge; the flag rides the context so the
+  // narration layer frames the range honestly.
+  if (nextWoven && role === 'mid') ctx.wovenSubject = next.placeName;
   if (!thread) return ctx;
   if (role === 'mid') {
     // Callbacks reference ONLY items actually earlier in this
