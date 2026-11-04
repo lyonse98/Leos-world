@@ -269,16 +269,31 @@ export function makeWorld(Tour, opts = {}) {
     const lat = typeof entry === 'string' ? 32.853 : entry.lat ?? 32.853;
     const lng = typeof entry === 'string' ? -117.18 : entry.lng ?? -117.18;
     const key = placeKeyOf(name);
-    libraryIndex.push({ place_key: key, place_name: name, angle: 'story', lat, lng });
-    libraryRows.set(`${key}|story`, {
-      place_key: key,
-      place_name: name,
-      angle: 'story',
-      story_text: `The library story of ${name}. `.repeat(40),
-      audio_path: `library/${key.replace(/\s+/g, '-')}.wav`,
-      lat,
-      lng,
-    });
+    // Multi-angle fixtures (Nov 4, 2026): an entry may carry
+    // `angles` to bank several rows for one place, in the
+    // order given — the woven twins' shape (a presence
+    // original beside its '-woven-v1' twin). Angled rows key
+    // their audio like the real shelf: library/<place>/<angle>.wav.
+    // The default single 'story' row is unchanged.
+    const angles = typeof entry === 'string' ? ['story'] : entry.angles ?? ['story'];
+    for (const angle of angles) {
+      libraryIndex.push({ place_key: key, place_name: name, angle, lat, lng });
+      libraryRows.set(`${key}|${angle}`, {
+        place_key: key,
+        place_name: name,
+        angle,
+        story_text:
+          angle === 'story'
+            ? `The library story of ${name}. `.repeat(40)
+            : `The library story of ${name} (${angle}). `.repeat(40),
+        audio_path:
+          angle === 'story'
+            ? `library/${key.replace(/\s+/g, '-')}.wav`
+            : `library/${key.replace(/\s+/g, '-')}/${angle}.wav`,
+        lat,
+        lng,
+      });
+    }
   }
   // Banked neighborhood intros: rows keyed (A-normalized name,
   // 'neighborhood_intro') — the fixture speaks the writer's dialect.

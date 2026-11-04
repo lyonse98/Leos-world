@@ -2808,4 +2808,91 @@ export async function runScenarios(Tour, extras) {
       JSON.stringify(playbacksFor(world, 'welcome:university city').map(e => e.payload)));
     tour.endTour();
   }
+
+  // ---------------------------------------------------------- WT: woven twins (Nov 4, 2026)
+  // The woven tranche's twins ride the shelf as sibling rows
+  // (source angle + '-woven-v1') RESERVED for route mode:
+  // freeform serves the presence originals. A twin must never
+  // be selected — above all when its original was already
+  // dealt this tour (the generic find would otherwise hand
+  // the twin out as the place's next telling), and never by
+  // a corridor serve whose index happens to sort it first.
+  suite('WT-1 woven twins: original serves; with the original dealt, the retell is generated — never the twin');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Twin Place', { tier1: true })],
+      library: [{ name: 'Twin Place', angles: ['landmark_origin', 'landmark_origin-woven-v1'] }],
+    });
+    // Starve prefetch so both tellings resolve at serve time (P4's discipline).
+    world.seams.discoverCandidates = async pt =>
+      Math.abs(pt.lat - UTC.lat) < 0.0001 && Math.abs(pt.lng - UTC.lng) < 0.0001
+        ? world.candidates
+        : [];
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    const tellings = () =>
+      world.eventsOf('story_played').filter(e => e.payload.subject === 'twin place');
+    for (let i = 0; i < 80 && tellings().length < 2; i++) await world.clock.advance(5_000);
+    const t = tellings();
+    check('the place was told twice (original + in-tour retell)', t.length === 2, `n=${t.length}`);
+    check('first telling is the library original',
+      t[0]?.payload.source === 'library' && t[0]?.payload.angle === 'landmark_origin',
+      JSON.stringify(t[0]?.payload));
+    check('the original audio is what played',
+      audio.log.some(e => typeof e.src === 'string' && e.src.endsWith('library/twin-place/landmark_origin.wav')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    check('second telling is generated live, not the twin',
+      t[1]?.payload.source === 'live' && t[1]?.payload.angle === null,
+      JSON.stringify(t[1]?.payload));
+    check('no telling anywhere carries a twin angle',
+      !world.eventsOf('story_played').some(e => typeof e.payload.angle === 'string' && e.payload.angle.endsWith('-woven-v1')),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.angle)));
+    check('the twin audio never played',
+      !audio.log.some(e => typeof e.src === 'string' && e.src.includes('-woven-v1')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    tour.endTour();
+  }
+
+  suite('WT-2 woven twins: a corridor serve takes the original even when the twin sorts first in the index');
+  {
+    resetLocalStorage();
+    // S-09's segment discipline: a substantial, non-degenerate
+    // segment, banked under whichever segment the matcher returns.
+    const segLen = s =>
+      s.polyline.reduce((acc, p, i) => (i === 0 ? 0 : acc + Math.hypot((p.lat - s.polyline[i - 1].lat) * 111_320, (p.lng - s.polyline[i - 1].lng) * 88_000)), 0);
+    const picked = CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
+    const start = picked.polyline[0];
+    const second = picked.polyline[1];
+    const pickedHeading = ((Math.atan2(second.lng - start.lng, second.lat - start.lat) * 180) / Math.PI + 360) % 360;
+    const seg = matchCorridor({ lat: start.lat, lng: start.lng, heading: pickedHeading })?.segment ?? picked;
+    const world = makeWorld(Tour, {
+      candidates: [],
+      // The twin row FIRST in the index: row order is not a
+      // guarantee the shelf makes, so the serve must refuse
+      // the twin on its angle, not on its position.
+      library: [{ name: seg.displayName, angles: ['corridor-woven-v1', 'corridor'] }],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ synth: 30_000 }));
+    const tour = world.makeTour(audio);
+    tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 27, headingDeg: pickedHeading });
+    tour.start(false);
+    await world.clock.advance(20_000); // greeting + opener done; welcome (30 s) playing
+    // A GPS tick on the segment while the WELCOME plays: the
+    // corridor story slots behind it (S-09's flow).
+    tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 27, headingDeg: pickedHeading });
+    for (let i = 0; i < 24 && audio.plays('library').length === 0; i++) await world.clock.advance(5_000);
+    const libPlays = audio.plays('library');
+    check('the corridor story served from the shelf', libPlays.length >= 1, JSON.stringify(audio.log.map(e => e.src)));
+    check('the corridor ORIGINAL is what played',
+      libPlays.some(e => typeof e.src === 'string' && e.src.endsWith('/corridor.wav')),
+      JSON.stringify(libPlays.map(e => e.src)));
+    check('the twin audio never played',
+      !audio.log.some(e => typeof e.src === 'string' && e.src.includes('-woven-v1')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    check('the corridor story_played fired for the segment',
+      world.eventsOf('story_played').some(e => e.payload.subject === `corridor:${seg.id}`),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    tour.endTour();
+  }
 }

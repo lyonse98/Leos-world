@@ -218,6 +218,21 @@ const INTRO_ANGLES: ReadonlySet<string> = new Set([
   'neighborhood_intro_greet',
 ]);
 /**
+ * Woven twins (Nov 4, 2026): the woven tranche's host-told
+ * retellings ride the shelf as sibling rows whose angle is
+ * the source angle + '-woven-v1'. They exist for ROUTE mode
+ * — a through-line member heard OFF its ground — and are
+ * reserved for it: freeform serves the presence originals.
+ * The generic library finds must refuse twin rows exactly as
+ * they refuse intro rows, or a place whose original angle
+ * was already dealt would deal its twin as if it were a
+ * fresh on-the-ground telling (and a corridor serve could
+ * take a twin whose row happens to sort first).
+ */
+function isWovenTwinAngle(angle: string): boolean {
+  return angle.endsWith('-woven-v1');
+}
+/**
  * Nested-area deferral (Nov 1): neighborhoods carry no polygons
  * in this shell — reverse geocoding returns names, not shapes —
  * so the honest geometry for "still inside the child" is the
@@ -1460,7 +1475,8 @@ export class Tour {
       e =>
         e.place_key === backend.placeKeyOf(segment.displayName) &&
         e.angle !== 'filler' &&
-        !INTRO_ANGLES.has(e.angle),
+        !INTRO_ANGLES.has(e.angle) &&
+        !isWovenTwinAngle(e.angle),
     );
     if (!entry) {
       this.inflight.delete(subject);
@@ -1616,6 +1632,7 @@ export class Tour {
         e.place_key === key &&
         e.angle !== 'filler' &&
         !INTRO_ANGLES.has(e.angle) &&
+        !isWovenTwinAngle(e.angle) &&
         !dealt.has(e.angle),
     );
     if (entry) {
