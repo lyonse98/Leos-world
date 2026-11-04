@@ -3747,5 +3747,223 @@ await checkAsync('woven telemetry: route_plan_started decisions carry the woven 
   runner.endTour();
 });
 
+// ── Member-fetch lever (Nov 4, 2026) ───────────────────────
+// The production acceptance at 54ecb95 flagged the supply
+// path: detection + candidacy saw only the fetched set and
+// starved from ~drive 14 while the county index held the
+// depth. The lever: detection counts index support, and a
+// short-handed thread declares wovenMembersSeeking for ONE
+// bounded member fetch. Fixtures reuse the woven section's
+// (WT thread, wCand off-route candidates at lat 32.0).
+const leverCompose = (units, driveSec, extraOpts = {}) => {
+  const plan = rm.composeRoutePlan(
+    units,
+    path,
+    dest,
+    'Dest',
+    { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: driveSec, driveSec, ...extraOpts },
+  );
+  plan.driveSec = driveSec;
+  plan.budgetSec = driveSec;
+  return plan;
+};
+const idxEntryOf = u => ({ place_key: u.placeKey, angle: u.angle, lat: u.lat, lng: u.lng });
+
+check('lever support: the index counter counts only unheard, eligible, landmark, off-corridor depth not in hand', () => {
+  const mk = (id, lat, lng, topics, eligible) => ({
+    u: { id, placeKey: id.split('|')[0], angle: id.split('|')[1], lat, lng, topics },
+    eligible,
+  });
+  const rows = [
+    mk('alpha|landmark_origin', 32.0, -117.05, [WT], true),
+    mk('beta|landmark_event', 32.0, -117.05, [WT, 'Coast'], true),
+    mk('gamma|landmark_origin', 32.0, -117.05, [WT], true), // heard → out
+    mk('delta|landmark_origin', 32.0, -117.05, [WT], true), // already fetched → out
+    mk('epsilon|landmark_origin', 32.0, -117.05, [WT], false), // presence-bound → out
+    mk('zeta|corridor', 32.0, -117.05, [WT], true), // not landmark-class → out
+    mk('eta|landmark_origin', 32.8, -117.25, [WT], true), // on the path → out
+    mk('theta|landmark_origin', 32.9, -117.25, [WT], true), // at the destination → out
+  ];
+  const byId = new Map(rows.map(r => [r.u.id, r.u]));
+  const support = rm.wovenIndexSupportByTopic(
+    rows.map(r => idxEntryOf(r.u)),
+    path,
+    dest,
+    (pk, ang) => ({ topics: byId.get(`${pk}|${ang}`)?.topics ?? [] }),
+    (pk, ang) => rows.find(r => r.u.id === `${pk}|${ang}`)?.eligible ?? false,
+    { fetchedIds: new Set(['delta|landmark_origin']), heardIds: new Set(['gamma|landmark_origin']) },
+  );
+  assert.deepEqual([...support.entries()].sort(), [['Coast', 1], [WT, 2]]);
+});
+
+check('lever detection: a thread is detected on index depth with a thin — or empty — fetched cast', () => {
+  const two = [wGeo('ga|landmark_origin', 32.71), wGeo('gb|landmark_origin', 32.72)];
+  assert.equal(rm.detectRouteThread(two, []), null, 'two in hand is under the bar without the index');
+  const t = rm.detectRouteThread(two, [], new Map([[WT, 4]]));
+  assert.equal(t?.topic, WT);
+  assert.equal(t?.score, 6, 'support = cast in hand + index depth');
+  assert.deepEqual(t?.memberIds, ['ga|landmark_origin', 'gb|landmark_origin'], 'member ids stay the real cast');
+  const zero = rm.detectRouteThread(
+    [unit('gx|landmark_origin', 32.71, { name: 'GX', topics: ['Surf'] })],
+    [],
+    new Map([[WT, 3]]),
+  );
+  assert.equal(zero?.topic, WT, 'zero cast, deep index: the exhausted-corridor thread still detects');
+  assert.deepEqual(zero?.memberIds, []);
+  // Ranking reads support: a deeper-indexed topic beats a thicker fetched cast.
+  const mixed = [
+    wGeo('a1|landmark_origin', 32.71, 120, 'A1'), wGeo('a2|landmark_origin', 32.72, 120, 'A2'), wGeo('a3|landmark_origin', 32.73, 120, 'A3'),
+    unit('b1|landmark_origin', 32.74, { topics: ['Coast'] }), unit('b2|landmark_origin', 32.75, { topics: ['Coast'] }),
+  ];
+  // a-units carry WT (wGeo), b-units Coast: cast 3 vs 2, index 0 vs 5.
+  assert.equal(rm.detectRouteThread(mixed, [], new Map([['Coast', 5]]))?.topic, 'Coast');
+  // The user's own picks still govern: support never forces a theme over them.
+  assert.equal(rm.detectRouteThread(two, ['Coast'], new Map([[WT, 9]])), null, 'user picked Coast; WT depth is irrelevant');
+});
+
+check('lever seeking: fires only when local candidacy is insufficient AND the index promises more', () => {
+  const support = new Map([[WT, 9]]);
+  // (a) Local candidacy at the cap → no fetch, however deep the index.
+  const rich = wFixtureUnits([
+    wCand('w1|landmark_history', 300), wCand('w2|landmark_history', 290),
+    wCand('w3|landmark_history', 280), wCand('w4|landmark_history', 270),
+    wCand('w5|landmark_history', 260),
+  ]);
+  assert.equal(leverCompose(rich, 1800, { wovenIndexSupport: support }).wovenMembersSeeking, null);
+  // (b) One local candidate + index depth → seeking the thread's topic.
+  const thin = wFixtureUnits([wCand('w1|landmark_history', 300)]);
+  assert.equal(leverCompose(thin, 1800, { wovenIndexSupport: support }).wovenMembersSeeking, WT);
+  // (c) Thin local candidacy but NO index support supplied → never seeking (the pre-lever shape).
+  assert.equal(leverCompose(thin, 1800).wovenMembersSeeking, null);
+  assert.equal(leverCompose(thin, 1800, { wovenIndexSupport: new Map() }).wovenMembersSeeking, null);
+  // (d) No thread → no fetch: index depth under the detection
+  // bar conjures nothing when the fetched set has no cast.
+  const castless = [
+    unit('ga|landmark_origin', 32.71, {}), unit('gb|landmark_origin', 32.72, {}),
+    wCand('w1|landmark_history', 300, { topics: ['Coast'] }),
+  ];
+  const noThread = leverCompose(castless, 1800, { wovenIndexSupport: new Map([[WT, 2]]) });
+  assert.equal(noThread.thread, null, 'WT depth 2 with zero cast is under the bar');
+  assert.equal(noThread.wovenMembersSeeking, null);
+  const scattered = [
+    unit('ga|landmark_origin', 32.71), unit('gb|landmark_origin', 32.72),
+    wCand('w1|landmark_history', 300, { topics: ['Coast'] }),
+  ];
+  const p = leverCompose(scattered, 1800, { wovenIndexSupport: new Map([['Surf', 2]]) });
+  assert.equal(p.thread, null, 'no topic reaches the bar anywhere');
+  assert.equal(p.wovenMembersSeeking, null, 'no thread → no member fetch');
+});
+
+check('lever fetch: entry selection respects the read cap and the member predicate', () => {
+  const valid = [];
+  for (let i = 0; i < 30; i++) {
+    valid.push({ place_key: `p${i}`, angle: 'landmark_origin', lat: 32.0, lng: -117.05 });
+  }
+  const poison = [
+    { place_key: 'fetched', angle: 'landmark_origin', lat: 32.0, lng: -117.05 },
+    { place_key: 'bound', angle: 'landmark_origin', lat: 32.0, lng: -117.05 },
+    { place_key: 'offtopic', angle: 'landmark_origin', lat: 32.0, lng: -117.05 },
+    { place_key: 'corr', angle: 'corridor', lat: 32.0, lng: -117.05 },
+    { place_key: 'onpath', angle: 'landmark_origin', lat: 32.8, lng: -117.25 },
+  ];
+  const entries = [...poison, ...valid];
+  const sel = (cap) =>
+    rm.selectMemberFetchEntries(entries, {
+      topic: WT,
+      fetchedIds: new Set(['fetched|landmark_origin']),
+      path,
+      destination: dest,
+      tagsOf: pk => ({ topics: pk === 'offtopic' ? ['Coast'] : [WT] }),
+      eligibleOf: pk => pk !== 'bound',
+      ...(cap ? { cap } : {}),
+    });
+  assert.equal(rm.MEMBER_FETCH_READ_CAP, 24);
+  assert.equal(sel().length, 24, 'the read cap binds at 24 of 30 valid entries');
+  assert.equal(sel(5).length, 5, 'an explicit smaller cap binds too');
+  assert.ok(
+    sel().every(e => e.angle.startsWith('landmark') && !['fetched', 'bound', 'offtopic', 'corr', 'onpath'].includes(e.place_key)),
+    'every selected entry passes the member predicate',
+  );
+});
+
+check('lever staging: fetched members seat under every seating rule — cap, climax, place, heard', () => {
+  const units = wFixtureUnits([
+    wCand('wloc|landmark_history', 300, { placeName: 'Local One' }),
+    wCand('wlo2|landmark_history', 290, { placeName: 'Local Two' }),
+  ]);
+  const plan1 = leverCompose(units, 2400, { wovenIndexSupport: new Map([[WT, 12]]) });
+  assert.equal(plan1.wovenMembersSeeking, WT, 'the thin local supply asks for the fetch');
+  // The fetch returns six survivors; one is the climax's own
+  // place (another angle), one lands in the build's heard set
+  // before seating — seating must refuse both.
+  const memberUnits = [
+    wCand('m1|landmark_history', 350, { placeName: 'Fetched One' }),
+    wCand('m2|landmark_history', 320, { placeName: 'Fetched Heard' }),
+    wCand('m3|landmark_history', 300, { placeName: 'Fetched Three' }),
+    wCand('m4|landmark_history', 280, { placeName: 'Fetched Four' }),
+    wCand('gd|landmark_history', 330, { placeName: 'Climax Place Twin' }),
+  ];
+  const heardKeys = new Set(['m2|landmark_history']);
+  const plan2 = leverCompose(units, 2400, {
+    wovenIndexSupport: new Map([[WT, 6]]),
+    memberUnits,
+    heardKeys,
+  });
+  assert.equal(plan2.thread?.topic, WT);
+  assert.ok(plan2.thread.memberIds.includes('m1|landmark_history'), 'fetched members join the cast in hand');
+  assert.equal(plan2.wovenMembersSeeking, null, 'supply in hand (local + fetched seatable) reaches the cap — no second fetch');
+  const seated = rm.seatWovenMembers(plan2, [...units, ...memberUnits], { heardKeys });
+  const ids = memberIds(seated);
+  assert.ok(ids.length >= 2 && ids.length <= rm.WOVEN_MEMBER_CAP, `cap respected (${ids.length} seated)`);
+  assert.ok(ids.includes('m1|landmark_history'), 'the strongest fetched member seats');
+  assert.ok(!ids.includes('m2|landmark_history'), 'a member in the heard set never seats');
+  assert.ok(!ids.includes('gd|landmark_history'), 'the climax’s place is spent — one telling per place');
+  assert.ok(!ids.includes(plan2.climaxUnitId), 'a member is never the climax');
+  assert.ok(
+    seated.items.filter(i => i.woven).every(i => i.climax === undefined && i.releaseProgress === undefined),
+    'fetched members are windowless non-climax inserts, like local ones',
+  );
+});
+
+check('lever no-op: empty or absent index support leaves a composed plan untouched', () => {
+  const units = wFixtureUnits([wCand('w1|landmark_history', 300), wCand('w2|landmark_history', 280)]);
+  const plain = wCompose(units, 1800);
+  const withEmpty = leverCompose(units, 1800, { wovenIndexSupport: new Map() });
+  assert.deepEqual(storyIds(withEmpty), storyIds(plain));
+  assert.equal(withEmpty.thread?.topic, plain.thread?.topic);
+  assert.equal(withEmpty.thread?.score, plain.thread?.score);
+  assert.equal(withEmpty.wovenMembersSeeking, null);
+  assert.equal(plain.wovenMembersSeeking, null);
+});
+
+await checkAsync('lever telemetry: route_plan_started fetch record carries the member fetch', async () => {
+  const units = wFixtureUnits([wCand('w1|landmark_history', 400, { placeName: 'Woven One' })]);
+  const plan = wCompose(units, 1800);
+  const seated = rm.seatWovenMembers(plan, units, { heardKeys: new Set() });
+  const baseStats = {
+    reads: 100, geoReads: 80, portalReads: 20, unheard: 40, geoUnheard: 30,
+    portalUnheard: 10, decileUnheard: Array(10).fill(3), ceilingHit: false,
+  };
+  const run = async fetchStats => {
+    const p = { ...seated, fetchStats };
+    const events = [];
+    const runner = new rp.RoutePlanRunner({
+      audio: new RealFakeAudio(250),
+      synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+      onEvent: (t, payload) => events.push({ t, p: payload }),
+      onStoryHeard: () => {},
+    });
+    await runner.start(p);
+    runner.endTour();
+    return events.find(e => e.t === 'route_plan_started');
+  };
+  const withFetch = await run({ ...baseStats, memberFetch: { topic: WT, reads: 12, candidates: 5 } });
+  assert.deepEqual(withFetch.p.fetch.member_fetch, { topic: WT, reads: 12, candidates: 5 });
+  assert.equal(withFetch.p.fetch.reads, 100, 'the departure window’s counts are not folded with the member fetch');
+  const without = await run({ ...baseStats });
+  assert.equal(without.p.fetch.member_fetch, null, 'no member fetch on the build → null, one telemetry shape');
+});
+
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
