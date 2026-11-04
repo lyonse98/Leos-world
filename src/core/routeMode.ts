@@ -22,15 +22,18 @@
 import { selectPriorDrive, type RouteDriveRecord } from './routeHistory';
 import {
   bridgeTextFor,
+  previewTextFor,
   BRIDGE_CONNECTIVE_LINES,
   REACTION_BANK,
   type BridgeContext,
+  type PreviewContext,
   type WrapUpContext,
 } from './narration';
 
-// The bridge text layer lives in the narration seam (addendum
-// 5); these re-exports keep its long-standing import surface.
-export { bridgeTextFor, BRIDGE_CONNECTIVE_LINES, REACTION_BANK, type BridgeContext };
+// The narration text layer lives in the narration seam
+// (addendum 5); these re-exports keep its long-standing
+// import surface.
+export { bridgeTextFor, previewTextFor, BRIDGE_CONNECTIVE_LINES, REACTION_BANK, type BridgeContext, type PreviewContext };
 
 // Composer v2 (Erik, Nov 3, 2026): full-path fetch with segment
 // fairness (no first-60 early-route bias), position-anchored
@@ -47,14 +50,25 @@ export { bridgeTextFor, BRIDGE_CONNECTIVE_LINES, REACTION_BANK, type BridgeConte
 // connected from beginning to end — not a queue of unrelated
 // stories. When the selectable shelf shares a topic thread the
 // route can sustain (see detectRouteThread), the composer leans
-// into it (a weighting nudge, never an override), reserves the
-// destination's flagship story for the approach, and gives the
-// bridges real connective context: the opening bridge names the
-// thread and promises the closing story, mid bridges may call
-// back an earlier story on the same thread, the bridge into the
-// flagship pays the promise off, and the arrival closeout wraps
-// the thread — but only when it actually played. No thread →
-// composition is exactly composer v2, bridges included.
+// into it (a weighting nudge, never an override), the plan's
+// strongest late story is sequenced as its climax (addendum 4:
+// NOT destination-geared — a commute's climax is its strongest
+// late story, not its workplace), and the episode is framed by
+// its own preview item up front and its ONE prepared wrap-up
+// at the end. Bridges carry real connective context between
+// their pairs — mid bridges may call back an earlier story on
+// the same thread, and the bridge into the climax pays the
+// preview's promise off. No thread → composition is exactly
+// composer v2, bridges included.
+//
+// The consolidation (Erik, Nov 3, 2026, ~21:57–22:03) then
+// codified the differentiator layer as ONE priority ladder —
+// see the composeRoutePlan doc comment — promoted the preview
+// to its own plan item, cut the climax fit-term and the
+// opening↔climax pairing preference (raw weight + thread boost
+// decide the climax again), and opened the climax slot to ONE
+// off-route portal story when it clearly beats the road's own
+// best (the portal climax, below).
 
 export type TourMode = 'passenger' | 'driving';
 
@@ -516,7 +530,7 @@ export function selectFetchCandidates(
   return [...ordered, ...portals];
 }
 
-export type PlanItemKind = 'story' | 'bridge' | 'reaction' | 'filler' | 'signoff' | 'handoff';
+export type PlanItemKind = 'preview' | 'story' | 'bridge' | 'reaction' | 'filler' | 'signoff' | 'handoff';
 
 export interface PlanItem {
   kind: PlanItemKind;
@@ -543,8 +557,17 @@ export interface PlanItem {
    */
   releaseProgress?: number;
   expireProgress?: number;
-  /** The plan's climax (addendums 4–5): the winner, marked in every mode. */
+  /** The plan's climax (addendum 4 + consolidation §4): the winner, marked in every mode. */
   climax?: boolean;
+  /**
+   * The off-route portal climax (consolidation §4): a story
+   * from anywhere in the county that won the climax slot
+   * outright. Windowless by design — it releases by sequence
+   * position in the final stretch, is exempt from the corridor
+   * test and from anchor stale-drop, and never consumes the
+   * portal-hop budget below.
+   */
+  portalClimax?: boolean;
   /** Portal hop (item 4): an off-corridor story tied by topic to a chosen story. */
   portal?: boolean;
   /** For a portal item: the chosen story unit id it hangs off. */
@@ -575,30 +598,47 @@ export interface RoutePlan {
    * null thread the plan is exactly what composer v2 built.
    */
   thread: RouteThread | null;
+  /**
+   * Where the thread came from (consolidation §1, for the
+   * route_plan_started decisions record): 'user' when the
+   * listener's own chosen topics supplied it, 'detected' when
+   * the composer found it on the shelf, null with no thread.
+   */
+  threadSource: 'user' | 'detected' | null;
   /** The climax unit id, when the plan has one (addendum 4: not destination-geared). */
   climaxUnitId: string | null;
   /**
-   * How the climax resolved (addendum 4): 'destination' when
-   * the winner is a destination-area unit sequenced last,
-   * 'late' when a late-corridor unit was sequenced last,
-   * 'natural' when no repositioning happened (no candidate,
-   * or sequencing it last would have stripped the early
-   * drive's only coverage).
+   * How the climax resolved (addendum 4 + consolidation §4):
+   * 'destination' when the winner is a destination-area unit
+   * sequenced last, 'late' when a late-corridor unit was
+   * sequenced last, 'portal' when an off-route story from
+   * anywhere in the county beat the road's own best and took
+   * the slot, 'natural' when no repositioning happened (no
+   * candidate, or sequencing it last would have stripped the
+   * early drive's only coverage).
    */
-  climaxMode: 'destination' | 'late' | 'natural';
+  climaxMode: 'destination' | 'late' | 'natural' | 'portal';
   /** The climax story's subject (place name), when the plan has one. */
   climaxSubject: string | null;
-  /** The winner's fit reasons (addendum 5): any of 'tone' | 'topic' | 'thread'. */
-  climaxFit: string[];
+  /** Portal climax only: the winner's distance from the route, km (one decimal). */
+  climaxDistanceKm: number | null;
   /**
-   * Bookend (addendum 5): true when the sequenced climax is
-   * the opening story's partner — they share a topic tag
-   * (bookendTopic) across different anchors, so the drive ends
-   * by explaining how it began.
+   * Portal climax (consolidation §4): the topic the slot
+   * stayed open for when no candidate in the build's fetched
+   * pool cleared the bar — the App may answer it with ONE
+   * additional bounded fetch (climax-only candidates) and a
+   * single re-compose. Null when the slot was decided (or
+   * never opened: no thread and no chosen topic).
    */
-  bookend: boolean;
-  /** The tag the bookend pair shares, when bookend is true. */
-  bookendTopic: string | null;
+  portalClimaxSeeking: string | null;
+  /**
+   * The preview item's facts (consolidation §§1–2), for the
+   * decisions record: whether the composed preview promises
+   * the thread, carries a matched prior drive, or carries a
+   * subject-level previously-heard nod. Null when the plan
+   * has no preview item (no stories to frame).
+   */
+  previewFacts: { threadPromised: boolean; previouslyDrive: boolean; previouslySubject: boolean } | null;
   /** The plan's opening story subject (the departure-area story), when the plan has stories. */
   openingSubject: string | null;
   /**
@@ -635,6 +675,14 @@ export interface RouteThread {
 export const THREAD_MIN_SCORE = 3;
 /** The climax zone: the final third of drive progress (addendum 4). */
 export const CLIMAX_ZONE_START = 2 / 3;
+/**
+ * The off-route portal climax bar (consolidation §4): a
+ * county-wide candidate takes the slot only when its weight —
+ * the standing sort's strength term, its telling's length —
+ * beats the road's own best climax candidate by this factor.
+ * Clearly beats, not edges out.
+ */
+export const PORTAL_CLIMAX_BAR = 1.25;
 /** Destination-area radius — the same 1.5 km the corridor test grants the destination pin. */
 export const DESTINATION_AREA_M = 1500;
 
@@ -714,11 +762,21 @@ export interface ComposeOptions {
    */
   driveSec?: number | null;
   /**
+   * Climax-only candidates (consolidation §4): units the
+   * caller fetched in the ONE additional bounded fetch after a
+   * first compose left the portal-climax slot open
+   * (plan.portalClimaxSeeking). They join ONLY the portal-
+   * climax evaluation pool — they never tile, never parent or
+   * become portal hops, never open chapters. Absent on the
+   * first compose of a build.
+   */
+  climaxOnlyUnits?: LibraryUnit[];
+  /**
    * Prior route drives (addendum 2), newest first, with each
    * record's owed subjects ALREADY filtered against the current
    * heard ledger by the caller (routeHistory.stillOwedSubjects)
    * — the composer matches at most one against this build (see
-   * selectPriorDrive) and feeds it to the opening preview only.
+   * selectPriorDrive) and feeds it to the spoken preview only.
    */
   driveRecords?: RouteDriveRecord[];
   /** The destination's library place_key when the build could derive one (addendum 2 matching). */
@@ -764,16 +822,33 @@ export interface ComposeOptions {
  * the early drive stays covered without it (addendum 4: the
  * candidate set is the final third plus any destination units,
  * on equal footing — a commute's climax is its strongest late
- * story, not its workplace), picked by bookend pairing, then
- * fit with today's tone/topics/thread, then standing weight
- * (addendum 5), and bridge contexts carrying the thread + real
- * plan facts into the elastic bridge text — the first bridge
- * doubling as the spoken episode preview, with a continuity
- * nod only when the heard ledger holds a subject on this
- * route's ground. With no thread and no repositionable
- * climax, the plan's items, order and windows are exactly
- * composer v2's; only the opening bridge's text differs (the
- * preview is its job in every plan).
+ * story, not its workplace), picked by the composer's standing
+ * weight with a thread boost, and bridge contexts carrying
+ * the thread + real plan facts into the elastic bridge text.
+ * With no thread and no repositionable climax, the plan's
+ * items, order and windows are exactly composer v2's; only the
+ * preview item differs (it frames every plan).
+ *
+ * THE PRIORITY LADDER (consolidation §1, Erik, Nov 3, 2026 —
+ * codified, not redesigned): the differentiator layer decides
+ * in exactly this order, and nothing lower re-opens what a
+ * higher rung settled —
+ *   (1) composer v2 base + the Coverage Guarantee: the hard
+ *       constraints live here (heard exclusion, budget,
+ *       release windows, corridor) and are NOT re-ordered by
+ *       anything below; the guarantee pass itself runs on the
+ *       composed plan in the App (routeGapFill);
+ *   (2) thread selection — the detected thread, or the
+ *       listener's own chosen topic (detectRouteThread);
+ *   (3) climax placement — the in-corridor generalized climax,
+ *       or the ONE off-route portal climax that clearly beats
+ *       it (consolidation §4);
+ *   (4) preview / previously / wrap-up context assembly —
+ *       narration facts only, assembled from the settled plan;
+ *       they never feed back into selection.
+ * The route_plan_started telemetry carries the ladder's
+ * decisions record so any single plan can be audited against
+ * this order after the fact.
  * The plan is a value, not a promise: nothing here touches the
  * network, so the harness can prove every invariant offline.
  */
@@ -884,27 +959,9 @@ export function composeRoutePlan(
   const toneRank = (u: LibraryUnit): number =>
     input.tone && (u.tone === input.tone || u.toneSecondary === input.tone) ? 0 : 1;
   const threadRank = (u: LibraryUnit): number => (threadMemberIds.has(u.id) ? 0 : 1);
-  // Bookend potential (addendum 5): in a threaded plan, an
-  // opening-zone story that shares a topic with a late-zone
-  // shelf story earns a point in its favor when the composer
-  // picks the drive's opening — the end may explain the
-  // beginning. A rank nudge inside the same stack as tone and
-  // thread (never a rule: heard exclusion, the budget and the
-  // windows are untouched), and inert without a thread, so
-  // no-thread selection stays exactly composer v2's.
-  const latePool = pool.filter(v => prog(v) >= CLIMAX_ZONE_START || isDestinationArea(v, destination));
-  const bookendRank = (u: LibraryUnit): number => {
-    if (!thread || prog(u) >= 1 - CLIMAX_ZONE_START) return 1;
-    return latePool.some(
-      v => v.id !== u.id && v.placeKey !== u.placeKey && v.topics.some(t => u.topics.includes(t)),
-    )
-      ? 0
-      : 1;
-  };
   const byRank = (a: LibraryUnit, b: LibraryUnit): number =>
     toneRank(a) - toneRank(b) ||
     threadRank(a) - threadRank(b) ||
-    bookendRank(a) - bookendRank(b) ||
     angleClassRank(a.angle) - angleClassRank(b.angle) ||
     prog(a) - prog(b);
 
@@ -958,70 +1015,94 @@ export function composeRoutePlan(
   // destination's shelf is the fastest to exhaust. Candidates
   // are the plan's stories anchored in the final third of
   // drive progress PLUS any destination-area stories, all on
-  // equal footing. The winner is chosen by (addendum 5):
-  //   1. BOOKEND — a candidate that shares a topic tag with
-  //      the opening story (a different anchor: pairing is by
-  //      subject family across the drive, never the same
-  //      place's second angle) — the end explains the
-  //      beginning;
-  //   2. FIT — how many of today's declared tone, the chosen
-  //      topics, and the plan's thread the candidate matches:
-  //      a fitting climax beats a marginally heavier story
-  //      that doesn't fit today;
-  //   3. the composer's standing weight (angle class, tone,
-  //      thread, longest telling, latest ground).
-  // The winner is sequenced LAST — moved to the end of the
-  // chosen order and re-anchored into the climax zone — unless
-  // it is the drive's only coverage of the ground before the
-  // zone: then natural order stands and the mode degrades to
-  // 'natural' (coverage beats drama, the Coverage Guarantee's
-  // values in code). A winner already last is sequenced
-  // without a move and keeps its natural anchor. When the
-  // plan holds a single story there is nothing to climax
-  // against.
+  // equal footing. The winner is picked by the composer's
+  // standing weight — angle class, tone, thread boost, longest
+  // telling, latest ground. (The consolidation cut the
+  // fit-term and the opening-pairing preference: this sort is
+  // the whole rule.) The winner is sequenced LAST — moved to
+  // the end of the chosen order and re-anchored into the
+  // climax zone — unless it is the drive's only coverage of
+  // the ground before the zone: then natural order stands and
+  // the mode degrades to 'natural' (coverage beats drama, the
+  // Coverage Guarantee's values in code). A winner already
+  // last is sequenced without a move and keeps its natural
+  // anchor. When the plan holds a single story there is
+  // nothing to climax against.
   const openingUnit = chosen[0] ?? null;
-  const fitReasonsFor = (u: LibraryUnit): string[] => {
-    const reasons: string[] = [];
-    if (input.tone && (u.tone === input.tone || u.toneSecondary === input.tone)) reasons.push('tone');
-    if (topicSet.size > 0 && u.topics.some(t => topicSet.has(t))) reasons.push('topic');
-    if (threadMemberIds.has(u.id)) reasons.push('thread');
-    return reasons;
-  };
-  const bookendTopicFor = (u: LibraryUnit): string | null => {
-    if (!openingUnit || u.id === openingUnit.id || u.placeKey === openingUnit.placeKey) return null;
-    return u.topics.find(t => openingUnit.topics.includes(t)) ?? null;
-  };
   let climaxUnitId: string | null = null;
   let climaxMode: RoutePlan['climaxMode'] = 'natural';
   let climaxSubject: string | null = null;
-  let climaxFit: string[] = [];
   let climaxAnchor: number | null = null;
   let climaxSequenced = false;
-  let bookend = false;
-  let bookendTopic: string | null = null;
+  let climaxDistanceKm: number | null = null;
+  let portalClimaxUnit: LibraryUnit | null = null;
+  let portalClimaxSeeking: string | null = null;
   // The opening story is NOT excluded from candidacy: a
   // destination unit can anchor the drive's start and still
   // be its climax (sequencing moves it last; the next story
-  // opens instead). It can never be its own bookend partner —
-  // bookendTopicFor returns null for the opening itself.
+  // opens instead).
   const climaxCandidates = chosen.filter(
     u => prog(u) >= CLIMAX_ZONE_START || isDestinationArea(u, destination),
   );
+  let climaxWinner: LibraryUnit | null = null;
   if (chosen.length >= 2 && climaxCandidates.length > 0) {
-    const winner = [...climaxCandidates].sort(
+    climaxWinner = [...climaxCandidates].sort(
       (a, b) =>
-        Number(bookendTopicFor(b) !== null) - Number(bookendTopicFor(a) !== null) ||
-        fitReasonsFor(b).length - fitReasonsFor(a).length ||
         angleClassRank(a.angle) - angleClassRank(b.angle) ||
         toneRank(a) - toneRank(b) ||
         threadRank(a) - threadRank(b) ||
         b.durationSec - a.durationSec ||
         prog(b) - prog(a),
     )[0];
+  }
+
+  // The off-route portal climax (consolidation §4, ladder
+  // rung 3): Erik's point — something from across the county
+  // that isn't on the route might still be the climax, when
+  // it is the story the drive has been about. ONE per plan,
+  // behind a high bar. The pool is the build's already-fetched
+  // off-corridor candidates plus any climax-only units the
+  // caller fetched for this slot (see ComposeOptions): unheard,
+  // landmark-class, carrying the plan's thread topic — or,
+  // with no thread, the listener's first chosen topic; with
+  // neither, the slot never opens. The bar: the pool's best
+  // must CLEARLY beat the in-corridor winner's weight (its
+  // telling's length × PORTAL_CLIMAX_BAR); when the road
+  // offered no late candidate at all, the strongest unit on
+  // the topic takes the open slot outright.
+  const portalTopic = thread?.topic ?? input.topics[0] ?? null;
+  if (portalTopic !== null && chosen.length >= 1) {
+    const chosenIds = new Set(chosen.map(u => u.id));
+    const best =
+      [...portalAll, ...(opts.climaxOnlyUnits ?? [])]
+        .filter(
+          u =>
+            !chosenIds.has(u.id) &&
+            !opts.heardKeys.has(u.id) &&
+            u.angle.startsWith('landmark') &&
+            u.topics.includes(portalTopic),
+        )
+        .sort((a, b) => b.durationSec - a.durationSec || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0] ?? null;
+    if (best && (climaxWinner === null || best.durationSec >= climaxWinner.durationSec * PORTAL_CLIMAX_BAR)) {
+      portalClimaxUnit = best;
+    } else {
+      // The slot stays open on this topic: the App may answer
+      // with ONE additional bounded fetch (climax-only
+      // candidates) and a single re-compose — never a loop.
+      portalClimaxSeeking = portalTopic;
+    }
+  }
+  if (portalClimaxUnit) {
+    climaxUnitId = portalClimaxUnit.id;
+    climaxSubject = portalClimaxUnit.placeName;
+    climaxMode = 'portal';
+    climaxSequenced = true; // it rides the sequence's tail (below)
+    climaxDistanceKm =
+      Math.round((distanceToPathM({ lat: portalClimaxUnit.lat, lng: portalClimaxUnit.lng }, path) / 1000) * 10) / 10;
+  } else if (climaxWinner) {
+    const winner = climaxWinner;
     climaxUnitId = winner.id;
     climaxSubject = winner.placeName;
-    climaxFit = fitReasonsFor(winner);
-    bookendTopic = bookendTopicFor(winner);
     const soleEarlyCoverage =
       prog(winner) < CLIMAX_ZONE_START &&
       !chosen.some(u => u.id !== winner.id && prog(u) < CLIMAX_ZONE_START);
@@ -1037,10 +1118,6 @@ export function composeRoutePlan(
         );
       }
       climaxMode = isDestinationArea(winner, destination) ? 'destination' : 'late';
-      // The pairing is real only when the partner actually
-      // closes the drive: an unsequenced winner leaves the
-      // loop open, and no surface may claim it.
-      bookend = bookendTopic !== null;
     }
   }
 
@@ -1052,8 +1129,15 @@ export function composeRoutePlan(
     portal?: boolean;
     portalParentId?: string;
     sharedTopic?: string;
+    portalClimax?: boolean;
   }
   const sequence: SeqEntry[] = chosen.map(u => ({ unit: u }));
+  // The portal climax rides the sequence's tail (consolidation
+  // §4): appended after the chosen order, before openers and
+  // hops assemble around it — the opener clamp and the hop
+  // exclusions both key off climaxUnitId, so the tail entry is
+  // protected exactly like a sequenced in-corridor winner.
+  if (portalClimaxUnit) sequence.push({ unit: portalClimaxUnit, portalClimax: true });
 
   // Chapter openers (item 3b): the first story at-or-after the
   // area's ground gets the area's intro as its chapter head.
@@ -1092,6 +1176,9 @@ export function composeRoutePlan(
     }
     const scored: PortalScore[] = [];
     for (const cand of portalAll) {
+      // The portal climax is never ALSO a hop: it already holds
+      // the tail slot (consolidation §4).
+      if (climaxUnitId !== null && cand.id === climaxUnitId) continue;
       let best: PortalScore | null = null;
       for (const g of chosen) {
         // A sequenced climax never parents a portal: the hop
@@ -1161,31 +1248,26 @@ export function composeRoutePlan(
   // and stamp each story with its release window.
   const items: PlanItem[] = [];
   let storiesSinceReaction = 0;
-  // Through-line bridge bookkeeping: the plan's closing story
-  // (the sequenced climax when there is one, else the last
-  // non-filler entry) is what the opening bridge promises, and
-  // the payoff line may only claim a promise that was actually
-  // composed — tracked here, as the bridges are built in order.
+  // Through-line bookkeeping: the plan's closing story (the
+  // sequenced climax when there is one, else the last
+  // non-filler entry) is what the preview promises, and the
+  // payoff bridge may only claim a promise that was actually
+  // composed — the preview item exists by the time any bridge
+  // is built, so the promise is a settled fact, not a hope.
   const closingEntry = [...sequence].reverse().find(e => e.unit.angle !== 'filler_hosted');
   // The preview teases the ACTUAL climax (addendum 4): the
   // winner and its mode when the plan has one; without a
   // winner, the closing story itself, rendered 'late' (it
-  // truly is last). The bookend context (addendum 5) exists
-  // only when the pairing actually closes the drive.
+  // truly is last).
   const climaxCtx = climaxUnitId
     ? { subject: climaxSubject ?? '', mode: climaxMode, sequenced: climaxSequenced }
     : closingEntry
       ? { subject: closingEntry.unit.placeName, mode: 'late' as const, sequenced: false }
       : null;
-  const bookendCtx =
-    bookend && openingUnit && bookendTopic
-      ? { openingSubject: openingUnit.placeName, sharedTopic: bookendTopic }
-      : null;
-  let firstBridgeSeen = false;
-  let promiseMade = false;
-  // The opening bridge is the spoken episode preview (Erik,
-  // Nov 3, 2026): it draws the listener in with the destination,
-  // the closing story, and ONE mid-drive subject to listen for.
+  // The spoken episode preview (consolidation §2): the plan's
+  // own FIRST item, no longer a job folded into the first
+  // bridge. It draws the listener in with the destination, the
+  // closing story, and ONE mid-drive subject to listen for.
   // The mid hook is a real story entry strictly between the
   // departure story and the closing story, nearest the drive's
   // midpoint (a thread member wins a near tie — the middle
@@ -1215,6 +1297,29 @@ export function composeRoutePlan(
         prog(a) - prog(b) ||
         (a.id < b.id ? -1 : 1),
     )[0]?.placeName ?? null;
+  const previewCtx =
+    storyEntries.length > 0
+      ? buildPreviewContext({
+          thread,
+          destinationName,
+          storyCount: storyEntries.length,
+          closing: closingEntry?.unit ?? null,
+          climax: climaxCtx,
+          mid: midEntry?.unit ?? null,
+          previouslyHeardSubject: priorHeardSubject,
+          priorDrive,
+        })
+      : null;
+  const previewText = previewCtx ? previewTextFor(previewCtx) : null;
+  const promiseMade = previewText !== null && climaxCtx !== null;
+  const previewFacts =
+    previewText !== null
+      ? {
+          threadPromised: thread !== null,
+          previouslyDrive: priorDrive !== null,
+          previouslySubject: priorHeardSubject !== null,
+        }
+      : null;
   sequence.forEach((entry, i) => {
     const u = entry.unit;
     // Bridges join story → story only: a filler spackle gets no
@@ -1230,31 +1335,24 @@ export function composeRoutePlan(
         Math.min(BRIDGE_MAX_SEC, Math.round(gapSec - WINDOW_LEAD_SEC)),
       );
       // Portal bridges keep their authored connection line and
-      // take no thread context; every other bridge in a threaded
-      // plan gets real connective context (thread, the pair, and
-      // — for callbacks — only items earlier in THIS plan).
+      // take no thread context; every other bridge gets real
+      // connective context (thread, the pair, and — for
+      // callbacks — only items earlier in THIS plan). The
+      // bridge into the portal climax additionally carries the
+      // off-route flag: its framing must be honest about the
+      // hop (consolidation §4).
       const context = entry.portal
         ? undefined
         : buildBridgeContext({
             earlier: sequence.slice(0, i).map(e => e.unit),
             prev,
             next: u,
-            closing: closingEntry?.unit ?? null,
-            mid: midEntry?.unit ?? null,
-            storyCount: storyEntries.length,
-            previouslyHeardSubject: priorHeardSubject,
-            priorDrive,
             thread,
-            isFirstBridge: !firstBridgeSeen,
             isClimaxBridge: climaxUnitId !== null && u.id === climaxUnitId,
             climaxLast: climaxSequenced,
-            climax: climaxCtx,
-            bookend: bookendCtx,
-            destinationName,
             promiseMade,
+            offRoute: entry.portalClimax === true,
           });
-      if (context?.role === 'opening' && (context.closingSubject || context.climaxSubject)) promiseMade = true;
-      firstBridgeSeen = true;
       const text = bridgeTextFor(prev, u, {
         targetSec: target,
         portalTopic: entry.portal ? entry.sharedTopic : undefined,
@@ -1277,8 +1375,17 @@ export function composeRoutePlan(
     // manifest, the wrap-up and telemetry read it); the
     // re-anchor applies only when sequencing actually moved it.
     const isClimax = climaxUnitId !== null && u.id === climaxUnitId;
-    const anchor = isClimax && climaxSequenced && climaxAnchor !== null ? climaxAnchor : prog(u);
-    const win = !isFiller && !entry.portal ? storyWindow(anchor, u.durationSec, driveDur) : null;
+    // The portal climax is windowless (consolidation §4): it
+    // releases by sequence position in the final stretch, so
+    // it carries a synthetic late anchor — where it SOUNDS on
+    // the expected-time map — and no release window at all.
+    const anchor = entry.portalClimax
+      ? Math.min(0.98, Math.max(CLIMAX_ZONE_START, 1 - u.durationSec / driveDur))
+      : isClimax && climaxSequenced && climaxAnchor !== null
+        ? climaxAnchor
+        : prog(u);
+    const win =
+      !isFiller && !entry.portal && !entry.portalClimax ? storyWindow(anchor, u.durationSec, driveDur) : null;
     items.push({
       kind: isFiller ? 'filler' : 'story',
       id: u.id,
@@ -1290,6 +1397,7 @@ export function composeRoutePlan(
       ...(win ? { releaseProgress: win.release, expireProgress: win.expire } : {}),
       ...(isClimax ? { climax: true } : {}),
       ...(entry.portal ? { portal: true, portalParentId: entry.portalParentId } : {}),
+      ...(entry.portalClimax ? { portalClimax: true } : {}),
       ...(entry.opener ? { opener: true } : {}),
     });
     storiesSinceReaction += 1;
@@ -1307,6 +1415,23 @@ export function composeRoutePlan(
     }
   });
 
+  // The preview item stands FIRST (consolidation §2): ~30 s of
+  // framing before the departure story. It is not a story — no
+  // unit, no anchor, no window — and nothing downstream counts
+  // it as one (the manifest reads story items; the runner's
+  // heard/owed accounting reads story items; the gap pass
+  // reads story windows).
+  if (previewText !== null) {
+    items.unshift({
+      kind: 'preview',
+      id: 'preview',
+      label: 'Episode preview',
+      durationSec: spokenSec(previewText),
+      text: previewText,
+      ready: true,
+    });
+  }
+
   const totalSec = items.reduce((s, it) => s + it.durationSec, 0);
   return {
     destinationName,
@@ -1320,12 +1445,13 @@ export function composeRoutePlan(
     topicsMatched,
     toneMatched,
     thread,
+    threadSource: thread ? (input.topics.includes(thread.topic) ? 'user' : 'detected') : null,
     climaxUnitId,
     climaxMode,
     climaxSubject,
-    climaxFit,
-    bookend,
-    bookendTopic: bookend ? bookendTopic : null,
+    climaxDistanceKm,
+    portalClimaxSeeking,
+    previewFacts,
     openingSubject: openingUnit?.placeName ?? null,
   };
 }
@@ -1350,63 +1476,30 @@ export function storyGist(unit: LibraryUnit): string | null {
  * Assemble a bridge's context from the plan's real facts —
  * the facts live here (composition); the TEXT they become is
  * authored in the narration layer (narration.bridgeTextFor)
- * from the BridgeContext this returns.
+ * from the BridgeContext this returns. A bridge is connective
+ * tissue between its pair only: the episode framing lives in
+ * the preview item (buildPreviewContext below), and the first
+ * bridge of a plan is an ordinary mid bridge like any other.
  */
 export function buildBridgeContext(args: {
   /** Every plan entry before the next story, in plan order (prev is the last of these). */
   earlier: LibraryUnit[];
   prev: LibraryUnit;
   next: LibraryUnit;
-  /** The plan's closing story unit (the sequenced climax when there is one). */
-  closing: LibraryUnit | null;
-  /** The plan's mid-drive hook subject (a real story entry between departure and closing). */
-  mid: LibraryUnit | null;
-  /** How many stories the plan carries. */
-  storyCount: number;
-  /** A previously-heard subject on this route's ground, drawn from the caller's heard input only. */
-  previouslyHeardSubject?: string | null;
-  /** The matched prior drive (addendum 2), or null when no record matched. */
-  priorDrive?: { threadTopic: string | null; stillOwedSubjects: string[] } | null;
   thread: RouteThread | null;
-  isFirstBridge: boolean;
   isClimaxBridge: boolean;
   /** True when the climax was sequenced last, so its incoming bridge is the payoff. */
   climaxLast?: boolean;
-  /** The plan's climax as the preview teases it (addendum 4), or null. */
-  climax?: { subject: string; mode: 'destination' | 'late' | 'natural'; sequenced: boolean } | null;
-  /** The bookend pairing (addendum 5), or null when the shelf offered none. */
-  bookend?: { openingSubject: string; sharedTopic: string } | null;
-  destinationName: string;
+  /** True when the plan's preview item actually promised this climax. */
   promiseMade: boolean;
+  /** True when the next story is the off-route portal climax (consolidation §4). */
+  offRoute?: boolean;
 }): BridgeContext {
-  const {
-    earlier,
-    prev,
-    next,
-    closing,
-    mid,
-    storyCount,
-    previouslyHeardSubject,
-    priorDrive,
-    thread,
-    isFirstBridge,
-    isClimaxBridge,
-    climaxLast,
-    climax,
-    bookend,
-    destinationName,
-    promiseMade,
-  } = args;
-  // The first bridge is always the preview — even when it is
-  // also the bridge into the climax (a two-story plan has only
-  // the one bridge, and it has to do the drawing-in). The
-  // bridge into a SEQUENCED climax is the payoff, thread or
-  // not: it owes the preview its closing beat.
-  const role: BridgeContext['role'] = isFirstBridge
-    ? 'opening'
-    : isClimaxBridge && climaxLast
-      ? 'payoff'
-      : 'mid';
+  const { earlier, prev, next, thread, isClimaxBridge, climaxLast, promiseMade, offRoute } = args;
+  // The bridge into a SEQUENCED climax is the payoff, thread
+  // or not: it owes the preview its closing beat. Every other
+  // bridge is a mid bridge.
+  const role: BridgeContext['role'] = isClimaxBridge && climaxLast ? 'payoff' : 'mid';
   const ctx: BridgeContext = {
     threadTopic: thread?.topic ?? null,
     prevSubject: prev.placeName,
@@ -1414,34 +1507,9 @@ export function buildBridgeContext(args: {
     nextSubject: next.placeName,
     role,
   };
-  if (role === 'opening') {
-    ctx.destinationName = destinationName;
-    ctx.storyCount = storyCount;
-    if (closing) ctx.closingSubject = closing.placeName;
-    if (climax) {
-      ctx.climaxSubject = climax.subject;
-      ctx.climaxMode = climax.mode;
-    }
-    if (bookend) {
-      ctx.openingSubject = bookend.openingSubject;
-      ctx.bookendTopic = bookend.sharedTopic;
-    }
-    if (thread && mid && mid.placeName !== ctx.closingSubject) {
-      ctx.midSubject = mid.placeName;
-      const gist = storyGist(mid);
-      if (gist && gist.length <= 110) ctx.midGist = gist;
-    }
-    if (previouslyHeardSubject) ctx.previouslyHeardSubject = previouslyHeardSubject;
-    if (priorDrive && (priorDrive.threadTopic !== null || priorDrive.stillOwedSubjects.length > 0)) {
-      ctx.priorDrive = priorDrive;
-    }
-  }
   if (role === 'payoff') {
     ctx.promiseMade = promiseMade;
-    if (bookend) {
-      ctx.openingSubject = bookend.openingSubject;
-      ctx.bookendTopic = bookend.sharedTopic;
-    }
+    if (offRoute) ctx.offRouteSubject = next.placeName;
   }
   if (!thread) return ctx;
   if (role === 'mid') {
@@ -1452,6 +1520,53 @@ export function buildBridgeContext(args: {
     const shares = (u: LibraryUnit) => u.topics.includes(thread.topic) || u.topics.some(t => nextTopics.has(t));
     const cb = [...earlier].reverse().find(u => u.id !== next.id && shares(u));
     if (cb) ctx.callbackSubject = cb.placeName;
+  }
+  return ctx;
+}
+
+/**
+ * Assemble the spoken preview's context from the plan's real
+ * facts (consolidation §2) — the preview may name subjects
+ * from anywhere in THIS plan (naming what the drive holds is
+ * its job), plus continuity data drawn only from the caller's
+ * heard input and the matched prior-drive record. Returns
+ * null when the plan has no closing story to frame (no
+ * stories → no preview item).
+ */
+export function buildPreviewContext(args: {
+  thread: RouteThread | null;
+  destinationName: string;
+  /** How many stories the plan carries. */
+  storyCount: number;
+  /** The plan's closing story unit (the sequenced climax when there is one). */
+  closing: LibraryUnit | null;
+  /** The plan's climax as the preview teases it (addendum 4 + consolidation §4), or null. */
+  climax?: { subject: string; mode: 'destination' | 'late' | 'natural' | 'portal'; sequenced: boolean } | null;
+  /** The plan's mid-drive hook subject (a real story entry between departure and closing). */
+  mid: LibraryUnit | null;
+  /** A previously-heard subject on this route's ground, drawn from the caller's heard input only. */
+  previouslyHeardSubject?: string | null;
+  /** The matched prior drive (addendum 2), or null when no record matched. */
+  priorDrive?: { threadTopic: string | null; stillOwedSubjects: string[] } | null;
+}): PreviewContext | null {
+  const { thread, destinationName, storyCount, closing, climax, mid, previouslyHeardSubject, priorDrive } = args;
+  if (!closing) return null;
+  const ctx: PreviewContext = {
+    threadTopic: thread?.topic ?? null,
+    destinationName,
+    storyCount,
+    closingSubject: closing.placeName,
+    climaxSubject: climax?.subject ?? null,
+    climaxMode: climax?.mode ?? 'natural',
+  };
+  if (thread && mid && mid.placeName !== ctx.closingSubject) {
+    ctx.midSubject = mid.placeName;
+    const gist = storyGist(mid);
+    if (gist && gist.length <= 110) ctx.midGist = gist;
+  }
+  if (previouslyHeardSubject) ctx.previouslyHeardSubject = previouslyHeardSubject;
+  if (priorDrive && (priorDrive.threadTopic !== null || priorDrive.stillOwedSubjects.length > 0)) {
+    ctx.priorDrive = priorDrive;
   }
   return ctx;
 }
@@ -1563,13 +1678,12 @@ export function decideCloseout(args: {
 /**
  * The wrap-up's facts (addendum 3), assembled from the plan
  * alone: destination + thread + the climax the plan was
- * composed around (addendum 4) + the bookend pairing when
- * the shelf offered one (addendum 5). Deliberately nothing
- * else — no played set exists at preparation time, and none
- * may leak in later: the wrap-up speaks the episode's arc,
- * never a recap. The text itself is authored in the
- * narration layer (narration.wrapUpTextFor) from this
- * context.
+ * composed around (addendum 4 + consolidation §4).
+ * Deliberately nothing else — no played set exists at
+ * preparation time, and none may leak in later: the wrap-up
+ * speaks the episode's arc, never a recap. The text itself
+ * is authored in the narration layer (narration.wrapUpTextFor)
+ * from this context.
  */
 export function buildWrapUpContext(plan: RoutePlan): WrapUpContext {
   return {
@@ -1577,14 +1691,6 @@ export function buildWrapUpContext(plan: RoutePlan): WrapUpContext {
     threadTopic: plan.thread?.topic ?? null,
     climaxMode: plan.climaxMode ?? 'natural',
     climaxSubject: plan.climaxSubject ?? null,
-    bookend:
-      plan.bookend && plan.openingSubject && plan.bookendTopic && plan.climaxSubject
-        ? {
-            openingSubject: plan.openingSubject,
-            sharedTopic: plan.bookendTopic,
-            climaxSubject: plan.climaxSubject,
-          }
-        : null,
   };
 }
 

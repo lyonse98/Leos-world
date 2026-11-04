@@ -9,8 +9,10 @@ import {
   buildWrapUpContext,
   composeRoutePlan,
   computeRoute,
+  distanceToPathM,
   estimateDurationSec,
   geocodeDestination,
+  haversineM,
   isRouteModeEnabled,
   parseRouteInput,
   qaGateOpen,
@@ -918,7 +920,7 @@ function MilesApp() {
         ...r,
         owedSubjects: stillOwedSubjects(r, heardLabels),
       }));
-      let plan = composeRoutePlan(units, route.path, geocoded.location, geocoded.name, input, {
+      const composeOpts = {
         nowMs,
         heardKeys,
         fillerUnits,
@@ -926,7 +928,59 @@ function MilesApp() {
         driveSec: route.durationSec,
         driveRecords,
         destinationPlaceKey: destPlaceKey,
-      });
+      };
+      let plan = composeRoutePlan(units, route.path, geocoded.location, geocoded.name, input, composeOpts);
+      // The off-route portal climax (consolidation §4): when the
+      // composed plan left the slot open on a topic, ONE
+      // additional bounded fetch may answer it — landmark-class
+      // units carrying that topic from anywhere in the county
+      // (off this route's corridor, away from the destination),
+      // drawn from the library index this build already fetched.
+      // Survivors join a SINGLE re-compose as climax-only
+      // candidates: they can take the climax slot and nothing
+      // else — they never tile, hop, or open chapters. No
+      // survivors (or a bar still unmet) ships the first plan
+      // exactly as composed; there is never a second fetch.
+      if (plan.portalClimaxSeeking) {
+        const topic = plan.portalClimaxSeeking;
+        const fetchedIds = new Set(fetchSet.map(e => `${e.place_key}|${e.angle}`));
+        const extraRows = index
+          .filter(
+            e =>
+              e.angle.startsWith('landmark') &&
+              !fetchedIds.has(`${e.place_key}|${e.angle}`) &&
+              tagsFor(e.place_key, e.angle).topics.includes(topic) &&
+              distanceToPathM({ lat: e.lat, lng: e.lng }, route.path) > 1500 &&
+              haversineM({ lat: e.lat, lng: e.lng }, geocoded.location) > 1500,
+          )
+          .slice(0, 12);
+        const extraUnits: LibraryUnit[] = [];
+        for (const e of extraRows) {
+          const row = await fetchLibraryRow(e.place_key, e.angle);
+          if (!row || heardLabels.has(row.place_name)) continue;
+          const tags = tagsFor(row.place_key, row.angle);
+          extraUnits.push({
+            id: `${row.place_key}|${row.angle}`,
+            placeKey: row.place_key,
+            placeName: row.place_name,
+            angle: row.angle,
+            lat: row.lat,
+            lng: row.lng,
+            durationSec: estimateDurationSec(row.story_text),
+            topics: tags.topics,
+            tone: tags.tone,
+            toneSecondary: tags.toneSecondary,
+            audioPath: row.audio_path,
+            storyText: row.story_text,
+          });
+        }
+        if (extraUnits.length > 0) {
+          plan = composeRoutePlan(units, route.path, geocoded.location, geocoded.name, input, {
+            ...composeOpts,
+            climaxOnlyUnits: extraUnits,
+          });
+        }
+      }
       // Coverage Guarantee (Nov 3, 2026 — route differentiator 1):
       // walk the composed plan for dead stretches over 180 s and
       // fill them at plan time. Untiled units from THIS build's

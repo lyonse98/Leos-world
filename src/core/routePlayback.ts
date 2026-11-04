@@ -131,6 +131,18 @@ export class RoutePlanRunner {
   private resolvedCount = 0;
   /** Stories dropped at the feed gate for an expired window (their outgoing bridges are skipped too). */
   private droppedStoryIds = new Set<string>();
+  /**
+   * The departure story's rendered entry — the first story to
+   * render (consolidation §2). It keeps the standing item-1
+   * exemption at the feed gate: the preview item holds slot 1
+   * now, but the departure story behind it still begins when
+   * the runner reaches it — never held by its release window,
+   * never dropped stale at the gate — exactly the treatment
+   * slot 1 had when the departure story WAS the first item.
+   * (When there is no preview, the departure story is begun
+   * directly and the gate never evaluates it at all.)
+   */
+  private departureEntry: { planItem: PlanItem; audible: AudibleItem } | null = null;
   /** Last known path progress (0 until the first GPS feed). */
   private lastProgress = 0;
   private begun = false;
@@ -351,8 +363,16 @@ export class RoutePlanRunner {
     for (const it of plan.items) {
       if (this.closed) break; // a closeout landed mid-render: stop building a dead plan
       const item = await this.toAudibleItem(it);
+      // Preview telemetry (consolidation §2): the preview item
+      // rendered, or it didn't — a failed preview never wedges
+      // the plan; the departure story simply becomes item 1.
+      if (it.kind === 'preview') {
+        this.deps.onEvent?.('route_preview', { preview: item ? 'generated' : 'failed' });
+      }
       if (!item) continue; // render failure → dropped, never wedged
-      this.rendered.push({ planItem: it, audible: item });
+      const entry = { planItem: it, audible: item };
+      this.rendered.push(entry);
+      if (it.kind === 'story' && !this.departureEntry) this.departureEntry = entry;
       if (beginFirst && !this.begun) {
         this.player.beginWithItem(item);
         this.begun = true;
@@ -393,17 +413,26 @@ export class RoutePlanRunner {
       portals: plan.items.filter(i => i.portal).length,
       budget_sec: plan.budgetSec,
       // Through-line (differentiator 2): the thread the plan was
-      // composed around. Climax (addendums 4–5): how it
-      // resolved, its subject, the winner's fit reasons against
-      // today's declared tone/topics/thread, and whether the
-      // opening↔climax bookend pairing is live.
+      // composed around. Climax (addendum 4 + consolidation
+      // §4): how it resolved and its subject — a portal climax
+      // carries its distance from the route as well.
       thread: plan.thread ? { topic: plan.thread.topic, members: plan.thread.memberIds } : null,
       climax: {
         mode: plan.climaxMode ?? 'natural',
         subject: plan.climaxSubject ?? null,
-        fit: plan.climaxFit ?? [],
+        ...(plan.climaxMode === 'portal' ? { distance_km: plan.climaxDistanceKm ?? null } : {}),
       },
-      bookend: plan.bookend ?? false,
+      // The priority ladder's decisions record (consolidation
+      // §1): which thread and where it came from, the climax
+      // placement, and what the preview item carries — so any
+      // plan can be audited against the ladder after the fact.
+      decisions: {
+        thread: plan.thread
+          ? { topic: plan.thread.topic, source: plan.threadSource ?? 'detected' }
+          : null,
+        climax: { mode: plan.climaxMode ?? 'natural', subject: plan.climaxSubject ?? null },
+        preview: plan.previewFacts ?? { threadPromised: false, previouslyDrive: false, previouslySubject: false },
+      },
     });
   }
 
@@ -419,7 +448,9 @@ export class RoutePlanRunner {
    *     stale (story_dropped, reason 'stale-window'); a story
    *     before its release progress HOLDS the gate — the Player
    *     idles on bridges/fillers already played, never on the
-   *     story sounded early;
+   *     story sounded early (the departure story is exempt from
+   *     both rules: it opens the drive, behind the preview item
+   *     or in slot 1 itself — see departureEntry);
    *   - everything else (bridges, reactions, fillers, portal
    *     stories) feeds.
    * Feeding one entry can empty the FIFO instantly (an idle
@@ -436,7 +467,7 @@ export class RoutePlanRunner {
         this.resolvedCount += 1;
         continue;
       }
-      if (it.kind === 'story' && !it.portal) {
+      if (it.kind === 'story' && !it.portal && entry !== this.departureEntry) {
         const release = it.releaseProgress ?? 0;
         const expire = it.expireProgress ?? Number.POSITIVE_INFINITY;
         if (this.lastProgress > expire) {
@@ -539,6 +570,12 @@ export class RoutePlanRunner {
     if (it.kind === 'story' && it.unit && sounded) {
       this.playedStoryIds.add(it.unit.id);
       this.deps.onStoryHeard?.(it.unit);
+    }
+    // The preview is not a story (consolidation §2): it is
+    // never heard-recorded and never owed — its only trace is
+    // that it played.
+    if (it.kind === 'preview' && sounded) {
+      this.deps.onEvent?.('route_preview', { preview: 'played' });
     }
     if (this.closing) return; // settles caused by the closeout itself
     this.resolvedCount += 1;
@@ -676,9 +713,24 @@ export class RoutePlanRunner {
     this.closed = true;
     this.closing = true;
     const plan = this.plan;
+    // The story sounding on the element right now, if any —
+    // computed BEFORE the owed set (consolidation §5).
+    const currentEntry = this.player.current
+      ? this.rendered.find(e => e.audible.id === this.player.current!.id)
+      : undefined;
+    const soundingStoryId =
+      currentEntry && currentEntry.planItem.kind === 'story' ? currentEntry.planItem.id : null;
     const unplayed = plan.items
       .filter(it => it.kind === 'story' && it.unit && !this.playedStoryIds.has(it.unit.id))
-      .map(it => it.unit as LibraryUnit);
+      .map(it => it.unit as LibraryUnit)
+      // Consolidation §5 — the owed-line wart: on an ARRIVAL
+      // close, the story sounding on the element is NOT owed.
+      // The close's queued pieces wait for its settle, so it
+      // plays to completion; naming it in the owed line would
+      // call a story owed while Miles is finishing it. The
+      // overrun handoff keeps it (there the Player cuts it off
+      // mid-flight, so it genuinely never completes).
+      .filter(u => !(kind !== 'overrun' && u.id === soundingStoryId));
     const closeout = decideCloseout({
       arrived: kind !== 'overrun',
       planExhausted: kind !== 'arrival-owed',
@@ -695,11 +747,6 @@ export class RoutePlanRunner {
     // abandoned in the queue, or never fed fails the gate —
     // that drive was cut short, and today's closeout line
     // speaks instead. The overrun handoff never plays it.
-    const currentEntry = this.player.current
-      ? this.rendered.find(e => e.audible.id === this.player.current!.id)
-      : undefined;
-    const soundingStoryId =
-      currentEntry && currentEntry.planItem.kind === 'story' ? currentEntry.planItem.id : null;
     const planRanOut =
       this.feedIndex >= this.rendered.length && unplayed.every(u => u.id === soundingStoryId);
     const useWrapUp = kind !== 'overrun' && planRanOut && plan.wrapUp != null;
