@@ -2332,5 +2332,75 @@ await checkAsync('wart (§5): the exclusion is surgical — a genuinely dropped 
   runner.endTour();
 });
 
+// ---- composer v3, commit A: grader metric correctness ----
+// The grader (grader.mjs) is scored, not gated — but its metric
+// computations are pinned here against hand-computed plans.
+const grader = await import('./grader.mjs');
+{
+  const gu = (id, placeKey, angle, durationSec) => ({
+    id, placeKey, placeName: placeKey, angle,
+    lat: 0, lng: 0, durationSec, topics: [], tone: null, toneSecondary: null,
+    audioPath: 'x', storyText: null,
+  });
+  // driveSec 1000. Sounding intervals: A [0,300] (window),
+  // B [500,600] (windowless, anchor), C [600,700] (window),
+  // P [780,920] (window, portal, climax). Covered = 640.
+  const handPlan = {
+    items: [
+      { kind: 'preview', id: 'preview', durationSec: 30 },
+      { kind: 'story', id: 'a|landmark_origin', durationSec: 300, anchorProgress: 0, releaseProgress: 0, expireProgress: 0.3, unit: gu('a|landmark_origin', 'pk-a', 'landmark_origin', 300) },
+      { kind: 'bridge', id: 'br1', durationSec: 20 },
+      { kind: 'story', id: 'b|landmark_event', durationSec: 100, anchorProgress: 0.5, unit: gu('b|landmark_event', 'pk-b', 'landmark_event', 100) },
+      { kind: 'story', id: 'c|corridor', durationSec: 90, anchorProgress: 0.65, releaseProgress: 0.6, expireProgress: 0.7, unit: gu('c|corridor', 'pk-c', 'corridor', 90) },
+      { kind: 'story', id: 'p|landmark_people', durationSec: 120, anchorProgress: 0.8, releaseProgress: 0.78, expireProgress: 0.92, portal: true, climax: true, unit: gu('p|landmark_people', 'pk-p', 'landmark_people', 120) },
+    ],
+    thread: { topic: 'Coast', memberIds: [], score: 3 },
+    climaxUnitId: 'p|landmark_people',
+    climaxMode: 'late',
+    budgetSec: 1000,
+  };
+  const pool = [100, 200, 300, 120].map((d, i) => gu(`pool${i}|landmark_origin`, `pk-pool${i}`, 'landmark_origin', d));
+  const m = grader.planMetrics(handPlan, { driveSec: 1000, climaxPool: pool });
+  check('grader metrics: silence share counts story-covered seconds only (bridges/preview are not coverage)', () => {
+    assert.equal(m.silenceSec, 360);
+    assert.equal(m.silenceShare, 0.36);
+    const overlap = { items: [
+      { kind: 'story', id: 'x', durationSec: 300, anchorProgress: 0, releaseProgress: 0, expireProgress: 0.3, unit: gu('x', 'pk-x', 'landmark_origin', 300) },
+      { kind: 'story', id: 'y', durationSec: 300, anchorProgress: 0.2, releaseProgress: 0.2, expireProgress: 0.5, unit: gu('y', 'pk-y', 'landmark_origin', 300) },
+    ] };
+    assert.equal(grader.coveredStorySec(overlap, 1000), 500); // union, not sum
+  });
+  check('grader metrics: thread, climax presence/mode/winner class read off the plan', () => {
+    assert.equal(m.threadTopic, 'Coast');
+    assert.equal(m.climaxPresent, true);
+    assert.equal(m.climaxMode, 'late');
+    assert.equal(m.climaxWinnerClass, 'landmark');
+  });
+  check('grader metrics: climax percentile counts pool members below + half the ties', () => {
+    assert.equal(m.climaxPercentile, 0.375); // (1 below + 0.5 × 1 tie) / 4
+    assert.equal(grader.weightPercentile([], pool[0]), null);
+    assert.equal(grader.weightPercentile(pool, null), null);
+  });
+  check('grader metrics: stale-drop risk = window slack under a quarter of the telling', () => {
+    assert.equal(m.atRisk, 3); // A (slack 0), C (10 < 22.5), P (20 < 30); windowless B skipped
+  });
+  check('grader metrics: portal share and distinct places', () => {
+    assert.equal(m.portalShare, 0.25);
+    assert.equal(m.distinctPlaces, 4);
+    assert.equal(m.stories, 4);
+  });
+  check('grader worlds: seeded generation is deterministic and census-shaped', () => {
+    const w1 = grader.buildWorld(1103, 'current');
+    const w2 = grader.buildWorld(1103, 'current');
+    assert.equal(w1.census, w2.census);
+    assert.equal(w1.topicLessShare, w2.topicLessShare);
+    assert.ok(Math.abs(w1.census - 1264) / 1264 < 0.05, `census ${w1.census} within 5% of 1264`);
+    assert.ok(w1.topicLessShare > 0.2 && w1.topicLessShare < 0.42, `topic-less share ${w1.topicLessShare}`);
+    const r1 = grader.mulberry32(7);
+    const r2 = grader.mulberry32(7);
+    assert.deepEqual([r1(), r1(), r1()], [r2(), r2(), r2()]);
+  });
+}
+
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
