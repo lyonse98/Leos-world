@@ -51,6 +51,23 @@ execFileSync(
 );
 const rn = await import(pathToFileURL(rnOut).href);
 
+// The bundled presence data (Nov 4, 2026): the woven suites
+// below pin its shape and its Protected/bound exclusions.
+const rpdOut = join(mkdtempSync(join(tmpdir(), 'route-presence-')), 'routePresence.mjs');
+execFileSync(
+  join(repoRoot, 'node_modules', '.bin', 'esbuild'),
+  [
+    join(repoRoot, 'src', 'data', 'routePresence.ts'),
+    '--bundle',
+    '--format=esm',
+    '--platform=node',
+    `--outfile=${rpdOut}`,
+    '--log-level=warning',
+  ],
+  { stdio: 'inherit' },
+);
+const rpd = await import(pathToFileURL(rpdOut).href);
+
 let passed = 0;
 let failed = 0;
 function check(name, fn) {
@@ -3409,6 +3426,325 @@ check('woven seated: substantive starvation counts only substantive drives (sile
     { starvationDrive: null, substantiveThreadBefore: 1 },
     'two thread-less substantive drives are not starvation',
   );
+});
+
+// ── Woven seated members (Nov 4, 2026) ─────────────────────
+// The production seating pass: off-route, woven-eligible
+// stories on the plan's through-line thread seat into silent
+// gaps as episode members — ≤4, guarantee-first (the pass
+// runs after the guarantee in the build staging; here it
+// runs on the composed plan directly), strongest-first,
+// never displacing sounding material, never the climax,
+// heard like everything else. Fixtures: a sacrificial portal
+// hop (whop) absorbs the plan's single hop slot so hop
+// behavior never pollutes the seating assertions.
+const WT = 'Military & Bases';
+const wGeo = (id, lat, dur = 120, name) =>
+  unit(id, lat, { topics: [WT], placeName: name, durationSec: dur });
+const wCand = (id, dur, extra = {}) =>
+  unit(id, 32.0, {
+    lng: -117.05,
+    angle: 'landmark_history',
+    topics: [WT],
+    durationSec: dur,
+    wovenEligible: true,
+    ...extra,
+  });
+const wFixtureUnits = wovenList => [
+  wGeo('ga|landmark_origin', 32.71, 120, 'Geo A'),
+  wGeo('gb|landmark_origin', 32.72, 120, 'Geo B'),
+  wGeo('gc|landmark_origin', 32.73, 120, 'Geo C'),
+  wGeo('gd|landmark_origin', 32.88, 500, 'Geo D'),
+  unit('whop|landmark_history', 32.0, {
+    lng: -117.05,
+    topics: [WT],
+    placeName: 'Hop Sacrifice',
+    durationSec: 60,
+    wovenEligible: false,
+  }),
+  ...wovenList,
+];
+const wCompose = (units, driveSec) => {
+  const plan = rm.composeRoutePlan(
+    units,
+    path,
+    dest,
+    'Dest',
+    { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: driveSec, driveSec },
+  );
+  // The App's staging assignments (post-guarantee), mirrored.
+  plan.driveSec = driveSec;
+  plan.budgetSec = driveSec;
+  return plan;
+};
+const storyIds = plan => plan.items.filter(i => i.kind === 'story').map(i => i.id);
+const memberIds = plan => plan.items.filter(i => i.woven).map(i => i.id);
+
+check('woven data: the bundled presence map pins the audit — Protected excluded whatever its register', () => {
+  assert.equal(Object.keys(rpd.ROUTE_PRESENCE).length, 1264, 'one row per shelf story');
+  // Kuchamaa is Protected register: even its weave-SAFE
+  // telling is never woven material.
+  assert.deepEqual(rpd.presenceFor('kuchamaa', 'landmark_origin'), { presence: 'safe', protected: true });
+  assert.equal(rpd.wovenEligibleFor('kuchamaa', 'landmark_origin'), false, 'Protected beats safe');
+  assert.equal(rpd.wovenEligibleFor('kuchamaa', 'landmark_event'), false);
+  // Presence-bound excluded; mixed and safe eligible.
+  assert.equal(rpd.wovenEligibleFor('alpine', 'landmark_origin'), false, 'bound is not eligible');
+  assert.equal(rpd.wovenEligibleFor('alpine', 'landmark_cultural'), true, 'safe is eligible');
+  assert.equal(rpd.wovenEligibleFor('619-as-a-badge', 'filler_hosted'), true, 'mixed is eligible');
+  // Unclassified rows are never eligible — the safe direction.
+  assert.equal(rpd.presenceFor('no such place', 'landmark_origin'), null);
+  assert.equal(rpd.wovenEligibleFor('no such place', 'landmark_origin'), false);
+});
+check('woven data regen: deterministic, and the committed routePresence.ts is in sync with the CSV', () => {
+  const dataPath = join(repoRoot, 'src', 'data', 'routePresence.ts');
+  const before = readFileSync(dataPath, 'utf8');
+  const gen = join(repoRoot, 'scripts', 'route-mode', 'build-route-presence.mjs');
+  execFileSync(process.execPath, [gen], { stdio: 'pipe' });
+  const after1 = readFileSync(dataPath, 'utf8');
+  execFileSync(process.execPath, [gen], { stdio: 'pipe' });
+  const after2 = readFileSync(dataPath, 'utf8');
+  assert.equal(after1, after2, 'two runs of the generator produce byte-identical output');
+  assert.equal(after1, before, 'the committed routePresence.ts already equals a fresh regeneration');
+});
+
+check('woven seating: members seat strongest-first into the silent gap, climax untouched', () => {
+  assert.equal(rm.WOVEN_MEMBER_CAP, 4);
+  const units = wFixtureUnits([
+    wCand('w1|landmark_history', 300, { placeName: 'Woven One' }),
+    wCand('w2|landmark_history', 280, { placeName: 'Woven Two' }),
+    wCand('w3|landmark_history', 250, { placeName: 'Woven Three' }),
+    wCand('w4|landmark_history', 200, { placeName: 'Woven Four' }),
+    wCand('w5|landmark_history', 170, { placeName: 'Woven Five' }),
+    wCand('w6|landmark_history', 100, { placeName: 'Woven Six' }),
+  ]);
+  const plan = wCompose(units, 1800);
+  assert.equal(plan.thread?.topic, WT, 'the geo spine alone carries the thread');
+  assert.equal(plan.climaxUnitId, 'gd|landmark_origin', 'the strong late geo story is the climax');
+  const beforeIds = storyIds(plan);
+  const seated = rm.seatWovenMembers(plan, units, { heardKeys: new Set() });
+  // The one big mid-drive gap (the departure edge is closed
+  // to members): w1 and w2 take it strongest-first; w3/w4 no
+  // longer fit the remainder and are skipped on size; w5
+  // (170 s) fits what is left; w6 does not.
+  assert.deepEqual(memberIds(seated), [
+    'w1|landmark_history',
+    'w2|landmark_history',
+    'w5|landmark_history',
+  ]);
+  assert.deepEqual(seated.wovenMembers, {
+    count: 3,
+    topics: [WT],
+    unitIds: memberIds(seated),
+  });
+  // Gap-only, no displacement: the pre-seating story sequence
+  // survives verbatim as the non-member subsequence.
+  assert.deepEqual(
+    seated.items.filter(i => i.kind === 'story' && !i.woven).map(i => i.id),
+    beforeIds,
+    'no sounding story moved, dropped, or reordered',
+  );
+  // Members are windowless inserts (they release by plan
+  // order) and never carry the climax flag.
+  for (const it of seated.items.filter(i => i.woven)) {
+    assert.equal(it.releaseProgress, undefined, 'a member is windowless');
+    assert.equal(it.climax, undefined, 'a member is never the climax');
+  }
+  // Every member fits entirely inside a gap of the ORIGINAL
+  // plan (the guarantee's own interval model, recomputed).
+  const spans = plan.items
+    .filter(i => (i.kind === 'story' || i.kind === 'filler') && i.unit)
+    .map(i => {
+      const a = (i.anchorProgress ?? 0) * 1800;
+      const s = i.releaseProgress !== undefined ? i.releaseProgress * 1800 : a;
+      const e = i.expireProgress !== undefined ? i.expireProgress * 1800 : s + i.durationSec;
+      return [s, e];
+    })
+    .sort((x, y) => x[0] - y[0]);
+  for (const it of seated.items.filter(i => i.woven)) {
+    const s = (it.anchorProgress ?? 0) * 1800;
+    const e = s + it.durationSec;
+    let cursor = 0;
+    let inside = false;
+    for (const [ss, ee] of spans) {
+      if (s >= cursor && e <= ss) inside = true;
+      cursor = Math.max(cursor, ee);
+    }
+    if (s >= cursor && e <= 1800) inside = true;
+    assert.ok(inside, `member ${it.id} [${s}, ${e}] sits inside an original silent gap`);
+  }
+});
+
+check('woven seating: the cap binds even when the gap could hold more', () => {
+  const units = wFixtureUnits([
+    wCand('w1|landmark_history', 200),
+    wCand('w2|landmark_history', 200),
+    wCand('w3|landmark_history', 200),
+    wCand('w4|landmark_history', 200),
+    wCand('w5|landmark_history', 200),
+    wCand('w6|landmark_history', 200),
+  ]);
+  const plan = wCompose(units, 2400);
+  const seated = rm.seatWovenMembers(plan, units, { heardKeys: new Set() });
+  assert.equal(seated.wovenMembers.count, 4, 'four members and no more, though six would fit');
+  assert.deepEqual(memberIds(seated), [
+    'w1|landmark_history',
+    'w2|landmark_history',
+    'w3|landmark_history',
+    'w4|landmark_history',
+  ]);
+  assert.ok(!storyIds(seated).includes('w5|landmark_history'), 'the fifth candidate stays on the shelf');
+  // The knob exists for the grader; the production caller
+  // never passes it.
+  const two = rm.seatWovenMembers(plan, units, { heardKeys: new Set(), maxMembers: 2 });
+  assert.equal(two.wovenMembers.count, 2);
+});
+
+check('woven seating: the thread gate — no through-line, no members, plan returned untouched', () => {
+  const units = [
+    unit('ga|landmark_origin', 32.71, { placeName: 'Geo A' }),
+    unit('gb|landmark_origin', 32.72, { placeName: 'Geo B' }),
+    wCand('w1|landmark_history', 300, { topics: ['Coast'] }),
+    wCand('w2|landmark_history', 300, { topics: ['Surf'] }),
+    wCand('w3|landmark_history', 300, { topics: ['Rail'] }),
+  ];
+  const plan = wCompose(units, 1800);
+  assert.equal(plan.thread, null, 'no topic reaches thread weight anywhere');
+  const seated = rm.seatWovenMembers(plan, units, { heardKeys: new Set() });
+  assert.equal(seated, plan, 'the same plan object comes back — a strict no-op');
+  assert.equal(seated.wovenMembers.count, 0);
+  assert.deepEqual(memberIds(seated), []);
+});
+
+check('woven thread support: eligible off-route stories count toward thread detection', () => {
+  const units = [
+    wGeo('ga|landmark_origin', 32.71, 120, 'Geo A'),
+    wGeo('gb|landmark_origin', 32.72, 120, 'Geo B'),
+    wCand('w1|landmark_history', 300),
+    wCand('w2|landmark_history', 300),
+    wCand('w3|landmark_history', 300),
+  ];
+  const plan = wCompose(units, 1800);
+  // Two geo places score 2 — under the thread bar. The three
+  // eligible off-route places on the same topic are real
+  // support: the union finds the thread.
+  assert.equal(plan.thread?.topic, WT);
+  assert.equal(plan.thread?.score, 5);
+});
+
+check('woven seating: eligibility exclusion — bound and unflagged stories never seat', () => {
+  const units = wFixtureUnits([
+    wCand('wbound|landmark_history', 600, { wovenEligible: false, placeName: 'Bound Giant' }),
+    unit('wnoflag|landmark_history', 32.0, {
+      lng: -117.05,
+      topics: [WT],
+      placeName: 'Unflagged Giant',
+      durationSec: 550,
+    }),
+    wCand('wok|landmark_history', 200, { placeName: 'Eligible One' }),
+  ]);
+  const plan = wCompose(units, 1800);
+  const seated = rm.seatWovenMembers(plan, units, { heardKeys: new Set() });
+  assert.deepEqual(seated.wovenMembers.unitIds, ['wok|landmark_history'], 'only the eligible story seats');
+  assert.ok(
+    !seated.items.some(i => i.woven && i.id !== 'wok|landmark_history'),
+    'no ineligible story carries the woven flag',
+  );
+  assert.ok(!storyIds(seated).includes('wnoflag|landmark_history'), 'the unflagged giant never sounds as anything');
+});
+
+check('woven seating: a member is never the climax — the portal-climax winner is excluded from seating', () => {
+  const units = [
+    wGeo('ga|landmark_origin', 32.71, 120, 'Geo A'),
+    wGeo('gb|landmark_origin', 32.72, 120, 'Geo B'),
+    wGeo('gc|landmark_origin', 32.73, 120, 'Geo C'),
+    unit('whop|landmark_history', 32.0, {
+      lng: -117.05,
+      topics: [WT],
+      placeName: 'Hop Sacrifice',
+      durationSec: 60,
+      wovenEligible: false,
+    }),
+    wCand('wbig|landmark_history', 400, { placeName: 'Woven Big' }),
+    wCand('wmid|landmark_history', 250, { placeName: 'Woven Mid' }),
+    wCand('wsmall|landmark_history', 200, { placeName: 'Woven Small' }),
+  ];
+  const plan = wCompose(units, 1800);
+  assert.equal(plan.climaxUnitId, 'wbig|landmark_history', 'with no late geo story, the strongest woven unit takes the portal climax');
+  const seated = rm.seatWovenMembers(plan, units, { heardKeys: new Set() });
+  const climaxItem = seated.items.find(i => i.climax);
+  assert.equal(climaxItem?.id, 'wbig|landmark_history');
+  assert.ok(!climaxItem?.woven, 'the climax item is not a member');
+  assert.deepEqual(seated.wovenMembers.unitIds, ['wmid|landmark_history', 'wsmall|landmark_history']);
+  assert.ok(!seated.wovenMembers.unitIds.includes('wbig|landmark_history'), 'the climax never double-seats as a member');
+});
+
+check('woven seating: heard exclusion is story-level — a heard member candidate is skipped, and a played member burns', () => {
+  const mk = () =>
+    wFixtureUnits([
+      wCand('wheard|landmark_history', 400, { placeName: 'Heard One', storyText: 'heard text unique' }),
+      wCand('wnext|landmark_history', 300, { placeName: 'Next One', storyText: 'next text unique' }),
+      wCand('wthird|landmark_history', 200, { placeName: 'Third One', storyText: 'third text unique' }),
+    ]);
+  const units1 = mk();
+  const plan1 = wCompose(units1, 1800);
+  const seated1 = rm.seatWovenMembers(plan1, units1, {
+    heardKeys: new Set(['wheard|landmark_history']),
+  });
+  assert.deepEqual(
+    seated1.wovenMembers.unitIds,
+    ['wnext|landmark_history', 'wthird|landmark_history'],
+    'the heard candidate is skipped; the next strongest seat',
+  );
+  // The burn: file wnext's text as heard (the ledger's own
+  // derivation) and the next build seats a different member.
+  const units2 = mk();
+  const plan2 = wCompose(units2, 1800);
+  const heard2 = rm.heardKeysForStories(units2, new Set(['next text unique']));
+  assert.ok(heard2.has('wnext|landmark_history'));
+  const seated2 = rm.seatWovenMembers(plan2, units2, { heardKeys: heard2 });
+  assert.deepEqual(
+    seated2.wovenMembers.unitIds,
+    ['wheard|landmark_history', 'wthird|landmark_history'],
+    'the burned member is gone next build; the previously heard-keyed slot was only this build’s exclusion',
+  );
+});
+
+check('woven framing: the bridge into a member ranges along the thread — no proximity language; geo bridges unchanged', () => {
+  const units = wFixtureUnits([
+    wCand('w1|landmark_history', 400, { placeName: 'Woven One' }),
+    wCand('w2|landmark_history', 350, { placeName: 'Woven Two' }),
+  ]);
+  const plan = wCompose(units, 1800);
+  const seated = rm.seatWovenMembers(plan, units, { heardKeys: new Set() });
+  assert.ok(memberIds(seated).length >= 1, 'fixture seats at least one member');
+  const memberBridge = seated.items.find(i => i.kind === 'bridge' && i.nextUnitId === 'w1|landmark_history');
+  assert.ok(memberBridge, 'a bridge introduces the member');
+  assert.ok(!/just ahead|on your left|on your right|coming up/i.test(memberBridge.text), `no proximity language: ${memberBridge.text}`);
+  assert.ok(memberBridge.text.includes('Woven One'), 'the bridge names the member’s real place');
+  assert.ok(memberBridge.text.includes('clear across the county'), 'the range is framed honestly');
+  assert.ok(memberBridge.text.includes(WT), 'the bridge names the thread it is following');
+  const geoBridge = seated.items.find(i => i.kind === 'bridge' && i.nextUnitId === 'gb|landmark_origin');
+  assert.ok(geoBridge && geoBridge.text.includes('just ahead is Geo B'), 'geo bridges keep their proximity framing');
+});
+
+await checkAsync('woven telemetry: route_plan_started decisions carry the woven members', async () => {
+  const units = wFixtureUnits([wCand('w1|landmark_history', 400, { placeName: 'Woven One' })]);
+  const plan = wCompose(units, 1800);
+  const seated = rm.seatWovenMembers(plan, units, { heardKeys: new Set() });
+  assert.equal(seated.wovenMembers.count, 1);
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio: new RealFakeAudio(250),
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onEvent: (t, p) => events.push({ t, p }),
+    onStoryHeard: () => {},
+  });
+  await runner.start(seated);
+  const started = events.find(e => e.t === 'route_plan_started');
+  assert.ok(started, 'route_plan_started filed');
+  assert.deepEqual(started.p.decisions.woven_members, { count: 1, topics: [WT] });
+  runner.endTour();
 });
 
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);

@@ -496,6 +496,12 @@ async function runBuild({ rm, gf, rh }, world, route, { heardNames, heardTexts, 
   );
   plan.driveSec = route.driveSec;
   plan.budgetSec = rm.budgetSecFor(route.driveSec);
+  // Woven seated members (Nov 4, 2026): the App's post-
+  // guarantee seating pass, same staging position. A strict
+  // no-op on worlds whose units carry no wovenEligible marks
+  // (every pre-feature battery), so the standard grades are
+  // untouched by its presence here.
+  plan = rm.seatWovenMembers(plan, units, { heardKeys });
   return { plan, units, climaxOnlyUnits, heardKeys, fetchStats: fetched.stats };
 }
 
@@ -1582,6 +1588,172 @@ function renderMarkdown(report, baseline) {
   return lines.join('\n');
 }
 
+// ------------------------------------------------------------ woven seated members — PRODUCTION (Nov 4, 2026)
+//
+// The seated-members simulation above justified the build;
+// this battery is its ACCEPTANCE: the same 40-drive commute
+// at current depth and the same audit eligibility draw (seed
+// 9200, per-topic measured usable shares — 473 eligible
+// units), but the plans come from the PRODUCTION pipeline
+// end to end — runBuild mirrors App.buildRoute's staging
+// (fetch → compose with woven thread support → the ONE
+// portal-climax re-compose → shelf-only guarantee →
+// rm.seatWovenMembers) with no sim-side post-pass anywhere.
+// The eligibility marks ride the world units themselves
+// (unit.wovenEligible), exactly as the App bakes them from
+// the bundled presence data. Fresh-drive spot checks
+// (tourist / hop / commute drive 1) run on the same marked
+// world so the feature's effect on a first drive is on the
+// record beside the repeat-commute headline.
+
+export async function runWovenProduction(mods, { drives: driveCount = 40 } = {}) {
+  const { rm } = mods;
+  const world = buildWorld(1103, 'current');
+  const eligible = wovenEligibleUnits(world, 'commute', { audit: true }, 9200);
+  const eligibleIds = new Set(eligible.map(u => u.id));
+  for (const u of world.unitsById.values()) {
+    if (eligibleIds.has(u.id)) u.wovenEligible = true;
+  }
+  const route = world.routes.commute;
+  const input = { destinationText: route.destName, arrivalTimeMs: null, tone: null, topics: [] };
+
+  // Fresh drives on the marked world (empty ledgers).
+  const fresh = {};
+  for (const routeName of ['tourist', 'hop', 'commute']) {
+    const r = world.routes[routeName];
+    const build = await runBuild(mods, world, r, {
+      heardNames: new Set(),
+      heardTexts: new Set(),
+      driveRecords: [],
+      input: { destinationText: r.destName, arrivalTimeMs: null, tone: null, topics: [] },
+      nowMs: BASE_NOW,
+    });
+    const m = planMetrics(build.plan, { driveSec: r.driveSec, climaxPool: null });
+    fresh[routeName] = {
+      stories: m.stories,
+      silenceSec: m.silenceSec,
+      silenceShare: m.silenceShare,
+      threadTopic: m.threadTopic,
+      climaxPresent: m.climaxPresent,
+      members: build.plan.wovenMembers?.count ?? 0,
+    };
+  }
+
+  const heardNames = new Set();
+  const heardTexts = new Set();
+  let records = [];
+  const drives = [];
+  const episodeSets = [];
+  let totalMembers = 0;
+  for (let d = 0; d < driveCount; d++) {
+    const nowMs = BASE_NOW + d * 24 * 60 * 60 * 1000;
+    const build = await runBuild(mods, world, route, {
+      heardNames,
+      heardTexts,
+      driveRecords: records,
+      input,
+      nowMs,
+    });
+    const plan = build.plan;
+    const metrics = planMetrics(plan, { driveSec: route.driveSec, climaxPool: null });
+    const played = plan.items.filter(i => i.kind === 'story' && i.unit);
+    episodeSets.push(new Set(played.map(i => i.unit.id)));
+    const members = plan.wovenMembers?.count ?? 0;
+    totalMembers += members;
+    drives.push({
+      drive: d + 1,
+      stories: metrics.stories,
+      silenceShare: metrics.silenceShare,
+      threadTopic: plan.thread?.topic ?? null,
+      climaxPresent: metrics.climaxPresent,
+      members,
+    });
+    for (const it of played) {
+      heardNames.add(it.unit.placeName);
+      if (it.unit.storyText) heardTexts.add(it.unit.storyText);
+    }
+    records = [
+      {
+        destinationName: route.destName,
+        destinationPlaceKey: route.destPlaceKey,
+        threadTopic: plan.thread?.topic ?? null,
+        playedSubjects: [...new Set(played.map(i => i.unit.placeName))],
+        owedSubjects: [],
+        endedAt: nowMs,
+      },
+      ...records,
+    ].slice(0, 20);
+  }
+  const substantive = drives.filter(d => d.silenceShare <= 0.5);
+  const starvation = substantiveThreadStarvation(drives);
+  return {
+    world: { census: world.census, shape: 'current' },
+    eligibleUnits: eligible.length,
+    fresh,
+    drives,
+    summary: {
+      substantiveThreadEpisodes: substantive.filter(d => d.threadTopic !== null).length,
+      substantiveEpisodes: substantive.length,
+      substantiveStarvationDrive: starvation.starvationDrive,
+      threadDrives: drives.filter(d => d.threadTopic !== null).length,
+      climaxDrives: drives.filter(d => d.climaxPresent).length,
+      meanSilenceShare:
+        Math.round((drives.reduce((s, d) => s + d.silenceShare, 0) / drives.length) * 1000) / 1000,
+      meanConsecutiveOverlap: meanConsecutiveOverlap(episodeSets),
+      totalMembers,
+      drivesWithMembers: drives.filter(d => d.members > 0).length,
+      minStories: Math.min(...drives.map(d => d.stories)),
+      lastDriveStories: drives[drives.length - 1].stories,
+    },
+  };
+}
+
+function renderWovenProductionMarkdown(prod, label) {
+  const lines = [];
+  lines.push('# Woven seated members — PRODUCTION acceptance (route mode)');
+  lines.push('');
+  lines.push(
+    `Composer: ${label ?? 'working tree'} · synthetic shelf, current depth (${prod.world.census} units), seeded; ` +
+      'the standard 40-drive commute battery with the heard-aware window and story-level heard (v3.1 A+B) underneath. ' +
+      `Eligibility: the presence audit's measured per-topic usable shares (seed 9200) — ${prod.eligibleUnits} eligible units, ` +
+      'marked on the world units (unit.wovenEligible) and consulted by the PRODUCTION composer + seating pass ' +
+      '(runBuild mirrors App.buildRoute staging end to end; no sim post-pass). Guarantee pass is shelf-only ' +
+      '(silence is an upper bound vs production).',
+  );
+  lines.push('');
+  const s = prod.summary;
+  lines.push(
+    `HEADLINE — substantive thread-bearing episodes (silence ≤ 50% AND a thread found) across 40 drives: ` +
+      `**${s.substantiveThreadEpisodes}** (the seated-members SIMULATION predicted 26 at this eligibility; ` +
+      `climax-only production-equivalent is 9). Substantive episodes ${s.substantiveEpisodes}, ` +
+      `substantive-thread starvation ${s.substantiveStarvationDrive ?? 'none in 40'}, thread drives ${s.threadDrives}/40, ` +
+      `climax ${s.climaxDrives}/40, mean silence ${fmtPct(s.meanSilenceShare)} (sim: 41%), ` +
+      `members seated ${s.totalMembers} across ${s.drivesWithMembers} drives, mean consecutive overlap ${s.meanConsecutiveOverlap}.`,
+  );
+  lines.push('');
+  lines.push('## Fresh drives on the marked world (vs grade-after-addendum-b, unmarked)');
+  lines.push('');
+  lines.push('| route | stories | silence | thread | members |');
+  lines.push('|---|---|---|---|---|');
+  for (const [name, f] of Object.entries(prod.fresh)) {
+    lines.push(
+      `| ${name} | ${f.stories} | ${f.silenceSec}s (${fmtPct(f.silenceShare)}) | ${f.threadTopic ?? '—'} | ${f.members} |`,
+    );
+  }
+  lines.push('');
+  lines.push('## The 40 drives');
+  lines.push('');
+  lines.push('| drive | stories | silence | thread | members | climax |');
+  lines.push('|---|---|---|---|---|---|');
+  for (const d of prod.drives) {
+    lines.push(
+      `| ${d.drive} | ${d.stories} | ${fmtPct(d.silenceShare)} | ${d.threadTopic ?? '—'} | ${d.members} | ${d.climaxPresent ? 'yes' : '—'} |`,
+    );
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
 async function main() {
   const argv = process.argv.slice(2);
   const argOf = name => {
@@ -1657,6 +1829,41 @@ async function main() {
           `(substantive ${s.substantiveEpisodes}), substantive starvation ${s.substantiveStarvationDrive ?? 'none in 40'}, ` +
           `thread ${s.threadDrives}/40, climax ${s.climaxDrives}/40, woven burned ${r.burn.totalWovenUnits}u/${r.burn.totalWovenSec}s ` +
           `(members ${r.burn.totalMembers}), overlap ${s.meanConsecutiveOverlap}, silence ${fmtPct(s.meanSilenceShare)}`,
+      );
+    }
+    return;
+  }
+  if (argv.includes('--woven-production')) {
+    // The production acceptance battery for woven seated
+    // members (Nov 4, 2026): the 40-drive commute through the
+    // production pipeline at audit eligibility. Writes
+    // grade-woven-production.json/.md unless --out says
+    // otherwise.
+    const prod = await runWovenProduction(mods);
+    const prodReport = {
+      generatedBy: 'scripts/route-mode/grader.mjs --woven-production',
+      generatedAt: new Date().toISOString(),
+      label,
+      world: prod.world,
+      eligibleUnits: prod.eligibleUnits,
+      fresh: prod.fresh,
+      drives: prod.drives,
+      summary: prod.summary,
+    };
+    const prodPrefix = argOf('--out') ?? 'grade-woven-production';
+    writeFileSync(join(here, `${prodPrefix}.json`), JSON.stringify(prodReport, null, 2));
+    writeFileSync(join(here, `${prodPrefix}.md`), renderWovenProductionMarkdown(prod, label));
+    console.log(`grader (woven production): wrote ${prodPrefix}.json + ${prodPrefix}.md (composer ${label ?? '?'})`);
+    const s = prod.summary;
+    console.log(
+      `  production seated: substantive thread-bearing ${s.substantiveThreadEpisodes}/40 (sim predicted 26), ` +
+        `substantive ${s.substantiveEpisodes}, starvation ${s.substantiveStarvationDrive ?? 'none in 40'}, ` +
+        `thread ${s.threadDrives}/40, climax ${s.climaxDrives}/40, silence ${fmtPct(s.meanSilenceShare)}, ` +
+        `members ${s.totalMembers} over ${s.drivesWithMembers} drives, overlap ${s.meanConsecutiveOverlap}`,
+    );
+    for (const [name, f] of Object.entries(prod.fresh)) {
+      console.log(
+        `  fresh ${name}: stories ${f.stories}, silence ${f.silenceSec}s, thread ${f.threadTopic ?? '—'}, members ${f.members}`,
       );
     }
     return;
