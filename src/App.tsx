@@ -23,7 +23,7 @@ import {
   type LibraryUnit,
   type TourMode,
 } from './core/routeMode';
-import { RoutePlanRunner, type RouteRunnerView } from './core/routePlayback';
+import { RoutePlanRunner, routeStartButtonState, type RouteRunnerView } from './core/routePlayback';
 import {
   DEFAULT_NARRATION_VOICE,
   narrationRequest,
@@ -463,7 +463,7 @@ function MilesApp() {
   const [routeRunner, setRouteRunner] = useState<RoutePlanRunner | null>(null);
   const [routeView, setRouteView] = useState<RouteRunnerView | null>(null);
   // Manifest (differentiator 3): the built plan's episode card,
-  // shown on the tour screen until the Start listening tap.
+  // shown on the tour screen until the Start tour tap.
   const [routeManifest, setRouteManifest] = useState<RouteManifest | null>(null);
   const [routeActive, setRouteActive] = useState(false);
   const [owedLine, setOwedLine] = useState<string | null>(null);
@@ -1587,11 +1587,16 @@ function MilesApp() {
   // Phase 2 adds ONE thing, Passenger/Walking rides only: an Ask
   // pill in the bar opening the question sheet. Driving route
   // tours render exactly the phase-1 screen. Manifest
-  // (differentiator 3): before the Start listening tap the screen
+  // (differentiator 3): before the Start tour tap the screen
   // is the episode card instead of the bar — the face above it,
   // the card under it, nothing scrolling.
   if (routeActive && routeRunner) {
     const rView = routeView;
+    // Composer v3 (commit D): the manifest card's primary
+    // button is honest about preparation — disabled
+    // 'Generating tour…' until the runner's narration has
+    // fully settled, then enabled 'Start tour'.
+    const startBtn = routeStartButtonState(rView ?? { narrationReady: false });
     const routeNeedsResume = Boolean(rView?.userPaused || rView?.guardPaused);
     return (
       <div
@@ -1616,8 +1621,12 @@ function MilesApp() {
               // shown before the first sound — title, runtime,
               // story count with the new-to-you count, the thread
               // line when the plan has one, and the closing story.
-              // Start listening is the play gesture: it begins the
+              // Start tour is the play gesture: it begins the
               // staged runner and re-primes its audio on the tap.
+              // Until the plan-time narration has settled the
+              // button sits disabled on 'Generating tour…' —
+              // the card is up while preparation finishes, and
+              // says so (composer v3, commit D).
               <div className="mb-2 rounded-[2rem] bg-white/80 p-5 shadow-xl shadow-ink/15 backdrop-blur">
                 <p className="text-xs font-bold uppercase tracking-[0.18em] text-sagedeep">Your episode</p>
                 <h2 className="mt-1 text-xl font-black leading-tight">{routeManifest.title}</h2>
@@ -1635,11 +1644,12 @@ function MilesApp() {
                 <button
                   type="button"
                   onClick={() => routeRunner.beginStaged()}
-                  aria-label="Start listening"
-                  className="mt-4 flex w-full items-center justify-center gap-2 rounded-full bg-ink px-5 py-3.5 text-base font-bold text-cream shadow-md shadow-ink/20 transition hover:bg-sagedeep active:scale-[0.99]"
+                  disabled={startBtn.disabled}
+                  aria-label={startBtn.label}
+                  className="mt-4 flex w-full items-center justify-center gap-2 rounded-full bg-ink px-5 py-3.5 text-base font-bold text-cream shadow-md shadow-ink/20 transition hover:bg-sagedeep active:scale-[0.99] disabled:opacity-60"
                 >
                   <Play className="h-5 w-5" />
-                  Start listening
+                  {startBtn.label}
                 </button>
                 <button
                   type="button"

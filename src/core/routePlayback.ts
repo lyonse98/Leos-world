@@ -86,6 +86,32 @@ export interface RouteRunnerView {
   qaPhase: 'idle' | 'generating' | 'answering';
   /** Answers that actually sounded this route tour. */
   questionsAnswered: number;
+  /**
+   * Composer v3 (commit D): the plan-time narration has fully
+   * settled — every preview, bridge, and generated gap-story
+   * render has succeeded OR fallen back (the skip-fallback
+   * design means a failure settles too; readiness can never
+   * hang on one), and the wrap-up was settled by the App
+   * before staging. The manifest card's primary button reads
+   * this flag: disabled 'Generating tour…' until it turns
+   * true, then enabled 'Start tour'.
+   */
+  narrationReady: boolean;
+}
+
+/**
+ * The manifest card's primary button, derived from the
+ * runner view (composer v3, commit D — Erik's copy): honest
+ * about the preparation phase, and live only when everything
+ * the plan needs has settled.
+ */
+export function routeStartButtonState(view: { narrationReady: boolean }): {
+  label: string;
+  disabled: boolean;
+} {
+  return view.narrationReady
+    ? { label: 'Start tour', disabled: false }
+    : { label: 'Generating tour…', disabled: true };
 }
 
 export interface RouteRunnerDeps {
@@ -260,6 +286,7 @@ export class RoutePlanRunner {
       closeoutDone: this.closeoutDoneFlag,
       qaPhase: this.qaPhase,
       questionsAnswered: this.questionsAnsweredCount,
+      narrationReady: this.plan !== null && this.renderingDone,
     };
   }
 
@@ -316,17 +343,26 @@ export class RoutePlanRunner {
    * exactly as start() does, but BEGIN nothing — the tour
    * screen is showing the plan's episode card, and the runner
    * must not consume story windows while the listener reads
-   * it. beginStaged() — the card's Start listening tap — is
+   * it. beginStaged() — the card's Start tour tap — is
    * what sets the plan in motion.
    */
   async stage(plan: RoutePlan): Promise<void> {
     this.heldStart = true;
-    await this.renderPlan(plan, false);
+    const rendering = this.renderPlan(plan, false);
+    // Surface the hold at once (composer v3, commit D): the
+    // manifest card must be visible WHILE the plan-time
+    // narration renders settle — renderPlan's synchronous
+    // prefix has already taken the plan, so this notify
+    // publishes phase 'ready' with narrationReady still
+    // false, and the card's button sits disabled on
+    // 'Generating tour…' until the settle notify below.
+    this.notify();
+    await rendering;
     this.notify();
   }
 
   /**
-   * The manifest card's Start listening tap. The tap IS a user
+   * The manifest card's Start tour tap. The tap IS a user
    * gesture, so it re-primes first, through the same noteGesture
    * path the awaiting state uses — if the build tap's prime was
    * refused, this tap gives item 1 a fresh carrier inside a live
@@ -595,7 +631,7 @@ export class RoutePlanRunner {
     // Manifest hold (differentiator 3): while the episode card
     // is up, a position update refreshes the progress reading
     // only — no arrival closeout, no corridor pause, no window
-    // feed. The guards evaluate from the Start listening tap
+    // feed. The guards evaluate from the Start tour tap
     // onward, against the progress the driver actually reached.
     if (this.heldStart) return;
     // Arrival check first: it outranks the corridor guard.

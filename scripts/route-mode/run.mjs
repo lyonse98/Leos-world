@@ -1323,7 +1323,7 @@ await checkAsync('first sound: a refused first play holds at tap-to-hear (never 
 });
 
 // ---- manifest hold (differentiator 3): the staged runner waits
-// for the Start listening action — nothing sounds, no window is
+// for the Start tour action — nothing sounds, no window is
 // fed, no guard fires while the episode card is up ----
 await checkAsync('manifest: a staged plan does not start until the start action fires', async () => {
   const audio = new GateFakeAudio(300);
@@ -1348,7 +1348,7 @@ await checkAsync('manifest: a staged plan does not start until the start action 
   assert.equal(runner.view().endedKind, null, 'no guard closeout fires during the hold');
   assert.equal(runner.submitQuestion('too early?'), false, 'no Q&A before the start action');
   assert.equal(audio.played.length, playedAfterPrime, 'still nothing sounded');
-  runner.beginStaged(); // the Start listening tap
+  runner.beginStaged(); // the Start tour tap
   await until(() => audio.played.some(u => u.includes('s1%7Clandmark_origin')), 'item 1 begins on the start action');
   assert.equal(events.filter(e => e.t === 'route_plan_started').length, 1, 'route_plan_started files at the real start');
   assert.equal(runner.view().phase, 'playing');
@@ -2331,6 +2331,61 @@ await checkAsync('wart (§5): the exclusion is surgical — a genuinely dropped 
   assert.ok(!records[0].owedSubjects.includes('c|landmark_origin'), 'and not the completer');
   runner.endTour();
 });
+
+// ---- composer v3, commit D: start-button readiness ----
+{
+  const dPlan = () =>
+    rm.composeRoutePlan(
+      [unit('a|landmark_origin', 32.71), unit('b|landmark_origin', 32.85)],
+      path, dest, 'Dest',
+      { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+      { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 10000 },
+    );
+  check('readiness: the start button state derives from narrationReady (Erik’s copy)', () => {
+    assert.deepEqual(rp.routeStartButtonState({ narrationReady: false }), { label: 'Generating tour…', disabled: true });
+    assert.deepEqual(rp.routeStartButtonState({ narrationReady: true }), { label: 'Start tour', disabled: false });
+  });
+  await checkAsync('readiness: narrationReady is false while a narration render is unsettled, true after it settles', async () => {
+    let release;
+    const gate = new Promise(r => { release = r; });
+    const runner = new rp.RoutePlanRunner({
+      audio: new RealFakeAudio(250),
+      synthUrl: async t => { await gate; return 'blob:audio/' + encodeURIComponent(t.slice(0, 16)); },
+      onEvent: () => {},
+      onStoryHeard: () => {},
+    });
+    const staging = runner.stage(dPlan());
+    // The hold is already visible (the card's rendering
+    // precondition) while the preview/bridge renders hang on
+    // the gate — and the button state says so.
+    assert.equal(runner.view().phase, 'ready');
+    assert.equal(runner.view().narrationReady, false);
+    assert.deepEqual(rp.routeStartButtonState(runner.view()), { label: 'Generating tour…', disabled: true });
+    release();
+    await staging;
+    assert.equal(runner.view().narrationReady, true);
+    assert.deepEqual(rp.routeStartButtonState(runner.view()), { label: 'Start tour', disabled: false });
+    runner.endTour();
+  });
+  await checkAsync('readiness: a failed narration render still settles readiness (skip-fallback)', async () => {
+    let calls = 0;
+    const runner = new rp.RoutePlanRunner({
+      audio: new RealFakeAudio(250),
+      synthUrl: async () => {
+        calls += 1;
+        if (calls === 2) throw new Error('synth down'); // the bridge fails over; the plan still settles
+        return 'blob:audio/ok';
+      },
+      onEvent: () => {},
+      onStoryHeard: () => {},
+    });
+    await runner.stage(dPlan());
+    assert.ok(calls >= 2, 'the failing render was attempted');
+    assert.equal(runner.view().narrationReady, true);
+    assert.equal(runner.view().phase, 'ready');
+    runner.endTour();
+  });
+}
 
 // ---- composer v3, commit C: rotation policy ----
 {
