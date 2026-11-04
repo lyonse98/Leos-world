@@ -700,6 +700,17 @@ export interface FetchReadStats {
   decileUnheard: number[];
   /** True when a read ceiling stopped the fetch while a decile (or the portal pool) still needed depth. */
   ceilingHit: boolean;
+  /**
+   * The member fetch (the member-fetch lever, Nov 4, 2026):
+   * the ONE bounded fetch a build runs when the composed
+   * plan's thread cannot seat its members from the departure
+   * fetch's candidates (plan.wovenMembersSeeking). Filed by
+   * the caller alongside this record — the departure fetch's
+   * own counts above never include it, so the window's
+   * accounting stays comparable to the pre-lever baselines.
+   * Absent (or null) when no member fetch ran.
+   */
+  memberFetch?: { topic: string; reads: number; candidates: number } | null;
 }
 
 /**
@@ -836,6 +847,123 @@ export async function fetchHeardAwareCandidates<R>(args: {
   };
 }
 
+// ------------------------------------------------------------ the member-fetch lever (Nov 4, 2026)
+
+/**
+ * Read cap for the ONE bounded member fetch: the climax
+ * precedent spends ≤12 reads to surface ONE portal-climax
+ * candidate; seating needs WOVEN_MEMBER_CAP (4) members plus
+ * alternates, and a read row can still be discarded at the
+ * door (heard at story level, a place collision at seating),
+ * so the fetch reads toward MEMBER_FETCH_TARGET survivors
+ * and never past twice the climax cap. The reads run in the
+ * heard-aware driver's chunk size (12), stopping early once
+ * the target is in hand.
+ */
+export const MEMBER_FETCH_READ_CAP = 24;
+/** Seatable survivors the member fetch stops at: the 4 seats plus an alternate per seat (gap-fit and place collisions spend them). */
+export const MEMBER_FETCH_TARGET = 8;
+
+/**
+ * The member-fetch predicate, shared by the index counter
+ * below and the fetch itself: a unit can only ever seat as
+ * a woven member when it is landmark-class, woven-eligible,
+ * and OFF this route's corridor — the same geometry the
+ * seating pass enforces (seatWovenMembers' inCorridor: the
+ * destination circle, else the landmark path radius).
+ */
+function isMemberGround(
+  e: FetchIndexEntry,
+  path: GeoPoint[],
+  destination: GeoPoint,
+): boolean {
+  return (
+    haversineM({ lat: e.lat, lng: e.lng }, destination) > DESTINATION_RADIUS_M &&
+    distanceToPathM({ lat: e.lat, lng: e.lng }, path) > LANDMARK_PATH_RADIUS_M
+  );
+}
+
+/**
+ * Index-level thread support (the member-fetch lever): per
+ * topic, how much seatable woven depth the county index
+ * holds BEYOND the units already in hand — landmark-class,
+ * woven-eligible, unheard (by unit id, as far as the caller
+ * can know it), off-corridor entries whose id is not in
+ * `fetchedIds`. The caller recomputes this before EVERY
+ * compose of a build with the build's growing fetched set
+ * (departure fetch ∪ climax fetch ∪ member fetch), so a
+ * unit is never counted twice: once a row is in hand it is
+ * real candidacy (the composer's pool, or memberUnits), not
+ * index promise.
+ *
+ * Heard, honestly: the route heard set names tellings among
+ * the units the build has READ (the ledger files story
+ * texts, not index ids), so a heard telling the build never
+ * fetched cannot be excluded here — support is an upper
+ * bound by exactly that much. The member fetch enforces
+ * true story-level heard exclusion when it reads the rows,
+ * and seating re-verifies: detection may fire on the
+ * promise, but only survivors ever seat.
+ */
+export function wovenIndexSupportByTopic(
+  entries: FetchIndexEntry[],
+  path: GeoPoint[],
+  destination: GeoPoint,
+  tagsOf: (placeKey: string, angle: string) => { topics: string[] },
+  eligibleOf: (placeKey: string, angle: string) => boolean,
+  opts: { fetchedIds: ReadonlySet<string>; heardIds: ReadonlySet<string> },
+): Map<string, number> {
+  const support = new Map<string, number>();
+  for (const e of entries) {
+    if (!e.angle.startsWith('landmark')) continue;
+    const id = `${e.place_key}|${e.angle}`;
+    if (opts.fetchedIds.has(id) || opts.heardIds.has(id)) continue;
+    if (!eligibleOf(e.place_key, e.angle)) continue;
+    if (!isMemberGround(e, path, destination)) continue;
+    for (const t of tagsOf(e.place_key, e.angle).topics) {
+      support.set(t, (support.get(t) ?? 0) + 1);
+    }
+  }
+  return support;
+}
+
+/**
+ * The member fetch's read list: index entries that could
+ * seat as members of the given thread — landmark-class,
+ * woven-eligible, carrying the topic, not already in hand,
+ * off the corridor — in index order (the climax fetch's
+ * plain-slice discipline), capped at MEMBER_FETCH_READ_CAP.
+ * Heard is NOT filtered here: an index entry carries no
+ * story text, so heard exclusion happens when the caller
+ * reads the rows — the reads are spent either way and the
+ * fetch's telemetry counts them.
+ */
+export function selectMemberFetchEntries(
+  entries: FetchIndexEntry[],
+  args: {
+    topic: string;
+    fetchedIds: ReadonlySet<string>;
+    path: GeoPoint[];
+    destination: GeoPoint;
+    tagsOf: (placeKey: string, angle: string) => { topics: string[] };
+    eligibleOf: (placeKey: string, angle: string) => boolean;
+    cap?: number;
+  },
+): FetchIndexEntry[] {
+  const cap = args.cap ?? MEMBER_FETCH_READ_CAP;
+  const out: FetchIndexEntry[] = [];
+  for (const e of entries) {
+    if (out.length >= cap) break;
+    if (!e.angle.startsWith('landmark')) continue;
+    if (args.fetchedIds.has(`${e.place_key}|${e.angle}`)) continue;
+    if (!args.eligibleOf(e.place_key, e.angle)) continue;
+    if (!args.tagsOf(e.place_key, e.angle).topics.includes(args.topic)) continue;
+    if (!isMemberGround(e, args.path, args.destination)) continue;
+    out.push(e);
+  }
+  return out;
+}
+
 export type PlanItemKind = 'preview' | 'story' | 'bridge' | 'reaction' | 'filler' | 'signoff' | 'handoff';
 
 export interface PlanItem {
@@ -943,6 +1071,18 @@ export interface RoutePlan {
    */
   portalClimaxSeeking: string | null;
   /**
+   * Member seeking (the member-fetch lever, Nov 4, 2026):
+   * the thread topic the App may answer with ONE bounded
+   * member fetch (selectMemberFetchEntries) and a single
+   * re-compose, when the thread's seatable members in hand
+   * number fewer than WOVEN_MEMBER_CAP while the county
+   * index still promises depth on the topic. Null when
+   * there is no thread, when local candidacy already
+   * suffices, or when no index support was supplied —
+   * pre-lever callers never see it set.
+   */
+  wovenMembersSeeking: string | null;
+  /**
    * The preview item's facts (consolidation §§1–2), for the
    * decisions record: whether the composed preview promises
    * the thread, carries a matched prior drive, or carries a
@@ -1022,9 +1162,18 @@ export interface WovenMembers {
 export interface RouteThread {
   /** The shared topic tag (routeTags vocabulary, e.g. 'Navy Century'). */
   topic: string;
-  /** Unit ids of the selectable units carrying the topic — the thread's cast. */
+  /** Unit ids of the selectable units carrying the topic — the thread's cast in hand. */
   memberIds: string[];
-  /** The cast size: members count once each, wherever they sit (addendum 4). */
+  /**
+   * The thread's support size: the cast in hand plus, when
+   * the caller supplies the county index (ComposeOptions.
+   * wovenIndexSupport, the member-fetch lever, Nov 4, 2026),
+   * the unheard woven-eligible depth the index holds behind
+   * the cast — a thread the road can no longer sustain alone
+   * is still a thread the EPISODE can sustain, because the
+   * member fetch can put that depth in hand. Without index
+   * support this is exactly the cast size (addendum 4).
+   */
   score: number;
 }
 
@@ -1060,12 +1209,35 @@ export function isDestinationArea(u: LibraryUnit, destination: GeoPoint): boolea
  * user's own order). When the user picked topics but NONE of
  * theirs qualifies, there is no thread — no theme is ever
  * forced over the listener's own picks. With no user topics,
- * the strongest thread wins (cast size, then topic name for
- * determinism). The caller passes the composer's pool, so a
- * thread can only ever be found among units the composer may
- * actually select.
+ * the strongest thread wins (support size, then topic name
+ * for determinism). The caller passes the composer's pool, so
+ * a thread can only ever be found among units the composer
+ * may actually select.
+ *
+ * Index support (the member-fetch lever, Erik, Nov 4, 2026):
+ * the optional third argument carries the county index's
+ * depth per topic — unheard, woven-eligible, landmark-class,
+ * off-corridor units NOT already in hand (see
+ * wovenIndexSupportByTopic). A topic's support is its cast
+ * in hand plus that depth, and the thread qualifies on
+ * support: the production acceptance battery (54ecb95)
+ * showed detection starving from ~drive 14 of a repeat
+ * commute because the FETCHED set — the only pool detection
+ * could see — held <3 unheard units per topic while the
+ * county index held dozens. A thread detected on index
+ * depth with a thin corridor cast is valid: that is exactly
+ * the exhausted-corridor case the seated members exist for,
+ * and the member fetch (plan.wovenMembersSeeking) is what
+ * turns the index's promise into selectable units. Member
+ * ids remain the cast in hand only — support is a count,
+ * never a set of phantom units. Absent the argument,
+ * detection is exactly the pre-lever detection.
  */
-export function detectRouteThread(candidates: LibraryUnit[], userTopics: string[]): RouteThread | null {
+export function detectRouteThread(
+  candidates: LibraryUnit[],
+  userTopics: string[],
+  indexSupport?: ReadonlyMap<string, number>,
+): RouteThread | null {
   const byTopic = new Map<string, LibraryUnit[]>();
   for (const u of candidates) {
     for (const t of u.topics) {
@@ -1074,9 +1246,22 @@ export function detectRouteThread(candidates: LibraryUnit[], userTopics: string[
       byTopic.set(t, list);
     }
   }
+  // A topic the fetched set holds NO cast for can still
+  // qualify on index depth alone (the fully exhausted
+  // corridor): its memberIds are empty until the member
+  // fetch puts real units in hand.
+  if (indexSupport) {
+    for (const topic of indexSupport.keys()) {
+      if (!byTopic.has(topic)) byTopic.set(topic, []);
+    }
+  }
   const qualifying = [...byTopic.entries()]
-    .filter(([, members]) => members.length >= THREAD_MIN_SCORE)
-    .map(([topic, members]) => ({ topic, memberIds: members.map(u => u.id), score: members.length }))
+    .map(([topic, members]) => ({
+      topic,
+      memberIds: members.map(u => u.id),
+      score: members.length + (indexSupport?.get(topic) ?? 0),
+    }))
+    .filter(t => t.score >= THREAD_MIN_SCORE)
     // Topics were picked and none of them qualify → no forced theme.
     .filter(t => userTopics.length === 0 || userTopics.includes(t.topic));
   if (qualifying.length === 0) return null;
@@ -1087,7 +1272,7 @@ export function detectRouteThread(candidates: LibraryUnit[], userTopics: string[
   qualifying.sort(
     (a, b) =>
       userRank(a.topic) - userRank(b.topic) ||
-      b.memberIds.length - a.memberIds.length ||
+      b.score - a.score ||
       (a.topic < b.topic ? -1 : a.topic > b.topic ? 1 : 0),
   );
   return qualifying[0];
@@ -1134,6 +1319,34 @@ export interface ComposeOptions {
    * first compose of a build.
    */
   climaxOnlyUnits?: LibraryUnit[];
+  /**
+   * Member units (the member-fetch lever, Nov 4, 2026): full
+   * story rows the caller fetched in the ONE bounded member
+   * fetch after a compose left the plan's thread short of
+   * seatable members (plan.wovenMembersSeeking), already
+   * heard-filtered at read time. They join thread support as
+   * real units (replacing the index promise that detected
+   * the thread) and — through the caller's seating call,
+   * which receives them alongside the fetched set — member
+   * candidacy. They never tile, never parent or become
+   * portal hops, and never join the climax pools: the member
+   * fetch answers the seating pass, nothing else. Absent
+   * until a build's member fetch has run.
+   */
+  memberUnits?: LibraryUnit[];
+  /**
+   * Index-level thread support (the member-fetch lever):
+   * per topic, the county index's seatable woven depth NOT
+   * already in hand (see wovenIndexSupportByTopic for the
+   * counting rule and its heard caveat). Thread detection
+   * qualifies topics on cast-in-hand plus this depth, so a
+   * repeat commute's thread survives the corridor's
+   * exhaustion. The caller recomputes it before every
+   * compose with the build's growing fetched set; absent
+   * (every pre-lever caller) detection is exactly what it
+   * was, and no plan ever seeks a member fetch.
+   */
+  wovenIndexSupport?: ReadonlyMap<string, number>;
   /**
    * Prior route drives (addendum 2), newest first, with each
    * record's owed subjects ALREADY filtered against the current
@@ -1292,6 +1505,23 @@ export interface ComposeOptions {
  * an episode member, and the portal-climax rung can crown
  * it. Detection with no eligibility flags anywhere is
  * exactly the pre-feature detection.
+ *
+ * Member-fetch lever (Erik, Nov 4, 2026): the production
+ * acceptance battery showed the union above starving on a
+ * repeat commute — detection and candidacy saw only the
+ * FETCHED set (~53 eligible units, the same every drive),
+ * while the county index the app already ships held the
+ * depth (Coast 58, Navy Century 51, Food & Drink 55 at
+ * audit eligibility). Detection now also counts the
+ * caller-supplied index support (opts.wovenIndexSupport),
+ * and a plan whose thread cannot seat WOVEN_MEMBER_CAP
+ * members from what is in hand declares
+ * wovenMembersSeeking: the caller answers with ONE bounded
+ * member fetch (selectMemberFetchEntries — landmark-class,
+ * eligible, on-topic, off-corridor, capped reads) and a
+ * single re-compose with the survivors as opts.
+ * memberUnits. Exactly one fetch, like the portal climax's;
+ * seating rules never change, only the supply does.
  * The plan is a value, not a promise: nothing here touches the
  * network, so the harness can prove every invariant offline.
  */
@@ -1400,8 +1630,19 @@ export function composeRoutePlan(
   // thread detection over corridor ∪ woven. Units without
   // the eligibility flag (every pre-feature caller) add
   // nothing, so detection is unchanged for them.
-  const wovenSupport = portalAll.filter(u => u.wovenEligible === true);
-  const thread = detectRouteThread([...pool, ...wovenSupport], input.topics);
+  //
+  // Member-fetch lever (Nov 4, 2026): member units the
+  // caller already fetched join the support union as real
+  // units, and the caller-supplied index support lets
+  // detection qualify a thread on the county's depth when
+  // the fetched cast runs thin — the exhausted-corridor
+  // case (see detectRouteThread). With neither input,
+  // detection is exactly the pre-lever detection.
+  const wovenSupport = [
+    ...portalAll.filter(u => u.wovenEligible === true),
+    ...(opts.memberUnits ?? []).filter(u => u.wovenEligible === true),
+  ];
+  const thread = detectRouteThread([...pool, ...wovenSupport], input.topics, opts.wovenIndexSupport);
   const threadMemberIds = new Set(thread?.memberIds ?? []);
 
   // "Previously on Miles", drive level (addendum 2): with the
@@ -2142,6 +2383,37 @@ export function composeRoutePlan(
     else if (it.unit.angle === 'corridor') line.corridor += 1;
   }
 
+  // Member seeking (the member-fetch lever): the plan asks
+  // for the ONE bounded member fetch when the thread's
+  // seatable supply in hand — the seating pass's own
+  // candidacy filter over the fetched set plus any member
+  // units already fetched — cannot fill the member cap,
+  // while the county index still promises depth on the
+  // topic. No index support supplied → never seeking (the
+  // pre-lever shape); local candidacy at the cap → no
+  // fetch, however deep the index runs.
+  let wovenMembersSeeking: string | null = null;
+  if (thread && (opts.wovenIndexSupport?.get(thread.topic) ?? 0) > 0) {
+    const usedIds = new Set<string>();
+    const usedPlaces = new Set<string>();
+    for (const it of items) {
+      if (it.kind === 'story' && it.unit) {
+        usedIds.add(it.unit.id);
+        usedPlaces.add(it.unit.placeKey);
+      }
+    }
+    const inHand = wovenMemberCandidates([...units, ...(opts.memberUnits ?? [])], {
+      topic: thread.topic,
+      heardKeys: opts.heardKeys,
+      climaxUnitId,
+      usedIds,
+      usedPlaces,
+      path,
+      destination,
+    });
+    if (inHand.length < WOVEN_MEMBER_CAP) wovenMembersSeeking = thread.topic;
+  }
+
   const totalSec = items.reduce((s, it) => s + it.durationSec, 0);
   return {
     destinationName,
@@ -2161,6 +2433,7 @@ export function composeRoutePlan(
     climaxSubject,
     climaxDistanceKm,
     portalClimaxSeeking,
+    wovenMembersSeeking,
     previewFacts,
     openingSubject: openingUnit?.placeName ?? null,
     actsSummary,
@@ -2256,6 +2529,51 @@ function memberGaps(items: PlanItem[], driveSec: number): MemberGap[] {
 }
 
 /**
+ * Member candidacy (Nov 4, 2026): the units that could seat
+ * as woven members of a thread right now — landmark-class,
+ * woven-eligible, carrying the thread's topic, unheard at
+ * story level, not the plan's climax, not already in the
+ * plan (by id or by place: one telling per place per plan),
+ * and OFF the route's corridor (the destination circle,
+ * else the landmark path radius — a member is an off-route
+ * story by construction). Strongest first — the composer's
+ * standing weight (the telling's length), id as the
+ * deterministic tiebreak. The seating pass seats from this
+ * list; the composer's member-seeking signal counts it —
+ * one candidacy rule for both, so the fetch is asked for
+ * exactly what seating could spend.
+ */
+export function wovenMemberCandidates(
+  units: LibraryUnit[],
+  args: {
+    topic: string;
+    heardKeys: ReadonlySet<string>;
+    climaxUnitId: string | null;
+    usedIds: ReadonlySet<string>;
+    usedPlaces: ReadonlySet<string>;
+    path: GeoPoint[];
+    destination: GeoPoint;
+  },
+): LibraryUnit[] {
+  const inCorridor = (u: LibraryUnit): boolean =>
+    haversineM({ lat: u.lat, lng: u.lng }, args.destination) <= DESTINATION_RADIUS_M ||
+    distanceToPathM({ lat: u.lat, lng: u.lng }, args.path) <= LANDMARK_PATH_RADIUS_M;
+  return units
+    .filter(
+      u =>
+        u.angle.startsWith('landmark') &&
+        u.wovenEligible === true &&
+        u.topics.includes(args.topic) &&
+        !args.heardKeys.has(u.id) &&
+        u.id !== args.climaxUnitId &&
+        !args.usedIds.has(u.id) &&
+        !args.usedPlaces.has(u.placeKey) &&
+        !inCorridor(u),
+    )
+    .sort((a, b) => b.durationSec - a.durationSec || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+/**
  * Woven seated members (Nov 4, 2026, Erik's ruling on the
  * seated-members simulation): the production form of the
  * sim's winning configuration (≤4 members/episode at
@@ -2311,10 +2629,6 @@ export function seatWovenMembers(
   const cap = opts.maxMembers ?? WOVEN_MEMBER_CAP;
   if (cap <= 0) return plan;
 
-  const inCorridor = (u: LibraryUnit): boolean =>
-    haversineM({ lat: u.lat, lng: u.lng }, plan.destination) <= DESTINATION_RADIUS_M ||
-    distanceToPathM({ lat: u.lat, lng: u.lng }, plan.path) <= LANDMARK_PATH_RADIUS_M;
-
   const usedIds = new Set<string>();
   const usedPlaces = new Set<string>();
   for (const it of plan.items) {
@@ -2323,21 +2637,15 @@ export function seatWovenMembers(
       usedPlaces.add(it.unit.placeKey);
     }
   }
-  // Strongest first — the composer's standing weight (the
-  // telling's length), id as the deterministic tiebreak.
-  const candidates = units
-    .filter(
-      u =>
-        u.angle.startsWith('landmark') &&
-        u.wovenEligible === true &&
-        u.topics.includes(thread.topic) &&
-        !opts.heardKeys.has(u.id) &&
-        u.id !== plan.climaxUnitId &&
-        !usedIds.has(u.id) &&
-        !usedPlaces.has(u.placeKey) &&
-        !inCorridor(u),
-    )
-    .sort((a, b) => b.durationSec - a.durationSec || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const candidates = wovenMemberCandidates(units, {
+    topic: thread.topic,
+    heardKeys: opts.heardKeys,
+    climaxUnitId: plan.climaxUnitId,
+    usedIds,
+    usedPlaces,
+    path: plan.path,
+    destination: plan.destination,
+  });
   if (candidates.length === 0) return plan;
 
   let items: PlanItem[] = [...plan.items];
