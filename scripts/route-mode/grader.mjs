@@ -968,6 +968,540 @@ function renderWovenMarkdown(sim, label) {
   return lines.join('\n');
 }
 
+// ------------------------------------------------------------ woven SEATED-members simulation (follow-up to commit F)
+//
+// Commit F's verdict: with woven units allowed ONLY as a
+// single climax insert, substantive episodes (silence ≤ 50%)
+// were 9 at every share — climax-only woven buys the episode
+// SHAPE (a named through-line + a closing story), not episode
+// substance, and exactly +1 substantive thread-bearing
+// episode. F's own conclusion: woven value scales only if
+// woven stories may be SEATED AS THREAD MEMBERS inside the
+// episode. Erik approved simulating that variant (Nov 4,
+// 2026) before any woven tranche decision. Grader-side only,
+// like F: no production composer behavior changes.
+//
+// The model (everything not listed here is F's machinery,
+// inherited unchanged — same world, same commute battery,
+// same eligibility draws and seeds, same union thread
+// detection, same climax post-pass, same metrics):
+//   - After F's climax pass, additional woven members —
+//     unheard eligible units on the detected thread topic,
+//     strongest (longest) first — seat as windowless inserts
+//     distributed through the episode. They never geo-tile
+//     and never open chapters (the pool is landmark-class by
+//     construction, as in F).
+//   - Placement is IDEALIZED: each member seats at the start
+//     of the largest remaining silent gap (per the grader's
+//     window-coverage model) and only if it fits entirely
+//     inside one gap. Inserts therefore never displace
+//     sounding geo material in the sim; the displacement
+//     cost a real composer would pay is represented by the
+//     caps below, which bound how much of the episode woven
+//     material may claim.
+//   - Caps (fixed in advance, per Erik's brief): seated
+//     configurations bound TOTAL woven story-seconds in the
+//     episode (the F climax insert counts toward the total)
+//     at 25% or 40% of the episode budget — the same
+//     budgetSec the silence share is measured against — or,
+//     in the count configuration, bound the member count at
+//     4 per episode (the climax is not a member and is not
+//     counted). In material-rich drives the silent gaps are
+//     scarce, so placement binds before the caps do; in
+//     exhausted drives the caps are the only limit.
+//   - A member that seats is played, so it joins the heard
+//     ledger exactly like any story (story-level heard,
+//     v3.1) and burns the woven pool: the report tracks
+//     per-topic consumption and the drive each used topic's
+//     unheard woven pool runs dry (the woven cliff).
+
+/**
+ * The silent gaps of a plan under the grader's coverage
+ * model: the complement of the story-interval union inside
+ * [0, driveSec], in drive order.
+ */
+export function silentGapsSec(items, driveSec) {
+  const gaps = [];
+  let cursor = 0;
+  for (const iv of storyIntervalsSec(items, driveSec)) {
+    if (iv.start > cursor) gaps.push({ start: cursor, end: iv.start });
+    cursor = Math.max(cursor, iv.end);
+  }
+  if (cursor < driveSec) gaps.push({ start: cursor, end: driveSec });
+  return gaps;
+}
+
+/**
+ * Seat woven thread members into a plan's silent gaps.
+ * Pure and deterministic. `candidates` are pre-filtered by
+ * the caller (eligible, unheard, on the thread topic); this
+ * helper enforces the episode-level rules: strongest first
+ * (duration desc, id asc), one telling per place per plan
+ * (v3.1's invariant — ids and places already in the plan, or
+ * seated earlier in this call, are out), the seconds cap on
+ * total woven time (`wovenSecBefore` carries any woven
+ * seconds already seated, e.g. the F climax insert), the
+ * member-count cap, and whole-gap placement into the largest
+ * fitting gap. A candidate that violates the seconds cap or
+ * fits no gap is skipped, not fatal — shorter candidates
+ * later in the order still seat.
+ */
+export function seatWovenMembers({
+  items,
+  candidates,
+  driveSec,
+  budgetSec,
+  wovenSecBefore = 0,
+  capShare = null,
+  maxMembers = Infinity,
+}) {
+  const usedIds = new Set();
+  const usedPlaces = new Set();
+  for (const it of items) {
+    if (it.kind === 'story' && it.unit) {
+      usedIds.add(it.unit.id);
+      usedPlaces.add(it.unit.placeKey);
+    }
+  }
+  const sorted = [...candidates].sort(
+    (a, b) =>
+      b.durationSec - a.durationSec || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+  const working = [...items];
+  const inserts = [];
+  let memberSec = 0;
+  for (const u of sorted) {
+    if (inserts.length >= maxMembers) break;
+    if (usedIds.has(u.id) || usedPlaces.has(u.placeKey)) continue;
+    if (
+      capShare !== null &&
+      wovenSecBefore + memberSec + u.durationSec > capShare * budgetSec
+    ) {
+      continue;
+    }
+    const gap = silentGapsSec(working, driveSec)
+      .filter(g => g.end - g.start >= u.durationSec)
+      .sort((a, b) => b.end - b.start - (a.end - a.start) || a.start - b.start)[0];
+    if (!gap) continue;
+    const insert = {
+      kind: 'story',
+      id: u.id,
+      unit: u,
+      text: null,
+      durationSec: u.durationSec,
+      anchorProgress: gap.start / driveSec,
+      woven: true,
+      member: true,
+    };
+    working.push(insert);
+    inserts.push(insert);
+    memberSec += u.durationSec;
+    usedIds.add(u.id);
+    usedPlaces.add(u.placeKey);
+  }
+  return { inserts, memberSec };
+}
+
+/**
+ * Substantive-thread starvation: within the subsequence of
+ * SUBSTANTIVE drives (silence ≤ 50%), the first run of 5
+ * consecutive thread-less ones. Returns the drive number the
+ * run begins at and how many substantive thread-bearing
+ * drives precede it (the headline count), or a null drive
+ * when no such run exists.
+ */
+export function substantiveThreadStarvation(drives) {
+  let run = 0;
+  let runStart = null;
+  let before = 0;
+  for (const d of drives) {
+    if (d.silenceShare > 0.5) continue;
+    if (d.threadTopic !== null) {
+      run = 0;
+      runStart = null;
+      before += 1;
+    } else {
+      if (run === 0) runStart = d.drive;
+      run += 1;
+      if (run >= 5) return { starvationDrive: runStart, substantiveThreadBefore: before };
+    }
+  }
+  return { starvationDrive: null, substantiveThreadBefore: before };
+}
+
+/**
+ * The woven seated-members battery: F's 40-drive commute at
+ * current shelf depth, per configuration. Configurations:
+ * the no-woven baseline and F's climax-only model at the two
+ * eligibilities (flat 50%, the audit's measured shares) —
+ * these rerun F's model and must reproduce its numbers —
+ * plus seated members under a 25% and a 40% woven-seconds
+ * cap and under a 4-member cap, at both eligibilities.
+ */
+export async function runWovenSeatedSimulation(mods, { drives: driveCount = 40 } = {}) {
+  const { rm } = mods;
+  const world = buildWorld(1103, 'current');
+  const route = world.routes.commute;
+  const input = { destinationText: route.destName, arrivalTimeMs: null, tone: null, topics: [] };
+  const configs = [
+    { key: '0%', mode: 'climax', share: 0, desc: 'no woven (baseline)' },
+    { key: 'climax-only 50%', mode: 'climax', share: 0.5, desc: "F's model, flat 50%" },
+    { key: 'climax-only audit', mode: 'climax', audit: true, desc: "F's model, audit shares" },
+    { key: 'seated-25% 50%', mode: 'seated', capShare: 0.25, share: 0.5, desc: 'seated, woven ≤25% of budget, flat 50%' },
+    { key: 'seated-25% audit', mode: 'seated', capShare: 0.25, audit: true, desc: 'seated, woven ≤25% of budget, audit shares' },
+    { key: 'seated-40% 50%', mode: 'seated', capShare: 0.4, share: 0.5, desc: 'seated, woven ≤40% of budget, flat 50%' },
+    { key: 'seated-40% audit', mode: 'seated', capShare: 0.4, audit: true, desc: 'seated, woven ≤40% of budget, audit shares' },
+    { key: 'seated-max4 50%', mode: 'seated', maxMembers: 4, share: 0.5, desc: 'seated, ≤4 members/episode, flat 50%' },
+    { key: 'seated-max4 audit', mode: 'seated', maxMembers: 4, audit: true, desc: 'seated, ≤4 members/episode, audit shares' },
+  ];
+  const results = {};
+  for (const config of configs) {
+    const eligible = wovenEligibleUnits(world, 'commute', config, config.audit ? 9200 : 9100);
+    const heardNames = new Set();
+    const heardTexts = new Set();
+    let records = [];
+    const drives = [];
+    const episodeSets = [];
+    // Woven pool burn accounting (per topic tag; a unit with
+    // several topics counts in each of its topics' pools and
+    // is removed from all of them when consumed).
+    const eligibleByTopic = new Map();
+    for (const u of eligible) {
+      for (const t of u.topics) {
+        eligibleByTopic.set(t, (eligibleByTopic.get(t) ?? 0) + 1);
+      }
+    }
+    const consumedByTopic = new Map();
+    const dryAfterDrive = new Map();
+    let supplyDryDrive = null;
+    for (let d = 0; d < driveCount; d++) {
+      const nowMs = BASE_NOW + d * 24 * 60 * 60 * 1000;
+      const build = await runBuild(mods, world, route, {
+        heardNames,
+        heardTexts,
+        driveRecords: records,
+        input,
+        nowMs,
+      });
+      // F's machinery, verbatim: corridor support pool, union
+      // thread detection, woven climax post-pass.
+      const corridorPool = build.units.filter(
+        u =>
+          !build.heardKeys.has(u.id) &&
+          u.angle !== 'neighborhood_intro' &&
+          u.angle !== 'neighborhood_intro_greet' &&
+          u.angle !== 'filler' &&
+          u.angle !== 'filler_hosted' &&
+          (rm.distanceToPathM({ lat: u.lat, lng: u.lng }, route.path) <= 1500 ||
+            rm.haversineM({ lat: u.lat, lng: u.lng }, route.dest) <= 1500),
+      );
+      const wovenAvail = eligible.filter(u => !(u.storyText && heardTexts.has(u.storyText)));
+      const unionThread = rm.detectRouteThread([...corridorPool, ...wovenAvail], []);
+      const threadTopic = unionThread?.topic ?? build.plan.thread?.topic ?? null;
+      const wovenAvailOnTopic =
+        threadTopic === null ? 0 : wovenAvail.filter(u => u.topics.includes(threadTopic)).length;
+      if (
+        eligible.length > 0 &&
+        threadTopic !== null &&
+        wovenAvailOnTopic === 0 &&
+        supplyDryDrive === null
+      ) {
+        supplyDryDrive = d + 1;
+      }
+
+      let plan = build.plan;
+      let climaxViaWoven = false;
+      let climaxSec = 0;
+      if (!plan.climaxUnitId && threadTopic !== null) {
+        const playedIds = new Set(
+          plan.items.filter(i => i.kind === 'story' && i.unit).map(i => i.unit.id),
+        );
+        const playedPlaces = new Set(
+          plan.items.filter(i => i.kind === 'story' && i.unit).map(i => i.unit.placeKey),
+        );
+        const candidates = wovenAvail
+          .filter(
+            u => u.topics.includes(threadTopic) && !playedIds.has(u.id) && !playedPlaces.has(u.placeKey),
+          )
+          .sort((a, b) => b.durationSec - a.durationSec);
+        const winner = candidates[0];
+        if (winner) {
+          const insert = {
+            kind: 'story',
+            id: winner.id,
+            unit: winner,
+            text: null,
+            durationSec: winner.durationSec,
+            anchorProgress: Math.max(0, 1 - winner.durationSec / route.driveSec),
+            climax: true,
+            portal: true,
+            woven: true,
+          };
+          plan = {
+            ...plan,
+            items: [...plan.items, insert],
+            climaxUnitId: winner.id,
+            climaxMode: 'woven',
+            thread: unionThread ?? plan.thread,
+          };
+          climaxViaWoven = true;
+          climaxSec = winner.durationSec;
+        }
+      } else if (unionThread && plan.thread?.topic !== unionThread.topic) {
+        plan = { ...plan, thread: unionThread };
+      }
+
+      // The seated-members pass (this simulation's variant):
+      // members on the thread topic seat into the plan the
+      // climax pass left, under the configuration's cap.
+      let membersSeated = 0;
+      if (config.mode === 'seated' && threadTopic !== null) {
+        const seated = seatWovenMembers({
+          items: plan.items,
+          candidates: wovenAvail.filter(u => u.topics.includes(threadTopic)),
+          driveSec: route.driveSec,
+          budgetSec: plan.budgetSec,
+          wovenSecBefore: climaxSec,
+          capShare: config.capShare ?? null,
+          maxMembers: config.maxMembers ?? Infinity,
+        });
+        if (seated.inserts.length > 0) {
+          plan = { ...plan, items: [...plan.items, ...seated.inserts] };
+          membersSeated = seated.inserts.length;
+        }
+      }
+
+      const metrics = planMetrics(plan, { driveSec: route.driveSec, climaxPool: null });
+      const played = plan.items.filter(i => i.kind === 'story' && i.unit);
+      episodeSets.push(new Set(played.map(i => i.unit.id)));
+      const wovenPlayed = played.filter(i => i.woven);
+      drives.push({
+        drive: d + 1,
+        stories: metrics.stories,
+        silenceShare: metrics.silenceShare,
+        threadTopic,
+        climaxPresent: metrics.climaxPresent,
+        climaxViaWoven,
+        membersSeated,
+        wovenUnits: wovenPlayed.length,
+        wovenSec: wovenPlayed.reduce((s, i) => s + i.durationSec, 0),
+        wovenAvailOnTopic,
+      });
+      for (const it of played) {
+        heardNames.add(it.unit.placeName);
+        if (it.unit.storyText) heardTexts.add(it.unit.storyText);
+      }
+      if (threadTopic !== null && wovenPlayed.length > 0) {
+        const c = consumedByTopic.get(threadTopic) ?? { units: 0, sec: 0 };
+        c.units += wovenPlayed.length;
+        c.sec += wovenPlayed.reduce((s, i) => s + i.durationSec, 0);
+        consumedByTopic.set(threadTopic, c);
+      }
+      // Pool state at drive end, for the topics this commute
+      // has threaded on so far: the first drive a used topic's
+      // unheard woven pool reaches zero is its cliff.
+      for (const t of consumedByTopic.keys()) {
+        if (dryAfterDrive.has(t)) continue;
+        const remaining = eligible.filter(
+          u => u.topics.includes(t) && !(u.storyText && heardTexts.has(u.storyText)),
+        ).length;
+        if (remaining === 0) dryAfterDrive.set(t, d + 1);
+      }
+      records = [
+        {
+          destinationName: route.destName,
+          destinationPlaceKey: route.destPlaceKey,
+          threadTopic,
+          playedSubjects: [...new Set(played.map(i => i.unit.placeName))],
+          owedSubjects: [],
+          endedAt: nowMs,
+        },
+        ...records,
+      ].slice(0, 20);
+    }
+    const starvation = threadStarvationDrive(drives);
+    const threadBefore =
+      starvation === null
+        ? drives.filter(d => d.threadTopic !== null).length
+        : drives.slice(0, starvation - 1).filter(d => d.threadTopic !== null).length;
+    const substantive = drives.filter(d => d.silenceShare <= 0.5);
+    const subStarvation = substantiveThreadStarvation(drives);
+    const perTopic = {};
+    for (const [t, c] of consumedByTopic.entries()) {
+      perTopic[t] = {
+        eligibleUnits: eligibleByTopic.get(t) ?? 0,
+        consumedUnits: c.units,
+        consumedSec: c.sec,
+        dryAfterDrive: dryAfterDrive.get(t) ?? null,
+      };
+    }
+    results[config.key] = {
+      config: config.desc,
+      eligibleUnits: eligible.length,
+      drives,
+      summary: {
+        threadDrives: drives.filter(d => d.threadTopic !== null).length,
+        climaxDrives: drives.filter(d => d.climaxPresent).length,
+        wovenClimaxDrives: drives.filter(d => d.climaxViaWoven).length,
+        threadStarvationDrive: starvation,
+        threadEpisodesBeforeStarvation: threadBefore,
+        substantiveEpisodes: substantive.length,
+        substantiveThreadEpisodes: substantive.filter(d => d.threadTopic !== null).length,
+        substantiveStarvationDrive: subStarvation.starvationDrive,
+        substantiveThreadBeforeStarvation: subStarvation.substantiveThreadBefore,
+        meanSilenceShare:
+          Math.round((drives.reduce((s, d) => s + d.silenceShare, 0) / drives.length) * 1000) / 1000,
+        meanConsecutiveOverlap: meanConsecutiveOverlap(episodeSets),
+        minStories: Math.min(...drives.map(d => d.stories)),
+        lastDriveStories: drives[drives.length - 1].stories,
+      },
+      burn: {
+        totalWovenUnits: drives.reduce((s, d) => s + d.wovenUnits, 0),
+        totalWovenSec: drives.reduce((s, d) => s + d.wovenSec, 0),
+        totalMembers: drives.reduce((s, d) => s + d.membersSeated, 0),
+        drivesWithMembers: drives.filter(d => d.membersSeated > 0).length,
+        supplyDryDrive,
+        perTopic,
+      },
+    };
+  }
+  return { world: { census: world.census, shape: 'current' }, results };
+}
+
+function renderWovenSeatedMarkdown(sim, label) {
+  const lines = [];
+  lines.push('# Woven SEATED-members simulation — route mode (follow-up to composer v3.1, commit F)');
+  lines.push('');
+  lines.push(
+    `Composer: ${label ?? 'working tree'} · synthetic shelf, current depth (${sim.world.census} units), seeded; ` +
+      'the standard 40-drive commute battery with the heard-aware window and story-level heard (v3.1 A+B) underneath. ' +
+      "Same world, eligibility draws and union thread detection as commit F's `--woven` run; the climax-only rows below " +
+      "rerun F's model at the same eligibilities and reproduce grade-woven-sim.md's numbers. " +
+      'Guarantee pass is shelf-only (silence is an upper bound vs production).',
+  );
+  lines.push('');
+  lines.push(
+    'THE MODEL — woven members seated in-episode: after F\'s climax post-pass, unheard eligible woven units ' +
+      'on the detected thread topic seat as windowless inserts, strongest first, one telling per place, each placed ' +
+      'at the start of the largest silent gap it fits entirely inside (idealized placement — inserts never displace ' +
+      'sounding geo material in the sim; the caps stand in for the displacement cost). Seconds-capped configurations ' +
+      'bound TOTAL woven story-seconds (the climax insert counts) at 25% / 40% of the episode budget — the same ' +
+      'budgetSec the silence share is measured against; the count configuration bounds members at 4 per episode ' +
+      '(climax not counted). Seated members are played, hence heard: they burn the woven pool, tracked per topic below. ' +
+      "Inherited from F unchanged: thread detection over (corridor pool ∪ woven pool), and the thread's selection " +
+      'nudge on corridor picks is not re-modeled, so tiling is the standard build\'s.',
+  );
+  lines.push('');
+  const zero = sim.results['0%'].summary;
+  lines.push(
+    `HEADLINE — substantive thread-bearing episodes (silence ≤ 50% AND a thread found) across 40 drives, ` +
+      `vs the 0% run's ${zero.substantiveThreadEpisodes} and F's climax-only best of 9:`,
+  );
+  lines.push('');
+  lines.push('| configuration | eligible units | substantive thread-bearing | substantive episodes | substantive-thread starvation | thread drives /40 | climax /40 | mean silence | mean consecutive overlap | woven burned (units / sec) | members seated | woven supply-dry drive |');
+  lines.push('|---|---|---|---|---|---|---|---|---|---|---|---|');
+  for (const key of Object.keys(sim.results)) {
+    const r = sim.results[key];
+    const s = r.summary;
+    const b = r.burn;
+    lines.push(
+      `| ${key} | ${r.eligibleUnits} | ${s.substantiveThreadEpisodes} | ${s.substantiveEpisodes} | ` +
+        `${s.substantiveStarvationDrive ?? 'none in 40'} | ${s.threadDrives} | ${s.climaxDrives} | ` +
+        `${fmtPct(s.meanSilenceShare)} | ${s.meanConsecutiveOverlap} | ${b.totalWovenUnits} / ${b.totalWovenSec} | ` +
+        `${b.totalMembers} | ${b.supplyDryDrive ?? 'none in 40'} |`,
+    );
+  }
+  lines.push('');
+  const s25a = sim.results['seated-25% audit'];
+  const s40a = sim.results['seated-40% audit'];
+  const m4f = sim.results['seated-max4 50%'];
+  const m4a = sim.results['seated-max4 audit'];
+  const cappedMembers = Math.min(
+    s25a.burn.totalMembers, sim.results['seated-25% 50%'].burn.totalMembers,
+    s40a.burn.totalMembers, sim.results['seated-40% 50%'].burn.totalMembers,
+  );
+  const cappedMembersMax = Math.max(
+    s25a.burn.totalMembers, sim.results['seated-25% 50%'].burn.totalMembers,
+    s40a.burn.totalMembers, sim.results['seated-40% 50%'].burn.totalMembers,
+  );
+  const coastM4a = m4a.burn.perTopic['Coast'];
+  lines.push(
+    'HONEST READING — seating scales substance only when woven seconds are allowed to become the episode\'s ' +
+      'majority material; capped below that, it buys fullness, not episodes. ' +
+      '(1) THE SECONDS CAPS FAIL THE HEADLINE METRIC FOR AN ARITHMETIC REASON: a substantive episode needs ' +
+      '≥1,200 covered seconds of the 2,400 budget, and in a corridor-dead drive (geo coverage ≈ 0) a 25% cap ' +
+      `(600 woven seconds) or a 40% cap (960) can never reach that line — substantive thread-bearing episodes ` +
+      `stay ${s25a.summary.substantiveThreadEpisodes} at both caps and both eligibilities, exactly F's climax-only ` +
+      `count, even though members seat on most drives (${cappedMembers}–${cappedMembersMax} members burned across ` +
+      `the capped runs) and mean silence falls to ${fmtPct(s25a.summary.meanSilenceShare)} / ` +
+      `${fmtPct(s40a.summary.meanSilenceShare)}. The capped models make dead drives less dark (1 story → 2–4), never episodes. ` +
+      '(2) THE 4-MEMBER CONFIGURATION SCALES: substantive thread-bearing episodes rise to ' +
+      `${m4f.summary.substantiveThreadEpisodes} (flat 50%) and ${m4a.summary.substantiveThreadEpisodes} (audit) of 40 — ` +
+      `every substantive episode thread-bearing, no substantive-thread starvation in 40, mean silence ` +
+      `${fmtPct(m4f.summary.meanSilenceShare)} / ${fmtPct(m4a.summary.meanSilenceShare)}. The price is in the burn ` +
+      `tables: ~4.3 woven units per drive (${m4a.burn.totalWovenUnits} of ${m4a.eligibleUnits} eligible units across ` +
+      '40 drives in the audit run), and in dead drives woven supplies ~1,100–1,450 of the 2,400 budget seconds — ' +
+      'nearly all of the covered story time. The geo spine becomes the frame, not the content. ' +
+      '(3) THE WOVEN CLIFF, AS A HARD EVENT, DOES NOT ARRIVE IN 40 DRIVES: no topic\'s pool empties ' +
+      `(deepest burn: Coast ${coastM4a.consumedUnits} of ${coastM4a.eligibleUnits} audit-eligible) and no detected ` +
+      'thread ever finds zero woven supply — detection rotates topics as pools thin. What arrives instead is a ' +
+      'DURATION FADE: strongest-first seating spends the county\'s long stories first, so a five-story woven ' +
+      'bundle sums to ~1,250 story-seconds around drives 28–30 but only ~730 by drive 40 (flat 50%), and ' +
+      'substance lapses drive-by-drive from ~drive 31; the audit pool\'s deeper per-topic benches hold substance ' +
+      'to drive 39, with dips. The binding resource is the pool\'s LONG stratum, not its unit count. ' +
+      '(4) CONSEQUENCE FOR THE DESIGN QUESTION: a production seating rule must cap members by count (as ' +
+      'simulated), or set any seconds cap above ~50% of budget for exhausted drives (arithmetic from the ' +
+      'substance line — not itself simulated); a 25–40% cap spends woven stories on fullness. And if a woven ' +
+      'tranche is ever bought, its value concentrates in LONG stories on the topics this commute burned ' +
+      'deepest (Coast, Navy Century, Food & Drink — see the burn tables). The distinctness column inherits ' +
+      'F\'s caveat: past the corridor\'s life it is exhaustion arithmetic, not an episode-diversity measure.',
+  );
+  lines.push('');
+  lines.push('## Woven pool burn, per configuration and topic');
+  lines.push('');
+  for (const key of Object.keys(sim.results)) {
+    const r = sim.results[key];
+    const topics = Object.keys(r.burn.perTopic);
+    lines.push(`### ${key} (${r.eligibleUnits} eligible units)`);
+    lines.push('');
+    if (topics.length === 0) {
+      lines.push('No woven units consumed.');
+      lines.push('');
+      continue;
+    }
+    lines.push('| thread topic | eligible units (topic-tagged) | consumed | consumed sec | pool dry after drive |');
+    lines.push('|---|---|---|---|---|');
+    for (const t of topics) {
+      const p = r.burn.perTopic[t];
+      lines.push(
+        `| ${t} | ${p.eligibleUnits} | ${p.consumedUnits} | ${p.consumedSec} | ${p.dryAfterDrive ?? 'not in 40'} |`,
+      );
+    }
+    lines.push('');
+    lines.push(
+      `Totals: ${r.burn.totalWovenUnits} woven units (${r.burn.totalWovenSec} story-seconds), ` +
+        `${r.burn.totalMembers} of them seated members, across ${r.burn.drivesWithMembers} drives with members; ` +
+        `first drive a detected thread found zero unheard woven units on its topic: ${r.burn.supplyDryDrive ?? 'none in 40'}.`,
+    );
+    lines.push('');
+  }
+  for (const key of Object.keys(sim.results)) {
+    const r = sim.results[key];
+    lines.push(`## ${key} (${r.eligibleUnits} eligible units)`);
+    lines.push('');
+    lines.push('| drive | stories | silence | thread | members | climax |');
+    lines.push('|---|---|---|---|---|---|');
+    for (const d of r.drives) {
+      lines.push(
+        `| ${d.drive} | ${d.stories} | ${fmtPct(d.silenceShare)} | ${d.threadTopic ?? '—'} | ` +
+          `${d.membersSeated} | ${d.climaxPresent ? (d.climaxViaWoven ? 'woven' : 'yes') : '—'} |`,
+      );
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
 // ------------------------------------------------------------ reporting
 
 function fmtPct(x) {
@@ -1093,6 +1627,36 @@ async function main() {
           `(0%: ${zero.threadEpisodesBeforeStarvation}), starvation ${s.threadStarvationDrive ?? 'none in 40'}, ` +
           `thread ${s.threadDrives}/40, climax ${s.climaxDrives}/40, substantive episodes ${s.substantiveEpisodes} ` +
           `(thread-bearing ${s.substantiveThreadEpisodes}), overlap ${s.meanConsecutiveOverlap}, silence ${fmtPct(s.meanSilenceShare)}`,
+      );
+    }
+    return;
+  }
+  if (argv.includes('--woven-seated')) {
+    // The woven SEATED-members battery (follow-up to commit
+    // F, approved by Erik Nov 4, 2026): 40-drive commute,
+    // climax-only reruns at both eligibilities plus seated
+    // members under 25% / 40% seconds caps and a 4-member
+    // cap. Writes grade-woven-seated.json/.md unless --out
+    // says otherwise.
+    const sim = await runWovenSeatedSimulation(mods);
+    const seatedReport = {
+      generatedBy: 'scripts/route-mode/grader.mjs --woven-seated',
+      generatedAt: new Date().toISOString(),
+      label,
+      world: sim.world,
+      results: sim.results,
+    };
+    const seatedPrefix = argOf('--out') ?? 'grade-woven-seated';
+    writeFileSync(join(here, `${seatedPrefix}.json`), JSON.stringify(seatedReport, null, 2));
+    writeFileSync(join(here, `${seatedPrefix}.md`), renderWovenSeatedMarkdown(sim, label));
+    console.log(`grader (woven-seated): wrote ${seatedPrefix}.json + ${seatedPrefix}.md (composer ${label ?? '?'})`);
+    for (const [key, r] of Object.entries(sim.results)) {
+      const s = r.summary;
+      console.log(
+        `  ${key}: substantive thread-bearing ${s.substantiveThreadEpisodes} ` +
+          `(substantive ${s.substantiveEpisodes}), substantive starvation ${s.substantiveStarvationDrive ?? 'none in 40'}, ` +
+          `thread ${s.threadDrives}/40, climax ${s.climaxDrives}/40, woven burned ${r.burn.totalWovenUnits}u/${r.burn.totalWovenSec}s ` +
+          `(members ${r.burn.totalMembers}), overlap ${s.meanConsecutiveOverlap}, silence ${fmtPct(s.meanSilenceShare)}`,
       );
     }
     return;

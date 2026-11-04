@@ -3104,5 +3104,112 @@ check('woven sim (F): starvation and overlap math', () => {
   assert.equal(grader.meanConsecutiveOverlap([new Set(['a']), new Set()]), 0);
 });
 
+// ── Woven SEATED-members helpers (follow-up to commit F) ────
+// The battery itself runs via `grader.mjs --woven-seated`
+// (360 builds is too heavy for this harness); its seating
+// rules are pinned here on hand-computed plans: gap math,
+// the seconds cap (climax pre-counted), the member-count
+// cap, whole-gap placement, one-telling-per-place, and the
+// substantive-starvation summary.
+check('woven seated: silent gaps are the complement of story coverage (tissue is not coverage)', () => {
+  const items = [
+    { kind: 'story', unit: { id: 's1', placeKey: 'P1' }, durationSec: 200, anchorProgress: 0.1 }, // sounds [100, 300]
+    { kind: 'story', unit: { id: 's2', placeKey: 'P2' }, durationSec: 999, releaseProgress: 0.5, expireProgress: 0.7 }, // window [500, 700]
+    { kind: 'bridge', durationSec: 30, anchorProgress: 0.8 }, // never coverage
+  ];
+  assert.deepEqual(grader.silentGapsSec(items, 1000), [
+    { start: 0, end: 100 },
+    { start: 300, end: 500 },
+    { start: 700, end: 1000 },
+  ]);
+  assert.deepEqual(grader.silentGapsSec([], 1000), [{ start: 0, end: 1000 }], 'an empty plan is one gap');
+});
+check('woven seated: the seconds cap binds TOTAL woven seconds and skips oversize candidates', () => {
+  const items = [{ kind: 'story', unit: { id: 'g1', placeKey: 'P0' }, durationSec: 400, anchorProgress: 0 }];
+  const candidates = [
+    { id: 'c500', placeKey: 'P1', durationSec: 500 },
+    { id: 'c300', placeKey: 'P2', durationSec: 300 },
+    { id: 'c200', placeKey: 'P3', durationSec: 200 },
+  ];
+  const seated = grader.seatWovenMembers({
+    items, candidates, driveSec: 1000, budgetSec: 1000, capShare: 0.25,
+  });
+  assert.equal(seated.inserts.length, 1, 'only the candidate that fits the 250s cap seats');
+  assert.equal(seated.inserts[0].unit.id, 'c200');
+  assert.equal(seated.inserts[0].anchorProgress, 0.4, 'seated at the start of the only gap');
+  assert.equal(seated.memberSec, 200);
+  const preCounted = grader.seatWovenMembers({
+    items, candidates, driveSec: 1000, budgetSec: 1000, capShare: 0.25, wovenSecBefore: 100,
+  });
+  assert.equal(preCounted.inserts.length, 0, 'a 100s woven climax leaves 150s of cap — nothing seats');
+});
+check('woven seated: the member-count cap seats strongest first and stops', () => {
+  const items = [{ kind: 'story', unit: { id: 'g1', placeKey: 'P0' }, durationSec: 400, anchorProgress: 0 }];
+  const candidates = [
+    { id: 'b150', placeKey: 'P2', durationSec: 150 },
+    { id: 'a200', placeKey: 'P1', durationSec: 200 },
+  ];
+  const seated = grader.seatWovenMembers({
+    items, candidates, driveSec: 1000, budgetSec: 1000, maxMembers: 1,
+  });
+  assert.equal(seated.inserts.length, 1);
+  assert.equal(seated.inserts[0].unit.id, 'a200', 'the longest candidate wins the single seat');
+});
+check('woven seated: a candidate longer than every gap never seats; an exact fit does', () => {
+  const items = [{ kind: 'story', unit: { id: 'g1', placeKey: 'P0' }, durationSec: 400, anchorProgress: 0 }];
+  const candidates = [
+    { id: 'c700', placeKey: 'P1', durationSec: 700 },
+    { id: 'c600', placeKey: 'P2', durationSec: 600 },
+    { id: 'c100', placeKey: 'P3', durationSec: 100 },
+  ];
+  const seated = grader.seatWovenMembers({ items, candidates, driveSec: 1000, budgetSec: 1000 });
+  assert.deepEqual(seated.inserts.map(i => i.unit.id), ['c600'], 'the 600s gap takes the 600s story, then no gap remains');
+  assert.equal(seated.memberSec, 600);
+});
+check('woven seated: placement goes to the largest fitting gap', () => {
+  const items = [
+    { kind: 'story', unit: { id: 'g1', placeKey: 'P0' }, durationSec: 100, anchorProgress: 0 },
+    { kind: 'story', unit: { id: 'g2', placeKey: 'P9' }, durationSec: 200, anchorProgress: 0.4 },
+  ]; // covered [0,100] + [400,600]; gaps [100,400]=300 and [600,1000]=400
+  const seated = grader.seatWovenMembers({
+    items,
+    candidates: [{ id: 'c250', placeKey: 'P1', durationSec: 250 }],
+    driveSec: 1000, budgetSec: 1000,
+  });
+  assert.equal(seated.inserts.length, 1);
+  assert.equal(seated.inserts[0].anchorProgress, 0.6, 'the 400s gap beats the 300s gap');
+});
+check('woven seated: ids and places already in the plan (or seated) are out — one telling per place', () => {
+  const items = [{ kind: 'story', unit: { id: 'x', placeKey: 'PX' }, durationSec: 100, anchorProgress: 0 }];
+  const candidates = [
+    { id: 'x', placeKey: 'PY', durationSec: 100 }, // same telling
+    { id: 'y', placeKey: 'PX', durationSec: 100 }, // same place, other angle
+    { id: 'z1', placeKey: 'PZ', durationSec: 100 },
+    { id: 'z2', placeKey: 'PZ', durationSec: 90 }, // second angle of the seated place
+  ];
+  const seated = grader.seatWovenMembers({ items, candidates, driveSec: 1000, budgetSec: 1000 });
+  assert.deepEqual(seated.inserts.map(i => i.unit.id), ['z1']);
+  const again = grader.seatWovenMembers({ items, candidates, driveSec: 1000, budgetSec: 1000 });
+  assert.deepEqual(again, seated, 'seating is deterministic');
+});
+check('woven seated: substantive starvation counts only substantive drives (silence ≤ 50%)', () => {
+  const mk = pairs => pairs.map(([silenceShare, threadTopic], i) => ({ drive: i + 1, silenceShare, threadTopic }));
+  assert.deepEqual(
+    grader.substantiveThreadStarvation(mk([[0.3, 'A'], [0.3, 'A'], [0.3, 'A'], [0.4, null], [0.2, null], [0.5, null], [0.1, null], [0.49, null], [0.3, 'A']])),
+    { starvationDrive: 4, substantiveThreadBefore: 3 },
+    'the run of five substantive thread-less drives begins at drive 4',
+  );
+  assert.deepEqual(
+    grader.substantiveThreadStarvation(mk([[0.3, 'A'], [0.9, null], [0.3, null], [0.3, null], [0.3, null], [0.3, null], [0.3, null]])),
+    { starvationDrive: 3, substantiveThreadBefore: 1 },
+    'a non-substantive drive neither counts nor breaks the run',
+  );
+  assert.deepEqual(
+    grader.substantiveThreadStarvation(mk([[0.3, null], [0.3, null], [0.3, 'A']])),
+    { starvationDrive: null, substantiveThreadBefore: 1 },
+    'two thread-less substantive drives are not starvation',
+  );
+});
+
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
