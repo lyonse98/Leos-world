@@ -705,5 +705,100 @@ await checkAsync('v2 runner: an outrun story drops stale and the closeout still 
   assert.ok(runner.view().owed && runner.view().owed.includes('b|landmark_origin'), `owed tease names the dropped story (got: ${runner.view().owed})`);
 });
 
+// ---- first-sound discipline (Nov 3, 2026): prime at the tap, honest state ----
+// Erik's stationary route test on the pre-fix build: the plan
+// built, he hit start, the UI showed speaking, and nothing
+// sounded — telemetry showed audio_blocked (playback) +
+// prime_attempt and NO unlock_latched for the route session.
+// The route player was constructed and primed only after the
+// whole async build, outside the tap's gesture window, whereas
+// freeform primes synchronously in its tap. GateFakeAudio models
+// WebKit transient activation: play() is refused with
+// NotAllowedError until `activated` is set.
+class GateFakeAudio extends RealFakeAudio {
+  constructor(durMs = 300) {
+    super(durMs);
+    this.activated = true;
+    this.refusals = 0;
+  }
+  play() {
+    if (!this.activated) {
+      this.refusals += 1;
+      return Promise.reject(
+        Object.assign(new Error("play() failed because the user didn't interact with the document first"), {
+          name: 'NotAllowedError',
+        }),
+      );
+    }
+    return super.play();
+  }
+}
+
+await checkAsync('first sound: the tap prime is attempted synchronously and earns unlock_latched before item 1', async () => {
+  const audio = new GateFakeAudio(300);
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onEvent: (t, p) => events.push({ t, p }),
+  });
+  // The Start tap: prime() must attempt play() INSIDE the call —
+  // synchronously, before any await (and therefore before the
+  // async build the tap goes on to run). A prime deferred past
+  // the gesture is the bug being fixed.
+  runner.prime();
+  assert.equal(audio.played.length, 1, 'the prime attempted synchronously within the tap call');
+  assert.ok(audio.played[0].startsWith('blob:'), 'the tap carrier is the local sample prime');
+  await new Promise(r => setTimeout(r, 25)); // let the prime's proof land
+  assert.equal(runner.view().latch, 'earned', 'tap prime earned the latch inside the gesture window');
+  const latched = events.filter(e => e.t === 'unlock_latched');
+  assert.equal(latched.length, 1, 'unlock_latched filed for the route session');
+  assert.equal(latched[0].p.source, 'prime');
+  // The build lands; the plan is handed to the same runner.
+  await runner.start(qaPlan());
+  const firstStoryAt = audio.played.findIndex(u => u.includes('s1%7Clandmark_origin'));
+  assert.ok(firstStoryAt > 0, 'item 1 sounded after the tap prime');
+  await until(() => runner.view().nowPlaying !== null, 'now-playing once sound flows');
+  assert.equal(runner.view().awaitingGesture, false);
+  assert.equal(runner.view().phase, 'playing');
+  runner.endTour();
+});
+
+await checkAsync('first sound: a refused first play holds at tap-to-hear (never "playing"); a gesture retry begins item 1', async () => {
+  const audio = new GateFakeAudio(300);
+  audio.activated = false; // the pre-fix world: the attempt happens with no activation live
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onEvent: (t, p) => events.push({ t, p }),
+    onStoryHeard: () => {},
+  });
+  await runner.start(qaPlan());
+  await new Promise(r => setTimeout(r, 150)); // the refusal chain settles (carrier → fallback prime)
+  const held = runner.view();
+  assert.equal(held.phase, 'awaiting', `a refused first play must hold at awaiting, got ${held.phase}`);
+  assert.equal(held.nowPlaying, null, 'no speaking claim over silence');
+  assert.equal(held.awaitingGesture, true);
+  assert.equal(held.latch, 'unearned');
+  assert.ok(events.some(e => e.t === 'prime_attempt' && e.p.result === 'rejected'), 'prime refusal on the record');
+  assert.ok(events.some(e => e.t === 'audio_blocked'), 'audio_blocked on the record');
+  assert.equal(events.filter(e => e.t === 'unlock_latched').length, 0, 'latch never earned');
+  assert.equal(audio.played.length, 0, 'nothing sounded');
+  // The tap-to-hear gesture: activation present, item 1 rides it
+  // as the prime carrier and begins.
+  audio.activated = true;
+  runner.noteGesture();
+  await until(() => runner.view().latch === 'earned', 'gesture retry earns the latch');
+  const latched = events.filter(e => e.t === 'unlock_latched');
+  assert.equal(latched.length, 1);
+  assert.equal(latched[0].p.source, 'gesture-retry');
+  await until(() => audio.played.some(u => u.includes('s1%7Clandmark_origin')), 'item 1 sounds after the gesture');
+  await until(() => runner.view().nowPlaying !== null, 'now-playing appears only once sound flows');
+  assert.equal(runner.view().phase, 'playing');
+  assert.equal(runner.view().awaitingGesture, false);
+  runner.endTour();
+});
+
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

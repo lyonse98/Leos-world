@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Play, Pause, Square, Send, MapPin, MessageCircle } from 'lucide-react';
+import { Play, Pause, Square, Send, MapPin, MessageCircle, Volume2 } from 'lucide-react';
 import { Tour, type TourView } from './core/tour';
 import { createBrowserAudio } from './core/player';
 import { isTesterUnlocked, tryTesterUnlock } from './core/accessGate';
@@ -519,6 +519,19 @@ function MilesApp() {
     return () => document.removeEventListener('pointerdown', onDown, true);
   }, [view.phase, view.latch]);
 
+  // The same net, route side (Nov 3, 2026): a route tour runs on
+  // the runner's OWN audio element, which the freeform net above
+  // can never prime. While a route tour is active and its latch
+  // is unearned or lost, any pointerdown retries the route
+  // player's unlock — capture phase, same discipline.
+  const routeLatch = routeView?.latch;
+  useEffect(() => {
+    if (!routeActive || routeLatch === undefined || routeLatch === 'earned') return;
+    const onDown = () => routeRunnerRef.current?.noteGesture();
+    document.addEventListener('pointerdown', onDown, true);
+    return () => document.removeEventListener('pointerdown', onDown, true);
+  }, [routeActive, routeLatch]);
+
   // Media Session: metadata + transport handlers (seek ±30 s).
   useEffect(() => {
     if (!('mediaSession' in navigator)) return;
@@ -669,6 +682,53 @@ function MilesApp() {
     // under the same id the tour itself would have used.
     const sessionId = `route-${Date.now()}`;
     routeSessionRef.current = sessionId;
+    // The runner — and its audio element — is constructed and
+    // PRIMED here, synchronously inside the Build tap, before the
+    // build's first await (Nov 3, 2026 first-sound fix). Freeform
+    // primes inside its START tap; the route player used to be
+    // constructed only after the whole async build (parse →
+    // geocode → routes → library fetches → plan-time rendering),
+    // minutes past the tap, so its first play fell outside the
+    // gesture window: WebKit refused it, the unlock latch never
+    // earned, and the tour opened silent while claiming to speak.
+    // The tap prime rides the local sample on the ROUTE element;
+    // the composed plan is handed to this same runner below. A
+    // build that fails discards the runner (a primed element,
+    // nothing filed, no tour ran).
+    // Phase-2 Q&A wiring is decided at tap time too: the runner
+    // receives the answer generator ONLY when the declared-mode
+    // gate is open for this ride. A driving route runner has no
+    // generator dep at all — the Q&A pipeline is unreachable in
+    // it, not hidden.
+    const qaAtBuild = qaGateOpen(ROUTE_MODE_ENABLED, tourMode);
+    const runner = new RoutePlanRunner({
+      audio: createBrowserAudio(),
+      synthUrl: async text => {
+        const blob = await synthesizeSpeech(text);
+        return URL.createObjectURL(blob);
+      },
+      ...(qaAtBuild
+        ? {
+            generateAnswer: (prompt: string) => generateAnswerText(prompt),
+            answerModelLabel: LEO_QA_MODEL_ID,
+          }
+        : {}),
+      onStoryHeard: unit => {
+        void recordHeard(sessionId, deviceKey(), unit.placeName, unit.storyText, unit.lat, unit.lng);
+      },
+      onEvent: (type, payload) => {
+        const pos = positionRef.current;
+        void emitEvent(sessionId, type, payload, { lat: pos?.lat ?? null, lng: pos?.lng ?? null, movementMode: tourMode });
+      },
+    });
+    routeRunnerRef.current = runner;
+    runner.prime();
+    let handedOver = false;
+    const discardRunner = () => {
+      if (handedOver) return;
+      if (routeRunnerRef.current === runner) routeRunnerRef.current = null;
+      runner.dispose();
+    };
     try {
       const nowMs = Date.now();
       const parsed = await parseRouteInput(
@@ -717,6 +777,7 @@ function MilesApp() {
           { stage: 'geocode', reason: geo.failure ?? 'unknown' },
           { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
         );
+        discardRunner();
         return;
       }
       const geocoded = geo.destination;
@@ -733,6 +794,7 @@ function MilesApp() {
           { stage: 'route', reason: routed.failure ?? 'unknown' },
           { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
         );
+        discardRunner();
         return;
       }
       const route = routed.route;
@@ -799,40 +861,20 @@ function MilesApp() {
       plan.budgetSec = budget;
       const plannedIds = new Set(plan.items.map(it => it.id));
       plan.shelfTease = units.find(u => !plannedIds.has(u.id) && !heardKeys.has(u.id)) ?? null;
-      // Phase-2 Q&A wiring: the runner receives the answer
-      // generator ONLY when the declared-mode gate is open for
-      // this ride. A driving route runner has no generator dep at
-      // all — the Q&A pipeline is unreachable in it, not hidden.
-      const qaAtBuild = qaGateOpen(ROUTE_MODE_ENABLED, tourMode);
+      // Hand the plan to the runner primed at the tap (above):
+      // same runner, same element, latch already earned inside
+      // the gesture window — item 1 now begins as a normal play,
+      // not as a prime attempted minutes too late.
       setRideMode(tourMode);
       setAskOpen(false);
-      const runner = new RoutePlanRunner({
-        audio: createBrowserAudio(),
-        synthUrl: async text => {
-          const blob = await synthesizeSpeech(text);
-          return URL.createObjectURL(blob);
-        },
-        ...(qaAtBuild
-          ? {
-              generateAnswer: (prompt: string) => generateAnswerText(prompt),
-              answerModelLabel: LEO_QA_MODEL_ID,
-            }
-          : {}),
-        onStoryHeard: unit => {
-          void recordHeard(sessionId, deviceKey(), unit.placeName, unit.storyText, unit.lat, unit.lng);
-        },
-        onEvent: (type, payload) => {
-          const pos = positionRef.current;
-          void emitEvent(sessionId, type, payload, { lat: pos?.lat ?? null, lng: pos?.lng ?? null, movementMode: tourMode });
-        },
-      });
-      routeRunnerRef.current = runner;
+      handedOver = true;
       setRouteRunner(runner);
       setRouteActive(true);
       setRouteFormOpen(false);
       setRouteStatus('');
       await runner.start(plan);
     } catch {
+      discardRunner();
       setRouteStatus('Something went wrong building the route — try again.');
     } finally {
       setRouteBuilding(false);
@@ -1345,6 +1387,23 @@ function MilesApp() {
             />
           </div>
           <div className="w-full max-w-xl pb-1" onPointerDown={e => e.stopPropagation()}>
+            {rView?.awaitingGesture && (
+              // Tap-to-hear (Nov 3, 2026): the first play was
+              // refused and the latch is unearned — the tour is
+              // HELD, not speaking, and says so. The tap is the
+              // gesture retry: item 1 rides it as the prime
+              // carrier. (Any tap anywhere also retries via the
+              // document net; this is the labeled, findable path.)
+              <button
+                type="button"
+                onClick={() => routeRunner.bannerTap()}
+                aria-label="Tap to hear Miles"
+                className="mb-2 flex w-full items-center justify-center gap-2 rounded-full bg-sagedeep px-5 py-3.5 text-base font-bold text-cream shadow-xl shadow-ink/20 transition active:scale-[0.99]"
+              >
+                <Volume2 className="h-5 w-5" />
+                Tap to hear Miles
+              </button>
+            )}
             {qaOpen && askOpen && (
               <div className="mb-2 rounded-[2rem] bg-white/80 p-4 shadow-xl shadow-ink/15 backdrop-blur">
                 <QuestionForm

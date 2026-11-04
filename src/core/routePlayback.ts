@@ -39,7 +39,7 @@
 // Player.enqueueNext), and the plan resumes at the next unplayed
 // item. One question at a time, mirroring freeform's lock.
 
-import { Player, type AudibleItem, type AudioPort, systemClock } from './player';
+import { Player, type AudibleItem, type AudioPort, type LatchState, systemClock } from './player';
 import { bucketUrl } from './backend';
 import {
   decideCloseout,
@@ -55,8 +55,18 @@ import {
 } from './routeMode';
 
 export interface RouteRunnerView {
-  phase: 'idle' | 'playing' | 'ended';
+  /**
+   * 'awaiting' = the tour is up but the audio unlock latch is
+   * unearned/lost: nothing has sounded, and the view must say so
+   * (tap-to-hear), never 'playing' (Nov 3, 2026 first-sound fix).
+   */
+  phase: 'idle' | 'awaiting' | 'playing' | 'ended';
+  /** A speaking claim, present only while sound is actually flowing. */
   nowPlaying: { label: string; kind: string } | null;
+  /** True while phase is 'awaiting': surface the tap-to-hear affordance. */
+  awaitingGesture: boolean;
+  /** The route player's unlock latch (drives the App's gesture net). */
+  latch: LatchState;
   userPaused: boolean;
   guardPaused: boolean;
   /** Post-tour 'Miles owes you' line, once a closeout tease exists. */
@@ -125,6 +135,8 @@ export class RoutePlanRunner {
   private closeoutDoneFlag = false;
   private qaPhase: RouteRunnerView['qaPhase'] = 'idle';
   private questionsAnsweredCount = 0;
+  /** Tap time (prime) or start() time, whichever came first: the tour's clock for latch telemetry. */
+  private startStamp: number | null = null;
 
   constructor(deps: RouteRunnerDeps) {
     this.deps = deps;
@@ -132,10 +144,34 @@ export class RoutePlanRunner {
       resolveUrl: async item => (item.source.kind === 'url' ? item.source.url : ''),
       stallSource: () => null,
       emit: (type, payload) => deps.onEvent?.(type, payload),
-      onFirstLatch: () => undefined,
-      onPrimeCarrierFailed: () => undefined,
-      onLatchLost: () => undefined,
-      onLatchRestored: () => undefined,
+      // The latch hooks are WIRED, mirroring the freeform Tour
+      // (Nov 3, 2026): a route tour's first latch files the same
+      // unlock_latched event freeform files (its absence from the
+      // first route session's telemetry is what hid the blocked
+      // first sound), a refused prime carrier falls back to the
+      // sample prime — the tap's second carrier (O3/P7) — and a
+      // restored latch re-drives the held item.
+      onFirstLatch: source => {
+        deps.onEvent?.('unlock_latched', {
+          source,
+          mode: 'route',
+          ms_from_tour_start: this.startStamp !== null ? Date.now() - this.startStamp : null,
+        });
+        this.player.retryDrive();
+        this.notify();
+      },
+      onPrimeCarrierFailed: () => {
+        this.player.attemptSamplePrime('prime');
+        this.notify();
+      },
+      onLatchLost: () => {
+        deps.onEvent?.('unlock_lost', { source: 'blocked-burst', mode: 'route' });
+        this.notify();
+      },
+      onLatchRestored: () => {
+        this.player.retryDrive();
+        this.notify();
+      },
       onFailureStreak: () => undefined,
       attemptCap: () => 3,
       judgeStory: () => ({ ok: true }),
@@ -164,9 +200,20 @@ export class RoutePlanRunner {
 
   view(): RouteRunnerView {
     const snap = this.player.snapshot();
+    // Honest playback state (Nov 3, 2026): a speaking claim keys
+    // off sound actually flowing — latch earned, an item sounding,
+    // not user/guard-paused — never off plan position alone. The
+    // pre-fix view derived 'playing' + now-playing from the plan
+    // existing and the player's current label, so a refused first
+    // play still presented as Miles speaking over silence.
+    const latch = snap.latch;
+    const sounding = latch === 'earned' && this.player.isPlaying() && !snap.userPaused;
+    const awaiting = this.plan !== null && this.endedKind === null && latch !== 'earned';
     return {
-      phase: this.plan === null ? 'idle' : this.endedKind !== null ? 'ended' : 'playing',
-      nowPlaying: snap.currentLabel ? { label: snap.currentLabel, kind: snap.currentKind ?? '' } : null,
+      phase: this.plan === null ? 'idle' : this.endedKind !== null ? 'ended' : awaiting ? 'awaiting' : 'playing',
+      nowPlaying: sounding && snap.currentLabel ? { label: snap.currentLabel, kind: snap.currentKind ?? '' } : null,
+      awaitingGesture: awaiting,
+      latch,
       userPaused: this.userPausedFlag,
       guardPaused: this.guardPausedFlag,
       owed: this.owed,
@@ -176,6 +223,38 @@ export class RoutePlanRunner {
       qaPhase: this.qaPhase,
       questionsAnswered: this.questionsAnsweredCount,
     };
+  }
+
+  /**
+   * Tap-time prime (Nov 3, 2026 first-sound fix). The App calls
+   * this SYNCHRONOUSLY inside the route intake's Build tap,
+   * before the build's first await: the sample prime attempts on
+   * THIS runner's element while the tap's transient activation
+   * is still live, so the unlock latch is earned (or refused)
+   * inside the gesture window — freeform's discipline, whose
+   * greeting primes in its own START tap. Item 1 does not exist
+   * at tap time, so the local sample is the carrier; the plan is
+   * handed to this same runner when the build lands (start).
+   * Before this, the route player was constructed and primed
+   * only after the whole async build (parse → geocode → routes
+   * → library fetches → plan-time synth), minutes past the tap:
+   * WebKit refused the first play, the latch never earned, and
+   * the tour opened silent. Calling prime() more than once is
+   * harmless — the Player coalesces in-flight primes.
+   */
+  prime(): void {
+    if (this.startStamp === null) this.startStamp = Date.now();
+    this.player.attemptSamplePrime('prime');
+  }
+
+  /**
+   * Discard a primed-but-never-started runner (the build failed
+   * after the tap prime): release the element and settle its
+   * items without filing an ending — no tour ever ran.
+   */
+  dispose(): void {
+    this.closed = true;
+    this.player.teardown();
   }
 
   /**
@@ -191,6 +270,7 @@ export class RoutePlanRunner {
    * next Miles story when its window opens.
    */
   async start(plan: RoutePlan): Promise<void> {
+    if (this.startStamp === null) this.startStamp = Date.now();
     this.plan = plan;
     for (const it of plan.items) {
       if (this.closed) break; // a closeout landed mid-render: stop building a dead plan
@@ -404,7 +484,9 @@ export class RoutePlanRunner {
   resumeByUser(): void {
     // An explicit Resume overrides a guard pause (the driver chose
     // to keep listening off-corridor); the guard re-arms on the
-    // next corridor return via onPosition.
+    // next corridor return via onPosition. The Resume tap is also
+    // a gesture: re-prime first, exactly as freeform's resume does.
+    this.player.noteGesture(this.heldFirstItem());
     if (this.guardPausedFlag) this.guardOverridden = true;
     this.userPausedFlag = false;
     this.guardPausedFlag = false;
@@ -420,12 +502,36 @@ export class RoutePlanRunner {
     this.player.seekBy(sec);
   }
 
-  noteGesture(): void {
-    this.player.noteGesture(null);
+  /**
+   * The held first sound, freeform's heldGreeting generalized:
+   * while the latch is unearned, the item that owes the first
+   * sound — the player's current item, or the parked head of the
+   * promised FIFO (a refused carrier is parked there by the
+   * fallback sample prime) — rides the next gesture as the prime
+   * carrier itself, so the retry IS the first story attempting,
+   * not only the sample blip.
+   */
+  private heldFirstItem(): AudibleItem | null {
+    if (this.player.latch === 'earned') return null;
+    const current = this.player.current;
+    if (current && !current.settled) return current;
+    const head = this.player.promised[0];
+    if (head && !head.settled) return head;
+    return null;
   }
 
+  /** Any in-tour gesture: a re-prime opportunity (P8), routed by the UI / the document net. */
+  noteGesture(): void {
+    this.player.noteGesture(this.heldFirstItem());
+  }
+
+  /** The tap-to-hear affordance's tap (P11): a gesture-retry, then a re-drive if nothing is current. */
   bannerTap(): void {
-    this.player.noteGesture(null);
+    this.player.noteGesture(this.heldFirstItem());
+    if (!this.player.isPlaying() && this.player.current === null) {
+      this.player.retryDrive();
+    }
+    this.notify();
   }
 
   private async close(kind: 'arrival-owed' | 'arrival-signoff' | 'overrun'): Promise<void> {
