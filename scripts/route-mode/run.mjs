@@ -2332,6 +2332,79 @@ await checkAsync('wart (§5): the exclusion is surgical — a genuinely dropped 
   runner.endTour();
 });
 
+// ---- composer v3, commit C: rotation policy ----
+{
+  const actPath = Array.from({ length: 11 }, (_, i) => ({ lat: 32.7 + i * 0.02, lng: -117.25 }));
+  const actDest = { lat: 32.9, lng: -117.25 };
+  const plainInput = { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] };
+  const rec = (played, extra = {}) => ({
+    destinationName: 'Dest', destinationPlaceKey: null, threadTopic: null,
+    playedSubjects: played, owedSubjects: [], endedAt: NOW, ...extra,
+  });
+  const composeC = (units, budget, records = []) =>
+    rm.composeRoutePlan(units, actPath, actDest, 'Dest', plainInput, {
+      nowMs: NOW, heardKeys: new Set(), budgetSecOverride: budget, driveSec: 1000, driveRecords: records,
+    });
+  const storyIds = plan => plan.items.filter(i => i.kind === 'story').map(i => i.id);
+
+  check('rotation r1: a place played on the immediately prior drive yields to a comparable alternative in its act', () => {
+    const units = [unit('old|landmark_origin', 32.79), unit('new|landmark_origin', 32.81)];
+    assert.deepEqual(storyIds(composeC(units, 130, [rec(['old|landmark_origin'])])), ['new|landmark_origin']);
+    assert.deepEqual(storyIds(composeC(units, 130, [])), ['old|landmark_origin']); // control: no record, no rotation
+  });
+  check('rotation r1: the yielded place still tiles when it is the act’s only feasible candidate', () => {
+    const plan = composeC([unit('old|landmark_origin', 32.79)], 10000, [rec(['old|landmark_origin'])]);
+    assert.deepEqual(storyIds(plan), ['old|landmark_origin']);
+  });
+  check('rotation r3: second choice wins when the top was played within the last 3 drives and the margin is small', () => {
+    const units = [
+      unit('top|landmark_origin', 32.79, { durationSec: 130 }),
+      unit('ru|landmark_origin', 32.81, { durationSec: 120 }),
+    ];
+    // top sounded two drives ago: inside the recency window,
+    // but not on the immediately prior drive (rule 1 stays out).
+    const records = [rec(['other|landmark_origin']), rec(['top|landmark_origin'])];
+    assert.deepEqual(storyIds(composeC(units, 140, records)), ['ru|landmark_origin']);
+  });
+  check('rotation r3: a clear margin keeps the top candidate', () => {
+    const units = [
+      unit('top|landmark_origin', 32.79, { durationSec: 130 }),
+      unit('ru|landmark_origin', 32.81, { durationSec: 100 }),
+    ];
+    const records = [rec(['other|landmark_origin']), rec(['top|landmark_origin'])];
+    assert.deepEqual(storyIds(composeC(units, 140, records)), ['top|landmark_origin']);
+  });
+  check('rotation r2: the prior drive’s opener area does not repeat when a fresh opener exists (cap pressure)', () => {
+    const units = [
+      unit('s1|landmark_origin', 32.73),
+      unit('s2|landmark_origin', 32.81),
+      unit('na|neighborhood_intro', 32.71, { angle: 'neighborhood_intro' }),
+      unit('nb|neighborhood_intro', 32.79, { angle: 'neighborhood_intro' }),
+    ];
+    // Budget leaves room for exactly one opener after the stories tile.
+    const rotated = composeC(units, 280, [rec(['na|neighborhood_intro'])]);
+    assert.deepEqual(rotated.items.filter(i => i.opener).map(i => i.id), ['nb|neighborhood_intro']);
+    const control = composeC(units, 280, []);
+    assert.deepEqual(control.items.filter(i => i.opener).map(i => i.id), ['na|neighborhood_intro']);
+  });
+  check('rotation r4: among near-equal climax candidates, the one with more unheard alternatives wins', () => {
+    const plan = composeC([
+      unit('alt1|landmark_origin', 32.71, { topics: ['Coast'] }),
+      unit('scarce|landmark_origin', 32.85, { durationSec: 200 }),
+      unit('plenty|landmark_event', 32.87, { durationSec: 190, topics: ['Coast'] }),
+    ], 10000, []);
+    assert.equal(plan.climaxUnitId, 'plenty|landmark_event');
+  });
+  check('rotation r4: outside the ~10% band, raw weight still decides the climax', () => {
+    const plan = composeC([
+      unit('alt1|landmark_origin', 32.71, { topics: ['Coast'] }),
+      unit('scarce|landmark_origin', 32.85, { durationSec: 200 }),
+      unit('plenty|landmark_event', 32.87, { durationSec: 150, topics: ['Coast'] }),
+    ], 10000, []);
+    assert.equal(plan.climaxUnitId, 'scarce|landmark_origin');
+  });
+}
+
 // ---- composer v3, commit B: act-structured selection ----
 // Dense 11-point path: segment midpoints give near-exact
 // progress (unit at lat L sits in segment (L-32.7)/0.02, whose

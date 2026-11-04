@@ -19,7 +19,7 @@
 // text search for the destination, one Routes computeRoutes call.
 // No live calls happen at import time, in tests, or in the harness.
 //
-import { selectPriorDrive, type RouteDriveRecord } from './routeHistory';
+import { normalizePlaceName, selectPriorDrive, type RouteDriveRecord } from './routeHistory';
 import {
   bridgeTextFor,
   previewTextFor,
@@ -892,7 +892,15 @@ export interface ComposeOptions {
  *       order, so a yielded candidate still seats when
  *       nothing stronger took its budget — and the settled
  *       plan carries a compact acts summary into the
- *       decisions record;
+ *       decisions record. ROTATION (commit C) lives inside
+ *       this rung as well, BELOW the thread: preferences
+ *       among the base candidates driven by this route's own
+ *       drive records — place recency, opener variation,
+ *       second-choice wins, and a scarcity-aware climax
+ *       tiebreak. Rotation never overrides heard exclusion,
+ *       the budget, the windows, or the portal bar; it only
+ *       chooses among candidates the higher rungs left tied
+ *       or near-tied;
  *   (2) thread selection — the detected thread, or the
  *       listener's own chosen topic (detectRouteThread);
  *   (3) climax placement — the in-corridor generalized climax,
@@ -992,6 +1000,36 @@ export function composeRoutePlan(
       ? { threadTopic: priorDriveRecord.threadTopic, stillOwedSubjects: priorDriveRecord.owedSubjects.slice(0, 2) }
       : null;
 
+  // Rotation state (composer v3, commit C): this route's own
+  // recent drives — the records relevance-tiered exactly like
+  // selectPriorDrive (destination key, then destination name,
+  // then thread topic), newest-first as stored, windowed to
+  // the last 3. The head of the window is the immediately
+  // prior drive on this route. Place identity is the
+  // normalized place name, the drive records' own currency.
+  const routeRecords: RouteDriveRecord[] = (() => {
+    const recs = opts.driveRecords ?? [];
+    if (recs.length === 0) return [];
+    const key = opts.destinationPlaceKey ?? null;
+    if (key) {
+      const byKey = recs.filter(r => r.destinationPlaceKey !== null && r.destinationPlaceKey === key);
+      if (byKey.length > 0) return byKey;
+    }
+    const wanted = normalizePlaceName(destinationName);
+    if (wanted) {
+      const byName = recs.filter(r => normalizePlaceName(r.destinationName) === wanted);
+      if (byName.length > 0) return byName;
+    }
+    const topic = thread?.topic ?? null;
+    if (topic) return recs.filter(r => r.threadTopic !== null && r.threadTopic === topic);
+    return [];
+  })();
+  const recentRouteRecords = routeRecords.slice(0, 3);
+  const playedOnLastDrive = new Set(
+    (recentRouteRecords[0]?.playedSubjects ?? []).map(normalizePlaceName),
+  );
+  const playedRecently = new Set(recentRouteRecords.flatMap(r => r.playedSubjects).map(normalizePlaceName));
+
   // Budget: the caller-supplied drive-time budget (budgetSecFor)
   // wins whenever present — since Nov 3, 2026 it is the ONLY
   // budget the App ever builds with. An input arrival time tiles
@@ -1087,6 +1125,51 @@ export function composeRoutePlan(
     return false;
   };
   /**
+   * Rotation rule 1 (place recency): a candidate whose place
+   * sounded on the immediately prior drive on this route
+   * yields while a comparable alternative — a different place,
+   * budget-feasible — exists in the same act. Like the floor,
+   * the yield defers without consuming: the mop-up seats the
+   * candidate when it is the act's only feasible tile or the
+   * alternatives left budget behind.
+   */
+  const recencyYields = (cand: LibraryUnit): boolean => {
+    if (playedOnLastDrive.size === 0) return false;
+    if (!playedOnLastDrive.has(normalizePlaceName(cand.placeName))) return false;
+    const a = actOf(cand);
+    const candPlace = normalizePlaceName(cand.placeName);
+    for (const alt of pool) {
+      if (alt.id === cand.id || consumed.has(alt.id) || chosenIds.has(alt.id)) continue;
+      if (actOf(alt) !== a) continue;
+      if (normalizePlaceName(alt.placeName) === candPlace) continue;
+      if (fitOk(alt)) return true;
+    }
+    return false;
+  };
+  const byRankTotal = (a: LibraryUnit, b: LibraryUnit): number =>
+    byRank(a, b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  /**
+   * The strongest seatable alternative to cand in its act
+   * (rotation rule 3's runner-up): unpicked, unconsumed,
+   * budget-feasible, a different place, and itself passing
+   * the gates — a runner-up that would only yield is no
+   * runner-up. Null when cand stands alone in its act.
+   */
+  const bestAlternativeInAct = (cand: LibraryUnit): LibraryUnit | null => {
+    const a = actOf(cand);
+    const candPlace = normalizePlaceName(cand.placeName);
+    let best: LibraryUnit | null = null;
+    for (const alt of pool) {
+      if (alt.id === cand.id || consumed.has(alt.id) || chosenIds.has(alt.id)) continue;
+      if (actOf(alt) !== a) continue;
+      if (normalizePlaceName(alt.placeName) === candPlace) continue;
+      if (!fitOk(alt)) continue;
+      if (floorYields(alt) || recencyYields(alt)) continue;
+      if (!best || byRankTotal(alt, best) < 0) best = alt;
+    }
+    return best;
+  };
+  /**
    * One round-robin pass over the decile buckets, in the
    * pointer sweep's exact pick order (bucket by bucket, byRank
    * within, one pick per bucket per pass, fit-skips consumed).
@@ -1124,9 +1207,26 @@ export function composeRoutePlan(
           passedYielders.push(cand);
           continue;
         }
-        chosen.push(cand);
-        chosenIds.add(cand.id);
-        total += cand.durationSec;
+        if (gates && recencyYields(cand)) {
+          continue;
+        }
+        // Rotation rule 3 (second-choice wins): a candidate
+        // whose place sounded on a recent drive on this route
+        // (last 3) loses its seat to the act's runner-up when
+        // the margin between them is small — under 15% of the
+        // top's weight (its telling's length, the composer's
+        // standing weight). The loser is not consumed: it may
+        // still seat later in the plan if budget remains.
+        let pick = cand;
+        if (gates && playedRecently.has(normalizePlaceName(cand.placeName))) {
+          const runnerUp = bestAlternativeInAct(cand);
+          if (runnerUp && cand.durationSec - runnerUp.durationSec < 0.15 * cand.durationSec) {
+            pick = runnerUp;
+          }
+        }
+        chosen.push(pick);
+        chosenIds.add(pick.id);
+        total += pick.durationSec;
         progressMade = true;
         if (gates) for (const y of passedYielders) floorSubByAct[actOf(y)] = true;
         break;
@@ -1186,15 +1286,48 @@ export function composeRoutePlan(
     u => prog(u) >= CLIMAX_ZONE_START || isDestinationArea(u, destination),
   );
   let climaxWinner: LibraryUnit | null = null;
+  // Rotation rule 4 (climax scarcity): for each candidate,
+  // count the UNHEARD story units in the fetched pool that
+  // share its place or a topic — the alternatives a future
+  // drive could still spend there. Among near-equal
+  // candidates the plentiful place wins and the unique one is
+  // saved; heard exclusion is never re-opened (heard units
+  // count for nothing here, exactly as in selection).
+  const climaxAltCount = new Map<string, number>();
+  if (climaxCandidates.length >= 2) {
+    const storyish = (u: LibraryUnit): boolean =>
+      u.angle !== 'neighborhood_intro' &&
+      u.angle !== 'neighborhood_intro_greet' &&
+      u.angle !== 'filler' &&
+      u.angle !== 'filler_hosted';
+    for (const c of climaxCandidates) {
+      let n = 0;
+      for (const u of units) {
+        if (u.id === c.id || opts.heardKeys.has(u.id) || !storyish(u)) continue;
+        if (u.placeKey === c.placeKey || u.topics.some(t => c.topics.includes(t))) n += 1;
+      }
+      climaxAltCount.set(c.id, n);
+    }
+  }
   if (chosen.length >= 2 && climaxCandidates.length > 0) {
-    climaxWinner = [...climaxCandidates].sort(
-      (a, b) =>
+    climaxWinner = [...climaxCandidates].sort((a, b) => {
+      const head =
         angleClassRank(a.angle) - angleClassRank(b.angle) ||
         toneRank(a) - toneRank(b) ||
-        threadRank(a) - threadRank(b) ||
-        b.durationSec - a.durationSec ||
-        prog(b) - prog(a),
-    )[0];
+        threadRank(a) - threadRank(b);
+      if (head !== 0) return head;
+      // The scarcity band: weights within ~10% of each other
+      // are near-equal, and remaining alternatives decide
+      // before raw length does. A pairwise band is not a
+      // total order, but the candidates enter the sort in
+      // fixed plan order, so the outcome is deterministic.
+      const band = 0.1 * Math.max(a.durationSec, b.durationSec);
+      if (Math.abs(a.durationSec - b.durationSec) <= band) {
+        const scar = (climaxAltCount.get(b.id) ?? 0) - (climaxAltCount.get(a.id) ?? 0);
+        if (scar !== 0) return scar;
+      }
+      return b.durationSec - a.durationSec || prog(b) - prog(a);
+    })[0];
   }
 
   // The off-route portal climax (consolidation §4, ladder
@@ -1284,7 +1417,18 @@ export function composeRoutePlan(
   // area's ground gets the area's intro as its chapter head.
   const openerByKey = new Map<string, LibraryUnit>();
   for (const u of openerAll) if (!openerByKey.has(u.placeKey)) openerByKey.set(u.placeKey, u);
-  const openers = [...openerByKey.values()].sort((a, b) => prog(a) - prog(b));
+  // Rotation rule 2 (opener variation): an opener whose area
+  // sounded on the immediately prior drive on this route is
+  // considered after the fresh areas — under the global cap,
+  // the fresh areas claim their chapters first. When every
+  // opener fits under the caps, all still seat; the ordering
+  // changes nothing else about their placement.
+  const openers = [...openerByKey.values()].sort(
+    (a, b) =>
+      Number(playedOnLastDrive.has(normalizePlaceName(a.placeName))) -
+        Number(playedOnLastDrive.has(normalizePlaceName(b.placeName))) ||
+      prog(a) - prog(b),
+  );
   let openersUsed = 0;
   for (const op of openers) {
     if (openersUsed >= CHAPTER_OPENER_MAX || sequence.length === 0) break;
