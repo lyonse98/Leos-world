@@ -21,6 +21,9 @@ import {
   qaGateOpen,
   rideEstimateLine,
   seatWovenMembers,
+  selectMemberFetchEntries,
+  wovenIndexSupportByTopic,
+  MEMBER_FETCH_TARGET,
   ROUTE_TONES,
   ROUTE_TOPICS,
   type LibraryUnit,
@@ -939,6 +942,26 @@ function MilesApp() {
       // verbatim text — one heard angle no longer takes the
       // whole place out of the route's window.
       const heardKeys = heardKeysForStories(units, heardTexts);
+      // Index-level thread support (the member-fetch lever,
+      // Nov 4, 2026): the county index this build already
+      // fetched (bundled tags + presence data) holds seatable
+      // woven depth far beyond the departure fetch's window.
+      // Support is recomputed before every compose with the
+      // build's GROWING fetched set — departure fetch, then
+      // the climax fetch, then the member fetch — so a row
+      // in hand is never also counted as index promise.
+      const fetchedIdSet = new Set(
+        [...fetched.geo, ...fetched.portals].map(x => `${x.entry.place_key}|${x.entry.angle}`),
+      );
+      const wovenSupportNow = () =>
+        wovenIndexSupportByTopic(
+          index,
+          route.path,
+          geocoded.location,
+          (pk, ang) => tagsFor(pk, ang),
+          (pk, ang) => wovenEligibleFor(pk, ang),
+          { fetchedIds: fetchedIdSet, heardIds: heardKeys },
+        );
       const hosted = await fetchHostedFillerRows();
       const fillerUnits: LibraryUnit[] = hosted.slice(0, 10).map(f => ({
         id: `${f.place_key}|filler_hosted`,
@@ -978,6 +1001,7 @@ function MilesApp() {
         driveRecords,
         destinationPlaceKey: destPlaceKey,
         corridorTellingCounts,
+        wovenIndexSupport: wovenSupportNow(),
       };
       let plan = composeRoutePlan(units, route.path, geocoded.location, geocoded.name, input, composeOpts);
       // The off-route portal climax (consolidation §4): when the
@@ -991,28 +1015,25 @@ function MilesApp() {
       // else — they never tile, hop, or open chapters. No
       // survivors (or a bar still unmet) ships the first plan
       // exactly as composed; there is never a second fetch.
+      let climaxOnlyUnits: LibraryUnit[] = [];
       if (plan.portalClimaxSeeking) {
         const topic = plan.portalClimaxSeeking;
-        const fetchedIds = new Set(
-          [...fetched.geo, ...fetched.portals].map(x => `${x.entry.place_key}|${x.entry.angle}`),
-        );
         const extraRows = index
           .filter(
             e =>
               e.angle.startsWith('landmark') &&
-              !fetchedIds.has(`${e.place_key}|${e.angle}`) &&
+              !fetchedIdSet.has(`${e.place_key}|${e.angle}`) &&
               tagsFor(e.place_key, e.angle).topics.includes(topic) &&
               distanceToPathM({ lat: e.lat, lng: e.lng }, route.path) > 1500 &&
               haversineM({ lat: e.lat, lng: e.lng }, geocoded.location) > 1500,
           )
           .slice(0, 12);
-        const extraUnits: LibraryUnit[] = [];
         for (const e of extraRows) {
           const row = await fetchLibraryRow(e.place_key, e.angle);
           // Story-level heard (v3.1): only this exact telling is out.
           if (!row || (row.story_text != null && heardTexts.has(row.story_text))) continue;
           const tags = tagsFor(row.place_key, row.angle);
-          extraUnits.push({
+          climaxOnlyUnits.push({
             id: `${row.place_key}|${row.angle}`,
             placeKey: row.place_key,
             placeName: row.place_name,
@@ -1027,10 +1048,78 @@ function MilesApp() {
             storyText: row.story_text,
           });
         }
-        if (extraUnits.length > 0) {
+        if (climaxOnlyUnits.length > 0) {
+          for (const u of climaxOnlyUnits) fetchedIdSet.add(u.id);
           plan = composeRoutePlan(units, route.path, geocoded.location, geocoded.name, input, {
             ...composeOpts,
-            climaxOnlyUnits: extraUnits,
+            wovenIndexSupport: wovenSupportNow(),
+            climaxOnlyUnits,
+          });
+        }
+      }
+      // The member fetch (the member-fetch lever, Nov 4,
+      // 2026): when the composed plan's thread cannot seat
+      // its members from the departure fetch's candidates,
+      // ONE additional bounded fetch answers it — landmark-
+      // class, woven-eligible units carrying the thread's
+      // topic from anywhere in the county, drawn from the
+      // same library index (selectMemberFetchEntries), read
+      // in the heard-aware chunk size toward MEMBER_FETCH_
+      // TARGET survivors and never past the read cap.
+      // Survivors join a SINGLE re-compose as member units:
+      // they can seat as thread members and nothing else —
+      // they never tile, hop, or contest the climax (the
+      // climax units above ride along so a settled portal
+      // climax survives the re-compose). No survivors ships
+      // the plan exactly as composed; there is never a
+      // second member fetch.
+      let memberUnits: LibraryUnit[] = [];
+      let memberFetchRecord: { topic: string; reads: number; candidates: number } | null = null;
+      if (plan.wovenMembersSeeking) {
+        const topic = plan.wovenMembersSeeking;
+        const entries = selectMemberFetchEntries(index, {
+          topic,
+          fetchedIds: fetchedIdSet,
+          path: route.path,
+          destination: geocoded.location,
+          tagsOf: (pk, ang) => tagsFor(pk, ang),
+          eligibleOf: (pk, ang) => wovenEligibleFor(pk, ang),
+        });
+        let reads = 0;
+        for (let i = 0; i < entries.length && memberUnits.length < MEMBER_FETCH_TARGET; i += 12) {
+          const chunk = entries.slice(i, i + 12);
+          const rows = await Promise.all(chunk.map(e => fetchLibraryRow(e.place_key, e.angle)));
+          reads += chunk.length;
+          for (let j = 0; j < chunk.length; j++) {
+            const row = rows[j];
+            // Story-level heard (v3.1): only this exact telling is out.
+            if (!row || (row.story_text != null && heardTexts.has(row.story_text))) continue;
+            const tags = tagsFor(row.place_key, row.angle);
+            memberUnits.push({
+              id: `${row.place_key}|${row.angle}`,
+              placeKey: row.place_key,
+              placeName: row.place_name,
+              angle: row.angle,
+              lat: row.lat,
+              lng: row.lng,
+              durationSec: estimateDurationSec(row.story_text),
+              topics: tags.topics,
+              tone: tags.tone,
+              toneSecondary: tags.toneSecondary,
+              audioPath: row.audio_path,
+              storyText: row.story_text,
+              wovenEligible: wovenEligibleFor(row.place_key, row.angle),
+            });
+          }
+        }
+        memberFetchRecord = { topic, reads, candidates: memberUnits.length };
+        if (memberUnits.length > 0) {
+          for (const u of memberUnits) fetchedIdSet.add(u.id);
+          plan = composeRoutePlan(units, route.path, geocoded.location, geocoded.name, input, {
+            ...composeOpts,
+            wovenIndexSupport: wovenSupportNow(),
+            climaxOnlyUnits,
+            memberUnits,
           });
         }
       }
@@ -1084,12 +1173,16 @@ function MilesApp() {
       // climax), heard exclusion is the build's own story-
       // level set, and the pass is a no-op when the plan has
       // no thread or no eligible candidate fits a real gap.
-      plan = seatWovenMembers(plan, units, { heardKeys });
+      plan = seatWovenMembers(plan, [...units, ...memberUnits], { heardKeys });
       const plannedIds = new Set(plan.items.map(it => it.id));
       plan.shelfTease = units.find(u => !plannedIds.has(u.id) && !heardKeys.has(u.id)) ?? null;
       // The fetch's read accounting rides the plan into the
-      // runner's route_plan_started telemetry (v3.1, commit B).
-      plan.fetchStats = fetched.stats;
+      // runner's route_plan_started telemetry (v3.1, commit B) —
+      // the member fetch's own record rides beside it when
+      // the lever fired, never folded into the window's counts.
+      plan.fetchStats = memberFetchRecord
+        ? { ...fetched.stats, memberFetch: memberFetchRecord }
+        : fetched.stats;
       // The wrap-up (addendum 3): ONE closing narration for the
       // episode, authored + synthesized NOW, at preparation,
       // through the narration seam — written for the planned

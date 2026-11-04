@@ -537,6 +537,18 @@ export class RoutePlanRunner {
             decile_unheard: plan.fetchStats.decileUnheard,
             decile_min: Math.min(...plan.fetchStats.decileUnheard),
             ceiling_hit: plan.fetchStats.ceilingHit,
+            // The member fetch (Nov 4, 2026): the ONE bounded
+            // fetch that answered the plan's member seeking —
+            // its topic, the reads it spent, and the seatable
+            // candidates it returned. Null when the lever
+            // never fired on this build.
+            member_fetch: plan.fetchStats.memberFetch
+              ? {
+                  topic: plan.fetchStats.memberFetch.topic,
+                  reads: plan.fetchStats.memberFetch.reads,
+                  candidates: plan.fetchStats.memberFetch.candidates,
+                }
+              : null,
           }
         : null,
       // Through-line (differentiator 2): the thread the plan was
