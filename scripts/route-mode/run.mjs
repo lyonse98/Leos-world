@@ -3060,5 +3060,49 @@ check('tag regen (E): the shared library ingest path carries the regen as its fi
   assert.ok(ingest.includes('if (!dryRun) regenRouteTags();'), 'a dry run stays side-effect free');
 });
 
+// ── Woven-pool simulation helpers (v3.1, commit F) ──────────
+// The battery itself runs via `grader.mjs --woven` (200 builds
+// is too heavy for this harness); its moving parts are pinned
+// here: pool shape, seeded determinism, share nesting, the
+// audit configuration, and the two summary computations.
+check('woven sim (F): the county pool is landmark-class and off the route corridor only', () => {
+  const world = grader.buildWorld(1103, 'current');
+  const pool = grader.wovenPoolUnits(world, 'commute');
+  assert.ok(pool.length > 0, 'the county pool is populated');
+  assert.ok(pool.every(u => u.angle.startsWith('landmark')), 'landmark class only');
+  assert.ok(pool.every(u => !u.placeName.startsWith('Commute ')), 'no commute-corridor places');
+  assert.ok(pool.some(u => u.placeName.startsWith('County ')), 'scatter places are in');
+});
+check('woven sim (F): eligibility is deterministic and flat shares nest', () => {
+  const world = grader.buildWorld(1103, 'current');
+  const ids = cfg => new Set(grader.wovenEligibleUnits(world, 'commute', cfg).map(u => u.id));
+  const e25 = ids({ share: 0.25 });
+  const e50 = ids({ share: 0.5 });
+  const e75 = ids({ share: 0.75 });
+  assert.deepEqual(ids({ share: 0.25 }), e25, 'same seed → same eligible set');
+  assert.equal(ids({ share: 0 }).size, 0, '0% is the empty pool');
+  assert.ok([...e25].every(id => e50.has(id)), '25% ⊂ 50%');
+  assert.ok([...e50].every(id => e75.has(id)), '50% ⊂ 75%');
+  const poolSize = grader.wovenPoolUnits(world, 'commute').length;
+  assert.ok(Math.abs(e50.size / poolSize - 0.5) < 0.06, `the 50% draw lands near half the pool (got ${e50.size}/${poolSize})`);
+});
+check('woven sim (F): the audit configuration follows the measured per-topic usable shares', () => {
+  const world = grader.buildWorld(1103, 'current');
+  const eligible = grader.wovenEligibleUnits(world, 'commute', { audit: true }, 9200);
+  assert.ok(eligible.every(u => u.topics.length > 0), 'a topic-less story is never woven material (the audit tagging gap)');
+  assert.equal(grader.WOVEN_AUDIT_USABLE['folklore'], 1.0, 'folklore measured 100% usable');
+  assert.equal(grader.WOVEN_AUDIT_USABLE['Navy Century'], 0.753, 'the most presence-locked rich thread, as measured');
+  assert.ok(eligible.length > 0, 'the audit pool is populated');
+});
+check('woven sim (F): starvation and overlap math', () => {
+  const mk = topics => topics.map(t => ({ threadTopic: t }));
+  assert.equal(grader.threadStarvationDrive(mk(['A', 'A', null, null, null, null, null, 'A'])), 3, 'the run of five begins at drive 3');
+  assert.equal(grader.threadStarvationDrive(mk(['A', null, null, null, null, 'A', null, null, null, null])), null, 'four-in-a-row twice is not starvation');
+  assert.equal(grader.threadStarvationDrive(mk([null, null, null, null, null])), 1, 'starved from the first drive');
+  assert.equal(grader.meanConsecutiveOverlap([new Set(['a', 'b']), new Set(['b', 'c'])]), 0.333, 'Jaccard of consecutive sets');
+  assert.equal(grader.meanConsecutiveOverlap([new Set(), new Set()]), 1, 'two silent episodes are identically empty');
+  assert.equal(grader.meanConsecutiveOverlap([new Set(['a']), new Set()]), 0);
+});
+
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

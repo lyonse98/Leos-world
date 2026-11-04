@@ -614,6 +614,360 @@ async function gradeAll(mods) {
   return shapes;
 }
 
+// ------------------------------------------------------------ woven-pool simulation (v3.1, commit F)
+//
+// Erik's hypothesis (Nov 4, 2026): every library story is
+// written in a presence register ("as if you are there"), so
+// route composition can only use corridor-anchored material —
+// one fixed commute can yield only as many genuinely different
+// episodes as its corridor holds, and thread/climax starve
+// first. A WOVEN register version (host-told, no presence
+// language) could be drawn from anywhere in the county. This
+// simulation prices that idea BEFORE anyone pays for woven
+// versions: when enabled, a parameterized share of
+// OFF-corridor stories becomes eligible THREAD and CLIMAX
+// material only — woven units never geo-tile, never open
+// chapters; they count toward thread support county-wide, and
+// the strongest unheard woven landmark on the thread's topic
+// may ride as ONE windowless climax insert, sequenced last,
+// in the spirit of the portal climax. Grader-side only: no
+// production composer behavior changes.
+//
+// Model notes (the simplifications, stated):
+//   - The thread is re-detected per drive as the REAL
+//     detectRouteThread over (corridor support pool ∪ woven
+//     pool) — the corridor pool replicates the composer's own
+//     partition (unheard, non-intro/greet/filler, within
+//     1500 m of path or destination).
+//   - The thread's selection NUDGE on corridor picks is not
+//     re-modeled: tiling is the standard build's, so silence
+//     moves only by the climax insert's own duration and
+//     distinctness only by the insert + thread changes. The
+//     sim is conservative for woven on both.
+//   - A woven climax replaces an existing climax only in
+//     presence terms (never modeled — presence is the metric);
+//     it is inserted only when the standard build found a
+//     thread but no climax, or a thread only woven support
+//     found (in which case the standard build has no climax
+//     by construction).
+//   - Eligibility is a property of the STORY (it either has a
+//     woven version or not), drawn once per configuration from
+//     a seeded stream over the county pool in world order;
+//     flat-share configurations share one stream, so pools
+//     nest (25% ⊂ 50% ⊂ 75%).
+
+/**
+ * Per-topic woven-usable shares (weave-safe + mixed) from the
+ * presence audit of Nov 4, 2026
+ * (~/workspace/leos-world/presence-audit-2026-11-04.md,
+ * non-Protected topic-tagged stories). Topics the audit table
+ * does not list use its overall tagged share (567/679 ≈ 0.835).
+ */
+export const WOVEN_AUDIT_USABLE = {
+  'Boom & Bust': 0.883, Coast: 0.911, 'Navy Century': 0.753,
+  'Food & Drink': 0.958, Sport: 0.859, 'Border / CaliBaja': 0.898,
+  Flight: 0.739, Film: 0.895, Rail: 0.938, Surf: 0.968,
+  Music: 0.966, folklore: 1.0, Highway: 0.577, 'Deep Time': 0.72,
+  'San Diego River': 0.75, Faith: 0.87, Water: 0.667,
+  Desert: 0.737, 'The Cure': 0.824,
+};
+export const WOVEN_AUDIT_FALLBACK = 0.835;
+
+/**
+ * The county pool for one route: landmark-class units whose
+ * place is NOT on the route's own corridor (in the synthetic
+ * world, corridor places are named for their route; everything
+ * else — scatter places and other routes' corridors — is
+ * county ground for this route).
+ */
+export function wovenPoolUnits(world, routeName) {
+  const label = routeName[0].toUpperCase() + routeName.slice(1);
+  return [...world.unitsById.values()].filter(
+    u => u.angle.startsWith('landmark') && !u.placeName.startsWith(`${label} `),
+  );
+}
+
+/**
+ * The woven-eligible subset of the county pool for one
+ * configuration: { share } for a flat sweep share, or
+ * { audit: true } for the presence audit's measured per-topic
+ * usable shares (a story's primary topic governs; a topic-less
+ * story can never join a thread and is never climax material
+ * here, exactly as the audit's tagging-gap note says).
+ * Deterministic: a seeded stream over the pool in world order.
+ */
+export function wovenEligibleUnits(world, routeName, config, seed = 9100) {
+  const pool = wovenPoolUnits(world, routeName);
+  const rnd = mulberry32(seed);
+  const out = [];
+  for (const u of pool) {
+    let p;
+    if (config.audit) {
+      if (u.topics.length === 0) p = 0;
+      else p = WOVEN_AUDIT_USABLE[u.topics[0]] ?? WOVEN_AUDIT_FALLBACK;
+    } else {
+      p = config.share;
+    }
+    if (rnd() < p) out.push(u);
+  }
+  return out;
+}
+
+/** Consecutive-episode distinctness: mean Jaccard overlap of story-id sets (lower = more different). */
+export function meanConsecutiveOverlap(episodeSets) {
+  if (episodeSets.length < 2) return null;
+  let sum = 0;
+  for (let i = 1; i < episodeSets.length; i++) {
+    const a = episodeSets[i - 1];
+    const b = episodeSets[i];
+    if (a.size === 0 && b.size === 0) {
+      sum += 1; // two silent episodes are identically empty
+      continue;
+    }
+    let inter = 0;
+    for (const id of a) if (b.has(id)) inter += 1;
+    sum += inter / (a.size + b.size - inter);
+  }
+  return Math.round((sum / (episodeSets.length - 1)) * 1000) / 1000;
+}
+
+/** The first drive (1-based) starting a run of 5 consecutive thread-less drives, or null. */
+export function threadStarvationDrive(drives) {
+  let run = 0;
+  for (let i = 0; i < drives.length; i++) {
+    run = drives[i].threadTopic !== null ? 0 : run + 1;
+    if (run >= 5) return i - 3; // 1-based drive where the failing run began (i is 0-based, run ends at i)
+  }
+  return null;
+}
+
+/**
+ * The woven battery: the commute at CURRENT shelf depth,
+ * extended to 40 drives, one run per configuration. Reuses
+ * runBuild (the standard machinery, v3.1 window + story-level
+ * heard included) and applies the woven post-pass per drive.
+ */
+export async function runWovenSimulation(mods, { drives: driveCount = 40 } = {}) {
+  const { rm } = mods;
+  const world = buildWorld(1103, 'current');
+  const route = world.routes.commute;
+  const input = { destinationText: route.destName, arrivalTimeMs: null, tone: null, topics: [] };
+  const configs = [
+    { key: '0%', share: 0 },
+    { key: '25%', share: 0.25 },
+    { key: '50%', share: 0.5 },
+    { key: '75%', share: 0.75 },
+    { key: 'audit', audit: true },
+  ];
+  const results = {};
+  for (const config of configs) {
+    const eligible = wovenEligibleUnits(world, 'commute', config, config.audit ? 9200 : 9100);
+    const heardNames = new Set();
+    const heardTexts = new Set();
+    let records = [];
+    const drives = [];
+    const episodeSets = [];
+    for (let d = 0; d < driveCount; d++) {
+      const nowMs = BASE_NOW + d * 24 * 60 * 60 * 1000;
+      const build = await runBuild(mods, world, route, {
+        heardNames,
+        heardTexts,
+        driveRecords: records,
+        input,
+        nowMs,
+      });
+      // The composer's corridor support pool, replicated from
+      // its partition (see header): unheard story-class units
+      // within the corridor tolerance.
+      const corridorPool = build.units.filter(
+        u =>
+          !build.heardKeys.has(u.id) &&
+          u.angle !== 'neighborhood_intro' &&
+          u.angle !== 'neighborhood_intro_greet' &&
+          u.angle !== 'filler' &&
+          u.angle !== 'filler_hosted' &&
+          (rm.distanceToPathM({ lat: u.lat, lng: u.lng }, route.path) <= 1500 ||
+            rm.haversineM({ lat: u.lat, lng: u.lng }, route.dest) <= 1500),
+      );
+      const wovenAvail = eligible.filter(u => !(u.storyText && heardTexts.has(u.storyText)));
+      const unionThread = rm.detectRouteThread([...corridorPool, ...wovenAvail], []);
+      const threadTopic = unionThread?.topic ?? build.plan.thread?.topic ?? null;
+
+      // Woven climax insert: a thread exists but the standard
+      // build seated no climax → the strongest unheard woven
+      // landmark on the thread's topic rides, windowless, last.
+      let plan = build.plan;
+      let climaxViaWoven = false;
+      if (!plan.climaxUnitId && threadTopic !== null) {
+        const playedIds = new Set(
+          plan.items.filter(i => i.kind === 'story' && i.unit).map(i => i.unit.id),
+        );
+        const playedPlaces = new Set(
+          plan.items.filter(i => i.kind === 'story' && i.unit).map(i => i.unit.placeKey),
+        );
+        const candidates = wovenAvail
+          .filter(
+            u => u.topics.includes(threadTopic) && !playedIds.has(u.id) && !playedPlaces.has(u.placeKey),
+          )
+          .sort((a, b) => b.durationSec - a.durationSec);
+        const winner = candidates[0];
+        if (winner) {
+          const insert = {
+            kind: 'story',
+            id: winner.id,
+            unit: winner,
+            text: null,
+            durationSec: winner.durationSec,
+            anchorProgress: Math.max(0, 1 - winner.durationSec / route.driveSec),
+            climax: true,
+            portal: true,
+            woven: true,
+          };
+          plan = {
+            ...plan,
+            items: [...plan.items, insert],
+            climaxUnitId: winner.id,
+            climaxMode: 'woven',
+            thread: unionThread ?? plan.thread,
+          };
+          climaxViaWoven = true;
+        }
+      } else if (unionThread && plan.thread?.topic !== unionThread.topic) {
+        plan = { ...plan, thread: unionThread };
+      }
+
+      const metrics = planMetrics(plan, { driveSec: route.driveSec, climaxPool: null });
+      const played = plan.items.filter(i => i.kind === 'story' && i.unit);
+      episodeSets.push(new Set(played.map(i => i.unit.id)));
+      drives.push({
+        drive: d + 1,
+        stories: metrics.stories,
+        silenceShare: metrics.silenceShare,
+        threadTopic,
+        climaxPresent: metrics.climaxPresent,
+        climaxViaWoven,
+      });
+      for (const it of played) {
+        heardNames.add(it.unit.placeName);
+        if (it.unit.storyText) heardTexts.add(it.unit.storyText);
+      }
+      records = [
+        {
+          destinationName: route.destName,
+          destinationPlaceKey: route.destPlaceKey,
+          threadTopic,
+          playedSubjects: [...new Set(played.map(i => i.unit.placeName))],
+          owedSubjects: [],
+          endedAt: nowMs,
+        },
+        ...records,
+      ].slice(0, 20);
+    }
+    const starvation = threadStarvationDrive(drives);
+    const threadBefore =
+      starvation === null
+        ? drives.filter(d => d.threadTopic !== null).length
+        : drives.slice(0, starvation - 1).filter(d => d.threadTopic !== null).length;
+    // Substance, kept beside the headline so it can't be
+    // misread: a drive counts as a substantive EPISODE when
+    // stories cover at least half of it (silence ≤ 50%). Past
+    // corridor exhaustion a "thread-bearing" drive may be a
+    // single woven climax insert in a mostly silent drive —
+    // a through-line and one story, not an episode.
+    const substantive = drives.filter(d => d.silenceShare <= 0.5);
+    results[config.key] = {
+      config: config.audit ? 'audit (per-topic measured usable shares)' : `flat ${config.key}`,
+      eligibleUnits: eligible.length,
+      drives,
+      summary: {
+        threadDrives: drives.filter(d => d.threadTopic !== null).length,
+        climaxDrives: drives.filter(d => d.climaxPresent).length,
+        wovenClimaxDrives: drives.filter(d => d.climaxViaWoven).length,
+        threadStarvationDrive: starvation,
+        threadEpisodesBeforeStarvation: threadBefore,
+        substantiveEpisodes: substantive.length,
+        substantiveThreadEpisodes: substantive.filter(d => d.threadTopic !== null).length,
+        meanSilenceShare:
+          Math.round((drives.reduce((s, d) => s + d.silenceShare, 0) / drives.length) * 1000) / 1000,
+        meanConsecutiveOverlap: meanConsecutiveOverlap(episodeSets),
+        minStories: Math.min(...drives.map(d => d.stories)),
+        lastDriveStories: drives[drives.length - 1].stories,
+      },
+    };
+  }
+  return { world: { census: world.census, shape: 'current' }, results };
+}
+
+function renderWovenMarkdown(sim, label) {
+  const lines = [];
+  lines.push('# Woven-pool simulation — route mode (composer v3.1, commit F)');
+  lines.push('');
+  lines.push(
+    `Composer: ${label ?? 'working tree'} · synthetic shelf, current depth (${sim.world.census} units), seeded; ` +
+      'the standard 40-drive commute battery with the heard-aware window and story-level heard (v3.1 A+B) underneath. ' +
+      'Woven units are thread/climax material only — they never geo-tile and never open chapters. ' +
+      'Guarantee pass is shelf-only (silence is an upper bound vs production).',
+  );
+  lines.push('');
+  const zero = sim.results['0%'].summary;
+  lines.push(
+    `HEADLINE — distinct, thread-bearing commute episodes before thread starvation ` +
+      `(thread-found failing on 5 consecutive drives), vs the 0% run's ${zero.threadEpisodesBeforeStarvation}:`,
+  );
+  lines.push('');
+  lines.push('| woven share | eligible units | thread episodes before starvation | additional vs 0% | starvation drive | thread drives /40 | climax drives /40 | woven climaxes | substantive episodes (silence ≤ 50%) | of those, thread-bearing | mean consecutive overlap | mean silence |');
+  lines.push('|---|---|---|---|---|---|---|---|---|---|---|---|');
+  for (const key of ['0%', '25%', '50%', '75%', 'audit']) {
+    const r = sim.results[key];
+    const s = r.summary;
+    lines.push(
+      `| ${key} | ${r.eligibleUnits} | ${s.threadEpisodesBeforeStarvation} | ` +
+        `${key === '0%' ? '—' : `+${s.threadEpisodesBeforeStarvation - zero.threadEpisodesBeforeStarvation}`} | ` +
+        `${s.threadStarvationDrive ?? 'none in 40'} | ${s.threadDrives} | ${s.climaxDrives} | ${s.wovenClimaxDrives} | ` +
+        `${s.substantiveEpisodes} | ${s.substantiveThreadEpisodes} | ` +
+        `${s.meanConsecutiveOverlap} | ${fmtPct(s.meanSilenceShare)} |`,
+    );
+  }
+  lines.push('');
+  lines.push(
+    'WHAT THE HEADLINE DOES AND DOES NOT SAY — read before deciding: at every woven share the corridor ' +
+      'itself exhausts on the same drive as the 0% run (the geo supply is untouched by register). Past that ' +
+      'drive, a "thread-bearing" drive is ONE woven climax story under a county-detected through-line, in a ' +
+      'drive that is otherwise ~89% silence (see the per-drive tables). Woven therefore buys ZERO additional ' +
+      'substantive episodes (silence ≤ 50%: identical at every share) — what it buys is that the commute never ' +
+      'goes fully dark: the episode SHAPE (a named through-line + a closing story) survives indefinitely, and ' +
+      '25% already saturates that effect (25/50/75/audit are indistinguishable) because the pool is spent only ' +
+      'through the single climax slot, one story per drive. The distinctness column is dominated by exhaustion ' +
+      'arithmetic (empty-vs-empty pairs score 1; singleton-insert pairs score 0) and should not be read as an ' +
+      'episode-diversity measure past the corridor\'s life. The open design question the sim poses: woven value ' +
+      'scales only if woven members may also be SEATED as thread members inside the episode (multiple inserts), ' +
+      'not only as its climax — that variant is not simulated here.',
+  );
+  lines.push('');
+  lines.push(
+    'Model notes: episode distinctness is the mean Jaccard overlap of consecutive episodes\' story sets ' +
+      '(lower = more different). Silence barely moves by design — woven units do not tile; the only ' +
+      'coverage they add is the climax insert\'s own duration. The selection-nudge effect of a ' +
+      'woven-supported thread on corridor picks is not modeled, so distinctness gains here are a floor.',
+  );
+  lines.push('');
+  for (const key of ['0%', '25%', '50%', '75%', 'audit']) {
+    const r = sim.results[key];
+    lines.push(`## Woven share ${key} (${r.eligibleUnits} eligible units)`);
+    lines.push('');
+    lines.push('| drive | stories | silence | thread | climax |');
+    lines.push('|---|---|---|---|---|');
+    for (const d of r.drives) {
+      lines.push(
+        `| ${d.drive} | ${d.stories} | ${fmtPct(d.silenceShare)} | ${d.threadTopic ?? '—'} | ` +
+          `${d.climaxPresent ? (d.climaxViaWoven ? 'woven' : 'yes') : '—'} |`,
+      );
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
 // ------------------------------------------------------------ reporting
 
 function fmtPct(x) {
@@ -715,6 +1069,34 @@ async function main() {
     }
   }
   const mods = await loadBundles(repoRoot);
+  if (argv.includes('--woven')) {
+    // The woven-pool battery (v3.1, commit F): current shelf
+    // depth, 40-drive commute, woven off vs each share. Writes
+    // grade-woven-sim.json/.md unless --out says otherwise.
+    const sim = await runWovenSimulation(mods);
+    const wovenReport = {
+      generatedBy: 'scripts/route-mode/grader.mjs --woven',
+      generatedAt: new Date().toISOString(),
+      label,
+      world: sim.world,
+      results: sim.results,
+    };
+    const wovenPrefix = argOf('--out') ?? 'grade-woven-sim';
+    writeFileSync(join(here, `${wovenPrefix}.json`), JSON.stringify(wovenReport, null, 2));
+    writeFileSync(join(here, `${wovenPrefix}.md`), renderWovenMarkdown(sim, label));
+    console.log(`grader (woven): wrote ${wovenPrefix}.json + ${wovenPrefix}.md (composer ${label ?? '?'})`);
+    const zero = sim.results['0%'].summary;
+    for (const key of ['0%', '25%', '50%', '75%', 'audit']) {
+      const s = sim.results[key].summary;
+      console.log(
+        `  woven ${key}: thread episodes before starvation ${s.threadEpisodesBeforeStarvation} ` +
+          `(0%: ${zero.threadEpisodesBeforeStarvation}), starvation ${s.threadStarvationDrive ?? 'none in 40'}, ` +
+          `thread ${s.threadDrives}/40, climax ${s.climaxDrives}/40, substantive episodes ${s.substantiveEpisodes} ` +
+          `(thread-bearing ${s.substantiveThreadEpisodes}), overlap ${s.meanConsecutiveOverlap}, silence ${fmtPct(s.meanSilenceShare)}`,
+      );
+    }
+    return;
+  }
   const shapes = await gradeAll(mods);
   const baseline = baselinePath
     ? JSON.parse(readFileSync(baselinePath, 'utf8'))
