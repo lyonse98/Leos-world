@@ -9,8 +9,9 @@
 //
 // Fully synthetic, deterministic (seeded), zero live calls:
 // the pipeline mirrored here is the App's buildRoute staging
-// (selectFetchCandidates → composeRoutePlan → the ONE portal-
-// climax re-compose → fillRouteGaps) with the guarantee pass
+// (orderFetchCandidates → fetchHeardAwareCandidates →
+// composeRoutePlan → the ONE portal-climax re-compose →
+// fillRouteGaps) with the guarantee pass
 // run shelf-only (no discovery/generation deps — the same
 // skip-fallback the production pass takes when generation is
 // unavailable), so silence numbers are an upper bound against
@@ -431,12 +432,21 @@ async function runBuild({ rm, gf, rh }, world, route, { heardNames, heardTexts, 
     const u = world.unitsById.get(`${pk}|${ang}`);
     return { topics: u ? u.topics : [] };
   };
-  const fetchSet = rm.selectFetchCandidates(world.index, route.path, route.dest, tagsOf, {
+  const fetchOrder = rm.orderFetchCandidates(world.index, route.path, route.dest, tagsOf, {
     userTopics: input.topics,
   });
-  const units = fetchSet
-    .map(e => world.unitsById.get(`${e.place_key}|${e.angle}`))
-    .filter(Boolean);
+  // The heard-aware fetch, exactly like the App's (v3.1,
+  // commit B): synthetic row reads over the world, heard
+  // classified by filed text.
+  const fetched = await rm.fetchHeardAwareCandidates({
+    geoOrder: fetchOrder.geo,
+    portalOrder: fetchOrder.portals,
+    path: route.path,
+    readRow: async e => world.unitsById.get(`${e.place_key}|${e.angle}`) ?? null,
+    rowText: u => u.storyText,
+    heardTexts,
+  });
+  const units = [...fetched.geo, ...fetched.portals].map(x => x.row);
   // Story-level heard, exactly like the App's (v3.1): the
   // ledger's filed texts name the tellings that are out.
   const heardKeys = rm.heardKeysForStories(units, heardTexts);
@@ -457,7 +467,9 @@ async function runBuild({ rm, gf, rh }, world, route, { heardNames, heardTexts, 
   let climaxOnlyUnits = [];
   if (plan.portalClimaxSeeking) {
     const topic = plan.portalClimaxSeeking;
-    const fetchedIds = new Set(fetchSet.map(e => `${e.place_key}|${e.angle}`));
+    const fetchedIds = new Set(
+      [...fetched.geo, ...fetched.portals].map(x => `${x.entry.place_key}|${x.entry.angle}`),
+    );
     climaxOnlyUnits = world.index
       .filter(
         e =>
@@ -484,7 +496,7 @@ async function runBuild({ rm, gf, rh }, world, route, { heardNames, heardTexts, 
   );
   plan.driveSec = route.driveSec;
   plan.budgetSec = rm.budgetSecFor(route.driveSec);
-  return { plan, units, climaxOnlyUnits, heardKeys };
+  return { plan, units, climaxOnlyUnits, heardKeys, fetchStats: fetched.stats };
 }
 
 /** The eligible pool a plan's climax winner was picked from (for the percentile). */
@@ -560,7 +572,14 @@ async function gradeAll(mods) {
       });
       const played = build.plan.items.filter(i => i.kind === 'story' && i.unit);
       for (const it of played) seenPlaces.add(it.unit.placeKey);
-      drives.push({ drive: d + 1, ...metrics, cumulativePlaces: seenPlaces.size });
+      drives.push({
+        drive: d + 1,
+        ...metrics,
+        cumulativePlaces: seenPlaces.size,
+        fetchReads: build.fetchStats.reads,
+        fetchUnheard: build.fetchStats.unheard,
+        fetchCeilingHit: build.fetchStats.ceilingHit,
+      });
       for (const it of played) {
         heardNames.add(it.unit.placeName);
         if (it.unit.storyText) heardTexts.add(it.unit.storyText);

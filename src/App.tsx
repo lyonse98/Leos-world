@@ -11,14 +11,15 @@ import {
   computeRoute,
   distanceToPathM,
   estimateDurationSec,
+  fetchHeardAwareCandidates,
   geocodeDestination,
   haversineM,
   heardKeysForStories,
   isRouteModeEnabled,
+  orderFetchCandidates,
   parseRouteInput,
   qaGateOpen,
   rideEstimateLine,
-  selectFetchCandidates,
   ROUTE_TONES,
   ROUTE_TOPICS,
   type LibraryUnit,
@@ -695,11 +696,14 @@ function MilesApp() {
    * The Coverage Guarantee pass after composition may add bounded
    * plan-time calls (discovery + generation + TTS + ingest, ≤2
    * generated stories) ONLY when the composed plan has a dead
-   * stretch over 180 s — see fillRouteGaps. Library rows are fetched
-   * for the FAIR fetch set (selectFetchCandidates: round-robin
-   * across the whole path's progress deciles, ≤120 geographic +
-   * ≤30 topic-connected portal candidates), read in parallel
-   * chunks — a build costs bounded reads, not a shelf scan, and
+   * stretch over 180 s — see fillRouteGaps. Library rows are
+   * fetched HEARD-AWARE (composer v3.1): the fair candidate
+   * order (round-robin across the whole path's progress
+   * deciles, then topic-connected portals) is read in parallel
+   * chunks until each decile holds its target of UNHEARD
+   * candidates — the old ≤120 + ≤30 caps are what a fresh
+   * shelf stops at; heard-saturated windows read deeper,
+   * bounded by the read ceilings — never a shelf scan, and
    * no stretch of the drive is crowded out by a dense start.
    * Heard exclusion is STORY-level (composer v3.1): the ledger
    * files each telling's verbatim story text, so the build
@@ -865,39 +869,48 @@ function MilesApp() {
       setRouteStatus(rideEstimateLine(route.durationSec));
       const budget = budgetSecFor(route.durationSec);
       const index = await fetchLibraryIndex();
-      const fetchSet = selectFetchCandidates(index, route.path, geocoded.location, (pk, ang) => tagsFor(pk, ang), {
-        userTopics: input.topics,
-      });
       const [heardLabelList, heardTextList] = await Promise.all([
         fetchHeardTopics(deviceKey()),
         fetchHeardStoryTexts(deviceKey()),
       ]);
       const heardLabels = new Set(heardLabelList);
       const heardTexts = new Set(heardTextList);
+      // Heard-aware fetch (composer v3.1, commit B): walk the
+      // fair candidate order in parallel chunks of 12, filing
+      // each read row heard/unheard by its story text, and keep
+      // reading deeper into the order until every progress
+      // decile holds its unheard target — a heard-saturated
+      // stretch refills instead of starving the plan. A fresh
+      // shelf stops at the old caps' worth of reads; the read
+      // ceilings bound the worst case (see routeMode).
+      const fetchOrder = orderFetchCandidates(index, route.path, geocoded.location, (pk, ang) => tagsFor(pk, ang), {
+        userTopics: input.topics,
+      });
+      const fetched = await fetchHeardAwareCandidates({
+        geoOrder: fetchOrder.geo,
+        portalOrder: fetchOrder.portals,
+        path: route.path,
+        readRow: e => fetchLibraryRow(e.place_key, e.angle),
+        rowText: row => row.story_text,
+        heardTexts,
+      });
       const units: LibraryUnit[] = [];
-      // Row reads are independent: fetch the bounded set in
-      // parallel chunks of 12 rather than one round trip at a time.
-      for (let i = 0; i < fetchSet.length; i += 12) {
-        const chunk = fetchSet.slice(i, i + 12);
-        const rows = await Promise.all(chunk.map(e => fetchLibraryRow(e.place_key, e.angle)));
-        for (const row of rows) {
-          if (!row) continue;
-          const tags = tagsFor(row.place_key, row.angle);
-          units.push({
-            id: `${row.place_key}|${row.angle}`,
-            placeKey: row.place_key,
-            placeName: row.place_name,
-            angle: row.angle,
-            lat: row.lat,
-            lng: row.lng,
-            durationSec: estimateDurationSec(row.story_text),
-            topics: tags.topics,
-            tone: tags.tone,
-            toneSecondary: tags.toneSecondary,
-            audioPath: row.audio_path,
-            storyText: row.story_text,
-          });
-        }
+      for (const { row } of [...fetched.geo, ...fetched.portals]) {
+        const tags = tagsFor(row.place_key, row.angle);
+        units.push({
+          id: `${row.place_key}|${row.angle}`,
+          placeKey: row.place_key,
+          placeName: row.place_name,
+          angle: row.angle,
+          lat: row.lat,
+          lng: row.lng,
+          durationSec: estimateDurationSec(row.story_text),
+          topics: tags.topics,
+          tone: tags.tone,
+          toneSecondary: tags.toneSecondary,
+          audioPath: row.audio_path,
+          storyText: row.story_text,
+        });
       }
       // Story-level heard (composer v3.1): a unit is excluded
       // only when the ledger holds a telling with its own
@@ -957,7 +970,9 @@ function MilesApp() {
       // exactly as composed; there is never a second fetch.
       if (plan.portalClimaxSeeking) {
         const topic = plan.portalClimaxSeeking;
-        const fetchedIds = new Set(fetchSet.map(e => `${e.place_key}|${e.angle}`));
+        const fetchedIds = new Set(
+          [...fetched.geo, ...fetched.portals].map(x => `${x.entry.place_key}|${x.entry.angle}`),
+        );
         const extraRows = index
           .filter(
             e =>
@@ -1039,6 +1054,9 @@ function MilesApp() {
       plan.budgetSec = budget;
       const plannedIds = new Set(plan.items.map(it => it.id));
       plan.shelfTease = units.find(u => !plannedIds.has(u.id) && !heardKeys.has(u.id)) ?? null;
+      // The fetch's read accounting rides the plan into the
+      // runner's route_plan_started telemetry (v3.1, commit B).
+      plan.fetchStats = fetched.stats;
       // The wrap-up (addendum 3): ONE closing narration for the
       // episode, authored + synthesized NOW, at preparation,
       // through the narration seam — written for the planned

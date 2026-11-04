@@ -465,6 +465,103 @@ check('v2 fetch fairness: selectFetchCandidates round-robins buckets under the b
   assert.ok(!picked.some(e => e.place_key === 'port2'), 'unconnected portal candidate not fetched');
 });
 
+// ---- composer v3.1, commit B: heard-aware fetch window ----
+// The fetch walks the fair order in chunks, filing each read
+// row heard/unheard by its story text, and reads deeper until
+// every decile holds its unheard target (or a ceiling binds).
+{
+  const fetchPath = Array.from({ length: 21 }, (_, i) => ({ lat: 32.7 + i * 0.01, lng: -117.25 }));
+  const fetchDest = { lat: 32.9, lng: -117.25 };
+  const fEntry = (key, lat, extra = {}) => ({ place_key: key, angle: 'landmark_origin', lat, lng: -117.25, ...extra });
+  const fRows = entries => new Map(entries.map(e => [`${e.place_key}|${e.angle}`, { story_text: `text:${e.place_key}|${e.angle}` }]));
+  const fRead = rows => async e => rows.get(`${e.place_key}|${e.angle}`) ?? null;
+  const noTopics = () => ({ topics: [] });
+  // Decile d's ground: lat 32.71 + 0.02d sits at progress
+  // ≈ 0.05 + 0.1d on the 21-point path — decile d exactly.
+  const decileEntries = (perDecile, prefix) => {
+    const entries = [];
+    for (let d = 0; d < 10; d++) {
+      const n = typeof perDecile === 'function' ? perDecile(d) : perDecile;
+      for (let k = 0; k < n; k++) entries.push(fEntry(`${prefix}${d}-${k}`, 32.71 + 0.02 * d));
+    }
+    return entries;
+  };
+  const saturatedScenario = () => {
+    const entries = decileEntries(d => (d === 5 ? 9 : 3), 'd');
+    const rows = fRows(entries);
+    const heardTexts = new Set();
+    for (let k = 0; k < 6; k++) heardTexts.add(`text:d5-${k}|landmark_origin`);
+    const order = rm.orderFetchCandidates(entries, fetchPath, fetchDest, noTopics, {});
+    return rm.fetchHeardAwareCandidates({
+      geoOrder: order.geo, portalOrder: order.portals, path: fetchPath,
+      readRow: fRead(rows), rowText: r => r.story_text, heardTexts,
+      perDecileTarget: 3, chunkSize: 4,
+    });
+  };
+
+  check('v3.1 fetch order: selectFetchCandidates is the bounded prefix of the fetch order', () => {
+    const entries = [...decileEntries(15, 'g'), ...Array.from({ length: 40 }, (_, k) => fEntry(`p${k}`, 32.8, { lng: -117.05 }))];
+    const tagsOf = () => ({ topics: ['Coast'] });
+    const order = rm.orderFetchCandidates(entries, fetchPath, fetchDest, tagsOf, {});
+    assert.equal(order.geo.length, 150);
+    assert.equal(order.portals.length, 40);
+    assert.deepEqual(
+      rm.selectFetchCandidates(entries, fetchPath, fetchDest, tagsOf, {}),
+      [...order.geo.slice(0, 120), ...order.portals.slice(0, 30)],
+    );
+    assert.deepEqual(
+      rm.selectFetchCandidates(entries, fetchPath, fetchDest, tagsOf, { geoLimit: 12, portalLimit: 5 }),
+      [...order.geo.slice(0, 12), ...order.portals.slice(0, 5)],
+    );
+  });
+
+  await checkAsync('v3.1 fetch: a heard-saturated decile triggers deeper reads until its unheard target', async () => {
+    const res = await saturatedScenario();
+    assert.equal(res.stats.decileUnheard[5], 3);
+    assert.equal(res.stats.geoUnheard, 30);
+    assert.equal(res.stats.geoReads, 36); // 27 clean reads + 9 through the saturated decile (6 heard first)
+    assert.equal(res.stats.ceilingHit, false);
+  });
+
+  await checkAsync('v3.1 fetch: the read ceiling binds exactly and reports itself', async () => {
+    const entries = decileEntries(10, 'h');
+    const rows = fRows(entries);
+    const heardTexts = new Set([...rows.values()].map(r => r.story_text)); // everything heard
+    const order = rm.orderFetchCandidates(entries, fetchPath, fetchDest, noTopics, {});
+    const res = await rm.fetchHeardAwareCandidates({
+      geoOrder: order.geo, portalOrder: [], path: fetchPath,
+      readRow: fRead(rows), rowText: r => r.story_text, heardTexts,
+      perDecileTarget: 3, geoCeiling: 25, chunkSize: 12,
+    });
+    assert.equal(res.stats.geoReads, 25); // never one read past the ceiling
+    assert.equal(res.stats.geoUnheard, 0);
+    assert.equal(res.stats.ceilingHit, true);
+  });
+
+  await checkAsync('v3.1 fetch: a fresh shelf stops at the old caps — no gratuitous over-fetch', async () => {
+    const entries = [...decileEntries(15, 'f'), ...Array.from({ length: 40 }, (_, k) => fEntry(`fp${k}`, 32.8, { lng: -117.05 }))];
+    const rows = fRows(entries);
+    const tagsOf = () => ({ topics: ['Coast'] });
+    const order = rm.orderFetchCandidates(entries, fetchPath, fetchDest, tagsOf, {});
+    const res = await rm.fetchHeardAwareCandidates({
+      geoOrder: order.geo, portalOrder: order.portals, path: fetchPath,
+      readRow: fRead(rows), rowText: r => r.story_text, heardTexts: new Set(),
+    });
+    assert.equal(res.stats.geoReads, 120);
+    assert.deepEqual(res.stats.decileUnheard, new Array(10).fill(12));
+    assert.equal(res.stats.portalReads, 30);
+    assert.equal(res.stats.portalUnheard, 30);
+    assert.equal(res.stats.ceilingHit, false);
+  });
+
+  await checkAsync('v3.1 fetch: deterministic — same inputs, same reads, same candidate set', async () => {
+    const a = await saturatedScenario();
+    const b = await saturatedScenario();
+    assert.deepEqual(a.stats, b.stats);
+    assert.deepEqual(a.geo.map(x => x.entry.place_key), b.geo.map(x => x.entry.place_key));
+  });
+}
+
 check('v2 weighting: landmark beats corridor at the same anchor (no user topics)', () => {
   const units = [unit('corr|corridor', 32.75, { angle: 'corridor' }), unit('mark|landmark_origin', 32.75)];
   const tight = rm.composeRoutePlan(units, path, dest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: NOW + 130 * 1000, tone: null, topics: [] }, { nowMs: NOW, heardKeys: new Set() });

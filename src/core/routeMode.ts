@@ -515,6 +515,26 @@ export const PORTAL_CAP_DIVISOR = 3;
 export const FETCH_GEO_LIMIT = 120;
 export const FETCH_PORTAL_LIMIT = 30;
 
+/**
+ * Heard-aware fetch bounds (composer v3.1, commit B): the
+ * fetch no longer stops at a fixed row count — it reads until
+ * each progress decile holds this many UNHEARD candidates
+ * (12 × 10 deciles = 120, exactly the old geo cap on a fresh
+ * shelf: no gratuitous over-fetch), or the hard read ceiling
+ * binds. The ceiling is 3.75× the old cap: the v3 grader's
+ * cliff showed a repeat commuter's window holding ~150 rows
+ * of which nearly all are heard, so refilling 120 unheard
+ * slots must reach several times deeper into the fair order;
+ * 450 bounds that reach while keeping the worst case a
+ * bounded, chunk-parallel set of small index reads. Portals
+ * mirror the shape at their scale: the old 30 cap as the
+ * unheard target, twice that as the read ceiling.
+ */
+export const FETCH_UNHEARD_PER_DECILE = 12;
+export const FETCH_GEO_READ_CEILING = 450;
+export const FETCH_PORTAL_UNHEARD_TARGET = 30;
+export const FETCH_PORTAL_READ_CEILING = 60;
+
 export interface FetchIndexEntry {
   place_key: string;
   angle: string;
@@ -525,35 +545,33 @@ export interface FetchIndexEntry {
 const FETCH_EXCLUDED_ANGLES = new Set(['neighborhood_intro_greet', 'filler', 'filler_hosted']);
 
 /**
- * The departure fetch plan: which library rows the App reads for
- * one route build, in fetch order. Pure given a tags lookup, so
- * the harness proves the fairness on synthetic shelves.
+ * The departure fetch ORDER (composer v2 fairness; the
+ * ordering half of the fetch plan, split out in v3.1): every
+ * candidate the build may read, in the order it should read
+ * them. Pure given a tags lookup, so the harness proves the
+ * fairness on synthetic shelves.
  *
- * Geographic candidates (story angles + plain intros inside the
- * corridor radius) are ordered FAIRLY — round-robin across
- * path-progress deciles — so a dense route start cannot crowd
- * out the back half of the drive the way the phase-1 first-60
- * cap did. Portal candidates (story angles OUTSIDE the corridor)
- * are ranked by topic overlap with the geographic pool's topics
- * plus any user-chosen topics; at least one shared topic is
- * required, and only enough are fetched to feed the composer's
- * portal cap.
+ * Geographic candidates (story angles + plain intros inside
+ * the corridor radius) are ordered FAIRLY — round-robin
+ * across path-progress deciles — so a dense route start
+ * cannot crowd out the back half of the drive the way the
+ * phase-1 first-60 cap did. Portal candidates (story angles
+ * OUTSIDE the corridor) are ranked by topic overlap with the
+ * geographic pool's topics plus any user-chosen topics; at
+ * least one shared topic is required.
  *
- * Bounds: ≤120 geographic + ≤30 portal row reads. Each read is
- * one small PostgREST round trip and the App fetches them in
- * parallel chunks, so the worst case adds a few seconds at
- * departure on a maximally dense route — the price of seeing
- * the whole path instead of its first sixty rows.
+ * Uncapped: how much of each order actually gets read is the
+ * heard-aware driver's decision (fetchHeardAwareCandidates);
+ * selectFetchCandidates below keeps the original bounded
+ * prefix for callers that want the v2 behavior.
  */
-export function selectFetchCandidates(
+export function orderFetchCandidates(
   entries: FetchIndexEntry[],
   path: GeoPoint[],
   destination: GeoPoint,
   tagsOf: (placeKey: string, angle: string) => { topics: string[] },
-  opts: { geoLimit?: number; portalLimit?: number; userTopics?: string[] } = {},
-): FetchIndexEntry[] {
-  const geoLimit = opts.geoLimit ?? FETCH_GEO_LIMIT;
-  const portalLimit = opts.portalLimit ?? FETCH_PORTAL_LIMIT;
+  opts: { userTopics?: string[] } = {},
+): { geo: FetchIndexEntry[]; portals: FetchIndexEntry[] } {
   const near = (e: FetchIndexEntry) =>
     distanceToPathM({ lat: e.lat, lng: e.lng }, path) <= 1500 ||
     haversineM({ lat: e.lat, lng: e.lng }, destination) <= 1500;
@@ -573,9 +591,9 @@ export function selectFetchCandidates(
   }
   for (const list of buckets.values()) list.sort((a, b) => a.p - b.p);
   const ordered: FetchIndexEntry[] = [];
-  for (let round = 0; ordered.length < geoLimit; round++) {
+  for (let round = 0; ; round++) {
     let took = false;
-    for (let b = 0; b < FAIRNESS_BUCKETS && ordered.length < geoLimit; b++) {
+    for (let b = 0; b < FAIRNESS_BUCKETS; b++) {
       const cand = buckets.get(b)?.[round];
       if (cand) {
         ordered.push(cand.e);
@@ -594,9 +612,178 @@ export function selectFetchCandidates(
     }))
     .filter(c => c.shared >= 1)
     .sort((a, b) => b.shared - a.shared || a.d - b.d)
-    .slice(0, portalLimit)
     .map(c => c.e);
-  return [...ordered, ...portals];
+  return { geo: ordered, portals };
+}
+
+/**
+ * The bounded fetch plan (composer v2): the first ≤120
+ * geographic + ≤30 portal entries of the fetch order. Kept
+ * as the fixed-cap selector; the App's route build reads
+ * through the heard-aware driver instead (v3.1, commit B).
+ */
+export function selectFetchCandidates(
+  entries: FetchIndexEntry[],
+  path: GeoPoint[],
+  destination: GeoPoint,
+  tagsOf: (placeKey: string, angle: string) => { topics: string[] },
+  opts: { geoLimit?: number; portalLimit?: number; userTopics?: string[] } = {},
+): FetchIndexEntry[] {
+  const { geo, portals } = orderFetchCandidates(entries, path, destination, tagsOf, opts);
+  return [
+    ...geo.slice(0, opts.geoLimit ?? FETCH_GEO_LIMIT),
+    ...portals.slice(0, opts.portalLimit ?? FETCH_PORTAL_LIMIT),
+  ];
+}
+
+/** Read accounting for one departure fetch (filed on route_plan_started). */
+export interface FetchReadStats {
+  /** Row reads performed (geo + portal). */
+  reads: number;
+  geoReads: number;
+  portalReads: number;
+  /** Unheard candidates the fetch put in hand (geo + portal). */
+  unheard: number;
+  geoUnheard: number;
+  portalUnheard: number;
+  /** Unheard geo candidates per progress decile (FAIRNESS_BUCKETS long). */
+  decileUnheard: number[];
+  /** True when a read ceiling stopped the fetch while a decile (or the portal pool) still needed depth. */
+  ceilingHit: boolean;
+}
+
+/**
+ * The heard-aware departure fetch (composer v3.1, commit B):
+ * walk the fetch order in parallel chunks, classifying each
+ * read row heard/unheard by its filed story text (the same
+ * predicate as heardKeysForStories), and CONTINUE past the
+ * old fixed caps until every progress decile holds
+ * perDecileTarget unheard candidates — or a hard read
+ * ceiling binds. A decile whose target is met stops
+ * consuming reads: its later entries are skipped unread, so
+ * a fresh shelf stops at exactly the old caps' worth of
+ * reads (120 geo + 30 portal) and only a heard-saturated
+ * window reads deeper. Heard rows are returned too — the
+ * composer partitions them out and the preview's
+ * previously-heard nod is drawn from them, exactly as when
+ * every read row was handed over.
+ *
+ * Deterministic: same order + same row results + same heard
+ * set → same reads, same candidate set, same stats (chunk
+ * boundaries never change membership, only batching). The
+ * row reader is injected, so the harness and grader drive
+ * this with synthetic shelves and zero live calls.
+ *
+ * Latency: reads run in parallel chunks of chunkSize
+ * (default 12, the App's standing chunk). A fresh shelf
+ * costs ~13 chunk round-trips, as before; the absolute
+ * worst case (450 geo + 60 portal) is ~43 — a few extra
+ * seconds at departure on a maximally heard-saturated
+ * route, paid only by the commuter who needs the depth.
+ */
+export async function fetchHeardAwareCandidates<R>(args: {
+  geoOrder: FetchIndexEntry[];
+  portalOrder: FetchIndexEntry[];
+  path: GeoPoint[];
+  readRow: (entry: FetchIndexEntry) => Promise<R | null>;
+  rowText: (row: R) => string | null;
+  heardTexts: ReadonlySet<string>;
+  perDecileTarget?: number;
+  geoCeiling?: number;
+  portalTarget?: number;
+  portalCeiling?: number;
+  chunkSize?: number;
+}): Promise<{
+  geo: { entry: FetchIndexEntry; row: R }[];
+  portals: { entry: FetchIndexEntry; row: R }[];
+  stats: FetchReadStats;
+}> {
+  const perDecileTarget = args.perDecileTarget ?? FETCH_UNHEARD_PER_DECILE;
+  const geoCeiling = args.geoCeiling ?? FETCH_GEO_READ_CEILING;
+  const portalTarget = args.portalTarget ?? FETCH_PORTAL_UNHEARD_TARGET;
+  const portalCeiling = args.portalCeiling ?? FETCH_PORTAL_READ_CEILING;
+  const chunkSize = Math.max(1, args.chunkSize ?? 12);
+  const decileOf = (e: FetchIndexEntry): number =>
+    progressBucket(progressAlongPath({ lat: e.lat, lng: e.lng }, args.path));
+  const isHeard = (row: R): boolean => {
+    const t = args.rowText(row);
+    return t !== null && args.heardTexts.has(t);
+  };
+
+  const decileUnheard = new Array<number>(FAIRNESS_BUCKETS).fill(0);
+  const decileRemaining = new Array<number>(FAIRNESS_BUCKETS).fill(0);
+  for (const e of args.geoOrder) decileRemaining[decileOf(e)] += 1;
+  const geoNeedy = (): boolean =>
+    decileUnheard.some((n, b) => n < perDecileTarget && decileRemaining[b] > 0);
+  const geoNeedTotal = (): number =>
+    decileUnheard.reduce((s, n, b) => s + (decileRemaining[b] > 0 ? Math.max(0, perDecileTarget - n) : 0), 0);
+
+  const geo: { entry: FetchIndexEntry; row: R }[] = [];
+  let geoReads = 0;
+  let cursor = 0;
+  while (geoReads < geoCeiling && geoNeedy()) {
+    // The next chunk: upcoming entries whose decile still
+    // needs unheard depth, capped by the remaining need and
+    // the remaining ceiling. Entries in satisfied deciles
+    // are passed over unread.
+    const want = Math.min(chunkSize, geoNeedTotal(), geoCeiling - geoReads);
+    const chunk: FetchIndexEntry[] = [];
+    while (cursor < args.geoOrder.length && chunk.length < want) {
+      const e = args.geoOrder[cursor];
+      cursor += 1;
+      const b = decileOf(e);
+      decileRemaining[b] -= 1;
+      if (decileUnheard[b] >= perDecileTarget) continue;
+      chunk.push(e);
+    }
+    if (chunk.length === 0) break;
+    const rows = await Promise.all(chunk.map(e => args.readRow(e)));
+    geoReads += chunk.length;
+    for (let i = 0; i < chunk.length; i++) {
+      const row = rows[i];
+      if (row === null) continue;
+      geo.push({ entry: chunk[i], row });
+      if (!isHeard(row)) decileUnheard[decileOf(chunk[i])] += 1;
+    }
+  }
+  const geoCeilingHit = geoReads >= geoCeiling && geoNeedy();
+
+  const portals: { entry: FetchIndexEntry; row: R }[] = [];
+  let portalReads = 0;
+  let portalUnheard = 0;
+  let pCursor = 0;
+  while (portalReads < portalCeiling && portalUnheard < portalTarget && pCursor < args.portalOrder.length) {
+    const want = Math.min(chunkSize, portalTarget - portalUnheard, portalCeiling - portalReads);
+    const chunk = args.portalOrder.slice(pCursor, pCursor + want);
+    pCursor += chunk.length;
+    if (chunk.length === 0) break;
+    const rows = await Promise.all(chunk.map(e => args.readRow(e)));
+    portalReads += chunk.length;
+    for (let i = 0; i < chunk.length; i++) {
+      const row = rows[i];
+      if (row === null) continue;
+      portals.push({ entry: chunk[i], row });
+      if (!isHeard(row)) portalUnheard += 1;
+    }
+  }
+  const portalCeilingHit =
+    portalReads >= portalCeiling && portalUnheard < portalTarget && pCursor < args.portalOrder.length;
+
+  const geoUnheard = decileUnheard.reduce((s, n) => s + n, 0);
+  return {
+    geo,
+    portals,
+    stats: {
+      reads: geoReads + portalReads,
+      geoReads,
+      portalReads,
+      unheard: geoUnheard + portalUnheard,
+      geoUnheard,
+      portalUnheard,
+      decileUnheard,
+      ceilingHit: geoCeilingHit || portalCeilingHit,
+    },
+  };
 }
 
 export type PlanItemKind = 'preview' | 'story' | 'bridge' | 'reaction' | 'filler' | 'signoff' | 'handoff';
@@ -724,6 +911,15 @@ export interface RoutePlan {
    * The pure composer cannot know the shelf beyond its inputs.
    */
   shelfTease?: LibraryUnit | null;
+  /**
+   * The departure fetch's read accounting (composer v3.1,
+   * commit B), set by the App after composition like
+   * shelfTease — the pure composer never sees the network.
+   * The runner files it on route_plan_started so a field
+   * drive can show whether the heard-aware window fed the
+   * composer or starved it.
+   */
+  fetchStats?: FetchReadStats | null;
   /**
    * The generated wrap-up (addendum 3), authored + synthesized
    * by the App at preparation (after gap-fill) and held by the

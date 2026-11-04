@@ -448,6 +448,22 @@ export class RoutePlanRunner {
       items: this.rendered.length,
       portals: plan.items.filter(i => i.portal).length,
       budget_sec: plan.budgetSec,
+      // Fetch accounting (composer v3.1, commit B): reads
+      // spent at departure, unheard candidates put in hand,
+      // the thinnest decile, and whether a read ceiling
+      // stopped the window while need remained — the field
+      // evidence for whether the window fed or starved.
+      fetch: plan.fetchStats
+        ? {
+            reads: plan.fetchStats.reads,
+            geo_reads: plan.fetchStats.geoReads,
+            portal_reads: plan.fetchStats.portalReads,
+            unheard: plan.fetchStats.unheard,
+            decile_unheard: plan.fetchStats.decileUnheard,
+            decile_min: Math.min(...plan.fetchStats.decileUnheard),
+            ceiling_hit: plan.fetchStats.ceilingHit,
+          }
+        : null,
       // Through-line (differentiator 2): the thread the plan was
       // composed around. Climax (addendum 4 + consolidation
       // §4): how it resolved and its subject — a portal climax
