@@ -100,9 +100,13 @@ export interface WrapUpContext {
    * climax; 'portal' — the off-route story the drive was about
    * — lands the same way; 'late' names it as the drive's
    * heart; 'natural' adds no climax sentence — arrival is
-   * treated plainly.
+   * treated plainly. 'thread' (thread-carried episodes,
+   * Nov 4, 2026): the strongest on-thread member holds the
+   * climax position because the road offered no climax of its
+   * own — it lands with the 'late' wording, the heart of the
+   * drive.
    */
-  climaxMode: 'destination' | 'late' | 'natural' | 'portal';
+  climaxMode: 'destination' | 'late' | 'natural' | 'portal' | 'thread';
   /** The climax story's subject, when the plan has one. */
   climaxSubject: string | null;
 }
@@ -125,7 +129,7 @@ export function wrapUpTextFor(ctx: WrapUpContext): string {
   const climax =
     (ctx.climaxMode === 'destination' || ctx.climaxMode === 'portal') && ctx.climaxSubject
       ? `${ctx.climaxSubject} was where it all came together. `
-      : ctx.climaxMode === 'late' && ctx.climaxSubject
+      : (ctx.climaxMode === 'late' || ctx.climaxMode === 'thread') && ctx.climaxSubject
         ? `And ${ctx.climaxSubject} — that was the heart of it. `
         : '';
   const signOff = `Thanks for riding with me. This is Miles — I'll be here for the next one.`;
@@ -159,7 +163,18 @@ export interface PreviewContext {
   /** The climax subject the preview teases, when the plan has one. */
   climaxSubject: string | null;
   /** How the climax resolves — the promise is worded to match. */
-  climaxMode: 'destination' | 'late' | 'natural' | 'portal';
+  climaxMode: 'destination' | 'late' | 'natural' | 'portal' | 'thread';
+  /**
+   * Thread-carried episode (Nov 4, 2026): the road could not
+   * fill half this drive, so the episode is carried by its
+   * thread — off-route members anchored along the timeline.
+   * The preview must SAY so, plainly: the road is quiet
+   * today, and the drive follows the thread instead. It
+   * never implies the member stories are on the route.
+   * Set only by the thread-carried rebuild (routeMode),
+   * from the settled plan's own assessment.
+   */
+  threadCarried?: boolean;
   /** One mid-drive subject to listen for (thread plans only). */
   midSubject?: string;
   /** The mid subject's own first line, when short enough to hook with. */
@@ -191,7 +206,24 @@ export interface PreviewContext {
 export function previewTextFor(ctx: PreviewContext): string {
   const promiseSubject = ctx.climaxSubject ?? ctx.closingSubject;
   let text: string;
-  if (ctx.threadTopic && promiseSubject) {
+  if (ctx.threadCarried && ctx.threadTopic) {
+    // Thread-carried framing (Nov 4, 2026): honest about the
+    // shape of this episode — the road itself is quiet, the
+    // THREAD is the drive. The promise is the member the
+    // episode builds to (the designated climax when there is
+    // one, else its closing story); the mid hook is a real
+    // member of the plan, as everywhere. No sentence places
+    // a member on the route.
+    text =
+      `The road's quiet today — so this drive follows a thread instead: ${ctx.threadTopic}. ` +
+      `It runs under the whole road, all the way to ${ctx.destinationName}.`;
+    if (promiseSubject) {
+      text += ` Keep an ear out for ${promiseSubject} — that's the one this drive builds to.`;
+    }
+    if (ctx.midSubject) {
+      text += ` And halfway there, ${ctx.midSubject} is waiting${ctx.midGist ? ` — ${ctx.midGist.replace(/\.$/, '')}` : ''}.`;
+    }
+  } else if (ctx.threadTopic && promiseSubject) {
     text =
       ctx.climaxMode === 'natural'
         ? `Here's the thread to listen for on this drive: ${ctx.threadTopic}. It runs under this whole road, all the way to ${ctx.destinationName}. Keep an ear out for ${promiseSubject} — that's the one this drive builds to.`

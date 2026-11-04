@@ -865,6 +865,25 @@ export const MEMBER_FETCH_READ_CAP = 24;
 export const MEMBER_FETCH_TARGET = 8;
 
 /**
+ * The member fetch's sizing for a given seat need (Nov 4,
+ * 2026 — generalized for thread-carried episodes): survivors
+ * targeted at twice the seats (a seat plus an alternate —
+ * gap-fit and place collisions spend the alternates), reads
+ * capped at three times the target (the lever battery's
+ * yield: roughly half the reads are spent on rows discarded
+ * at the door — heard tellings the index cannot pre-filter,
+ * place collisions). At the standing 4 seats this reproduces
+ * the lever's constants exactly (target 8, cap 24); at the
+ * thread-carried 8 seats it scales proportionally (target
+ * 16, cap 48) — still ONE fetch, still bounded, still only
+ * when a thread exists and local candidacy is insufficient.
+ */
+export function memberFetchSizing(seats: number): { readCap: number; target: number } {
+  const target = seats * 2;
+  return { readCap: target * 3, target };
+}
+
+/**
  * The member-fetch predicate, shared by the index counter
  * below and the fetch itself: a unit can only ever seat as
  * a woven member when it is landmark-class, woven-eligible,
@@ -1010,7 +1029,10 @@ export interface PlanItem {
    * Woven member (Nov 4, 2026): an off-route, woven-eligible
    * story seated into a silent gap as a member of the plan's
    * through-line (seatWovenMembers). Windowless like a portal
-   * — it releases by plan order — and never the climax.
+   * — it releases by plan order — and never the climax, with
+   * ONE exception: the thread-carried designation, where the
+   * strongest member holds the climax position and carries
+   * climax: true alongside this flag.
    */
   woven?: boolean;
   /** Bridges: the elastic target the text was composed toward, seconds. */
@@ -1054,9 +1076,12 @@ export interface RoutePlan {
    * anywhere in the county beat the road's own best and took
    * the slot, 'natural' when no repositioning happened (no
    * candidate, or sequencing it last would have stripped the
-   * early drive's only coverage).
+   * early drive's only coverage). 'thread' (Nov 4, 2026):
+   * a thread-carried plan with no geo climax of its own —
+   * the strongest on-thread member holds the climax
+   * position (seatWovenMembers' designation, below).
    */
-  climaxMode: 'destination' | 'late' | 'natural' | 'portal';
+  climaxMode: 'destination' | 'late' | 'natural' | 'portal' | 'thread';
   /** The climax story's subject (place name), when the plan has one. */
   climaxSubject: string | null;
   /** Portal climax only: the winner's distance from the route, km (one decimal). */
@@ -1083,6 +1108,31 @@ export interface RoutePlan {
    */
   wovenMembersSeeking: string | null;
   /**
+   * Member seat need (Nov 4, 2026 — thread-carried sizing):
+   * how many seats the ONE member fetch should provision
+   * for, as sized by memberFetchSizing. WOVEN_MEMBER_CAP
+   * normally; WOVEN_MEMBER_CAP_CARRIED when the composed
+   * plan's own geo coverage already sits below the
+   * thread-carried floor — the guarantee pass that runs
+   * before the assessment can only ADD geo coverage, so a
+   * plan at or above the floor here can never engage the
+   * mode, and a plan below it is provisioned for the cap
+   * the mode would raise. Always present; pre-carried
+   * callers read exactly the standing cap.
+   */
+  wovenMemberNeed: number;
+  /**
+   * Thread-carried assessment (Nov 4, 2026): the build
+   * staging's verdict on the post-guarantee plan —
+   * assessThreadCarried's record (mode active, the measured
+   * geo coverage fraction, the member cap seating ran
+   * under). The composer never assesses (it returns null);
+   * the App/grader staging sets it after the Coverage
+   * Guarantee, and the runner files it in the
+   * route_plan_started decisions record.
+   */
+  threadCarried: ThreadCarried | null;
+  /**
    * The preview item's facts (consolidation §§1–2), for the
    * decisions record: whether the composed preview promises
    * the thread, carries a matched prior drive, or carries a
@@ -1090,6 +1140,17 @@ export interface RoutePlan {
    * has no preview item (no stories to frame).
    */
   previewFacts: { threadPromised: boolean; previouslyDrive: boolean; previouslySubject: boolean } | null;
+  /**
+   * The composed preview's own context (consolidation §2),
+   * carried on the plan so a post-compose pass can
+   * re-author the preview from the SAME facts — the
+   * thread-carried rebuild (seatWovenMembers) reframes the
+   * episode around its thread without losing the composed
+   * preview's continuity nod (prior drive / previously
+   * heard subject), which only this context holds. Null
+   * when the plan composed no preview.
+   */
+  previewContext?: PreviewContext | null;
   /** The plan's opening story subject (the departure-area story), when the plan has stories. */
   openingSubject: string | null;
   /**
@@ -1522,6 +1583,27 @@ export interface ComposeOptions {
  * single re-compose with the survivors as opts.
  * memberUnits. Exactly one fetch, like the portal climax's;
  * seating rules never change, only the supply does.
+ *
+ * Thread-carried episodes (Erik, Nov 4, 2026): the lever's
+ * acceptance battery isolated the remaining failure as a
+ * COMPOSITION rule, not supply — members could fill an
+ * episode's silence but never BE the episode, so a corridor
+ * heard to exhaustion produced no episode at all despite a
+ * detected thread and fetched members. The exhausted-case
+ * rule: when the post-guarantee plan's geo-anchored
+ * coverage (stories + guarantee fills, members excluded)
+ * covers less than half the drive (THREAD_CARRIED_FLOOR),
+ * the staging assesses the plan thread-carried
+ * (assessThreadCarried) and the seating pass runs again in
+ * its anchoring mode — members may anchor the episode
+ * along the timeline under a raised cap, and the strongest
+ * member takes the climax position when the road offered
+ * none. The composer only PREDICTS the mode here (its own
+ * geo coverage sets wovenMemberNeed, the seat count the
+ * member fetch provisions for); the assessment itself is
+ * the staging's, on the guaranteed plan. Below the floor
+ * is the only behavioral delta — a geo-healthy plan is
+ * composed, fetched, and seated exactly as before.
  * The plan is a value, not a promise: nothing here touches the
  * network, so the harness can prove every invariant offline.
  */
@@ -2393,6 +2475,22 @@ export function composeRoutePlan(
   // pre-lever shape); local candidacy at the cap → no
   // fetch, however deep the index runs.
   let wovenMembersSeeking: string | null = null;
+  // Thread-carried seat need (Nov 4, 2026): the floor is
+  // ASSESSED post-guarantee in the build staging, but the
+  // member fetch is sized from THIS plan, before the
+  // guarantee runs. The composed plan's own geo coverage is
+  // the predictor, and it is conservative in the safe
+  // direction: the guarantee only ADDS geo-anchored
+  // coverage, so a plan at or above the floor here can
+  // never engage the mode (its need stays the standing
+  // cap), while a plan below the floor here is provisioned
+  // for the carried cap whether or not the guarantee
+  // ultimately lifts it back over — the fetch then simply
+  // over-provisions, bounded and once.
+  let wovenMemberNeed = WOVEN_MEMBER_CAP;
+  if (thread && geoCoverageOfItems(items, driveDur) < THREAD_CARRIED_FLOOR) {
+    wovenMemberNeed = WOVEN_MEMBER_CAP_CARRIED;
+  }
   if (thread && (opts.wovenIndexSupport?.get(thread.topic) ?? 0) > 0) {
     const usedIds = new Set<string>();
     const usedPlaces = new Set<string>();
@@ -2411,7 +2509,7 @@ export function composeRoutePlan(
       path,
       destination,
     });
-    if (inHand.length < WOVEN_MEMBER_CAP) wovenMembersSeeking = thread.topic;
+    if (inHand.length < wovenMemberNeed) wovenMembersSeeking = thread.topic;
   }
 
   const totalSec = items.reduce((s, it) => s + it.durationSec, 0);
@@ -2434,7 +2532,12 @@ export function composeRoutePlan(
     climaxDistanceKm,
     portalClimaxSeeking,
     wovenMembersSeeking,
+    wovenMemberNeed,
+    // The composer never assesses thread-carried — the
+    // staging does, post-guarantee (assessThreadCarried).
+    threadCarried: null,
     previewFacts,
+    previewContext: previewCtx ?? null,
     openingSubject: openingUnit?.placeName ?? null,
     actsSummary,
     corridorRetiredStretches: opts.corridorTellingCounts ? retiredStretches.size : null,
@@ -2455,6 +2558,92 @@ export function composeRoutePlan(
  * drive), so no seconds cap exists here by design.
  */
 export const WOVEN_MEMBER_CAP = 4;
+
+/**
+ * The member cap inside a thread-carried episode (Nov 4,
+ * 2026): when the road cannot fill half the drive, members
+ * anchor the episode and the cap rises to fill — 8 members
+ * at the shelf's ~250 s telling length is ~2,000 s, enough
+ * to cross the substance line (half of a 2,400 s budget)
+ * that 4 members arithmetically cannot. Bounded, and in
+ * thread-carried mode only: a normal episode never seats
+ * more than WOVEN_MEMBER_CAP.
+ */
+export const WOVEN_MEMBER_CAP_CARRIED = 8;
+
+/**
+ * The thread-carried floor: the mode engages only when the
+ * plan's geo-anchored coverage — stories plus Coverage
+ * Guarantee fills, woven members excluded — covers less
+ * than this fraction of the drive. "The road cannot fill
+ * roughly half the drive" (Erik, Nov 4, 2026), measured
+ * with the codebase's standing interval model (the same
+ * sounding spans the guarantee walks and the grader scores
+ * silence with), on the post-guarantee plan.
+ */
+export const THREAD_CARRIED_FLOOR = 0.5;
+
+/** The build staging's thread-carried verdict on a plan (see assessThreadCarried). */
+export interface ThreadCarried {
+  /** The mode engaged: a thread exists and geo coverage sits below the floor. */
+  active: boolean;
+  /** Geo-anchored coverage as a fraction of the drive, members excluded, post-guarantee. */
+  geoCoverageFraction: number;
+  /** The member cap seating runs under for this plan (the carried cap when active). */
+  memberCap: number;
+}
+
+/**
+ * Geo-anchored coverage of an item list, as a fraction of
+ * the drive: the union of the sounding spans of every
+ * story/filler item that is NOT a woven member — composed
+ * geo stories, portal hops and the portal climax, hosted
+ * fillers, and the Coverage Guarantee's fills all count
+ * (they are the road's own material); members never do
+ * (they are what the floor measures the NEED for). The
+ * standing interval model throughout: windowed stories
+ * sound across their windows, windowless ones at their
+ * anchors.
+ */
+function geoCoverageOfItems(items: PlanItem[], driveSec: number): number {
+  if (!(driveSec > 0)) return 0;
+  let covered = 0;
+  let cursor = 0;
+  for (const span of soundingSpans(items, driveSec)) {
+    if (span.item.woven) continue;
+    if (span.end <= cursor) continue;
+    covered += span.end - Math.max(span.start, cursor);
+    cursor = Math.max(cursor, span.end);
+  }
+  return covered / driveSec;
+}
+
+/** A settled plan's geo-anchored coverage fraction (see geoCoverageOfItems). */
+export function geoCoverageFraction(plan: RoutePlan): number {
+  return geoCoverageOfItems(plan.items, plan.driveSec ?? plan.budgetSec);
+}
+
+/**
+ * The thread-carried assessment (Nov 4, 2026): run by the
+ * build staging on the POST-GUARANTEE plan — the Coverage
+ * Guarantee has claimed its ground (its fills are geo
+ * coverage and count), the normal seating pass has run
+ * (its members are excluded from the measure by
+ * construction, so the verdict is the same before or after
+ * it). Active requires a thread: without one there is no
+ * pool to carry the episode, whatever the road's silence.
+ * The record rides the plan into the route_plan_started
+ * decisions telemetry.
+ */
+export function assessThreadCarried(plan: RoutePlan): ThreadCarried {
+  const fraction = geoCoverageFraction(plan);
+  const active = plan.thread !== null && fraction < THREAD_CARRIED_FLOOR;
+  return {
+    active,
+    geoCoverageFraction: fraction,
+    memberCap: active ? WOVEN_MEMBER_CAP_CARRIED : WOVEN_MEMBER_CAP,
+  };
+}
 
 /** One sounding span of a plan, in expected travel seconds (a story or a filler). */
 interface SoundingSpan {
@@ -2509,8 +2698,16 @@ interface MemberGap {
  * the episode opens with the preview and the road's own
  * first story, and a member needs a sounding story before
  * it for its bridge in to hang from.
+ *
+ * Thread-carried mode (openDeparture) lifts the second
+ * closure only: a member may open the episode (the preview
+ * frames it, and the first story of a composed plan never
+ * needed a bridge in either). The climax closure is NOT
+ * lifted — a member still never sounds after the closing
+ * story, whether that story is the road's or the
+ * designated member climax.
  */
-function memberGaps(items: PlanItem[], driveSec: number): MemberGap[] {
+function memberGaps(items: PlanItem[], driveSec: number, openDeparture = false): MemberGap[] {
   const spans = soundingSpans(items, driveSec);
   const climaxItem = items.find(i => i.climax) ?? null;
   const climaxStart = climaxItem
@@ -2525,7 +2722,7 @@ function memberGaps(items: PlanItem[], driveSec: number): MemberGap[] {
     prev = span.item;
   }
   if (cursor < driveSec) gaps.push({ start: cursor, end: driveSec, prev, next: null });
-  return gaps.filter(g => g.prev !== null && g.start < climaxStart);
+  return gaps.filter(g => (openDeparture || g.prev !== null) && g.start < climaxStart);
 }
 
 /**
@@ -2611,6 +2808,42 @@ export function wovenMemberCandidates(
  * per plan holds, and the corridor lifetime cap is untouched
  * (members are off-route by construction).
  *
+ * THREAD-CARRIED MODE (opts.threadCarried — Erik, Nov 4,
+ * 2026): the staging calls this pass a second time, with
+ * the raised cap, when assessThreadCarried engaged the
+ * mode on the guaranteed plan. Three rules change, and
+ * only three:
+ *  1. ANCHORING: the departure edge opens — a member may
+ *     be the episode's first story (the preview frames
+ *     it), so a plan with little or no geo spine composes
+ *     from the thread pool along the budget timeline
+ *     instead of producing no episode at all. Placement
+ *     is the same largest-gap discipline; the members
+ *     spread across the timeline and the act shape falls
+ *     out of the spread.
+ *  2. THE CLIMAX POSITION: when the plan has NO climax
+ *     winner of its own (plan.climaxUnitId null — the
+ *     road offered nothing to crown), the strongest
+ *     unheard on-thread member is RESERVED before general
+ *     seating and placed inside the final third, marked
+ *     as the plan's climax (mode 'thread'). This is the
+ *     no-geo-spine case only: an existing geo/portal
+ *     climax is never displaced, never followed (the
+ *     climax gap closure still binds), and never joined
+ *     by a member in its slot. When the strongest member
+ *     cannot fit the final third, no designation happens
+ *     — it seats as an ordinary member and the episode
+ *     closes naturally.
+ *  3. FRAMING: with at least one member seated in total,
+ *     the preview is re-authored from the plan's stashed
+ *     composed context plus the settled shape — the
+ *     narration seam's thread-carried framing ("the
+ *     road's quiet today, so this drive follows a
+ *     thread"), which never places a member on the route.
+ * The cap in this mode counts the plan's TOTAL members
+ * (the normal pass's seats included): the second call
+ * tops the episode up, it does not seat a second cast.
+ *
  * Pure and deterministic — no network, no clock — so the
  * harness and the grader run the very code the App runs.
  * Returns the plan unchanged (same object) when nothing
@@ -2620,13 +2853,14 @@ export function wovenMemberCandidates(
 export function seatWovenMembers(
   plan: RoutePlan,
   units: LibraryUnit[],
-  opts: { heardKeys: Set<string>; maxMembers?: number },
+  opts: { heardKeys: Set<string>; maxMembers?: number; threadCarried?: boolean },
 ): RoutePlan {
   const thread = plan.thread;
   if (!thread) return plan;
   const driveSec = plan.driveSec ?? plan.budgetSec;
   if (!(driveSec > 0)) return plan;
-  const cap = opts.maxMembers ?? WOVEN_MEMBER_CAP;
+  const carried = opts.threadCarried === true;
+  const cap = opts.maxMembers ?? (carried ? WOVEN_MEMBER_CAP_CARRIED : WOVEN_MEMBER_CAP);
   if (cap <= 0) return plan;
 
   const usedIds = new Set<string>();
@@ -2646,10 +2880,23 @@ export function seatWovenMembers(
     path: plan.path,
     destination: plan.destination,
   });
-  if (candidates.length === 0) return plan;
+  // Members the plan already carries (the normal pass's
+  // seats, when this is the thread-carried top-up call):
+  // the cap binds the plan's total, and the returned
+  // record counts them all.
+  const alreadySeated = plan.items
+    .filter(i => i.woven && i.unit)
+    .map(i => i.unit as LibraryUnit);
+  if (candidates.length === 0 && !(carried && alreadySeated.length > 0)) return plan;
 
   let items: PlanItem[] = [...plan.items];
-  const seated: LibraryUnit[] = [];
+  const seated: LibraryUnit[] = [...alreadySeated];
+  // The thread-carried climax designation (this pass only):
+  // the strongest member reserved for the final third when
+  // the road crowned nothing. Null in normal mode, and
+  // whenever an existing climax stands or the strongest
+  // member cannot fit the zone.
+  let carriedClimax: LibraryUnit | null = null;
   // The units sounding before a boundary item, for bridge
   // callbacks (the composer's own convention: every entry
   // before the next story, its prev included) — recomputed
@@ -2663,19 +2910,15 @@ export function seatWovenMembers(
     return out;
   };
 
-  for (const cand of candidates) {
-    if (seated.length >= cap) break;
-    if (usedIds.has(cand.id) || usedPlaces.has(cand.placeKey)) continue;
-    // The largest silent gap this candidate fits entirely
-    // inside (earliest first on a tie) — the sim's placement
-    // rule, recomputed per seat because each member splits
-    // the gap it took.
-    const gap =
-      memberGaps(items, driveSec)
-        .filter(g => g.end - g.start >= cand.durationSec)
-        .sort((a, b) => b.end - b.start - (a.end - a.start) || a.start - b.start)[0] ?? null;
-    if (!gap) continue;
-
+  // Seat one candidate into one gap, with the bridge
+  // surgery the adjacency calls for. Shared by the general
+  // loop and (thread-carried mode) the climax designation:
+  // asClimax marks the item as the plan's climax and gives
+  // its bridge in the payoff treatment — the preview the
+  // framing pass below authors WILL have promised it, and
+  // the hop off the road is framed as one (offRoute), never
+  // as ground ahead.
+  const insertIntoGap = (cand: LibraryUnit, gap: MemberGap, asClimax: boolean): void => {
     const memberItem: PlanItem = {
       kind: 'story',
       id: cand.id,
@@ -2685,6 +2928,7 @@ export function seatWovenMembers(
       ready: true,
       anchorProgress: gap.start / driveSec,
       woven: true,
+      ...(asClimax ? { climax: true } : {}),
     };
     const bridgeTarget = (fromAnchorSec: number, fromDur: number, toAnchorSec: number): number =>
       Math.max(
@@ -2700,15 +2944,26 @@ export function seatWovenMembers(
     // one: a story (not a filler) sounding before the member.
     if (gap.prev && gap.prev.kind === 'story' && gap.prev.unit) {
       const prev = gap.prev.unit;
-      const context = buildBridgeContext({
-        earlier: earlierUnits(gap.next),
-        prev,
-        next: cand,
-        thread,
-        isClimaxBridge: false,
-        promiseMade: false,
-        nextWoven: true,
-      });
+      const context = asClimax
+        ? buildBridgeContext({
+            earlier: earlierUnits(gap.next),
+            prev,
+            next: cand,
+            thread,
+            isClimaxBridge: true,
+            climaxLast: true,
+            promiseMade: true,
+            offRoute: true,
+          })
+        : buildBridgeContext({
+            earlier: earlierUnits(gap.next),
+            prev,
+            next: cand,
+            thread,
+            isClimaxBridge: false,
+            promiseMade: false,
+            nextWoven: true,
+          });
       const target = bridgeTarget(
         (gap.prev.anchorProgress ?? 0) * driveSec,
         prev.durationSec,
@@ -2735,16 +2990,25 @@ export function seatWovenMembers(
     // portal climax keeps its honest hop framing).
     if (gap.next && gap.next.kind === 'story' && gap.next.unit) {
       const next = gap.next.unit;
-      const isClimaxNext = plan.climaxUnitId !== null && next.id === plan.climaxUnitId;
+      // The designated member climax (thread-carried mode)
+      // earns the payoff treatment exactly as a composed
+      // climax does — it is sequenced as the closing peak
+      // and the reframed preview promises it — with the
+      // honest hop framing (offRoute): it is not on the road.
+      const nextIsCarriedClimax = carriedClimax !== null && next.id === carriedClimax.id;
+      const isClimaxNext =
+        nextIsCarriedClimax || (plan.climaxUnitId !== null && next.id === plan.climaxUnitId);
       const context = buildBridgeContext({
         earlier: [...earlierUnits(gap.next), cand],
         prev: cand,
         next,
         thread,
         isClimaxBridge: isClimaxNext,
-        climaxLast: plan.climaxMode !== 'natural',
-        promiseMade: plan.previewFacts !== null && plan.climaxUnitId !== null,
-        offRoute: gap.next.portalClimax === true,
+        climaxLast: nextIsCarriedClimax ? true : plan.climaxMode !== 'natural',
+        promiseMade: nextIsCarriedClimax
+          ? true
+          : plan.previewFacts !== null && plan.climaxUnitId !== null,
+        offRoute: gap.next.portalClimax === true || nextIsCarriedClimax,
       });
       const target = bridgeTarget(
         memberAnchorSec,
@@ -2783,8 +3047,59 @@ export function seatWovenMembers(
     seated.push(cand);
     usedIds.add(cand.id);
     usedPlaces.add(cand.placeKey);
+  };
+
+  // The climax designation (thread-carried mode only, and
+  // only when the road crowned nothing): reserve the
+  // strongest member BEFORE general seating and place it
+  // inside the final third — preferring the tail gap, so
+  // the member closes the episode; any gap whose
+  // final-third room fits it is the fallback. Its span
+  // then closes later gaps to members exactly as a
+  // composed climax's does (memberGaps reads the item).
+  if (carried && plan.climaxUnitId === null && candidates.length > 0 && seated.length < cap) {
+    const cand = candidates[0];
+    const zoneStartSec = CLIMAX_ZONE_START * driveSec;
+    const fits = memberGaps(items, driveSec, true)
+      .map(g => {
+        const atSec = Math.max(g.start, zoneStartSec);
+        return atSec + cand.durationSec <= g.end ? { gap: g, atSec } : null;
+      })
+      .filter((x): x is { gap: MemberGap; atSec: number } => x !== null)
+      .sort(
+        (a, b) =>
+          Number(b.gap.next === null) - Number(a.gap.next === null) ||
+          b.gap.end - b.atSec - (a.gap.end - a.atSec) ||
+          a.atSec - b.atSec,
+      )[0];
+    if (fits) {
+      carriedClimax = cand;
+      insertIntoGap(
+        cand,
+        { start: fits.atSec, end: fits.gap.end, prev: fits.gap.prev, next: fits.gap.next },
+        true,
+      );
+    }
+  }
+
+  for (const cand of candidates) {
+    if (seated.length >= cap) break;
+    if (usedIds.has(cand.id) || usedPlaces.has(cand.placeKey)) continue;
+    // The largest silent gap this candidate fits entirely
+    // inside (earliest first on a tie) — the sim's placement
+    // rule, recomputed per seat because each member splits
+    // the gap it took. Thread-carried mode reads the same
+    // gaps with the departure edge open: a member may
+    // anchor the episode's start.
+    const gap =
+      memberGaps(items, driveSec, carried)
+        .filter(g => g.end - g.start >= cand.durationSec)
+        .sort((a, b) => b.end - b.start - (a.end - a.start) || a.start - b.start)[0] ?? null;
+    if (!gap) continue;
+    insertIntoGap(cand, gap, false);
   }
   if (seated.length === 0) return plan;
+  if (!carried && seated.length === alreadySeated.length) return plan;
 
   // The acts summary recounts from the final items, exactly
   // as the composer counted the composed plan (story items by
@@ -2803,12 +3118,95 @@ export function seatWovenMembers(
     else if (it.unit.angle === 'corridor') line.corridor += 1;
   }
   const unitIds = items.filter(i => i.woven && i.unit).map(i => (i.unit as LibraryUnit).id);
+
+  // Thread-carried framing: with members seated, the
+  // preview is re-authored from the settled plan — the
+  // composed preview's own stashed context (its continuity
+  // nod survives verbatim) updated for the final shape:
+  // the real story count, the closing story (the
+  // designated member climax when there is one), a mid
+  // hook off the final items, and the narration seam's
+  // threadCarried flag, whose text says the road is quiet
+  // and the drive follows the thread. A story-less
+  // composed plan composed NO preview; the rebuild authors
+  // the episode's first one. Normal mode never rebuilds:
+  // the composed preview stands exactly as composed.
+  let previewFacts = plan.previewFacts;
+  let previewContext = plan.previewContext ?? null;
+  if (carried && seated.length > 0) {
+    const storyItems = items.filter(i => i.kind === 'story' && i.unit);
+    const closingItem =
+      (carriedClimax ? storyItems.find(i => i.id === carriedClimax.id) : undefined) ??
+      storyItems[storyItems.length - 1];
+    if (closingItem?.unit) {
+      const midItem =
+        storyItems.length > 2
+          ? storyItems
+              .slice(1)
+              .filter(i => i !== closingItem)
+              .sort(
+                (a, b) =>
+                  Math.abs((a.anchorProgress ?? 0) - 0.5) - Math.abs((b.anchorProgress ?? 0) - 0.5) ||
+                  (a.anchorProgress ?? 0) - (b.anchorProgress ?? 0),
+              )[0]
+          : undefined;
+      const ctx = buildPreviewContext({
+        thread,
+        destinationName: plan.destinationName,
+        storyCount: storyItems.length,
+        closing: closingItem.unit,
+        climax: carriedClimax
+          ? { subject: carriedClimax.placeName, mode: 'thread', sequenced: true }
+          : plan.climaxUnitId
+            ? {
+                subject: plan.climaxSubject ?? '',
+                mode: plan.climaxMode,
+                sequenced: plan.climaxMode !== 'natural',
+              }
+            : null,
+        mid: midItem?.unit ?? null,
+        previouslyHeardSubject: previewContext?.previouslyHeardSubject ?? null,
+        priorDrive: previewContext?.priorDrive ?? null,
+        threadCarried: true,
+      });
+      const text = ctx ? previewTextFor(ctx) : null;
+      if (ctx && text !== null) {
+        previewContext = ctx;
+        previewFacts = {
+          threadPromised: true,
+          previouslyDrive: ctx.priorDrive != null,
+          previouslySubject: ctx.previouslyHeardSubject != null,
+        };
+        const previewItem: PlanItem = {
+          kind: 'preview',
+          id: 'preview',
+          label: 'Episode preview',
+          durationSec: spokenSec(text),
+          text,
+          ready: true,
+        };
+        const at = items.findIndex(i => i.kind === 'preview');
+        if (at >= 0) items.splice(at, 1, previewItem);
+        else items.unshift(previewItem);
+      }
+    }
+  }
+
   return {
     ...plan,
     items,
     totalSec: items.reduce((s, it) => s + it.durationSec, 0),
     actsSummary,
     wovenMembers: { count: seated.length, topics: [thread.topic], unitIds },
+    ...(carriedClimax
+      ? {
+          climaxUnitId: carriedClimax.id,
+          climaxSubject: carriedClimax.placeName,
+          climaxMode: 'thread' as RoutePlan['climaxMode'],
+        }
+      : {}),
+    previewFacts,
+    previewContext,
   };
 }
 
@@ -2874,9 +3272,12 @@ export function buildBridgeContext(args: {
     ctx.promiseMade = promiseMade;
     if (offRoute) ctx.offRouteSubject = next.placeName;
   }
-  // A woven member is never the climax, so its incoming bridge
-  // is always a mid bridge; the flag rides the context so the
-  // narration layer frames the range honestly.
+  // An ordinary woven member is never the climax, so its
+  // incoming bridge is always a mid bridge; the flag rides
+  // the context so the narration layer frames the range
+  // honestly. (The thread-carried designated climax is
+  // seated WITHOUT this flag — its bridge in is the payoff,
+  // with offRoute carrying the honest hop instead.)
   if (nextWoven && role === 'mid') ctx.wovenSubject = next.placeName;
   if (!thread) return ctx;
   if (role === 'mid') {
@@ -2908,13 +3309,21 @@ export function buildPreviewContext(args: {
   /** The plan's closing story unit (the sequenced climax when there is one). */
   closing: LibraryUnit | null;
   /** The plan's climax as the preview teases it (addendum 4 + consolidation §4), or null. */
-  climax?: { subject: string; mode: 'destination' | 'late' | 'natural' | 'portal'; sequenced: boolean } | null;
+  climax?: { subject: string; mode: 'destination' | 'late' | 'natural' | 'portal' | 'thread'; sequenced: boolean } | null;
   /** The plan's mid-drive hook subject (a real story entry between departure and closing). */
   mid: LibraryUnit | null;
   /** A previously-heard subject on this route's ground, drawn from the caller's heard input only. */
   previouslyHeardSubject?: string | null;
   /** The matched prior drive (addendum 2), or null when no record matched. */
   priorDrive?: { threadTopic: string | null; stillOwedSubjects: string[] } | null;
+  /**
+   * Thread-carried framing (Nov 4, 2026): the rebuild in
+   * seatWovenMembers re-authors the preview of a plan the
+   * staging assessed thread-carried — the context carries
+   * the flag into the narration layer, whose preview text
+   * frames the quiet road and the thread honestly.
+   */
+  threadCarried?: boolean;
 }): PreviewContext | null {
   const { thread, destinationName, storyCount, closing, climax, mid, previouslyHeardSubject, priorDrive } = args;
   if (!closing) return null;
@@ -2926,6 +3335,7 @@ export function buildPreviewContext(args: {
     climaxSubject: climax?.subject ?? null,
     climaxMode: climax?.mode ?? 'natural',
   };
+  if (args.threadCarried) ctx.threadCarried = true;
   if (thread && mid && mid.placeName !== ctx.closingSubject) {
     ctx.midSubject = mid.placeName;
     const gist = storyGist(mid);
