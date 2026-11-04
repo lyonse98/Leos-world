@@ -23,6 +23,12 @@ import {
 import { RoutePlanRunner, type RouteRunnerView } from './core/routePlayback';
 import { discoverGapSubjects, fillRouteGaps } from './core/routeGapFill';
 import { buildManifest, originAreaName, type RouteManifest } from './core/routeManifest';
+import {
+  loadDriveRecords,
+  normalizePlaceName,
+  saveDriveRecord,
+  stillOwedSubjects,
+} from './core/routeHistory';
 import { tagsFor } from './data/routeTags';
 import {
   deviceKey,
@@ -32,6 +38,8 @@ import {
   fetchLibraryIndex,
   fetchLibraryRow,
   ingestRouteGapStory,
+  lsGet,
+  lsSet,
   recordHeard,
 } from './core/backend';
 import { generateAnswerText, generateStoryText, synthesizeSpeech } from './core/gemini';
@@ -48,6 +56,16 @@ import { LEO_QA_MODEL_ID } from './services/leoPersona';
 const ROUTE_MODE_ENABLED = isRouteModeEnabled(
   import.meta.env.VITE_ROUTE_MODE as string | undefined,
 );
+
+/**
+ * Drive-record store (addendum 2): the shell's own localStorage
+ * helpers — client-side only, like the rest of the local state.
+ * A failed read degrades to "no prior drives", never an error.
+ */
+const driveRecordStore = {
+  read: () => lsGet('routeDrives'),
+  write: (value: string) => lsSet('routeDrives', value),
+};
 
 /**
  * Q&A gate (v16 phase 2 — Erik, Nov 3, 2026, activating the Nov 2
@@ -692,6 +710,10 @@ function MilesApp() {
     // under the same id the tour itself would have used.
     const sessionId = `route-${Date.now()}`;
     routeSessionRef.current = sessionId;
+    // The destination's library place_key (addendum 2), derived
+    // once the library rows are in — the runner's drive record
+    // is enriched with it at write time via this closure.
+    let destPlaceKey: string | null = null;
     // The runner — and its audio element — is constructed and
     // PRIMED here, synchronously inside the Build tap, before the
     // build's first await (Nov 3, 2026 first-sound fix). Freeform
@@ -725,6 +747,9 @@ function MilesApp() {
         : {}),
       onStoryHeard: unit => {
         void recordHeard(sessionId, deviceKey(), unit.placeName, unit.storyText, unit.lat, unit.lng);
+      },
+      onDriveRecord: record => {
+        saveDriveRecord(driveRecordStore, { ...record, destinationPlaceKey: destPlaceKey });
       },
       onEvent: (type, payload) => {
         const pos = positionRef.current;
@@ -860,12 +885,29 @@ function MilesApp() {
         audioPath: f.audio_path,
         storyText: f.story_text,
       }));
+      // "Previously on Miles" (addendum 2): derive the
+      // destination's library place_key (a fetched unit that IS
+      // the destination, by name) and load the stored prior
+      // drives with their owed lists discharged against THIS
+      // build's heard ledger — a subject heard since that drive
+      // is never presented as still owed. The composer matches
+      // at most one record (destination, then thread) and feeds
+      // it to the spoken preview only.
+      destPlaceKey =
+        units.find(u => normalizePlaceName(u.placeName) === normalizePlaceName(geocoded.name))?.placeKey ??
+        null;
+      const driveRecords = loadDriveRecords(driveRecordStore).map(r => ({
+        ...r,
+        owedSubjects: stillOwedSubjects(r, heardLabels),
+      }));
       let plan = composeRoutePlan(units, route.path, geocoded.location, geocoded.name, input, {
         nowMs,
         heardKeys,
         fillerUnits,
         budgetSecOverride: budget,
         driveSec: route.durationSec,
+        driveRecords,
+        destinationPlaceKey: destPlaceKey,
       });
       // Coverage Guarantee (Nov 3, 2026 — route differentiator 1):
       // walk the composed plan for dead stretches over 180 s and

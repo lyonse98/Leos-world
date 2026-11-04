@@ -52,6 +52,7 @@ const LS = {
   storiesSinceLastAd: 'leo_stories_since_last_ad',
   installNudgeSeen: 'leo_install_nudge_seen',
   spotifyPrompted: 'leo_spotify_prompted',
+  routeDrives: 'leo_route_drives',
 } as const;
 
 export function lsGet(key: keyof typeof LS): string | null {

@@ -41,6 +41,7 @@
 
 import { Player, type AudibleItem, type AudioPort, type LatchState, systemClock } from './player';
 import { bucketUrl } from './backend';
+import type { RouteDriveRecord } from './routeHistory';
 import {
   decideCloseout,
   estimateDurationSec,
@@ -102,6 +103,14 @@ export interface RouteRunnerDeps {
   answerModelLabel?: string;
   /** Best-effort heard recording for a sounded story (App wires backend.recordHeard). */
   onStoryHeard?: (unit: LibraryUnit) => void;
+  /**
+   * The drive record (addendum 2): fired ONCE when the plan's
+   * accounting finalizes — any closeout, or an early End Tour on
+   * a tour that actually began. The App persists it client-side
+   * (routeHistory). Absent dep = no record, by construction —
+   * freeform never constructs this runner at all.
+   */
+  onDriveRecord?: (record: RouteDriveRecord) => void;
   /** Best-effort telemetry (App wires backend.emitEvent). */
   onEvent?: (type: string, payload: Record<string, unknown>) => void;
 }
@@ -127,6 +136,8 @@ export class RoutePlanRunner {
   private begun = false;
   /** Manifest hold (differentiator 3): a staged plan renders but does not begin until beginStaged(). */
   private heldStart = false;
+  /** Drive record (addendum 2): filed at most once per runner. */
+  private driveRecordWritten = false;
   private renderingDone = false;
   private closing = false;
   private closed = false;
@@ -354,6 +365,11 @@ export class RoutePlanRunner {
       // Empty plan (all heard / nothing near the route): the
       // handoff line is still owed — never dead air, never a
       // silent screen. The App treats this as an overrun tail.
+      // The accounting finalizes here too (addendum 2): every
+      // plan story is unplayed, hence owed.
+      this.writeDriveRecord(
+        plan.items.filter(it => it.kind === 'story' && it.unit).map(it => it.unit as LibraryUnit),
+      );
       this.heldStart = false;
       this.freeformTailFlag = true;
       this.endedKind = 'overrun';
@@ -619,6 +635,36 @@ export class RoutePlanRunner {
     this.notify();
   }
 
+  /**
+   * File the drive record (addendum 2) from the runner's own
+   * accounting: sounded stories are the played list, the
+   * closeout's unplayed plan stories are the owed list — the
+   * same lists the owed tease is drawn from, never reconstructed
+   * after the fact. The destination place_key is the App's to
+   * enrich at write time (the runner cannot know it). A failure
+   * inside the dep is swallowed: the record never breaks a tour.
+   */
+  private writeDriveRecord(unplayedUnits: LibraryUnit[]): void {
+    if (this.driveRecordWritten || !this.plan || !this.deps.onDriveRecord) return;
+    this.driveRecordWritten = true;
+    const names = (units: LibraryUnit[]) => [...new Set(units.map(u => u.placeName))];
+    const played = this.plan.items
+      .filter(it => it.kind === 'story' && it.unit && this.playedStoryIds.has(it.unit.id))
+      .map(it => it.unit as LibraryUnit);
+    try {
+      this.deps.onDriveRecord({
+        destinationName: this.plan.destinationName,
+        destinationPlaceKey: null,
+        threadTopic: this.plan.thread?.topic ?? null,
+        playedSubjects: names(played),
+        owedSubjects: names(unplayedUnits),
+        endedAt: Date.now(),
+      });
+    } catch {
+      /* the record is a nicety — never a tour failure */
+    }
+  }
+
   private async close(kind: 'arrival-owed' | 'arrival-signoff' | 'overrun'): Promise<void> {
     if (!this.plan || this.closed) return;
     this.closed = true;
@@ -650,6 +696,9 @@ export class RoutePlanRunner {
       unheardShelfUnits: plan.shelfTease ? [plan.shelfTease] : [],
       ...(plan.thread ? { thread: { topic: plan.thread.topic, playedNames: threadPlayedNames } } : {}),
     });
+    // The accounting just finalized — file the drive record
+    // (addendum 2) with the closeout's actual owed list.
+    this.writeDriveRecord(unplayed);
     // Drop everything still queued so the closeout line is next,
     // not after five unplayed stories. The items must LEAVE the
     // promised FIFO as they settle: abandon() alone settles an
@@ -783,6 +832,17 @@ export class RoutePlanRunner {
 
   /** User ends the route: teardown, no sign-off line, owed state kept if already set. */
   endTour(): void {
+    // An End Tour on a tour that actually began still concludes
+    // a drive (addendum 2): file its record from the standing
+    // accounting before teardown. A never-begun plan (the
+    // manifest hold, backed out of) concludes nothing and files
+    // nothing; a tour already closed out filed its record there.
+    if (this.begun && this.plan && !this.closed) {
+      const unplayed = this.plan.items
+        .filter(it => it.kind === 'story' && it.unit && !this.playedStoryIds.has(it.unit.id))
+        .map(it => it.unit as LibraryUnit);
+      this.writeDriveRecord(unplayed);
+    }
     this.endedKind = this.endedKind ?? 'user-ended';
     this.closed = true;
     this.player.teardown();

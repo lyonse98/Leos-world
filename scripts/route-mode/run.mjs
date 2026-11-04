@@ -1176,6 +1176,68 @@ await checkAsync('manifest: an empty staged plan ends as the standing overrun (n
   runner.endTour();
 });
 
+// ---- drive record (addendum 2): the runner files ONE record
+// when a route tour's accounting finalizes — closeout or an
+// early End Tour on a begun tour; never twice, never for a
+// staged plan backed out of, and (by construction of the dep
+// seam — freeform's engine has no such dep) never for freeform.
+await checkAsync('drive record: an arrival closeout files the record with the real played and owed lists', async () => {
+  const records = [];
+  const audio = new RealFakeAudio(300);
+  const heard = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onStoryHeard: u => heard.push(u.id),
+    onDriveRecord: r => records.push(r),
+    onEvent: () => {},
+  });
+  await runner.start(threadPlan());
+  await until(() => heard.includes('n1|landmark_origin'), 'first story sounded');
+  runner.onPosition({ lat: 32.78, lng: -117.25 });
+  await until(() => heard.includes('n2|landmark_origin'), 'second story sounded');
+  runner.onPosition(denseDest); // arrival with n3 unplayed
+  await until(() => runner.view().closeoutDone, 'arrival closeout');
+  assert.equal(records.length, 1, 'exactly one record');
+  const rec = records[0];
+  assert.equal(rec.destinationName, 'Dest');
+  assert.equal(rec.destinationPlaceKey, null, 'the runner cannot know the place key — the App enriches it');
+  assert.equal(rec.threadTopic, 'Navy Century');
+  assert.deepEqual(rec.playedSubjects, ['n1|landmark_origin', 'n2|landmark_origin']);
+  assert.deepEqual(rec.owedSubjects, ['n3|landmark_origin'], "the closeout's actual owed list");
+  assert.ok(typeof rec.endedAt === 'number' && rec.endedAt > 0);
+  runner.endTour(); // the App's End after a closeout must not double-file
+  assert.equal(records.length, 1, 'no second record after the closeout');
+});
+await checkAsync('drive record: an early End Tour on a begun tour files it; a staged plan backed out of files nothing', async () => {
+  const records = [];
+  const audio = new RealFakeAudio(300);
+  const heard = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onStoryHeard: u => heard.push(u.id),
+    onDriveRecord: r => records.push(r),
+    onEvent: () => {},
+  });
+  await runner.start(qaPlan());
+  await until(() => heard.includes('s1|landmark_origin'), 'first story sounded');
+  runner.endTour();
+  assert.equal(records.length, 1, 'the early end still concludes a drive');
+  assert.deepEqual(records[0].playedSubjects, ['s1|landmark_origin']);
+  assert.deepEqual(records[0].owedSubjects, ['s2|landmark_origin', 's3|landmark_origin']);
+  const stagedRecords = [];
+  const staged = new rp.RoutePlanRunner({
+    audio: new RealFakeAudio(300),
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onDriveRecord: r => stagedRecords.push(r),
+    onEvent: () => {},
+  });
+  await staged.stage(qaPlan());
+  staged.endTour(); // backed out of the manifest card — no drive ever ran
+  assert.equal(stagedRecords.length, 0, 'a never-begun plan files nothing');
+});
+
 // ---- Coverage Guarantee (Nov 3, 2026): gap geometry, library-first
 // fill, generation cap/failure discipline, shelf promotion seams ----
 // Everything live is stubbed — discovery, generation, TTS and ingest
@@ -1680,6 +1742,106 @@ check('manifest: the origin area names itself from the nearest fetched unit, els
   const units = [unit('near|landmark_origin', 32.71), unit('far|landmark_origin', 32.85)];
   assert.equal(mf.originAreaName(units, { lat: 32.7, lng: -117.25 }, 'Fallback'), 'near|landmark_origin');
   assert.equal(mf.originAreaName(units, { lat: 32.2, lng: -117.25 }, 'Fallback'), 'Fallback', 'nothing fetched is the origin’s ground from 50 km away');
+});
+
+// ---- drive record store + matching (addendum 2) ----
+const rhOut = join(mkdtempSync(join(tmpdir(), 'route-history-')), 'routeHistory.mjs');
+execFileSync(
+  join(repoRoot, 'node_modules', '.bin', 'esbuild'),
+  [join(repoRoot, 'src', 'core', 'routeHistory.ts'), '--bundle', '--format=esm', '--platform=node', `--outfile=${rhOut}`, '--log-level=warning'],
+  { stdio: 'inherit' },
+);
+const rh = await import(pathToFileURL(rhOut).href);
+const mkRecord = (over = {}) => ({
+  destinationName: 'Dest',
+  destinationPlaceKey: null,
+  threadTopic: null,
+  playedSubjects: [],
+  owedSubjects: [],
+  endedAt: 1000,
+  ...over,
+});
+const fakeStore = () => {
+  let data = null;
+  return { read: () => data, write: v => { data = v; }, raw: () => data };
+};
+
+check('drive record store: round-trip through the seam; the cap evicts the oldest', () => {
+  const store = fakeStore();
+  for (let i = 1; i <= 21; i++) rh.saveDriveRecord(store, mkRecord({ destinationName: `D${i}`, endedAt: i }));
+  const loaded = rh.loadDriveRecords(store);
+  assert.equal(loaded.length, 20, 'the store is capped at 20 records');
+  assert.equal(loaded[0].destinationName, 'D21', 'newest first');
+  assert.equal(loaded[loaded.length - 1].destinationName, 'D2', 'the 21st save evicted D1');
+});
+check('drive record store: corruption, wrong shapes and oversize all read as no records', () => {
+  assert.deepEqual(rh.parseDriveRecords('{oops'), []);
+  assert.deepEqual(rh.parseDriveRecords('{"x":1}'), []);
+  assert.deepEqual(rh.parseDriveRecords('[{"destinationName":42}]'), [], 'shape-invalid entries are dropped');
+  assert.deepEqual(rh.parseDriveRecords('x'.repeat(70000)), [], 'an oversized store is corruption, not history');
+  assert.deepEqual(rh.loadDriveRecords({ read: () => { throw new Error('denied'); }, write: () => {} }), [], 'a throwing read degrades silently');
+  assert.deepEqual(rh.loadDriveRecords(fakeStore()), [], 'an empty store is no records');
+});
+check('prior drive match: destination beats topic, place_key beats name, newest wins inside a tier', () => {
+  const topicNewer = mkRecord({ destinationName: 'Elsewhere', threadTopic: 'Coast', endedAt: 2000 });
+  const destOlder = mkRecord({ destinationName: 'Dest', threadTopic: 'Navy Century', endedAt: 1000 });
+  const hit = rh.selectPriorDrive([topicNewer, destOlder], { destinationPlaceKey: null, destinationName: 'Dest', threadTopic: 'Coast' });
+  assert.equal(hit, destOlder, 'a destination match outranks a newer topic match');
+  const byNameRec = mkRecord({ destinationName: 'Dest', destinationPlaceKey: 'other-place' });
+  const byKeyRec = mkRecord({ destinationName: 'A Different Name Entirely', destinationPlaceKey: 'dest-key' });
+  const keyHit = rh.selectPriorDrive([byNameRec, byKeyRec], { destinationPlaceKey: 'dest-key', destinationName: 'Dest', threadTopic: null });
+  assert.equal(keyHit, byKeyRec, 'a place_key match outranks a name match');
+  const nameHit = rh.selectPriorDrive([topicNewer], { destinationPlaceKey: null, destinationName: 'elsewhere', threadTopic: null });
+  assert.equal(nameHit, topicNewer, 'name matching is normalized (case/spacing)');
+  const threadHit = rh.selectPriorDrive([topicNewer], { destinationPlaceKey: null, destinationName: 'Dest', threadTopic: 'Coast' });
+  assert.equal(threadHit, topicNewer, 'the topic tier catches what the destination tiers miss');
+  assert.equal(rh.selectPriorDrive([topicNewer], { destinationPlaceKey: null, destinationName: 'Dest', threadTopic: 'Navy Century' }), null, 'no tier matches → no prior drive');
+  assert.equal(rh.selectPriorDrive([], { destinationPlaceKey: null, destinationName: 'Dest', threadTopic: 'Coast' }), null);
+});
+check('still-owed: the current heard ledger discharges its share; the preview carries at most two', () => {
+  const rec = mkRecord({ owedSubjects: ['Alpha', 'Beta', 'Gamma', 'Delta'] });
+  assert.deepEqual(rh.stillOwedSubjects(rec, new Set(['beta'])), ['Alpha', 'Gamma'], 'heard since (any case) is discharged, order kept');
+  assert.deepEqual(rh.stillOwedSubjects(rec, new Set()), ['Alpha', 'Beta'], 'capped at two');
+  assert.deepEqual(rh.stillOwedSubjects(rec, new Set(['Alpha', 'Beta', 'Gamma', 'Delta'])), [], 'fully discharged → nothing owed');
+});
+check('preview: a matched prior drive feeds the opening bridge — its thread and its still-owed subjects', () => {
+  const records = [
+    mkRecord({ destinationName: 'Dest', threadTopic: 'Coast', owedSubjects: ['Owed Place'], endedAt: 5000 }),
+  ];
+  const plan = composeDense(
+    [navy('n1|landmark_origin', 32.72), navy('n2|landmark_origin', 32.78), navy('n3|landmark_origin', 32.84)],
+    noTopics,
+    { driveRecords: records },
+  );
+  const firstBridge = plan.items.find(i => i.kind === 'bridge');
+  assert.ok(firstBridge.text.includes('the thread was Coast'), 'the prior drive’s thread is named');
+  assert.ok(firstBridge.text.includes('Miles still owes you Owed Place'), 'the still-owed subject is named (the caller pre-filtered it against the heard ledger)');
+  const byThread = composeDense(
+    [navy('n1|landmark_origin', 32.72), navy('n2|landmark_origin', 32.78), navy('n3|landmark_origin', 32.84)],
+    noTopics,
+    { driveRecords: [mkRecord({ destinationName: 'Elsewhere', threadTopic: 'Navy Century', owedSubjects: [], endedAt: 5000 })] },
+  );
+  assert.ok(byThread.items.find(i => i.kind === 'bridge').text.includes('the thread was Navy Century'), 'a thread-tier match feeds the preview too');
+  const noMatch = composeDense(
+    [navy('n1|landmark_origin', 32.72), navy('n2|landmark_origin', 32.78), navy('n3|landmark_origin', 32.84)],
+    noTopics,
+    { driveRecords: [mkRecord({ destinationName: 'Elsewhere', threadTopic: 'Coast', owedSubjects: ['Owed Place'], endedAt: 5000 })] },
+  );
+  assert.ok(!noMatch.items.some(i => i.text && i.text.includes('still owes you')), 'no matched record → the preview is addendum-1’s, untouched');
+});
+check('preview: the drive nod takes the continuity slot over the subject-level nod', () => {
+  const heardOnRoute = unit('old|landmark_origin', 32.8);
+  const plan = composeDense(
+    [navy('n1|landmark_origin', 32.72), navy('n2|landmark_origin', 32.78), navy('n3|landmark_origin', 32.84), heardOnRoute],
+    noTopics,
+    {
+      heardKeys: new Set(['old|landmark_origin']),
+      driveRecords: [mkRecord({ destinationName: 'Dest', threadTopic: null, owedSubjects: ['Owed Place'], endedAt: 5000 })],
+    },
+  );
+  const firstBridge = plan.items.find(i => i.kind === 'bridge');
+  assert.ok(firstBridge.text.includes('Miles still owes you Owed Place'), 'the drive nod renders');
+  assert.ok(!firstBridge.text.includes('today, new ground'), 'the subject-level nod stands down — one nod, not two');
 });
 
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);

@@ -19,6 +19,8 @@
 // text search for the destination, one Routes computeRoutes call.
 // No live calls happen at import time, in tests, or in the harness.
 //
+import { selectPriorDrive, type RouteDriveRecord } from './routeHistory';
+
 // Composer v2 (Erik, Nov 3, 2026): full-path fetch with segment
 // fairness (no first-60 early-route bias), position-anchored
 // release (a story sounds inside its ground's window, never just
@@ -675,6 +677,16 @@ export interface ComposeOptions {
    * the travel window in the arrival case.
    */
   driveSec?: number | null;
+  /**
+   * Prior route drives (addendum 2), newest first, with each
+   * record's owed subjects ALREADY filtered against the current
+   * heard ledger by the caller (routeHistory.stillOwedSubjects)
+   * — the composer matches at most one against this build (see
+   * selectPriorDrive) and feeds it to the opening preview only.
+   */
+  driveRecords?: RouteDriveRecord[];
+  /** The destination's library place_key when the build could derive one (addendum 2 matching). */
+  destinationPlaceKey?: string | null;
 }
 
 /**
@@ -791,6 +803,23 @@ export function composeRoutePlan(
   // or the caps.
   const thread = detectRouteThread(pool, destination, input.topics);
   const threadMemberIds = new Set(thread?.memberIds ?? []);
+
+  // "Previously on Miles", drive level (addendum 2): with the
+  // thread known, match at most one prior drive — same
+  // destination first, same thread second — for the opening
+  // preview's continuity nod. A record whose thread and owed
+  // list are both empty carries nothing the preview can say.
+  const priorDriveRecord = opts.driveRecords?.length
+    ? selectPriorDrive(opts.driveRecords, {
+        destinationPlaceKey: opts.destinationPlaceKey ?? null,
+        destinationName,
+        threadTopic: thread?.topic ?? null,
+      })
+    : null;
+  const priorDrive =
+    priorDriveRecord && (priorDriveRecord.threadTopic !== null || priorDriveRecord.owedSubjects.length > 0)
+      ? { threadTopic: priorDriveRecord.threadTopic, stillOwedSubjects: priorDriveRecord.owedSubjects.slice(0, 2) }
+      : null;
 
   // Budget: the caller-supplied drive-time budget (budgetSecFor)
   // wins whenever present — since Nov 3, 2026 it is the ONLY
@@ -1094,6 +1123,7 @@ export function composeRoutePlan(
             mid: midEntry?.unit ?? null,
             storyCount: storyEntries.length,
             previouslyHeardSubject: priorHeardSubject,
+            priorDrive,
             thread,
             isFirstBridge: !firstBridgeSeen,
             isClimaxBridge: climaxUnitId !== null && u.id === climaxUnitId,
@@ -1240,6 +1270,15 @@ export interface BridgeContext {
   midGist?: string;
   /** Opening role only: a real previously-heard subject on this route's ground, when the ledger has one. */
   previouslyHeardSubject?: string;
+  /**
+   * Opening role only: the matched prior DRIVE (addendum 2) —
+   * its thread topic and up to two still-owed subjects, all from
+   * the stored record as filtered against the current heard
+   * ledger. When present it takes the continuity slot: the
+   * subject-level nod stands down (the drive record is the
+   * richer continuity, and the preview gets one nod, not two).
+   */
+  priorDrive?: { threadTopic: string | null; stillOwedSubjects: string[] };
   /** Mid role only: an earlier plan item this bridge may call back. */
   callbackSubject?: string;
   /** Payoff role only: whether the opening promise was actually composed earlier in this plan. */
@@ -1259,6 +1298,8 @@ export function buildBridgeContext(args: {
   storyCount: number;
   /** A previously-heard subject on this route's ground, drawn from the caller's heard input only. */
   previouslyHeardSubject?: string | null;
+  /** The matched prior drive (addendum 2), or null when no record matched. */
+  priorDrive?: { threadTopic: string | null; stillOwedSubjects: string[] } | null;
   thread: RouteThread | null;
   isFirstBridge: boolean;
   isClimaxBridge: boolean;
@@ -1273,6 +1314,7 @@ export function buildBridgeContext(args: {
     mid,
     storyCount,
     previouslyHeardSubject,
+    priorDrive,
     thread,
     isFirstBridge,
     isClimaxBridge,
@@ -1300,6 +1342,9 @@ export function buildBridgeContext(args: {
       if (gist && gist.length <= 110) ctx.midGist = gist;
     }
     if (previouslyHeardSubject) ctx.previouslyHeardSubject = previouslyHeardSubject;
+    if (priorDrive && (priorDrive.threadTopic !== null || priorDrive.stillOwedSubjects.length > 0)) {
+      ctx.priorDrive = priorDrive;
+    }
   }
   if (!thread) return ctx;
   if (role === 'payoff') ctx.promiseMade = promiseMade;
@@ -1362,7 +1407,22 @@ export function bridgeTextFor(
       } else if (ctx.closingSubject) {
         text += ` We're headed to ${ctx.destinationName ?? 'the end'} — ${ctx.storyCount ?? 0} stories between here and there, and the last of them is ${ctx.closingSubject}.`;
       }
-      if (ctx.previouslyHeardSubject) {
+      // One continuity nod, never two: a matched prior DRIVE
+      // (addendum 2) takes the slot over the subject-level nod.
+      // Every name in it is record/ledger data — the prior
+      // drive's thread, and what it still owes after the
+      // current heard ledger discharged its share.
+      if (ctx.priorDrive) {
+        const owed = ctx.priorDrive.stillOwedSubjects;
+        const owedList = owed.length === 2 ? `${owed[0]} and ${owed[1]}` : owed[0];
+        if (owed.length > 0 && ctx.priorDrive.threadTopic) {
+          text += ` Last time we came this way, the thread was ${ctx.priorDrive.threadTopic} — and Miles still owes you ${owedList}.`;
+        } else if (owed.length > 0) {
+          text += ` And Miles still owes you ${owedList} from last time we came this way.`;
+        } else if (ctx.priorDrive.threadTopic) {
+          text += ` Last time we came this way, the thread was ${ctx.priorDrive.threadTopic}.`;
+        }
+      } else if (ctx.previouslyHeardSubject) {
         text += ` Last time we came this way, you heard about ${ctx.previouslyHeardSubject} — today, new ground.`;
       }
     } else if (ctx.threadTopic && ctx.role === 'payoff') {
