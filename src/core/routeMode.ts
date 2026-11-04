@@ -390,6 +390,39 @@ export function estimateDurationSec(text: string | null, fallbackSec = 150): num
   return Math.max(20, Math.round((words / 150) * 60));
 }
 
+/**
+ * Story-level heard keys (composer v3.1, Erik, Nov 4, 2026):
+ * the route build's heard set, derived from the heard ledger's
+ * own filed evidence. The ledger (heard_stories) stores no
+ * (place, angle) key — each telling is filed under its label
+ * with the telling's VERBATIM story text (backend.recordHeard).
+ * A route-recorded telling files the unit's canonical
+ * story_text, and a freeform shelf serve files the same
+ * canonical text, so an exact text match identifies the one
+ * (place, angle) story that was heard — and only that one. An
+ * unheard angle of a heard place carries a different text and
+ * stays selectable: the angle depth is what the shelf's three
+ * angles are FOR. (The pre-v3.1 derivation keyed exclusion on
+ * the place NAME — one telling killed the whole place — and
+ * the v3 grader showed it starving repeat commutes: the
+ * candidate window never widened no matter how deep the shelf
+ * grew.) Units without text cannot be matched and are never
+ * excluded by this derivation; ledger texts that match no unit
+ * (live-generated freeform tellings) exclude nothing — a
+ * generated telling is not any specific shelf story.
+ */
+export function heardKeysForStories(
+  units: LibraryUnit[],
+  heardStoryTexts: ReadonlySet<string>,
+): Set<string> {
+  const keys = new Set<string>();
+  if (heardStoryTexts.size === 0) return keys;
+  for (const u of units) {
+    if (u.storyText !== null && heardStoryTexts.has(u.storyText)) keys.add(u.id);
+  }
+  return keys;
+}
+
 // ------------------------------------------------------------ composer v2: fairness, windows, fetch plan
 
 /** Path-progress deciles the fairness rounds sweep (item 1). */
@@ -782,7 +815,13 @@ export function detectRouteThread(candidates: LibraryUnit[], userTopics: string[
 
 export interface ComposeOptions {
   nowMs: number;
-  /** Heard keys (place_key|angle); unplayed units stay unheard — never serve heard stories. */
+  /**
+   * Heard keys (place_key|angle) at STORY level (composer v3.1):
+   * a key names the one telling that was heard — an unheard
+   * angle of a heard place is NOT in this set and stays
+   * selectable. The caller derives the set from the heard
+   * ledger's filed story texts (heardKeysForStories).
+   */
   heardKeys: Set<string>;
   /** Max stories in one plan (keeps a plan build bounded). */
   maxStories?: number;
@@ -912,6 +951,20 @@ export interface ComposeOptions {
  * The route_plan_started telemetry carries the ladder's
  * decisions record so any single plan can be audited against
  * this order after the fact.
+ *
+ * Composer v3.1 (Erik, Nov 4, 2026) changes the heard
+ * predicate's granularity, nothing else in the ladder: heard
+ * exclusion is STORY-level (opts.heardKeys names tellings,
+ * derived by the caller from the ledger's filed texts — see
+ * heardKeysForStories), so an unheard angle of a heard place
+ * is a full candidate — it counts toward thread support,
+ * climax eligibility and scarcity, and the portal pools —
+ * while the sweep seats at most ONE telling per place per
+ * plan, so the new depth spends across drives, never twice
+ * in one episode. Rotation's place-level rules (recency,
+ * opener variation) still read the drive records' subjects:
+ * a place heard yesterday yields today even when it holds
+ * an unheard angle, exactly as commit C specified.
  * The plan is a value, not a promise: nothing here touches the
  * network, so the harness can prove every invariant offline.
  */
@@ -1090,6 +1143,14 @@ export function composeRoutePlan(
 
   const chosen: LibraryUnit[] = [];
   const chosenIds = new Set<string>();
+  // One telling per place per plan (composer v3.1): with
+  // story-level heard granularity, a place can offer several
+  // unheard angles to the SAME plan — the sweep seats at most
+  // one of them. The other angles stay unheard for a future
+  // drive; that rotation across drives is the depth the
+  // shelf's angles exist for. (Chapter openers are exempt by
+  // design: an intro heads its own area's chapter.)
+  const chosenPlaces = new Set<string>();
   // Fit-skipped candidates are consumed permanently — total
   // only grows, so a candidate that cannot fit now never fits
   // later. This is the pointer sweep's exact semantics,
@@ -1118,6 +1179,7 @@ export function composeRoutePlan(
     if (portalAltInAct[a]) return true;
     for (const alt of pool) {
       if (alt.id === cand.id || consumed.has(alt.id) || chosenIds.has(alt.id)) continue;
+      if (chosenPlaces.has(alt.placeKey)) continue;
       if (actOf(alt) !== a) continue;
       if (angleClassRank(alt.angle) !== 0 && !threadMemberIds.has(alt.id)) continue;
       if (fitOk(alt)) return true;
@@ -1140,6 +1202,7 @@ export function composeRoutePlan(
     const candPlace = normalizePlaceName(cand.placeName);
     for (const alt of pool) {
       if (alt.id === cand.id || consumed.has(alt.id) || chosenIds.has(alt.id)) continue;
+      if (chosenPlaces.has(alt.placeKey)) continue;
       if (actOf(alt) !== a) continue;
       if (normalizePlaceName(alt.placeName) === candPlace) continue;
       if (fitOk(alt)) return true;
@@ -1161,6 +1224,7 @@ export function composeRoutePlan(
     let best: LibraryUnit | null = null;
     for (const alt of pool) {
       if (alt.id === cand.id || consumed.has(alt.id) || chosenIds.has(alt.id)) continue;
+      if (chosenPlaces.has(alt.placeKey)) continue;
       if (actOf(alt) !== a) continue;
       if (normalizePlaceName(alt.placeName) === candPlace) continue;
       if (!fitOk(alt)) continue;
@@ -1193,6 +1257,13 @@ export function composeRoutePlan(
       for (const cand of list) {
         if (chosen.length >= maxStories) break;
         if (consumed.has(cand.id) || chosenIds.has(cand.id)) continue;
+        if (chosenPlaces.has(cand.placeKey)) {
+          // A sibling angle of a place this plan already tells:
+          // consumed for this plan, untouched for future drives.
+          consumed.add(cand.id);
+          progressMade = true;
+          continue;
+        }
         if (Number.isFinite(budgetSec) && total >= budgetSec) {
           consumed.add(cand.id);
           progressMade = true;
@@ -1226,6 +1297,7 @@ export function composeRoutePlan(
         }
         chosen.push(pick);
         chosenIds.add(pick.id);
+        chosenPlaces.add(pick.placeKey);
         total += pick.durationSec;
         progressMade = true;
         if (gates) for (const y of passedYielders) floorSubByAct[actOf(y)] = true;

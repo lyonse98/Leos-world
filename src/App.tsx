@@ -13,6 +13,7 @@ import {
   estimateDurationSec,
   geocodeDestination,
   haversineM,
+  heardKeysForStories,
   isRouteModeEnabled,
   parseRouteInput,
   qaGateOpen,
@@ -42,6 +43,7 @@ import { tagsFor } from './data/routeTags';
 import {
   deviceKey,
   emitEvent,
+  fetchHeardStoryTexts,
   fetchHeardTopics,
   fetchHostedFillerRows,
   fetchLibraryIndex,
@@ -699,8 +701,13 @@ function MilesApp() {
    * ≤30 topic-connected portal candidates), read in parallel
    * chunks — a build costs bounded reads, not a shelf scan, and
    * no stretch of the drive is crowded out by a dense start.
-   * Heard exclusion keys on the heard ledger's own vocabulary
-   * (place names — heard_stories.topic records labels, not keys).
+   * Heard exclusion is STORY-level (composer v3.1): the ledger
+   * files each telling's verbatim story text, so the build
+   * matches fetched units against the filed texts and excludes
+   * exactly the (place, angle) tellings heard — an unheard
+   * angle of a heard place stays in play. Place-name labels
+   * are still read for the subject-level consumers that speak
+   * them (owed discharge, the manifest's new-to-you count).
    */
   const buildRoute = async () => {
     const origin = positionRef.current ?? (position ? { lat: position.lat, lng: position.lng } : null);
@@ -861,7 +868,12 @@ function MilesApp() {
       const fetchSet = selectFetchCandidates(index, route.path, geocoded.location, (pk, ang) => tagsFor(pk, ang), {
         userTopics: input.topics,
       });
-      const heardLabels = new Set(await fetchHeardTopics(deviceKey()));
+      const [heardLabelList, heardTextList] = await Promise.all([
+        fetchHeardTopics(deviceKey()),
+        fetchHeardStoryTexts(deviceKey()),
+      ]);
+      const heardLabels = new Set(heardLabelList);
+      const heardTexts = new Set(heardTextList);
       const units: LibraryUnit[] = [];
       // Row reads are independent: fetch the bounded set in
       // parallel chunks of 12 rather than one round trip at a time.
@@ -887,9 +899,11 @@ function MilesApp() {
           });
         }
       }
-      const heardKeys = new Set(
-        units.filter(u => heardLabels.has(u.placeName)).map(u => u.id),
-      );
+      // Story-level heard (composer v3.1): a unit is excluded
+      // only when the ledger holds a telling with its own
+      // verbatim text — one heard angle no longer takes the
+      // whole place out of the route's window.
+      const heardKeys = heardKeysForStories(units, heardTexts);
       const hosted = await fetchHostedFillerRows();
       const fillerUnits: LibraryUnit[] = hosted.slice(0, 10).map(f => ({
         id: `${f.place_key}|filler_hosted`,
@@ -957,7 +971,8 @@ function MilesApp() {
         const extraUnits: LibraryUnit[] = [];
         for (const e of extraRows) {
           const row = await fetchLibraryRow(e.place_key, e.angle);
-          if (!row || heardLabels.has(row.place_name)) continue;
+          // Story-level heard (v3.1): only this exact telling is out.
+          if (!row || (row.story_text != null && heardTexts.has(row.story_text))) continue;
           const tags = tagsFor(row.place_key, row.angle);
           extraUnits.push({
             id: `${row.place_key}|${row.angle}`,

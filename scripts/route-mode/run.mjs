@@ -136,6 +136,115 @@ check('tiling: heard stories never served', () => {
   assert.ok(!plan.items.some(i => i.id === 'heard|landmark_origin'));
 });
 
+// ---- composer v3.1, commit A: story-level heard granularity ----
+// The ledger files tellings by verbatim story text; the route
+// derivation (heardKeysForStories) excludes exactly the telling
+// whose text was filed. One heard angle no longer kills its
+// place — and the sweep seats at most one telling per place
+// per plan, so the depth spends across drives.
+check('v3.1 heard derivation: filed texts name the exact telling heard — not the place', () => {
+  const units = [
+    unit('p|landmark_origin', 32.75, { storyText: 'alpha text' }),
+    unit('p|landmark_event', 32.75, { storyText: 'beta text' }),
+    unit('q|landmark_origin', 32.8, { storyText: null }),
+  ];
+  const keys = rm.heardKeysForStories(units, new Set(['alpha text', 'a live-generated telling']));
+  assert.deepEqual([...keys], ['p|landmark_origin']);
+  assert.equal(rm.heardKeysForStories(units, new Set()).size, 0);
+});
+
+check('v3.1 granularity: an unheard angle of a heard place is selectable; the heard angle never serves', () => {
+  const units = [
+    unit('p|landmark_origin', 32.75),
+    unit('p|landmark_event', 32.75),
+    unit('q|landmark_origin', 32.85),
+  ];
+  const plan = rm.composeRoutePlan(units, path, dest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] }, { nowMs: NOW, heardKeys: new Set(['p|landmark_origin']), budgetSecOverride: 100000 });
+  const ids = plan.items.filter(i => i.kind === 'story').map(i => i.id);
+  assert.equal(plan.skippedHeard, 1);
+  assert.ok(!ids.includes('p|landmark_origin'));
+  assert.ok(ids.includes('p|landmark_event'), 'the unheard angle tiles');
+});
+
+check('v3.1 granularity: a heard intro excludes only the intro; a heard story leaves the intro its chapter', () => {
+  const mk = () => [
+    unit('p|neighborhood_intro', 32.75, { angle: 'neighborhood_intro', durationSec: 60 }),
+    unit('p|landmark_origin', 32.75),
+    unit('q|landmark_origin', 32.85),
+  ];
+  const input = { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] };
+  const introHeard = rm.composeRoutePlan(mk(), path, dest, 'Dest', input, { nowMs: NOW, heardKeys: new Set(['p|neighborhood_intro']), budgetSecOverride: 100000 });
+  assert.ok(introHeard.items.some(i => i.id === 'p|landmark_origin' && i.kind === 'story'), 'story serves with its intro heard');
+  assert.ok(!introHeard.items.some(i => i.id === 'p|neighborhood_intro'));
+  const storyHeard = rm.composeRoutePlan(mk(), path, dest, 'Dest', input, { nowMs: NOW, heardKeys: new Set(['p|landmark_origin']), budgetSecOverride: 100000 });
+  assert.ok(!storyHeard.items.some(i => i.id === 'p|landmark_origin'));
+  assert.ok(storyHeard.items.some(i => i.id === 'p|neighborhood_intro' && i.opener), 'the unheard intro still opens a chapter');
+});
+
+check('v3.1 one per place: three unheard angles of one place tile exactly once in a plan', () => {
+  const units = [
+    unit('solo|landmark_origin', 32.75),
+    unit('solo|landmark_event', 32.75),
+    unit('solo|landmark_people', 32.75),
+    unit('b|landmark_origin', 32.78),
+    unit('c|landmark_origin', 32.85),
+  ];
+  const plan = rm.composeRoutePlan(units, path, dest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] }, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000 });
+  assert.equal(plan.items.filter(i => i.kind === 'story' && i.unit.placeKey === 'solo').length, 1);
+});
+
+check('v3.1 thread support: unheard angles of a partially heard place count toward the thread', () => {
+  const units = [
+    unit('p|landmark_origin', 32.75, { topics: ['Coast'] }),
+    unit('p|landmark_event', 32.75, { topics: ['Coast'] }),
+    unit('p|landmark_people', 32.75, { topics: ['Coast'] }),
+    unit('q|landmark_origin', 32.85, { topics: ['Coast'] }),
+  ];
+  const plan = rm.composeRoutePlan(units, path, dest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] }, { nowMs: NOW, heardKeys: new Set(['p|landmark_origin']), budgetSecOverride: 100000 });
+  assert.equal(plan.thread?.topic, 'Coast');
+  assert.deepEqual(
+    new Set(plan.thread.memberIds),
+    new Set(['p|landmark_event', 'p|landmark_people', 'q|landmark_origin']),
+  );
+});
+
+check('v3.1 rotation r1 × granularity: the prior drive’s place yields at place level despite unheard angles; alone, it still tiles — once', () => {
+  const rec = played => ({
+    destinationName: 'Dest', destinationPlaceKey: null, threadTopic: null,
+    playedSubjects: played, owedSubjects: [], endedAt: NOW,
+  });
+  const input = { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] };
+  const soloAngles = () => [
+    unit('solo|landmark_origin', 32.82, { placeName: 'Solo Place' }),
+    unit('solo|landmark_event', 32.82, { placeName: 'Solo Place' }),
+  ];
+  const storyIds = plan => plan.items.filter(i => i.kind === 'story').map(i => i.id);
+  // Tight budget (one story seats): the prior drive's place
+  // yields to the comparable alternative even though BOTH its
+  // angles are unheard — rotation reads subjects, not tellings.
+  const rotated = rm.composeRoutePlan(
+    [...soloAngles(), unit('new|landmark_origin', 32.85)],
+    path, dest, 'Dest', input,
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 130, driveRecords: [rec(['Solo Place'])] },
+  );
+  assert.deepEqual(storyIds(rotated), ['new|landmark_origin']);
+  // Control: no record — the place's first angle wins the seat.
+  const control = rm.composeRoutePlan(
+    [...soloAngles(), unit('new|landmark_origin', 32.85)],
+    path, dest, 'Dest', input,
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 130 },
+  );
+  assert.deepEqual(storyIds(control), ['solo|landmark_origin']);
+  // Alone with room to spare: the yielded place seats via its
+  // first unheard angle — and only one telling of it tiles.
+  const alone = rm.composeRoutePlan(
+    soloAngles(),
+    path, dest, 'Dest', input,
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveRecords: [rec(['Solo Place'])] },
+  );
+  assert.deepEqual(storyIds(alone), ['solo|landmark_origin']);
+});
+
 // ---- bridge skip-fallback ----
 check('bridge skip-fallback: unready bridge drops, stories stay', () => {
   const units = [unit('a|landmark_origin', 32.71), unit('b|landmark_origin', 32.85)];

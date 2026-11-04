@@ -335,7 +335,10 @@ export function buildWorld(seed, shape) {
       tone: rnd() < 0.8 ? pickWeighted(rnd, TONE_WEIGHTS) : null,
       toneSecondary: rnd() < 0.15 ? pickWeighted(rnd, TONE_WEIGHTS) : null,
       audioPath: `x/${place.placeKey}-${angle}.wav`,
-      storyText: null,
+      // A unique filed text per telling — the synthetic
+      // ledger's story_text, so the App's story-level heard
+      // derivation (heardKeysForStories) runs here verbatim.
+      storyText: `text:${place.placeKey}|${angle}`,
     };
     unitsById.set(unit.id, unit);
     index.push({ place_key: place.placeKey, angle, lat: place.lat, lng: place.lng });
@@ -423,7 +426,7 @@ async function loadBundles(repoRoot) {
  * → row reads → compose → (portal-climax seeking: one bounded
  * index scan + single re-compose) → shelf-only guarantee pass.
  */
-async function runBuild({ rm, gf, rh }, world, route, { heardNames, driveRecords, input, nowMs }) {
+async function runBuild({ rm, gf, rh }, world, route, { heardNames, heardTexts, driveRecords, input, nowMs }) {
   const tagsOf = (pk, ang) => {
     const u = world.unitsById.get(`${pk}|${ang}`);
     return { topics: u ? u.topics : [] };
@@ -434,7 +437,9 @@ async function runBuild({ rm, gf, rh }, world, route, { heardNames, driveRecords
   const units = fetchSet
     .map(e => world.unitsById.get(`${e.place_key}|${e.angle}`))
     .filter(Boolean);
-  const heardKeys = new Set(units.filter(u => heardNames.has(u.placeName)).map(u => u.id));
+  // Story-level heard, exactly like the App's (v3.1): the
+  // ledger's filed texts name the tellings that are out.
+  const heardKeys = rm.heardKeysForStories(units, heardTexts);
   const records = (driveRecords ?? []).map(r => ({
     ...r,
     owedSubjects: rh.stillOwedSubjects(r, heardNames),
@@ -464,7 +469,7 @@ async function runBuild({ rm, gf, rh }, world, route, { heardNames, driveRecords
       )
       .slice(0, 12)
       .map(e => world.unitsById.get(`${e.place_key}|${e.angle}`))
-      .filter(u => u && !heardNames.has(u.placeName));
+      .filter(u => u && !(u.storyText && heardTexts.has(u.storyText)));
     if (climaxOnlyUnits.length > 0) {
       plan = rm.composeRoutePlan(units, route.path, route.dest, route.destName, input, {
         ...opts,
@@ -518,6 +523,7 @@ async function gradeAll(mods) {
       const input = { destinationText: route.destName, arrivalTimeMs: null, tone: null, topics: [] };
       const build = await runBuild(mods, world, route, {
         heardNames: new Set(),
+        heardTexts: new Set(),
         driveRecords: [],
         input,
         nowMs: BASE_NOW,
@@ -528,11 +534,14 @@ async function gradeAll(mods) {
       });
     }
     // The repeat commute: 20 drives, one route, a growing
-    // heard ledger (name-based, exactly like the App's) and a
+    // heard ledger (story-text-based, exactly like the App's
+    // since v3.1; place names are still kept alongside for
+    // the records' subject-level owed discharge) and a
     // growing drive-record store feeding the next build.
     const route = world.routes.commute;
     const input = { destinationText: route.destName, arrivalTimeMs: null, tone: null, topics: [] };
     const heardNames = new Set();
+    const heardTexts = new Set();
     let records = [];
     const drives = [];
     const seenPlaces = new Set();
@@ -540,6 +549,7 @@ async function gradeAll(mods) {
       const nowMs = BASE_NOW + d * 24 * 60 * 60 * 1000;
       const build = await runBuild(mods, world, route, {
         heardNames,
+        heardTexts,
         driveRecords: records,
         input,
         nowMs,
@@ -551,7 +561,10 @@ async function gradeAll(mods) {
       const played = build.plan.items.filter(i => i.kind === 'story' && i.unit);
       for (const it of played) seenPlaces.add(it.unit.placeKey);
       drives.push({ drive: d + 1, ...metrics, cumulativePlaces: seenPlaces.size });
-      for (const it of played) heardNames.add(it.unit.placeName);
+      for (const it of played) {
+        heardNames.add(it.unit.placeName);
+        if (it.unit.storyText) heardTexts.add(it.unit.storyText);
+      }
       records = [
         {
           destinationName: route.destName,

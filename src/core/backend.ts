@@ -405,6 +405,29 @@ export async function fetchHeardTopics(userKey: string, limit = 500): Promise<st
   return (data as { topic: string }[]).map(r => r.topic);
 }
 
+/**
+ * The heard ledger's filed story texts (route mode's
+ * story-level heard derivation, composer v3.1): the same rows
+ * fetchHeardTopics reads, projected to each telling's verbatim
+ * story text — the only (place, angle)-identifying evidence
+ * the ledger holds (recordHeard files it on every telling).
+ * Read-side only: the ledger's shape is unchanged and
+ * freeform never calls this.
+ */
+export async function fetchHeardStoryTexts(userKey: string, limit = 500): Promise<string[]> {
+  if (!BACKEND_CONFIGURED) return [];
+  const { data, error } = await db
+    .from('heard_stories')
+    .select('story_text')
+    .eq('user_key', userKey)
+    .order('told_at', { ascending: false })
+    .limit(limit);
+  if (error || !data) return [];
+  return (data as { story_text: string | null }[])
+    .map(r => r.story_text)
+    .filter((t): t is string => typeof t === 'string' && t.length > 0);
+}
+
 export async function recordHeard(
   sessionId: string,
   userKey: string,
