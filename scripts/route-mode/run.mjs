@@ -7,7 +7,7 @@
 // Exit 0 = all checks pass; anything else prints failures.
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -67,6 +67,24 @@ execFileSync(
   { stdio: 'inherit' },
 );
 const rpd = await import(pathToFileURL(rpdOut).href);
+
+// The bundled route tags (Nov 1 tagging + the woven twins'
+// inherited topics): the woven-twins data suites below pin
+// the two generated maps against each other.
+const rtOut = join(mkdtempSync(join(tmpdir(), 'route-tags-')), 'routeTags.mjs');
+execFileSync(
+  join(repoRoot, 'node_modules', '.bin', 'esbuild'),
+  [
+    join(repoRoot, 'src', 'data', 'routeTags.ts'),
+    '--bundle',
+    '--format=esm',
+    '--platform=node',
+    `--outfile=${rtOut}`,
+    '--log-level=warning',
+  ],
+  { stdio: 'inherit' },
+);
+const rtg = await import(pathToFileURL(rtOut).href);
 
 let passed = 0;
 let failed = 0;
@@ -3482,7 +3500,7 @@ const storyIds = plan => plan.items.filter(i => i.kind === 'story').map(i => i.i
 const memberIds = plan => plan.items.filter(i => i.woven).map(i => i.id);
 
 check('woven data: the bundled presence map pins the audit — Protected excluded whatever its register', () => {
-  assert.equal(Object.keys(rpd.ROUTE_PRESENCE).length, 1264, 'one row per shelf story');
+  assert.equal(Object.keys(rpd.ROUTE_PRESENCE).length, 1294, 'one row per shelf story (1,264 audit rows + 30 woven twins)');
   // Kuchamaa is Protected register: even its weave-SAFE
   // telling is never woven material.
   assert.deepEqual(rpd.presenceFor('kuchamaa', 'landmark_origin'), { presence: 'safe', protected: true });
@@ -3506,6 +3524,140 @@ check('woven data regen: deterministic, and the committed routePresence.ts is in
   const after2 = readFileSync(dataPath, 'utf8');
   assert.equal(after1, after2, 'two runs of the generator produce byte-identical output');
   assert.equal(after1, before, 'the committed routePresence.ts already equals a fresh regeneration');
+});
+
+// ── Woven twins, wired (Nov 4, 2026) ──────────────────────
+// The tranche's 30 twins (source angle + '-woven-v1') are
+// real shelf rows now: the tag map carries them with their
+// sources' topics, the presence map classifies them
+// weave-safe by construction (derived in the generator, not
+// hand-edited), and the lever's index machinery — support
+// counting and the member fetch — can reach them.
+const TWIN_SUFFIX = '-woven-v1';
+const twinKeysOf = map => Object.keys(map).filter(k => k.split('|')[1]?.endsWith(TWIN_SUFFIX));
+check('woven twins (data): the tag map carries all 30 twins with topics inherited from their sources', () => {
+  assert.equal(Object.keys(rtg.ROUTE_TAGS).length, 1294, 'one tag row per shelf story');
+  const twins = twinKeysOf(rtg.ROUTE_TAGS);
+  assert.equal(twins.length, 30, 'the November tranche twins are index-visible');
+  let coast = 0;
+  for (const k of twins) {
+    const [pk, ang] = [k.slice(0, k.indexOf('|')), k.slice(k.indexOf('|') + 1)];
+    const twin = rtg.tagsFor(pk, ang);
+    const source = rtg.tagsFor(pk, ang.slice(0, -TWIN_SUFFIX.length));
+    assert.ok(twin.topics.length > 0, `${k} carries topics`);
+    assert.deepEqual(twin.topics, source.topics, `${k} inherits its source's topics`);
+    if (twin.topics.includes('Coast')) coast += 1;
+  }
+  assert.equal(coast, 24, 'the Coast tranche landed whole (24 of 30 twins carry Coast)');
+});
+check('woven twins (data): every twin resolves weave-safe and eligible; its source keeps the audit’s call', () => {
+  for (const k of twinKeysOf(rtg.ROUTE_TAGS)) {
+    const pk = k.slice(0, k.indexOf('|'));
+    const ang = k.slice(k.indexOf('|') + 1);
+    assert.deepEqual(rpd.presenceFor(pk, ang), { presence: 'safe', protected: false }, `${k} is safe by construction`);
+    assert.equal(rpd.wovenEligibleFor(pk, ang), true, `${k} is woven-eligible`);
+    const srcAng = ang.slice(0, -TWIN_SUFFIX.length);
+    assert.notEqual(rpd.presenceFor(pk, srcAng), null, `${pk}|${srcAng} still carries its audit class`);
+    assert.equal(rpd.presenceFor(pk, srcAng).protected, false, 'a twinned source is never Protected (the generator aborts otherwise)');
+  }
+  // The audit split for the original rows is untouched by the derivation.
+  const split = { bound: 0, mixed: 0, safe: 0 };
+  for (const [k, e] of Object.entries(rpd.ROUTE_PRESENCE)) {
+    if (!k.split('|')[1]?.endsWith(TWIN_SUFFIX)) split[e.presence] += 1;
+  }
+  assert.deepEqual(split, { bound: 195, mixed: 567, safe: 502 }, 'the recovered audit split, byte-stable');
+});
+check('woven twins (data): index support counts the twins, and the member fetch can return them', () => {
+  // The REAL shipped index (every tag-map key), all placed on
+  // member ground (off the fixture path, away from the
+  // destination) so geometry admits whatever class + topic +
+  // eligibility admit — the data is the only variable.
+  const index = Object.keys(rtg.ROUTE_TAGS).map(k => ({
+    place_key: k.slice(0, k.indexOf('|')),
+    angle: k.slice(k.indexOf('|') + 1),
+    lat: 32.0,
+    lng: -117.05,
+  }));
+  const tagsOf = (pk, ang) => rtg.tagsFor(pk, ang);
+  const eligibleOf = (pk, ang) => rpd.wovenEligibleFor(pk, ang);
+  const isLandmarkCoast = e =>
+    e.angle.startsWith('landmark') && tagsOf(e.place_key, e.angle).topics.includes('Coast');
+  const expectedCoast = index.filter(e => isLandmarkCoast(e) && eligibleOf(e.place_key, e.angle)).length;
+  const support = rm.wovenIndexSupportByTopic(index, path, dest, tagsOf, eligibleOf, {
+    fetchedIds: new Set(),
+    heardIds: new Set(),
+  });
+  assert.equal(support.get('Coast'), expectedCoast, 'support = the eligible landmark Coast depth of the shipped index');
+  const noTwins = rm.wovenIndexSupportByTopic(index, path, dest, tagsOf, (pk, ang) => eligibleOf(pk, ang) && !ang.endsWith(TWIN_SUFFIX), {
+    fetchedIds: new Set(),
+    heardIds: new Set(),
+  });
+  const landmarkCoastTwins = index.filter(e => isLandmarkCoast(e) && e.angle.endsWith(TWIN_SUFFIX)).length;
+  assert.equal(support.get('Coast') - (noTwins.get('Coast') ?? 0), landmarkCoastTwins, 'the twins add exactly their depth to Coast support');
+  assert.ok(landmarkCoastTwins > 0, 'landmark Coast twins exist to count');
+  // The member fetch: with every non-twin Coast landmark
+  // already in hand (the lever's exhausted-local-candidacy
+  // case), the read list is the twins and only the twins.
+  const inHand = new Set(
+    index.filter(e => isLandmarkCoast(e) && !e.angle.endsWith(TWIN_SUFFIX)).map(e => `${e.place_key}|${e.angle}`),
+  );
+  const fetched = rm.selectMemberFetchEntries(index, {
+    topic: 'Coast',
+    fetchedIds: inHand,
+    path,
+    destination: dest,
+    tagsOf,
+    eligibleOf,
+  });
+  assert.equal(fetched.length, landmarkCoastTwins, 'every landmark Coast twin is fetchable');
+  assert.ok(fetched.every(e => e.angle.endsWith(TWIN_SUFFIX)), 'only twins remain to fetch');
+  // Index-order discipline: with nothing in hand the capped
+  // read list is originals (twins ride at the index's tail).
+  const firstPage = rm.selectMemberFetchEntries(index, {
+    topic: 'Coast',
+    fetchedIds: new Set(),
+    path,
+    destination: dest,
+    tagsOf,
+    eligibleOf,
+  });
+  assert.equal(firstPage.length, rm.MEMBER_FETCH_READ_CAP, 'the read cap binds');
+  assert.ok(firstPage.every(e => !e.angle.endsWith(TWIN_SUFFIX)), 'the first page is originals, in index order');
+});
+check('woven twins (generator): a Protected source aborts the build; an unclassified source is skipped; an audit row for the twin wins', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'presence-twins-'));
+  const gen = join(repoRoot, 'scripts', 'route-mode', 'build-route-presence.mjs');
+  const presenceCsv = join(dir, 'presence.csv');
+  const tagsCsv = join(dir, 'tags.csv');
+  const outTs = join(dir, 'out.ts');
+  writeFileSync(
+    presenceCsv,
+    [
+      'place_key,angle,presence_class,protected',
+      'good place,landmark_origin,bound,0',
+      'prot place,landmark_origin,safe,1',
+      'audit twin,landmark_event-woven-v1,bound,0',
+      '',
+    ].join('\n'),
+  );
+  const tagsHead = 'place_key,angle,topics,tone,tone_secondary,tagged_from';
+  writeFileSync(
+    tagsCsv,
+    [tagsHead, 'good place,landmark_origin-woven-v1,Coast,warm,,t', 'audit twin,landmark_event-woven-v1,Coast,warm,,t', 'ghost place,landmark_origin-woven-v1,Coast,warm,,t', ''].join('\n'),
+  );
+  execFileSync(process.execPath, [gen, presenceCsv, tagsCsv, outTs], { stdio: 'pipe' });
+  const out = readFileSync(outTs, 'utf8');
+  assert.ok(out.includes('"good place|landmark_origin-woven-v1": { presence: "safe", protected: false }'), 'the twin of a bound source derives safe');
+  assert.ok(out.includes('"audit twin|landmark_event-woven-v1": { presence: "bound", protected: false }'), 'the audit’s own row for a twin key is not overridden');
+  assert.ok(!out.includes('ghost place'), 'a twin of an unclassified source is skipped (stays ineligible)');
+  writeFileSync(
+    tagsCsv,
+    [tagsHead, 'prot place,landmark_origin-woven-v1,Coast,warm,,t', ''].join('\n'),
+  );
+  assert.throws(
+    () => execFileSync(process.execPath, [gen, presenceCsv, tagsCsv, outTs], { stdio: 'pipe' }),
+    'a twin of a Protected source aborts the build',
+  );
 });
 
 check('woven seating: members seat strongest-first into the silent gap, climax untouched', () => {
