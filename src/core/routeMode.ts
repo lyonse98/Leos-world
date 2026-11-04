@@ -557,10 +557,12 @@ export interface ComposeOptions {
   /** Hosted-filler units available as budget spackle (angle filler_hosted). */
   fillerUnits?: LibraryUnit[];
   /**
-   * Finite tiling budget for the no-arrival case (the caller passes
-   * budgetSecFor(parsed, now, driveSec) — tile to the drive time).
-   * When absent and no arrival time is set, the plan fills to
-   * maxStories; callers should always pass it.
+   * The tiling budget. The App always passes budgetSecFor(driveSec)
+   * — the Routes drive-time estimate — and when present it is
+   * AUTHORITATIVE over any arrival-derived budget. When absent,
+   * an input arrival time (parser-only since Nov 3, 2026) still
+   * tiles the plan in pure-function tests; with neither, the plan
+   * fills to maxStories.
    */
   budgetSecOverride?: number;
   /**
@@ -660,13 +662,16 @@ export function composeRoutePlan(
   const pool = topicMatches.length > 0 ? topicMatches : geoAll;
   const topicsMatched = topicMatches.length > 0;
 
-  // Budget: arrival budget when given, else the caller-supplied
-  // drive-time budget (budgetSecFor); without either, maxStories
-  // is the only cap.
+  // Budget: the caller-supplied drive-time budget (budgetSecFor)
+  // wins whenever present — since Nov 3, 2026 it is the ONLY
+  // budget the App ever builds with. An input arrival time tiles
+  // the plan only when no override was passed (pure-function
+  // tests); without either, maxStories is the only cap.
   const budgetSec =
-    input.arrivalTimeMs !== null
+    opts.budgetSecOverride ??
+    (input.arrivalTimeMs !== null
       ? Math.max(60, Math.round((input.arrivalTimeMs - opts.nowMs) / 1000))
-      : (opts.budgetSecOverride ?? Number.POSITIVE_INFINITY);
+      : Number.POSITIVE_INFINITY);
   // Expected-time map for windows + elastic bridges: the Routes
   // drive time when the caller passes it, else the budget (the
   // drive time in the no-arrival case, the travel window in the
@@ -987,9 +992,15 @@ export function applyBridgeFallback(plan: RoutePlan): RoutePlan {
   return { ...plan, items, totalSec: items.reduce((s, it) => s + it.durationSec, 0) };
 }
 
-/** Budget helper for the no-arrival case: tile to the drive time. */
-export function budgetSecFor(input: ParsedRouteInput, nowMs: number, driveSec: number | null): number {
-  if (input.arrivalTimeMs !== null) return Math.max(60, Math.round((input.arrivalTimeMs - nowMs) / 1000));
+/**
+ * The composition budget (Erik, Nov 3, 2026: ride duration
+ * replaces Arrive-by). The Routes API's estimated drive time is
+ * the SOLE budget source — the intake no longer solicits an
+ * arrival time, and a typed "by <time>" clause, though the parser
+ * still reads it, never reaches the budget. Falls back to a
+ * 30-minute tile when no estimate exists.
+ */
+export function budgetSecFor(driveSec: number | null): number {
   return driveSec !== null ? Math.max(60, driveSec) : 1800;
 }
 
@@ -1089,40 +1100,123 @@ export interface GeocodedDestination {
 }
 
 /**
- * Places (New) text search for the destination. Returns the top
- * candidate. One call per route build; null on any failure (the
- * caller falls back to a typed-pin / retry, never a guessed pin).
+ * Why a live maps call produced nothing (Nov 3, 2026 — the
+ * failure-class split Erik's first stationary test forced):
+ * 'permission' = every configured key was blocked for this API
+ * (403 / PERMISSION_DENIED — a key-restriction problem, NOT a bad
+ * query); 'no_results' = a key answered fine and the API simply
+ * has nothing for the query; 'http' / 'network' = transport-level
+ * failure; 'no_keys' = no Google key is configured at all. The App
+ * speaks these differently — a permission failure must never
+ * masquerade as "couldn't find that place" again — and files the
+ * class to telemetry so the next one is visible in analytics.
+ */
+export type MapsFailure = 'permission' | 'no_results' | 'http' | 'network' | 'no_keys';
+
+export interface GeocodeOutcome {
+  destination: GeocodedDestination | null;
+  /** Null on success; otherwise the failure class above. */
+  failure: MapsFailure | null;
+}
+
+export interface RouteOutcome {
+  route: ComputedRoute | null;
+  /** Null on success; otherwise the failure class above. */
+  failure: MapsFailure | null;
+}
+
+/**
+ * The configured Google keys, deduped, blanks dropped. The bundle
+ * carries several keys whose API-restriction lists DIFFER (Nov 3,
+ * 2026, probe-verified): the key named Places is 403-blocked for
+ * Places (New) searchText while the second key allows it, and
+ * Routes sits on the first key's list. So no single key can be
+ * "the" maps key — every live call tries each configured key in
+ * order until one answers, and a 403 moves to the next key rather
+ * than failing the call. Key selection is per call: Places and
+ * Routes may legitimately succeed on different keys in one build.
+ */
+function configuredKeys(apiKeys: string[]): string[] {
+  return [...new Set(apiKeys.map(k => (typeof k === 'string' ? k.trim() : '')).filter(k => k.length > 0))];
+}
+
+/** Classify a non-ok response: 403 / PERMISSION_DENIED is a key-restriction block. */
+function classifyHttpFailure(status: number | undefined, errorStatus: string | undefined): MapsFailure {
+  if (status === 403 || errorStatus === 'PERMISSION_DENIED') return 'permission';
+  return 'http';
+}
+
+/** Merge a new attempt's failure into the running one: 'permission' is sticky (it is the actionable class). */
+function mergeFailure(current: MapsFailure, next: MapsFailure): MapsFailure {
+  if (current === 'permission' || next === 'permission') return 'permission';
+  return next;
+}
+
+/**
+ * Places (New) text search for the destination, across ALL
+ * configured keys (see configuredKeys). Returns the top candidate
+ * from the first key that answers; a key that answers with zero
+ * places is definitive ('no_results') — later keys are not tried
+ * for a query the service itself rejected as empty.
  */
 export async function geocodeDestination(
   query: string,
-  apiKey: string,
+  apiKeys: string[],
   fetchFn: typeof fetch = fetch,
-): Promise<GeocodedDestination | null> {
-  if (!apiKey) return null;
-  try {
-    const res = await fetchFn('https://places.googleapis.com/v1/places:searchText', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Goog-Api-Key': apiKey,
-        'X-Goog-FieldMask': 'places.displayName,places.location,places.formattedAddress',
-      },
-      body: JSON.stringify({ textQuery: query, maxResultCount: 1 }),
-    });
-    if (!res.ok) return null;
-    const parsed = (await res.json()) as {
+): Promise<GeocodeOutcome> {
+  const keys = configuredKeys(apiKeys);
+  if (keys.length === 0) return { destination: null, failure: 'no_keys' };
+  let failure: MapsFailure = 'network';
+  for (const apiKey of keys) {
+    let res: Response;
+    try {
+      res = await fetchFn('https://places.googleapis.com/v1/places:searchText', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': apiKey,
+          'X-Goog-FieldMask': 'places.displayName,places.location,places.formattedAddress',
+        },
+        body: JSON.stringify({ textQuery: query, maxResultCount: 1 }),
+      });
+    } catch {
+      failure = mergeFailure(failure, 'network');
+      continue;
+    }
+    if (!res.ok) {
+      let errorStatus: string | undefined;
+      try {
+        const body = (await res.json()) as { error?: { status?: string } };
+        errorStatus = body?.error?.status;
+      } catch {
+        /* classification falls back to the HTTP status alone */
+      }
+      failure = mergeFailure(failure, classifyHttpFailure(res.status, errorStatus));
+      continue;
+    }
+    let parsed: {
       places?: { displayName?: { text?: string }; location?: { latitude?: number; longitude?: number }; formattedAddress?: string }[];
     };
+    try {
+      parsed = (await res.json()) as typeof parsed;
+    } catch {
+      failure = mergeFailure(failure, 'http');
+      continue;
+    }
     const p = parsed.places?.[0];
-    if (!p?.displayName?.text || p.location?.latitude === undefined || p.location?.longitude === undefined) return null;
+    if (!p?.displayName?.text || p.location?.latitude === undefined || p.location?.longitude === undefined) {
+      return { destination: null, failure: 'no_results' };
+    }
     return {
-      name: p.displayName.text,
-      address: p.formattedAddress ?? null,
-      location: { lat: p.location.latitude, lng: p.location.longitude },
+      destination: {
+        name: p.displayName.text,
+        address: p.formattedAddress ?? null,
+        location: { lat: p.location.latitude, lng: p.location.longitude },
+      },
+      failure: null,
     };
-  } catch {
-    return null;
   }
+  return { destination: null, failure };
 }
 
 export interface ComputedRoute {
@@ -1132,49 +1226,90 @@ export interface ComputedRoute {
 }
 
 /**
- * Routes API computeRoutes with traffic (TRAFFIC_AWARE), DRIVE mode.
- * One call per route build. The Places key carries the Routes API
- * restriction (enabled Nov 2, 2026); a 403 here means the key's
- * restriction list, not the code path — the caller surfaces that.
+ * Routes API computeRoutes with traffic (TRAFFIC_AWARE), DRIVE
+ * mode, across ALL configured keys (see configuredKeys — Routes
+ * was added to one key's restriction list Nov 2, 2026, Places
+ * (New) evidently sits on another's; a 403 tries the next key).
+ * A key that answers with no route is definitive ('no_results').
  */
 export async function computeRoute(
   origin: GeoPoint,
   destination: GeoPoint,
-  apiKey: string,
+  apiKeys: string[],
   fetchFn: typeof fetch = fetch,
-): Promise<ComputedRoute | null> {
-  if (!apiKey) return null;
-  try {
-    const res = await fetchFn('https://routes.googleapis.com/directions/v2:computeRoutes', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Goog-Api-Key': apiKey,
-        'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline',
-      },
-      body: JSON.stringify({
-        origin: { location: { latLng: { latitude: origin.lat, longitude: origin.lng } } },
-        destination: { location: { latLng: { latitude: destination.lat, longitude: destination.lng } } },
-        travelMode: 'DRIVE',
-        routingPreference: 'TRAFFIC_AWARE',
-        computeAlternativeRoutes: false,
-      }),
-    });
-    if (!res.ok) return null;
-    const parsed = (await res.json()) as {
+): Promise<RouteOutcome> {
+  const keys = configuredKeys(apiKeys);
+  if (keys.length === 0) return { route: null, failure: 'no_keys' };
+  let failure: MapsFailure = 'network';
+  for (const apiKey of keys) {
+    let res: Response;
+    try {
+      res = await fetchFn('https://routes.googleapis.com/directions/v2:computeRoutes', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': apiKey,
+          'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline',
+        },
+        body: JSON.stringify({
+          origin: { location: { latLng: { latitude: origin.lat, longitude: origin.lng } } },
+          destination: { location: { latLng: { latitude: destination.lat, longitude: destination.lng } } },
+          travelMode: 'DRIVE',
+          routingPreference: 'TRAFFIC_AWARE',
+          computeAlternativeRoutes: false,
+        }),
+      });
+    } catch {
+      failure = mergeFailure(failure, 'network');
+      continue;
+    }
+    if (!res.ok) {
+      let errorStatus: string | undefined;
+      try {
+        const body = (await res.json()) as { error?: { status?: string } };
+        errorStatus = body?.error?.status;
+      } catch {
+        /* classification falls back to the HTTP status alone */
+      }
+      failure = mergeFailure(failure, classifyHttpFailure(res.status, errorStatus));
+      continue;
+    }
+    let parsed: {
       routes?: { distanceMeters?: number; duration?: string; polyline?: { encodedPolyline?: string } }[];
     };
+    try {
+      parsed = (await res.json()) as typeof parsed;
+    } catch {
+      failure = mergeFailure(failure, 'http');
+      continue;
+    }
     const r = parsed.routes?.[0];
-    if (!r?.polyline?.encodedPolyline) return null;
+    if (!r?.polyline?.encodedPolyline) return { route: null, failure: 'no_results' };
     const dur = r.duration ? parseInt(r.duration.replace('s', ''), 10) : 0;
     return {
-      path: decodePolyline(r.polyline.encodedPolyline),
-      distanceMeters: r.distanceMeters ?? 0,
-      durationSec: Number.isFinite(dur) ? dur : 0,
+      route: {
+        path: decodePolyline(r.polyline.encodedPolyline),
+        distanceMeters: r.distanceMeters ?? 0,
+        durationSec: Number.isFinite(dur) ? dur : 0,
+      },
+      failure: null,
     };
-  } catch {
-    return null;
   }
+  return { route: null, failure };
+}
+
+/**
+ * The ride estimate in plain words (Erik, Nov 3, 2026 — the
+ * Routes drive-time estimate replaces the Arrive-by input):
+ * shown in the building state once the route has computed.
+ */
+export function rideEstimateLine(durationSec: number): string {
+  const mins = Math.max(1, Math.round(durationSec / 60));
+  if (mins < 60) return `About ${mins} minute${mins === 1 ? '' : 's'} of driving — Miles will fill the ride.`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  const span = m === 0 ? `${h} hour${h === 1 ? '' : 's'}` : `${h} hour${h === 1 ? '' : 's'} ${m} minute${m === 1 ? '' : 's'}`;
+  return `About ${span} of driving — Miles will fill the ride.`;
 }
 
 /**

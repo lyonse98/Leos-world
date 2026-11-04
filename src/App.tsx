@@ -13,6 +13,7 @@ import {
   isRouteModeEnabled,
   parseRouteInput,
   qaGateOpen,
+  rideEstimateLine,
   selectFetchCandidates,
   ROUTE_TONES,
   ROUTE_TOPICS,
@@ -272,6 +273,41 @@ function LegalLinks() {
 }
 
 /**
+ * Compact header for the stepped pre-tour screens (Nov 3, 2026
+ * landing restructure): Miles's face at the standard (non-large)
+ * size, the wordmark, and the located line — sized so each step
+ * fits one phone viewport with room for its choices below.
+ */
+function PreTourHeader({
+  granted,
+  position,
+  locationError,
+}: {
+  granted: boolean;
+  position: { lat: number; lng: number } | null;
+  locationError: string | null;
+}) {
+  return (
+    <>
+      <MilesFigure pose="wave" />
+      <h1 className="mt-1 text-center text-4xl font-black tracking-tight text-ink">Miles</h1>
+      <div className="mt-2 flex items-center justify-center gap-2 text-xs font-semibold text-inksoft">
+        <MapPin className="h-4 w-4 text-sagedeep" />
+        {granted && position ? (
+          <span>
+            Located — {position.lat.toFixed(3)}, {position.lng.toFixed(3)}
+          </span>
+        ) : locationError ? (
+          <span className="text-amber-700">{locationError}</span>
+        ) : (
+          <span>Finding you…</span>
+        )}
+      </div>
+    </>
+  );
+}
+
+/**
  * Tester access gate screen (Nov 2, 2026). Rendered INSTEAD of the
  * tour shell while locked: nothing in MilesApp — no Tour, no landing
  * warm, no position watch — mounts behind this screen, so a locked
@@ -383,8 +419,13 @@ function MilesApp() {
   const [askOpen, setAskOpen] = useState(false);
   const qaOpen = qaGateOpen(ROUTE_MODE_ENABLED, rideMode);
   const [routeFormOpen, setRouteFormOpen] = useState(false);
+  // Landing steps (Nov 3, 2026 restructure, flag-on only): 'mode'
+  // (Driving vs Passenger/Walking) → 'choice' (Freeform vs Route,
+  // equal prominence) → 'route' (the intake). Each step fits one
+  // viewport — no scrolling. Flag-off never reads this: the exact
+  // v15 landing renders instead.
+  const [landingStep, setLandingStep] = useState<'mode' | 'choice' | 'route'>('mode');
   const [routeDest, setRouteDest] = useState('');
-  const [routeArrival, setRouteArrival] = useState('');
   const [routeTone, setRouteTone] = useState('');
   const [routeTopics, setRouteTopics] = useState<string[]>([]);
   const [routeStatus, setRouteStatus] = useState('');
@@ -419,6 +460,7 @@ function MilesApp() {
     const owed = routeView.owed;
     const tail = routeView.freeformTail;
     setRouteActive(false);
+    setLandingStep('mode');
     routeRunnerRef.current = null;
     if (owed) setOwedLine(owed);
     if (tail) {
@@ -598,7 +640,10 @@ function MilesApp() {
    * Route build (v16.1; composer v2, Nov 3, 2026): ONE static
    * composition pass at departure. Live calls, exactly three per
    * build: one Gemini parse (local fallback), one Places text
-   * search, one Routes computeRoutes. Library rows are fetched
+   * search, one Routes computeRoutes — each maps call walks ALL
+   * configured Google keys until one answers (Nov 3, 2026: the
+   * keys' API-restriction lists differ per key, so key selection
+   * is per call, never once per build). Library rows are fetched
    * for the FAIR fetch set (selectFetchCandidates: round-robin
    * across the whole path's progress deciles, ≤120 geographic +
    * ≤30 topic-connected portal candidates), read in parallel
@@ -610,7 +655,7 @@ function MilesApp() {
   const buildRoute = async () => {
     const origin = positionRef.current ?? (position ? { lat: position.lat, lng: position.lng } : null);
     if (!origin) {
-      setRouteStatus('Miles needs your location first — wait for the “Located” line above.');
+      setRouteStatus('Miles needs your location first — give it a moment, then try again.');
       return;
     }
     if (routeDest.trim().length === 0) {
@@ -619,6 +664,11 @@ function MilesApp() {
     }
     setRouteBuilding(true);
     setRouteStatus('Building your route…');
+    // One session id for the whole build, minted up front so a
+    // build-time failure (geocode / route) files its telemetry
+    // under the same id the tour itself would have used.
+    const sessionId = `route-${Date.now()}`;
+    routeSessionRef.current = sessionId;
     try {
       const nowMs = Date.now();
       const parsed = await parseRouteInput(
@@ -626,28 +676,70 @@ function MilesApp() {
         nowMs,
         import.meta.env.VITE_GEMINI_API_KEY as string | undefined,
       );
-      const arrivalMs = routeArrival ? Date.parse(routeArrival) : null;
+      // Erik, Nov 3, 2026: ride duration replaces Arrive-by. The
+      // parser still reads a typed "by <time>" clause, but no
+      // arrival time is solicited by the UI or used anywhere —
+      // the Routes drive-time estimate is the composition's sole
+      // budget (budgetSecFor below).
       const input = {
         ...parsed,
-        arrivalTimeMs: Number.isFinite(arrivalMs) && (arrivalMs as number) > nowMs ? (arrivalMs as number) : parsed.arrivalTimeMs,
+        arrivalTimeMs: null,
         tone: routeTone || parsed.tone,
         topics: routeTopics.length > 0 ? routeTopics : parsed.topics,
       };
-      const placesKey =
-        (import.meta.env.VITE_GOOGLE_PLACES_API_KEY as string | undefined) ??
-        (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined) ??
-        '';
-      const geocoded = await geocodeDestination(input.destinationText, placesKey);
-      if (!geocoded) {
-        setRouteStatus('Couldn’t find that place — try a fuller name (e.g. “Balboa Park, San Diego”).');
+      // Every configured Google key, in order (Nov 3, 2026): the
+      // bundle's keys carry DIFFERENT API-restriction lists —
+      // Places (New) answers on one key, Routes on another — so
+      // geocodeDestination / computeRoute each walk this list
+      // until a key answers, per call.
+      const googleKeys = [
+        import.meta.env.VITE_GOOGLE_PLACES_API_KEY as string | undefined,
+        import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined,
+        import.meta.env.VITE_GEMINI_API_KEY as string | undefined,
+      ].filter((k): k is string => typeof k === 'string' && k.length > 0);
+      const geo = await geocodeDestination(input.destinationText, googleKeys);
+      if (!geo.destination) {
+        // Failure classes speak differently (Nov 3, 2026): a
+        // permission/transport failure is the maps SERVICE being
+        // unreachable — never "couldn't find", which is reserved
+        // for a search that answered and came back empty. The
+        // class files to telemetry either way, so the next
+        // blockage is visible in analytics, not masked as a
+        // bad query.
+        if (geo.failure === 'no_results') {
+          setRouteStatus('Couldn’t find that place — try a fuller name (e.g. “Balboa Park, San Diego”).');
+        } else {
+          setRouteStatus('Miles can’t reach the maps service right now — try again in a bit.');
+        }
+        void emitEvent(
+          sessionId,
+          'route_build_failed',
+          { stage: 'geocode', reason: geo.failure ?? 'unknown' },
+          { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
+        );
         return;
       }
-      const route = await computeRoute(origin, geocoded.location, placesKey);
-      if (!route) {
-        setRouteStatus('Couldn’t compute a route — check the drive and try again.');
+      const geocoded = geo.destination;
+      const routed = await computeRoute(origin, geocoded.location, googleKeys);
+      if (!routed.route) {
+        if (routed.failure === 'no_results') {
+          setRouteStatus('Couldn’t find a driving route there — try a different destination.');
+        } else {
+          setRouteStatus('Miles can’t reach the maps service right now — try again in a bit.');
+        }
+        void emitEvent(
+          sessionId,
+          'route_build_failed',
+          { stage: 'route', reason: routed.failure ?? 'unknown' },
+          { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
+        );
         return;
       }
-      const budget = budgetSecFor(input, nowMs, route.durationSec);
+      const route = routed.route;
+      // The ride estimate, in plain words, for the rest of the
+      // build (the composer pass + library fetch that follow).
+      setRouteStatus(rideEstimateLine(route.durationSec));
+      const budget = budgetSecFor(route.durationSec);
       const index = await fetchLibraryIndex();
       const fetchSet = selectFetchCandidates(index, route.path, geocoded.location, (pk, ang) => tagsFor(pk, ang), {
         userTopics: input.topics,
@@ -707,8 +799,6 @@ function MilesApp() {
       plan.budgetSec = budget;
       const plannedIds = new Set(plan.items.map(it => it.id));
       plan.shelfTease = units.find(u => !plannedIds.has(u.id) && !heardKeys.has(u.id)) ?? null;
-      const sessionId = `route-${Date.now()}`;
-      routeSessionRef.current = sessionId;
       // Phase-2 Q&A wiring: the runner receives the answer
       // generator ONLY when the declared-mode gate is open for
       // this ride. A driving route runner has no generator dep at
@@ -755,6 +845,7 @@ function MilesApp() {
     if (routeRunnerRef.current?.view().owed) setOwedLine(routeRunnerRef.current.view().owed);
     routeRunnerRef.current?.endTour();
     setRouteActive(false);
+    setLandingStep('mode');
     routeRunnerRef.current = null;
     setRouteRunner(null);
   };
@@ -825,6 +916,206 @@ function MilesApp() {
     typeof window !== 'undefined' &&
     (window.matchMedia('(display-mode: standalone)').matches ||
       (navigator as Navigator & { standalone?: boolean }).standalone === true);
+
+  // ------------------------------------------------------------ landing (stepped, flag-on)
+  // Erik's restructure (Nov 3, 2026): with route mode on, the
+  // pre-tour flow is three one-viewport steps — (1) the declared
+  // mode, Driving vs Passenger/Walking, as two large EQUAL
+  // choices; (2) Freeform vs Route as two EQUAL choices (route is
+  // no longer a collapsed "instead" tucked under the freeform
+  // button); (3) the route intake. No step scrolls on mobile: the
+  // shell is h-dvh with overflow hidden and a compact header. The
+  // declared mode still snapshots at tour start exactly as before
+  // (startTour / buildRoute read tourMode), stays immutable
+  // mid-drive, and the Q&A gate consumes it unchanged. Flag off
+  // never reaches here — the legacy landing below renders instead,
+  // byte-for-byte the v15 landing.
+  if (ROUTE_MODE_ENABLED && view.phase !== 'active' && !routeActive) {
+    const equalChoiceBtn =
+      'w-full rounded-full bg-ink px-6 py-5 text-lg font-extrabold tracking-wide text-cream shadow-xl shadow-ink/25 transition hover:bg-sagedeep active:scale-[0.99]';
+    const choiceCaption = 'mt-0.5 block text-xs font-semibold tracking-normal text-cream/70';
+    return (
+      <div className="miles-app-bg relative h-dvh overflow-hidden bg-cream text-ink">
+        <PosterBackdrop />
+        <main className="safe-top safe-bottom relative mx-auto flex h-full w-full max-w-xl flex-col px-6 py-4">
+          {landingStep !== 'route' && !(landingStep === 'choice' && resumeOffered) && (
+            <PreTourHeader granted={granted} position={position} locationError={locationError} />
+          )}
+
+          {landingStep === 'mode' && (
+            <>
+              {owedLine && (
+                <p className="mt-4 w-full rounded-[2rem] bg-white/70 p-4 text-center text-sm font-bold text-ink shadow-lg shadow-ink/10">
+                  {owedLine}
+                </p>
+              )}
+              <div className="flex flex-1 flex-col justify-end pb-2">
+                <p className="text-center text-base font-bold text-ink">How are you riding?</p>
+                <div className="mt-4 flex flex-col gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTourMode('driving');
+                      setLandingStep('choice');
+                    }}
+                    className={equalChoiceBtn}
+                  >
+                    Driving
+                    <span className={choiceCaption}>Just the stories — eyes on the road</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTourMode('passenger');
+                      setLandingStep('choice');
+                    }}
+                    className={equalChoiceBtn}
+                  >
+                    Passenger / Walking
+                    <span className={choiceCaption}>Stories — and you can ask Miles questions</span>
+                  </button>
+                </div>
+                <p className="mt-3 text-center text-[11px] text-inksoft">
+                  This stays set for the whole ride — it can&rsquo;t change mid-drive.
+                </p>
+              </div>
+            </>
+          )}
+
+          {landingStep === 'choice' && (
+            <>
+              <div className="mt-3 flex items-center justify-center gap-2 text-xs font-semibold text-inksoft">
+                <span>Riding: {tourMode === 'driving' ? 'Driving' : 'Passenger / Walking'}</span>
+                <button
+                  type="button"
+                  onClick={() => setLandingStep('mode')}
+                  className="font-bold text-sagedeep underline underline-offset-2"
+                >
+                  Change
+                </button>
+              </div>
+              {resumeOffered && view.phase === 'idle' && (
+                <div className="mt-4 w-full rounded-[2rem] bg-white/70 p-5 text-center shadow-xl shadow-ink/10">
+                  <p className="text-sm font-bold text-ink">Tour in progress</p>
+                  <p className="mt-1 text-xs text-inksoft">
+                    You stepped away recently. Pick it back up, or start fresh.
+                  </p>
+                  <div className="mt-4 flex gap-3">
+                    <button
+                      onPointerDown={startOnPointerDown(true)}
+                      onClick={startOnKeyboardClick(true)}
+                      className="flex-1 rounded-full bg-ink px-4 py-3.5 text-sm font-bold text-cream shadow-lg shadow-ink/20 transition hover:bg-sagedeep"
+                    >
+                      RESUME TOUR
+                    </button>
+                    <button
+                      onClick={() => setResumeOffered(false)}
+                      className="flex-1 rounded-full bg-cream2 px-4 py-3.5 text-sm font-bold text-ink transition hover:bg-sage/25"
+                    >
+                      Start Fresh
+                    </button>
+                  </div>
+                </div>
+              )}
+              <div className="flex flex-1 flex-col justify-end pb-2">
+                <p className="text-center text-base font-bold text-ink">How do you want to ride?</p>
+                <div className="mt-4 flex flex-col gap-3">
+                  <button onPointerDown={startOnPointerDown(false)} onClick={startOnKeyboardClick(false)} className={equalChoiceBtn}>
+                    <span className="flex items-center justify-center gap-2">
+                      <Play className="h-6 w-6" /> Freeform
+                    </span>
+                    <span className={choiceCaption}>Stories as you pass them — no destination</span>
+                  </button>
+                  <button type="button" onClick={() => setLandingStep('route')} className={equalChoiceBtn}>
+                    <span className="flex items-center justify-center gap-2">
+                      <MapPin className="h-6 w-6" /> Route
+                    </span>
+                    <span className={choiceCaption}>One destination — Miles plans the ride</span>
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+
+          {landingStep === 'route' && (
+            <div className="flex flex-1 flex-col">
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setLandingStep('choice')}
+                  className="rounded-full bg-cream2 px-4 py-2 text-xs font-bold text-ink transition hover:bg-sage/25"
+                >
+                  ‹ Back
+                </button>
+                <p className="text-base font-extrabold text-ink">Plan a route</p>
+              </div>
+              <label className="mt-4 block text-sm font-bold text-ink" htmlFor="route-dest-step">
+                Where to?
+              </label>
+              <input
+                id="route-dest-step"
+                value={routeDest}
+                onChange={e => setRouteDest(e.target.value)}
+                placeholder="e.g. Balboa Park"
+                className="mt-2 w-full rounded-full border-2 border-sage/30 bg-white px-5 py-3 text-base text-ink placeholder:text-inksoft/50 focus:border-sagedeep focus:outline-none"
+              />
+              <label className="mt-3 block text-sm font-bold text-ink" htmlFor="route-tone-step">
+                Mood for the ride (optional)
+              </label>
+              <select
+                id="route-tone-step"
+                value={routeTone}
+                onChange={e => setRouteTone(e.target.value)}
+                className="mt-2 w-full rounded-full border-2 border-sage/30 bg-white px-5 py-3 text-base text-ink focus:border-sagedeep focus:outline-none"
+              >
+                <option value="">Any mood</option>
+                {ROUTE_TONES.map(t => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-3 text-sm font-bold text-ink">Topics (optional)</p>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {ROUTE_TOPICS.map(t => (
+                  <button
+                    key={t}
+                    type="button"
+                    aria-pressed={routeTopics.includes(t)}
+                    onClick={() =>
+                      setRouteTopics(prev => (prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t]))
+                    }
+                    className={`rounded-full px-2.5 py-1 text-[11px] font-bold transition ${
+                      routeTopics.includes(t) ? 'bg-ink text-cream' : 'bg-cream2 text-ink hover:bg-sage/25'
+                    }`}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={() => void buildRoute()}
+                disabled={routeBuilding}
+                className="mt-4 w-full rounded-full bg-ink px-4 py-3.5 text-sm font-bold text-cream shadow-lg shadow-ink/20 transition hover:bg-sagedeep disabled:opacity-50"
+              >
+                {routeBuilding ? 'Building…' : 'Build my route'}
+              </button>
+              {routeStatus && <p className="mt-2 text-center text-xs leading-relaxed text-inksoft">{routeStatus}</p>}
+              <p className="mt-2 text-center text-[11px] text-inksoft">
+                One route, composed at departure from stories you haven&rsquo;t heard — no re-planning mid-drive.
+              </p>
+            </div>
+          )}
+
+          <p className="pt-3 text-center text-[11px] leading-relaxed text-inksoft/80">
+            Miles is an AI guide — he may occasionally get a detail wrong.
+          </p>
+          <LegalLinks />
+        </main>
+      </div>
+    );
+  }
 
   // ------------------------------------------------------------ landing
   // (routeActive skips the landing: the route screen below owns the
@@ -951,16 +1242,6 @@ function MilesApp() {
                     onChange={e => setRouteDest(e.target.value)}
                     placeholder="e.g. Balboa Park"
                     className="mt-2 w-full rounded-full border-2 border-sage/30 bg-white px-5 py-3 text-base text-ink placeholder:text-inksoft/50 focus:border-sagedeep focus:outline-none"
-                  />
-                  <label className="mt-4 block text-sm font-bold text-ink" htmlFor="route-arrival">
-                    Arrive by (optional)
-                  </label>
-                  <input
-                    id="route-arrival"
-                    type="datetime-local"
-                    value={routeArrival}
-                    onChange={e => setRouteArrival(e.target.value)}
-                    className="mt-2 w-full rounded-full border-2 border-sage/30 bg-white px-5 py-3 text-base text-ink focus:border-sagedeep focus:outline-none"
                   />
                   <label className="mt-4 block text-sm font-bold text-ink" htmlFor="route-tone">
                     Mood for the ride (optional)

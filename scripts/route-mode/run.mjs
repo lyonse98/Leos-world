@@ -179,23 +179,120 @@ check('local parse: destination, arrival, tone, topics', () => {
 });
 
 // ---- stubbed live APIs (no network) ----
+// Outcome-shaped results + per-key fallback (Nov 3, 2026): the
+// bundle's keys carry different API-restriction lists, so each
+// maps call walks the configured key list until one answers.
+const okPlaces = name => ({
+  ok: true,
+  status: 200,
+  json: async () => ({ places: [{ displayName: { text: name }, location: { latitude: 32.734, longitude: -117.149 }, formattedAddress: 'San Diego, CA' }] }),
+});
+const okRoute = {
+  ok: true,
+  status: 200,
+  json: async () => ({ routes: [{ distanceMeters: 12000, duration: '900s', polyline: { encodedPolyline: '_p~iF~ps|U_ulLnnqC_mqNvxq`@' } }] }),
+};
+const blocked = {
+  ok: false,
+  status: 403,
+  json: async () => ({ error: { code: 403, status: 'PERMISSION_DENIED', message: 'Requests to this API are blocked.' } }),
+};
+const keyOf = opts => opts.headers['X-Goog-Api-Key'];
+
 await checkAsync('geocode: stub fetch parses top candidate', async () => {
-  const stub = async () => ({
-    ok: true,
-    json: async () => ({ places: [{ displayName: { text: 'Balboa Park' }, location: { latitude: 32.734, longitude: -117.149 }, formattedAddress: 'San Diego, CA' }] }),
-  });
-  const g = await rm.geocodeDestination('Balboa Park', 'fake-key', stub);
-  assert.equal(g.name, 'Balboa Park');
-  assert.equal(g.location.lat, 32.734);
+  const stub = async () => okPlaces('Balboa Park');
+  const g = await rm.geocodeDestination('Balboa Park', ['fake-key'], stub);
+  assert.equal(g.failure, null);
+  assert.equal(g.destination.name, 'Balboa Park');
+  assert.equal(g.destination.location.lat, 32.734);
 });
 await checkAsync('routes: stub fetch decodes polyline + duration', async () => {
-  const stub = async () => ({
-    ok: true,
-    json: async () => ({ routes: [{ distanceMeters: 12000, duration: '900s', polyline: { encodedPolyline: '_p~iF~ps|U_ulLnnqC_mqNvxq`@' } }] }),
-  });
-  const r = await rm.computeRoute({ lat: 32.7, lng: -117.25 }, dest, 'fake-key', stub);
-  assert.equal(r.durationSec, 900);
-  assert.equal(r.path.length, 3);
+  const stub = async () => okRoute;
+  const r = await rm.computeRoute({ lat: 32.7, lng: -117.25 }, dest, ['fake-key'], stub);
+  assert.equal(r.failure, null);
+  assert.equal(r.route.durationSec, 900);
+  assert.equal(r.route.path.length, 3);
+});
+await checkAsync('geocode: first key 403-blocked → second key succeeds (the NBSD case)', async () => {
+  const tried = [];
+  const stub = async (url, opts) => {
+    tried.push(keyOf(opts));
+    return keyOf(opts) === 'places-blocked-key' ? blocked : okPlaces('Naval Base San Diego');
+  };
+  const g = await rm.geocodeDestination('naval base san diego', ['places-blocked-key', 'working-key'], stub);
+  assert.deepEqual(tried, ['places-blocked-key', 'working-key'], 'keys tried in order');
+  assert.equal(g.failure, null);
+  assert.equal(g.destination.name, 'Naval Base San Diego');
+});
+await checkAsync('split keys: Places answers on key B, Routes on key A → the build sequence succeeds', async () => {
+  // Places (New) is blocked on key A but open on key B; Routes is
+  // open on key A. The App passes the same list to both calls;
+  // per-call selection must land each on its working key.
+  const used = { places: null, routes: null };
+  const stub = async (url, opts) => {
+    const key = keyOf(opts);
+    if (url.includes('places:searchText')) {
+      used.places = key;
+      return key === 'key-a' ? blocked : okPlaces('Naval Base San Diego');
+    }
+    used.routes = key;
+    return okRoute;
+  };
+  const g = await rm.geocodeDestination('naval base san diego', ['key-a', 'key-b'], stub);
+  assert.equal(g.failure, null);
+  assert.equal(used.places, 'key-b');
+  const r = await rm.computeRoute({ lat: 32.7, lng: -117.25 }, g.destination.location, ['key-a', 'key-b'], stub);
+  assert.equal(r.failure, null);
+  assert.equal(used.routes, 'key-a', 'routes succeeded on the first key — no need to walk');
+  assert.equal(r.route.durationSec, 900);
+});
+await checkAsync('geocode: all keys blocked → permission failure class (never "no results")', async () => {
+  const stub = async () => blocked;
+  const g = await rm.geocodeDestination('naval base san diego', ['key-a', 'key-b'], stub);
+  assert.equal(g.destination, null);
+  assert.equal(g.failure, 'permission');
+  const r = await rm.computeRoute({ lat: 32.7, lng: -117.25 }, dest, ['key-a', 'key-b'], stub);
+  assert.equal(r.route, null);
+  assert.equal(r.failure, 'permission');
+});
+await checkAsync('geocode: an answering key with zero places is definitive no_results (later keys untried)', async () => {
+  let calls = 0;
+  const stub = async () => {
+    calls += 1;
+    return { ok: true, status: 200, json: async () => ({ places: [] }) };
+  };
+  const g = await rm.geocodeDestination('the middle of nowhere', ['key-a', 'key-b'], stub);
+  assert.equal(g.destination, null);
+  assert.equal(g.failure, 'no_results');
+  assert.equal(calls, 1, 'a definitive empty answer does not burn more keys');
+});
+await checkAsync('geocode: no keys configured → no_keys, fetch never called', async () => {
+  const stub = async () => {
+    throw new Error('must not be called');
+  };
+  const g = await rm.geocodeDestination('Balboa Park', [], stub);
+  assert.equal(g.destination, null);
+  assert.equal(g.failure, 'no_keys');
+  const r = await rm.computeRoute({ lat: 32.7, lng: -117.25 }, dest, ['', '  '], stub);
+  assert.equal(r.route, null);
+  assert.equal(r.failure, 'no_keys');
+});
+
+// ---- ride-duration budget (Nov 3, 2026: Arrive-by removed) ----
+check('budget: the Routes drive estimate is the sole source', () => {
+  assert.equal(rm.budgetSecFor(1440), 1440);
+  assert.equal(rm.budgetSecFor(20), 60, 'floor of one minute');
+  assert.equal(rm.budgetSecFor(null), 1800, 'no estimate → 30-minute tile');
+});
+check('budget: a caller drive budget overrides any parsed arrival time', () => {
+  const units = [unit('a|landmark_origin', 32.71), unit('b|landmark_origin', 32.75)];
+  const plan = rm.composeRoutePlan(units, path, dest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: NOW + 3600 * 1000, tone: null, topics: [] }, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: rm.budgetSecFor(600) });
+  assert.equal(plan.budgetSec, 600, 'drive budget wins over the (parser-only) arrival time');
+});
+check('ride estimate line: plain words for the building state', () => {
+  assert.equal(rm.rideEstimateLine(1440), 'About 24 minutes of driving — Miles will fill the ride.');
+  assert.equal(rm.rideEstimateLine(3900), 'About 1 hour 5 minutes of driving — Miles will fill the ride.');
+  assert.equal(rm.rideEstimateLine(45), 'About 1 minute of driving — Miles will fill the ride.');
 });
 await checkAsync('gemini parse: failure falls back to local parse', async () => {
   const failing = async () => {
