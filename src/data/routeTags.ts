@@ -1,6 +1,6 @@
 // GENERATED — do not hand-edit. Built by
 // scripts/route-mode/build-route-tags.mjs from story-tags.csv
-// (1220 rows, Nov 1 tone/topic tagging). The route
+// (1264 rows, Nov 1 tone/topic tagging). The route
 // composer joins library-index rows to this map at runtime, so no
 // DB change is needed for route mode to see tone/topic tags.
 
@@ -736,7 +736,7 @@ export const ROUTE_TAGS: Record<string, RouteTagEntry> = {
   "rancho bernardo|neighborhood_intro_greet": { topics: [], tone: "grand", toneSecondary: "warm" },
   "rancho bernardo inn|landmark_origin": { topics: [], tone: "light", toneSecondary: "warm" },
   "rancho bernardo inn|landmark_people": { topics: ["Boom & Bust"], tone: "light", toneSecondary: null },
-  "rancho bernardo inn|landmark_recent": { topics: [], tone: "grand", toneSecondary: "reflective" },
+  "rancho bernardo inn|landmark_recent": { topics: [], tone: "warm", toneSecondary: "reflective" },
   "rancho guajome adobe|landmark_building": { topics: [], tone: "reflective", toneSecondary: null },
   "rancho guajome adobe|landmark_origin": { topics: [], tone: "warm", toneSecondary: "light" },
   "rancho guajome adobe|landmark_people": { topics: [], tone: "reflective", toneSecondary: "somber" },
@@ -1232,6 +1232,50 @@ export const ROUTE_TAGS: Record<string, RouteTagEntry> = {
   "wonderland-park--v-heavy|filler_hosted": { topics: ["Boom & Bust"], tone: "light", toneSecondary: "reflective" },
   "zonies|filler_hosted": { topics: ["Coast"], tone: "warm", toneSecondary: "light" },
   "zonies--v-heavy|filler_hosted": { topics: ["Coast"], tone: "light", toneSecondary: null },
+  "museum of us|landmark_origin": { topics: ["Expositions & the Canal"], tone: "reflective", toneSecondary: "warm" },
+  "museum of us|landmark_building": { topics: ["Expositions & the Canal"], tone: "grand", toneSecondary: "reflective" },
+  "museum of us|landmark_people": { topics: ["Deep Time"], tone: "reflective", toneSecondary: "warm" },
+  "san diego air and space museum|landmark_origin": { topics: ["Flight"], tone: "warm", toneSecondary: "reflective" },
+  "san diego air and space museum|landmark_event": { topics: ["Flight"], tone: "grand", toneSecondary: "reflective" },
+  "san diego air and space museum|landmark_building": { topics: ["Flight"], tone: "grand", toneSecondary: "warm" },
+  "junipero serra museum|landmark_origin": { topics: ["Mission Chain"], tone: "reflective", toneSecondary: null },
+  "junipero serra museum|landmark_building": { topics: ["Mission Chain"], tone: "warm", toneSecondary: "reflective" },
+  "junipero serra museum|landmark_people": { topics: ["Mission Chain"], tone: "somber", toneSecondary: "reflective" },
+  "pilot boat|landmark_origin": { topics: ["Navy Century"], tone: "warm", toneSecondary: "grand" },
+  "pilot boat|landmark_role": { topics: ["Navy Century"], tone: "warm", toneSecondary: "reflective" },
+  "pilot boat|landmark_event": { topics: ["Navy Century"], tone: "reflective", toneSecondary: null },
+  "cabrillo ferry|landmark_origin": { topics: ["Navy Century"], tone: "warm", toneSecondary: "light" },
+  "cabrillo ferry|landmark_role": { topics: ["Navy Century"], tone: "warm", toneSecondary: "reflective" },
+  "cabrillo ferry|landmark_event": { topics: ["Navy Century"], tone: "warm", toneSecondary: "reflective" },
+  "pcf 816|landmark_origin": { topics: ["Navy Century"], tone: "reflective", toneSecondary: "warm" },
+  "pcf 816|landmark_role": { topics: ["Navy Century"], tone: "reflective", toneSecondary: "somber" },
+  "pcf 816|landmark_event": { topics: ["Navy Century"], tone: "warm", toneSecondary: "reflective" },
+  "the lodge at torrey pines|landmark_origin": { topics: [], tone: "warm", toneSecondary: "grand" },
+  "the lodge at torrey pines|landmark_building": { topics: [], tone: "warm", toneSecondary: "grand" },
+  "the lodge at torrey pines|landmark_people": { topics: ["Sport"], tone: "grand", toneSecondary: "warm" },
+  "the old globe|landmark_origin": { topics: [], tone: "warm", toneSecondary: null },
+  "the old globe|landmark_event": { topics: [], tone: "reflective", toneSecondary: "warm" },
+  "san diego museum of art|landmark_origin": { topics: [], tone: "warm", toneSecondary: "grand" },
+  "san diego museum of art|landmark_building": { topics: [], tone: "reflective", toneSecondary: "warm" },
+  "san diego natural history museum|landmark_origin": { topics: ["Deep Time"], tone: "grand", toneSecondary: "warm" },
+  "san diego natural history museum|landmark_people": { topics: ["Deep Time"], tone: "warm", toneSecondary: "reflective" },
+  "mingei international museum|landmark_origin": { topics: [], tone: "warm", toneSecondary: "reflective" },
+  "mingei international museum|landmark_people": { topics: [], tone: "warm", toneSecondary: "reflective" },
+  "timken museum of art|landmark_origin": { topics: [], tone: "light", toneSecondary: "warm" },
+  "fleet science center|landmark_origin": { topics: ["Navy Century"], tone: "grand", toneSecondary: "warm" },
+  "fleet science center|landmark_event": { topics: ["Navy Century"], tone: "grand", toneSecondary: "light" },
+  "san diego model railroad museum|landmark_origin": { topics: [], tone: "light", toneSecondary: "warm" },
+  "san diego model railroad museum|landmark_role": { topics: [], tone: "warm", toneSecondary: "light" },
+  "museum of photographic arts|landmark_origin": { topics: [], tone: "warm", toneSecondary: "reflective" },
+  "san diego automotive museum|landmark_origin": { topics: [], tone: "light", toneSecondary: "warm" },
+  "veterans museum at balboa park|landmark_origin": { topics: [], tone: "reverent", toneSecondary: "warm" },
+  "san diego history center|landmark_origin": { topics: [], tone: "warm", toneSecondary: "reflective" },
+  "spanish village art center|landmark_origin": { topics: [], tone: "light", toneSecondary: "warm" },
+  "botanical building|landmark_origin": { topics: [], tone: "warm", toneSecondary: "reflective" },
+  "japanese friendship garden|landmark_origin": { topics: [], tone: "somber", toneSecondary: "reflective" },
+  "naval base san diego|landmark_origin": { topics: ["Navy Century"], tone: "grand", toneSecondary: "reflective" },
+  "naval base san diego|landmark_role": { topics: ["Navy Century"], tone: "warm", toneSecondary: "reflective" },
+  "naval base san diego|landmark_event": { topics: ["Navy Century"], tone: "grand", toneSecondary: "reflective" },
 };
 
 export function tagsFor(placeKey: string, angle: string): RouteTagEntry {

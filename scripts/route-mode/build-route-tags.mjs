@@ -1,13 +1,23 @@
 // Generate src/data/routeTags.ts from the tagged shelf
-// (~/workspace/leos-world/story-tags.csv, Nov 1 tone/topic tagging,
-// 1,220 rows). The composer joins library-index rows to this
+// (~/workspace/leos-world/story-tags.csv, Nov 1 tone/topic
+// tagging). The composer joins library-index rows to this
 // bundled map at runtime — no DB change, no paste, no per-serve
 // fetch: tags ride the app bundle.
 //
+// DETERMINISTIC: the output is a pure function of the CSV —
+// rows in CSV order, values JSON-encoded, and the generated
+// header carries only the row count (no timestamps). Same CSV
+// in → byte-identical file out.
+//
 // Usage: node scripts/route-mode/build-route-tags.mjs [csv-path]
 // Default csv path: ../../story-tags.csv relative to the repo root
-// (the workspace layout). Re-run whenever story-tags.csv is
-// re-tagged; the generated file's header records the row count.
+// (the workspace layout). Since composer v3.1 (commit E) this
+// runs automatically as the FINAL STEP of the shared library
+// ingest path (repo-avatar/scripts/library — lib.mjs's
+// regenRouteTags(), called by ingest.mjs and required of every
+// ingest path); re-run by hand only for a tags-only change. The
+// known remainder: stories the APP itself promotes at runtime
+// (gap-fill) gain tags only when the next pipeline regen runs.
 
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';

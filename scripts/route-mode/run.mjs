@@ -3023,5 +3023,42 @@ await checkAsync('breath (D): runner integration — a window about to close ski
   runner.endTour();
 });
 
+// ── Tag regeneration as an ingest-pipeline step (v3.1, E) ───
+// The generator is a pure function of story-tags.csv: two runs
+// are byte-identical, and the committed routeTags.ts must equal
+// a fresh run (a stale bundle is exactly the bug E fixes — if
+// this fails, someone updated the CSV without regenerating;
+// the run below has already repaired the working tree).
+check('tag regen (E): deterministic, and the committed routeTags.ts is in sync with the CSV', () => {
+  const tagsPath = join(repoRoot, 'src', 'data', 'routeTags.ts');
+  const before = readFileSync(tagsPath, 'utf8');
+  const gen = join(repoRoot, 'scripts', 'route-mode', 'build-route-tags.mjs');
+  execFileSync(process.execPath, [gen], { stdio: 'pipe' });
+  const after1 = readFileSync(tagsPath, 'utf8');
+  execFileSync(process.execPath, [gen], { stdio: 'pipe' });
+  const after2 = readFileSync(tagsPath, 'utf8');
+  assert.equal(after1, after2, 'two runs of the generator produce byte-identical output');
+  assert.equal(after1, before, 'the committed routeTags.ts already equals a fresh regeneration');
+});
+check('tag regen (E): the shared library ingest path carries the regen as its final step', () => {
+  const libPath = join(repoRoot, '..', 'repo-avatar', 'scripts', 'library', 'lib.mjs');
+  const ingestPath = join(repoRoot, '..', 'repo-avatar', 'scripts', 'library', 'ingest.mjs');
+  let lib = null;
+  let ingest = null;
+  try {
+    lib = readFileSync(libPath, 'utf8');
+    ingest = readFileSync(ingestPath, 'utf8');
+  } catch {
+    // The tooling lives outside this repo; where it is absent
+    // there is nothing to assert — the check above still pins
+    // the generator itself.
+    return;
+  }
+  assert.ok(lib.includes('export function regenRouteTags()'), 'lib.mjs exports the shared regen helper');
+  assert.ok(lib.includes('build-route-tags.mjs'), 'the helper runs the repo generator');
+  assert.ok(ingest.includes('regenRouteTags()'), 'ingest.mjs calls it as its final step');
+  assert.ok(ingest.includes('if (!dryRun) regenRouteTags();'), 'a dry run stays side-effect free');
+});
+
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
