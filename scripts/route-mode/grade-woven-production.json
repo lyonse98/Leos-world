@@ -1,7 +1,7 @@
 {
   "generatedBy": "scripts/route-mode/grader.mjs --woven-production",
-  "generatedAt": "2026-11-04T15:07:34.000Z",
-  "label": "v16-route-mode + woven production (Nov 4)",
+  "generatedAt": "2026-11-04T15:32:37.971Z",
+  "label": "v16-route-mode + member-fetch lever (Nov 4)",
   "world": {
     "census": 1258,
     "shape": "current"
@@ -9,20 +9,30 @@
   "eligibleUnits": 473,
   "fresh": {
     "tourist": {
-      "stories": 14,
-      "silenceSec": 311,
-      "silenceShare": 0.173,
-      "threadTopic": "Navy Century",
+      "stories": 19,
+      "silenceSec": 183,
+      "silenceShare": 0.102,
+      "threadTopic": "Coast",
       "climaxPresent": true,
-      "members": 0
+      "members": 1,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 12,
+        "candidates": 12
+      }
     },
     "hop": {
-      "stories": 5,
-      "silenceSec": 39,
-      "silenceShare": 0.055,
-      "threadTopic": "Food & Drink",
+      "stories": 7,
+      "silenceSec": 7,
+      "silenceShare": 0.01,
+      "threadTopic": "Coast",
       "climaxPresent": true,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 12,
+        "candidates": 12
+      }
     },
     "commute": {
       "stories": 18,
@@ -30,7 +40,8 @@
       "silenceShare": 0.104,
       "threadTopic": "Food & Drink",
       "climaxPresent": true,
-      "members": 0
+      "members": 0,
+      "memberFetch": null
     }
   },
   "drives": [
@@ -40,332 +51,631 @@
       "silenceShare": 0.104,
       "threadTopic": "Food & Drink",
       "climaxPresent": true,
-      "members": 0
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 150,
+      "ceilingHit": false
     },
     {
       "drive": 2,
-      "stories": 18,
-      "silenceShare": 0.186,
-      "threadTopic": "Highway",
+      "stories": 17,
+      "silenceShare": 0.171,
+      "threadTopic": "Coast",
       "climaxPresent": true,
-      "members": 0
+      "members": 1,
+      "memberFetch": null,
+      "fetchReads": 166,
+      "ceilingHit": false
     },
     {
       "drive": 3,
-      "stories": 17,
-      "silenceShare": 0.214,
-      "threadTopic": "Coast",
+      "stories": 15,
+      "silenceShare": 0.099,
+      "threadTopic": "Food & Drink",
       "climaxPresent": true,
-      "members": 1
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 182,
+      "ceilingHit": false
     },
     {
       "drive": 4,
       "stories": 18,
-      "silenceShare": 0.197,
+      "silenceShare": 0.213,
       "threadTopic": "Navy Century",
       "climaxPresent": true,
-      "members": 0
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 192,
+      "ceilingHit": false
     },
     {
       "drive": 5,
-      "stories": 17,
-      "silenceShare": 0.116,
-      "threadTopic": "Highway",
+      "stories": 21,
+      "silenceShare": 0.063,
+      "threadTopic": "Coast",
       "climaxPresent": true,
-      "members": 0
+      "members": 1,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 12,
+        "candidates": 12
+      },
+      "fetchReads": 207,
+      "ceilingHit": false
     },
     {
       "drive": 6,
-      "stories": 19,
-      "silenceShare": 0.167,
-      "threadTopic": "Mission Chain",
+      "stories": 20,
+      "silenceShare": 0.083,
+      "threadTopic": "Food & Drink",
       "climaxPresent": true,
-      "members": 1
+      "members": 2,
+      "memberFetch": {
+        "topic": "Food & Drink",
+        "reads": 12,
+        "candidates": 12
+      },
+      "fetchReads": 222,
+      "ceilingHit": false
     },
     {
       "drive": 7,
-      "stories": 16,
-      "silenceShare": 0.086,
+      "stories": 18,
+      "silenceShare": 0.125,
       "threadTopic": "Food & Drink",
       "climaxPresent": true,
-      "members": 2
+      "members": 1,
+      "memberFetch": {
+        "topic": "Food & Drink",
+        "reads": 12,
+        "candidates": 10
+      },
+      "fetchReads": 236,
+      "ceilingHit": false
     },
     {
       "drive": 8,
-      "stories": 19,
-      "silenceShare": 0.13,
+      "stories": 24,
+      "silenceShare": 0.07,
       "threadTopic": "Navy Century",
       "climaxPresent": true,
-      "members": 1
+      "members": 3,
+      "memberFetch": {
+        "topic": "Navy Century",
+        "reads": 12,
+        "candidates": 12
+      },
+      "fetchReads": 246,
+      "ceilingHit": true
     },
     {
       "drive": 9,
-      "stories": 15,
-      "silenceShare": 0.137,
-      "threadTopic": "folklore",
+      "stories": 17,
+      "silenceShare": 0.146,
+      "threadTopic": "Food & Drink",
       "climaxPresent": true,
-      "members": 0
+      "members": 1,
+      "memberFetch": {
+        "topic": "Food & Drink",
+        "reads": 12,
+        "candidates": 10
+      },
+      "fetchReads": 255,
+      "ceilingHit": true
     },
     {
       "drive": 10,
-      "stories": 18,
-      "silenceShare": 0.192,
-      "threadTopic": "Deep Time",
+      "stories": 20,
+      "silenceShare": 0.191,
+      "threadTopic": "Food & Drink",
       "climaxPresent": true,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Food & Drink",
+        "reads": 12,
+        "candidates": 10
+      },
+      "fetchReads": 262,
+      "ceilingHit": true
     },
     {
       "drive": 11,
       "stories": 19,
-      "silenceShare": 0.145,
-      "threadTopic": "Highway",
+      "silenceShare": 0.085,
+      "threadTopic": "Coast",
       "climaxPresent": true,
-      "members": 0
+      "members": 2,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 12,
+        "candidates": 11
+      },
+      "fetchReads": 264,
+      "ceilingHit": true
     },
     {
       "drive": 12,
-      "stories": 18,
-      "silenceShare": 0.09,
-      "threadTopic": "Border / CaliBaja",
+      "stories": 20,
+      "silenceShare": 0.113,
+      "threadTopic": "Food & Drink",
       "climaxPresent": true,
-      "members": 1
+      "members": 2,
+      "memberFetch": {
+        "topic": "Food & Drink",
+        "reads": 12,
+        "candidates": 10
+      },
+      "fetchReads": 267,
+      "ceilingHit": true
     },
     {
       "drive": 13,
-      "stories": 14,
-      "silenceShare": 0.192,
-      "threadTopic": "The Cure",
+      "stories": 20,
+      "silenceShare": 0.166,
+      "threadTopic": "Food & Drink",
       "climaxPresent": true,
-      "members": 0
+      "members": 1,
+      "memberFetch": {
+        "topic": "Food & Drink",
+        "reads": 12,
+        "candidates": 8
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 14,
-      "stories": 15,
-      "silenceShare": 0.476,
-      "threadTopic": null,
+      "stories": 17,
+      "silenceShare": 0.119,
+      "threadTopic": "Food & Drink",
       "climaxPresent": true,
-      "members": 0
+      "members": 2,
+      "memberFetch": {
+        "topic": "Food & Drink",
+        "reads": 24,
+        "candidates": 19
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 15,
-      "stories": 12,
-      "silenceShare": 0.444,
-      "threadTopic": null,
-      "climaxPresent": true,
-      "members": 0
+      "stories": 10,
+      "silenceShare": 0.475,
+      "threadTopic": "Coast",
+      "climaxPresent": false,
+      "members": 4,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 12,
+        "candidates": 10
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 16,
-      "stories": 6,
-      "silenceShare": 0.799,
-      "threadTopic": null,
+      "stories": 10,
+      "silenceShare": 0.446,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 4,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 16
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 17,
-      "stories": 6,
-      "silenceShare": 0.829,
-      "threadTopic": null,
+      "stories": 5,
+      "silenceShare": 0.782,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 2,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 12
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 18,
-      "stories": 4,
-      "silenceShare": 0.846,
-      "threadTopic": null,
+      "stories": 2,
+      "silenceShare": 0.908,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 1,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 10
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 19,
-      "stories": 0,
-      "silenceShare": 1,
-      "threadTopic": null,
+      "stories": 2,
+      "silenceShare": 0.911,
+      "threadTopic": "Food & Drink",
       "climaxPresent": false,
-      "members": 0
+      "members": 1,
+      "memberFetch": {
+        "topic": "Food & Drink",
+        "reads": 24,
+        "candidates": 17
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 20,
-      "stories": 0,
-      "silenceShare": 1,
-      "threadTopic": null,
+      "stories": 1,
+      "silenceShare": 0.972,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 21,
-      "stories": 0,
-      "silenceShare": 1,
-      "threadTopic": null,
+      "stories": 1,
+      "silenceShare": 0.963,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 22,
       "stories": 0,
       "silenceShare": 1,
-      "threadTopic": null,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 23,
       "stories": 0,
       "silenceShare": 1,
-      "threadTopic": null,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 24,
       "stories": 0,
       "silenceShare": 1,
-      "threadTopic": null,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 25,
       "stories": 0,
       "silenceShare": 1,
-      "threadTopic": null,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 26,
       "stories": 0,
       "silenceShare": 1,
-      "threadTopic": null,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 27,
       "stories": 0,
       "silenceShare": 1,
-      "threadTopic": null,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 28,
       "stories": 0,
       "silenceShare": 1,
-      "threadTopic": null,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 29,
       "stories": 0,
       "silenceShare": 1,
-      "threadTopic": null,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 30,
       "stories": 0,
       "silenceShare": 1,
-      "threadTopic": null,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 31,
       "stories": 0,
       "silenceShare": 1,
-      "threadTopic": null,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 32,
       "stories": 0,
       "silenceShare": 1,
-      "threadTopic": null,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 33,
       "stories": 0,
       "silenceShare": 1,
-      "threadTopic": null,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 34,
       "stories": 0,
       "silenceShare": 1,
-      "threadTopic": null,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 35,
       "stories": 0,
       "silenceShare": 1,
-      "threadTopic": null,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 36,
       "stories": 0,
       "silenceShare": 1,
-      "threadTopic": null,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 37,
       "stories": 0,
       "silenceShare": 1,
-      "threadTopic": null,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 38,
       "stories": 0,
       "silenceShare": 1,
-      "threadTopic": null,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 39,
       "stories": 0,
       "silenceShare": 1,
-      "threadTopic": null,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     },
     {
       "drive": 40,
       "stories": 0,
       "silenceShare": 1,
-      "threadTopic": null,
+      "threadTopic": "Coast",
       "climaxPresent": false,
-      "members": 0
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 24,
+        "candidates": 9
+      },
+      "fetchReads": 270,
+      "ceilingHit": true
     }
   ],
   "summary": {
-    "substantiveThreadEpisodes": 13,
-    "substantiveEpisodes": 15,
+    "substantiveThreadEpisodes": 16,
+    "substantiveEpisodes": 16,
     "substantiveStarvationDrive": null,
-    "threadDrives": 13,
-    "climaxDrives": 15,
-    "meanSilenceShare": 0.684,
-    "meanConsecutiveOverlap": 0.538,
-    "totalMembers": 6,
-    "drivesWithMembers": 5,
+    "threadDrives": 40,
+    "climaxDrives": 14,
+    "meanSilenceShare": 0.655,
+    "meanConsecutiveOverlap": 0.462,
+    "totalMembers": 28,
+    "drivesWithMembers": 15,
     "minStories": 0,
-    "lastDriveStories": 0
+    "lastDriveStories": 0,
+    "funnel": {
+      "early": {
+        "drives": 13,
+        "threadDrives": 13,
+        "substantiveThread": 13,
+        "members": 14,
+        "memberFetches": 9,
+        "memberReads": 108,
+        "memberCandidates": 95,
+        "departureReads": 2919,
+        "ceilingHits": 6
+      },
+      "late": {
+        "drives": 27,
+        "threadDrives": 27,
+        "substantiveThread": 3,
+        "members": 14,
+        "memberFetches": 27,
+        "memberReads": 636,
+        "memberCandidates": 273,
+        "departureReads": 7290,
+        "ceilingHits": 27
+      },
+      "all": {
+        "drives": 40,
+        "threadDrives": 40,
+        "substantiveThread": 16,
+        "members": 28,
+        "memberFetches": 36,
+        "memberReads": 744,
+        "memberCandidates": 368,
+        "departureReads": 10209,
+        "ceilingHits": 33
+      }
+    }
   }
 }

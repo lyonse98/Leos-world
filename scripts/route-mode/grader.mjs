@@ -424,14 +424,17 @@ async function loadBundles(repoRoot) {
 /**
  * One route build, mirroring App.buildRoute's staging order
  * with the network replaced by the synthetic world: fetch plan
- * → row reads → compose → (portal-climax seeking: one bounded
- * index scan + single re-compose) → shelf-only guarantee pass.
+ * → row reads → compose (with index-level thread support) →
+ * (portal-climax seeking: one bounded index scan + single
+ * re-compose) → (member seeking: one bounded member fetch +
+ * single re-compose) → shelf-only guarantee pass → seating.
  */
 async function runBuild({ rm, gf, rh }, world, route, { heardNames, heardTexts, driveRecords, input, nowMs }) {
   const tagsOf = (pk, ang) => {
     const u = world.unitsById.get(`${pk}|${ang}`);
     return { topics: u ? u.topics : [] };
   };
+  const eligibleOf = (pk, ang) => world.unitsById.get(`${pk}|${ang}`)?.wovenEligible === true;
   const fetchOrder = rm.orderFetchCandidates(world.index, route.path, route.dest, tagsOf, {
     userTopics: input.topics,
   });
@@ -450,6 +453,24 @@ async function runBuild({ rm, gf, rh }, world, route, { heardNames, heardTexts, 
   // Story-level heard, exactly like the App's (v3.1): the
   // ledger's filed texts name the tellings that are out.
   const heardKeys = rm.heardKeysForStories(units, heardTexts);
+  // Index-level thread support (the member-fetch lever): the
+  // build's fetched-id set grows across its fetches, and the
+  // support map is recomputed before every compose — exactly
+  // the App's discipline. Heard ids are EXACT here (the
+  // synthetic ledger is id-addressable through the filed
+  // texts); in the App they are the fetched set's heard keys,
+  // the one place the mirror is stronger than production.
+  const fetchedIds = new Set(
+    [...fetched.geo, ...fetched.portals].map(x => `${x.entry.place_key}|${x.entry.angle}`),
+  );
+  const heardIds = new Set(
+    [...world.unitsById.values()].filter(u => u.storyText && heardTexts.has(u.storyText)).map(u => u.id),
+  );
+  const supportNow = () =>
+    rm.wovenIndexSupportByTopic(world.index, route.path, route.dest, tagsOf, eligibleOf, {
+      fetchedIds,
+      heardIds,
+    });
   const records = (driveRecords ?? []).map(r => ({
     ...r,
     owedSubjects: rh.stillOwedSubjects(r, heardNames),
@@ -462,14 +483,12 @@ async function runBuild({ rm, gf, rh }, world, route, { heardNames, heardTexts, 
     driveSec: route.driveSec,
     driveRecords: records,
     destinationPlaceKey: route.destPlaceKey,
+    wovenIndexSupport: supportNow(),
   };
   let plan = rm.composeRoutePlan(units, route.path, route.dest, route.destName, input, opts);
   let climaxOnlyUnits = [];
   if (plan.portalClimaxSeeking) {
     const topic = plan.portalClimaxSeeking;
-    const fetchedIds = new Set(
-      [...fetched.geo, ...fetched.portals].map(x => `${x.entry.place_key}|${x.entry.angle}`),
-    );
     climaxOnlyUnits = world.index
       .filter(
         e =>
@@ -483,9 +502,48 @@ async function runBuild({ rm, gf, rh }, world, route, { heardNames, heardTexts, 
       .map(e => world.unitsById.get(`${e.place_key}|${e.angle}`))
       .filter(u => u && !(u.storyText && heardTexts.has(u.storyText)));
     if (climaxOnlyUnits.length > 0) {
+      for (const u of climaxOnlyUnits) fetchedIds.add(u.id);
       plan = rm.composeRoutePlan(units, route.path, route.dest, route.destName, input, {
         ...opts,
+        wovenIndexSupport: supportNow(),
         climaxOnlyUnits,
+      });
+    }
+  }
+  // The member fetch (the lever): the App's bounded fetch,
+  // mirrored — selectMemberFetchEntries over the world index,
+  // reads counted per entry attempted in chunks of 12 toward
+  // MEMBER_FETCH_TARGET survivors, heard discarded at read
+  // time, one re-compose carrying the climax units forward.
+  let memberUnits = [];
+  let memberFetch = null;
+  if (plan.wovenMembersSeeking) {
+    const topic = plan.wovenMembersSeeking;
+    const entries = rm.selectMemberFetchEntries(world.index, {
+      topic,
+      fetchedIds,
+      path: route.path,
+      destination: route.dest,
+      tagsOf,
+      eligibleOf,
+    });
+    let reads = 0;
+    for (let i = 0; i < entries.length && memberUnits.length < rm.MEMBER_FETCH_TARGET; i += 12) {
+      const chunk = entries.slice(i, i + 12);
+      reads += chunk.length;
+      for (const e of chunk) {
+        const u = world.unitsById.get(`${e.place_key}|${e.angle}`);
+        if (u && !(u.storyText && heardTexts.has(u.storyText))) memberUnits.push(u);
+      }
+    }
+    memberFetch = { topic, reads, candidates: memberUnits.length };
+    if (memberUnits.length > 0) {
+      for (const u of memberUnits) fetchedIds.add(u.id);
+      plan = rm.composeRoutePlan(units, route.path, route.dest, route.destName, input, {
+        ...opts,
+        wovenIndexSupport: supportNow(),
+        climaxOnlyUnits,
+        memberUnits,
       });
     }
   }
@@ -501,8 +559,16 @@ async function runBuild({ rm, gf, rh }, world, route, { heardNames, heardTexts, 
   // no-op on worlds whose units carry no wovenEligible marks
   // (every pre-feature battery), so the standard grades are
   // untouched by its presence here.
-  plan = rm.seatWovenMembers(plan, units, { heardKeys });
-  return { plan, units, climaxOnlyUnits, heardKeys, fetchStats: fetched.stats };
+  plan = rm.seatWovenMembers(plan, [...units, ...memberUnits], { heardKeys });
+  return {
+    plan,
+    units,
+    climaxOnlyUnits,
+    memberUnits,
+    memberFetch,
+    heardKeys,
+    fetchStats: memberFetch ? { ...fetched.stats, memberFetch } : fetched.stats,
+  };
 }
 
 /** The eligible pool a plan's climax winner was picked from (for the percentile). */
@@ -1599,6 +1665,11 @@ function renderMarkdown(report, baseline) {
 // (fetch → compose with woven thread support → the ONE
 // portal-climax re-compose → shelf-only guarantee →
 // rm.seatWovenMembers) with no sim-side post-pass anywhere.
+// The member-fetch lever (later the same day) extends the
+// staging it mirrors: index-level thread support in every
+// compose, and the ONE bounded member fetch + re-compose
+// when a plan seeks members — this battery is the lever's
+// acceptance too, against the pre-lever run's 13.
 // The eligibility marks ride the world units themselves
 // (unit.wovenEligible), exactly as the App bakes them from
 // the bundled presence data. Fresh-drive spot checks
@@ -1636,6 +1707,7 @@ export async function runWovenProduction(mods, { drives: driveCount = 40 } = {})
       threadTopic: m.threadTopic,
       climaxPresent: m.climaxPresent,
       members: build.plan.wovenMembers?.count ?? 0,
+      memberFetch: build.memberFetch ?? null,
     };
   }
 
@@ -1667,6 +1739,9 @@ export async function runWovenProduction(mods, { drives: driveCount = 40 } = {})
       threadTopic: plan.thread?.topic ?? null,
       climaxPresent: metrics.climaxPresent,
       members,
+      memberFetch: build.memberFetch ?? null,
+      fetchReads: build.fetchStats.reads,
+      ceilingHit: build.fetchStats.ceilingHit,
     });
     for (const it of played) {
       heardNames.add(it.unit.placeName);
@@ -1686,6 +1761,21 @@ export async function runWovenProduction(mods, { drives: driveCount = 40 } = {})
   }
   const substantive = drives.filter(d => d.silenceShare <= 0.5);
   const starvation = substantiveThreadStarvation(drives);
+  // The lever's funnel (Nov 4, 2026): where the member fetch
+  // fired, what it cost, and what it returned — split at the
+  // pre-lever battery's phase boundary (drives 1–13 succeeded
+  // on geo substance; 14–40 starved).
+  const phase = list => ({
+    drives: list.length,
+    threadDrives: list.filter(d => d.threadTopic !== null).length,
+    substantiveThread: list.filter(d => d.silenceShare <= 0.5 && d.threadTopic !== null).length,
+    members: list.reduce((s, d) => s + d.members, 0),
+    memberFetches: list.filter(d => d.memberFetch).length,
+    memberReads: list.reduce((s, d) => s + (d.memberFetch?.reads ?? 0), 0),
+    memberCandidates: list.reduce((s, d) => s + (d.memberFetch?.candidates ?? 0), 0),
+    departureReads: list.reduce((s, d) => s + d.fetchReads, 0),
+    ceilingHits: list.filter(d => d.ceilingHit).length,
+  });
   return {
     world: { census: world.census, shape: 'current' },
     eligibleUnits: eligible.length,
@@ -1704,6 +1794,11 @@ export async function runWovenProduction(mods, { drives: driveCount = 40 } = {})
       drivesWithMembers: drives.filter(d => d.members > 0).length,
       minStories: Math.min(...drives.map(d => d.stories)),
       lastDriveStories: drives[drives.length - 1].stories,
+      funnel: {
+        early: phase(drives.slice(0, 13)),
+        late: phase(drives.slice(13)),
+        all: phase(drives),
+      },
     },
   };
 }
@@ -1725,12 +1820,31 @@ function renderWovenProductionMarkdown(prod, label) {
   lines.push(
     `HEADLINE — substantive thread-bearing episodes (silence ≤ 50% AND a thread found) across 40 drives: ` +
       `**${s.substantiveThreadEpisodes}** (the seated-members SIMULATION predicted 26 at this eligibility; ` +
-      `climax-only production-equivalent is 9). Substantive episodes ${s.substantiveEpisodes}, ` +
+      `climax-only production-equivalent is 9; the PRE-LEVER production run scored 13). Substantive episodes ${s.substantiveEpisodes}, ` +
       `substantive-thread starvation ${s.substantiveStarvationDrive ?? 'none in 40'}, thread drives ${s.threadDrives}/40, ` +
       `climax ${s.climaxDrives}/40, mean silence ${fmtPct(s.meanSilenceShare)} (sim: 41%), ` +
       `members seated ${s.totalMembers} across ${s.drivesWithMembers} drives, mean consecutive overlap ${s.meanConsecutiveOverlap}.`,
   );
   lines.push('');
+  if (s.funnel) {
+    const f = s.funnel;
+    lines.push('## The lever funnel — member fetch, by phase');
+    lines.push('');
+    lines.push(
+      'Pre-lever, drives 1–13 succeeded on geo substance and drives 14–40 starved (thread detection and member ' +
+        'candidacy saw only the fetched set). The lever counts thread support from the county index and answers a ' +
+        'short-handed thread with ONE bounded member fetch per build.',
+    );
+    lines.push('');
+    lines.push('| phase | thread drives | substantive thread-bearing | members seated | member fetches | member reads | candidates returned | departure reads | departure ceiling hits |');
+    lines.push('|---|---|---|---|---|---|---|---|---|');
+    const row = (label, p) =>
+      `| ${label} | ${p.threadDrives}/${p.drives} | ${p.substantiveThread} | ${p.members} | ${p.memberFetches} | ${p.memberReads} | ${p.memberCandidates} | ${p.departureReads} | ${p.ceilingHits} |`;
+    lines.push(row('drives 1–13', f.early));
+    lines.push(row('drives 14–40', f.late));
+    lines.push(row('all 40', f.all));
+    lines.push('');
+  }
   lines.push('## Fresh drives on the marked world (vs grade-after-addendum-b, unmarked)');
   lines.push('');
   lines.push('| route | stories | silence | thread | members |');
@@ -1861,6 +1975,15 @@ async function main() {
         `thread ${s.threadDrives}/40, climax ${s.climaxDrives}/40, silence ${fmtPct(s.meanSilenceShare)}, ` +
         `members ${s.totalMembers} over ${s.drivesWithMembers} drives, overlap ${s.meanConsecutiveOverlap}`,
     );
+    if (s.funnel) {
+      const f = s.funnel;
+      console.log(
+        `  lever funnel: member fetches ${f.all.memberFetches} (${f.all.memberReads} reads → ${f.all.memberCandidates} candidates); ` +
+          `early (1–13): thread ${f.early.threadDrives}/13, substantive-thread ${f.early.substantiveThread}, members ${f.early.members}; ` +
+          `late (14–40): thread ${f.late.threadDrives}/27, substantive-thread ${f.late.substantiveThread}, members ${f.late.members}; ` +
+          `departure ceiling hits ${f.all.ceilingHits}/40`,
+      );
+    }
     for (const [name, f] of Object.entries(prod.fresh)) {
       console.log(
         `  fresh ${name}: stories ${f.stories}, silence ${f.silenceSec}s, thread ${f.threadTopic ?? '—'}, members ${f.members}`,
