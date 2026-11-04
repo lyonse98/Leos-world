@@ -408,6 +408,42 @@ export function angleClassRank(angle: string): number {
   return angle === 'corridor' ? 1 : 0;
 }
 
+// ------------------------------------------------------------ composer v3: acts (commit B)
+
+/** The opening act ends here; the climax act is the existing climax zone (CLIMAX_ZONE_START). */
+export const ACT_OPENING_END = 0.15;
+
+/**
+ * Act index by drive progress (composer v3, Erik, Nov 3,
+ * 2026): 0 = opening (the first ~15% of the drive), 1 = the
+ * middle chapters (the decile structure the fetch already
+ * sweeps), 2 = the climax act (the final third — the same
+ * zone the climax rung reads). Acts structure the BASE rung
+ * only; the thread and climax rungs keep their precedence.
+ */
+export function actIndexForProgress(progress: number): number {
+  if (progress < ACT_OPENING_END) return 0;
+  if (progress < CLIMAX_ZONE_START) return 1;
+  return 2;
+}
+
+/** One act's line in a plan's acts summary (carried into the decisions record). */
+export interface ActSummary {
+  /** Story items seated in the act (chapter openers included — they are story items). */
+  stories: number;
+  landmark: number;
+  corridor: number;
+  openers: number;
+  /** A corridor-class candidate yielded to a stronger same-act candidate while this act was tiled. */
+  floorSub: boolean;
+}
+
+export interface ActsSummary {
+  opening: ActSummary;
+  middle: ActSummary;
+  climax: ActSummary;
+}
+
 /** Lead time before a story's anchor at which its release window opens. */
 export const WINDOW_LEAD_SEC = 20;
 
@@ -642,6 +678,14 @@ export interface RoutePlan {
   /** The plan's opening story subject (the departure-area story), when the plan has stories. */
   openingSubject: string | null;
   /**
+   * Composer v3 (commit B): the settled plan's act structure —
+   * per act, the story count, the class tallies, the chapter
+   * openers seated, and whether the act's quality floor fired.
+   * Counted from the final items at compose time; carried into
+   * the route_plan_started decisions record.
+   */
+  actsSummary: ActsSummary;
+  /**
    * Optional shelf tease for the arrival-signoff closeout, set by
    * the App after composing (an unheard, unplanned shelf unit).
    * The pure composer cannot know the shelf beyond its inputs.
@@ -837,7 +881,18 @@ export interface ComposeOptions {
  *       constraints live here (heard exclusion, budget,
  *       release windows, corridor) and are NOT re-ordered by
  *       anything below; the guarantee pass itself runs on the
- *       composed plan in the App (routeGapFill);
+ *       composed plan in the App (routeGapFill). Within this
+ *       rung, composer v3 structures selection into ACTS by
+ *       progress (opening <15%, middle chapters, climax act =
+ *       the final third) with a per-act quality floor: a
+ *       corridor-class candidate yields to a window-feasible
+ *       landmark-class, thread-member, or portal alternative
+ *       in its own act. The floor only DEFERS — gated passes
+ *       are followed by a gates-off mop-up in the same pick
+ *       order, so a yielded candidate still seats when
+ *       nothing stronger took its budget — and the settled
+ *       plan carries a compact acts summary into the
+ *       decisions record;
  *   (2) thread selection — the detected thread, or the
  *       listener's own chosen topic (detectRouteThread);
  *   (3) climax placement — the in-corridor generalized climax,
@@ -975,34 +1030,120 @@ export function composeRoutePlan(
     buckets.set(b, list);
   }
   for (const list of buckets.values()) list.sort(byRank);
+
+  // Acts (composer v3, commit B): per-act portal availability
+  // for the quality floor — an off-corridor unit whose
+  // projected progress falls in the act and which shares a
+  // topic with the act's selectable pool counts as a portal
+  // alternative for that act. Whether it ultimately hops is
+  // the portal pass's business; if it never lands, the mop-up
+  // sweep below can still seat the yielded candidate.
+  const actOf = (u: LibraryUnit): number => actIndexForProgress(prog(u));
+  const poolTopicsByAct: Set<string>[] = [new Set(), new Set(), new Set()];
+  for (const u of pool) for (const t of u.topics) poolTopicsByAct[actOf(u)].add(t);
+  const portalAltInAct = [false, false, false];
+  for (const u of portalAll) {
+    const a = actOf(u);
+    if (u.topics.some(t => poolTopicsByAct[a].has(t))) portalAltInAct[a] = true;
+  }
+  // Floor substitutions by act: set when a bucket scan that
+  // passed over a yielded candidate seats a pick instead.
+  const floorSubByAct = [false, false, false];
+
   const chosen: LibraryUnit[] = [];
+  const chosenIds = new Set<string>();
+  // Fit-skipped candidates are consumed permanently — total
+  // only grows, so a candidate that cannot fit now never fits
+  // later. This is the pointer sweep's exact semantics,
+  // restated as a set so the gates below can pass a candidate
+  // over WITHOUT consuming it.
+  const consumed = new Set<string>();
   let total = 0;
-  const pointers = new Map<number, number>();
-  let sweeping = true;
-  while (sweeping && chosen.length < maxStories) {
-    sweeping = false;
+  const fitOk = (cand: LibraryUnit): boolean =>
+    !Number.isFinite(budgetSec) ||
+    chosen.length === 0 ||
+    total + cand.durationSec <= budgetSec * 1.5;
+  /**
+   * The act quality floor: a corridor-class candidate that is
+   * not itself carrying the thread yields while a stronger
+   * candidate — landmark-class, a thread member, or a portal
+   * alternative — is window-feasible in the same act (the
+   * sweep's own budget-fit rule is the feasibility test).
+   * Every existing cap still binds the alternative: heard
+   * exclusion already partitioned it out, and budget, windows
+   * and the portal/opener caps apply downstream as before.
+   */
+  const floorYields = (cand: LibraryUnit): boolean => {
+    if (angleClassRank(cand.angle) === 0) return false;
+    if (threadMemberIds.has(cand.id)) return false;
+    const a = actOf(cand);
+    if (portalAltInAct[a]) return true;
+    for (const alt of pool) {
+      if (alt.id === cand.id || consumed.has(alt.id) || chosenIds.has(alt.id)) continue;
+      if (actOf(alt) !== a) continue;
+      if (angleClassRank(alt.angle) !== 0 && !threadMemberIds.has(alt.id)) continue;
+      if (fitOk(alt)) return true;
+    }
+    return false;
+  };
+  /**
+   * One round-robin pass over the decile buckets, in the
+   * pointer sweep's exact pick order (bucket by bucket, byRank
+   * within, one pick per bucket per pass, fit-skips consumed).
+   * With gates on, the act floor may pass a candidate over
+   * without consuming it; commit C's rotation gates join it
+   * here. Returns true when the pass picked or consumed
+   * anything — passes repeat until one makes no progress.
+   */
+  const sweepPass = (gates: boolean): boolean => {
+    let progressMade = false;
+    // Yielders passed anywhere earlier in THIS pass: the pick
+    // that follows them (usually a later bucket in the same
+    // round) is the substitution they yielded to. A pass that
+    // seats nothing records no substitution — the mop-up
+    // resolving a deferral to the same candidate is not one.
+    const passedYielders: LibraryUnit[] = [];
     for (let b = 0; b < FAIRNESS_BUCKETS; b++) {
       if (chosen.length >= maxStories) break;
       const list = buckets.get(b);
       if (!list) continue;
-      let idx = pointers.get(b) ?? 0;
-      while (idx < list.length) {
-        const cand = list[idx];
-        idx += 1;
-        if (Number.isFinite(budgetSec)) {
-          if (total >= budgetSec) {
-            idx = list.length;
-            break;
-          }
-          if (total + cand.durationSec > budgetSec * 1.5 && chosen.length > 0) continue;
+      for (const cand of list) {
+        if (chosen.length >= maxStories) break;
+        if (consumed.has(cand.id) || chosenIds.has(cand.id)) continue;
+        if (Number.isFinite(budgetSec) && total >= budgetSec) {
+          consumed.add(cand.id);
+          progressMade = true;
+          continue;
+        }
+        if (!fitOk(cand)) {
+          consumed.add(cand.id);
+          progressMade = true;
+          continue;
+        }
+        if (gates && floorYields(cand)) {
+          passedYielders.push(cand);
+          continue;
         }
         chosen.push(cand);
+        chosenIds.add(cand.id);
         total += cand.durationSec;
-        sweeping = true;
+        progressMade = true;
+        if (gates) for (const y of passedYielders) floorSubByAct[actOf(y)] = true;
         break;
       }
-      pointers.set(b, idx);
     }
+    return progressMade;
+  };
+  // Gated passes until one makes no progress, then mop-up
+  // passes with every gate off: the floor defers a corridor
+  // candidate — it never starves the plan of it. On a sparse
+  // shelf (a single feasible candidate in an act) nothing
+  // yields and the tiling is exactly the pre-acts tiling.
+  while (chosen.length < maxStories && sweepPass(true)) {
+    // gated rounds
+  }
+  while (chosen.length < maxStories && sweepPass(false)) {
+    // mop-up rounds
   }
   // Playback order is route order; rank breaks near-ties.
   chosen.sort((a, b) => prog(a) - prog(b) || byRank(a, b));
@@ -1432,6 +1573,27 @@ export function composeRoutePlan(
     });
   }
 
+  // Acts summary (composer v3, commit B): the settled plan's
+  // shape by act, counted from the final items — story items
+  // only, seated by anchor (the portal climax's synthetic late
+  // anchor seats it in the climax act, where it sounds). The
+  // floor flags come from the sweep; the rest is the plan as
+  // built, so the decisions record describes what shipped.
+  const actsSummary: ActsSummary = {
+    opening: { stories: 0, landmark: 0, corridor: 0, openers: 0, floorSub: floorSubByAct[0] },
+    middle: { stories: 0, landmark: 0, corridor: 0, openers: 0, floorSub: floorSubByAct[1] },
+    climax: { stories: 0, landmark: 0, corridor: 0, openers: 0, floorSub: floorSubByAct[2] },
+  };
+  const actLines = [actsSummary.opening, actsSummary.middle, actsSummary.climax];
+  for (const it of items) {
+    if (it.kind !== 'story' || !it.unit) continue;
+    const line = actLines[actIndexForProgress(it.anchorProgress ?? 0)];
+    line.stories += 1;
+    if (it.unit.angle.startsWith('landmark')) line.landmark += 1;
+    else if (it.unit.angle === 'corridor') line.corridor += 1;
+    if (it.opener) line.openers += 1;
+  }
+
   const totalSec = items.reduce((s, it) => s + it.durationSec, 0);
   return {
     destinationName,
@@ -1453,6 +1615,7 @@ export function composeRoutePlan(
     portalClimaxSeeking,
     previewFacts,
     openingSubject: openingUnit?.placeName ?? null,
+    actsSummary,
   };
 }
 

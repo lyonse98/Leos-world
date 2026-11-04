@@ -2332,6 +2332,116 @@ await checkAsync('wart (§5): the exclusion is surgical — a genuinely dropped 
   runner.endTour();
 });
 
+// ---- composer v3, commit B: act-structured selection ----
+// Dense 11-point path: segment midpoints give near-exact
+// progress (unit at lat L sits in segment (L-32.7)/0.02, whose
+// midpoint progress is (seg+0.5)/10).
+{
+  const actPath = Array.from({ length: 11 }, (_, i) => ({ lat: 32.7 + i * 0.02, lng: -117.25 }));
+  const actDest = { lat: 32.9, lng: -117.25 };
+  const plainInput = { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] };
+  const composeAct = (units, budget) =>
+    rm.composeRoutePlan(units, actPath, actDest, 'Dest', plainInput, {
+      nowMs: NOW, heardKeys: new Set(), budgetSecOverride: budget, driveSec: 1000,
+    });
+  const storyIds = plan => plan.items.filter(i => i.kind === 'story').map(i => i.id);
+
+  check('acts: a corridor candidate yields to a window-feasible landmark in its act (floor substitution)', () => {
+    // Budget seats exactly one story. The corridor candidate's
+    // bucket is swept first — without the floor it would take
+    // the seat and the landmark would be fit-skipped.
+    const plan = composeAct([
+      unit('corr|corridor', 32.79, { angle: 'corridor' }),
+      unit('lm|landmark_origin', 32.81),
+    ], 130);
+    assert.deepEqual(storyIds(plan), ['lm|landmark_origin']);
+    assert.equal(plan.actsSummary.middle.floorSub, true);
+    assert.equal(plan.actsSummary.middle.stories, 1);
+    assert.equal(plan.actsSummary.middle.landmark, 1);
+    assert.equal(plan.actsSummary.middle.corridor, 0);
+  });
+  check('acts: with no stronger alternative in the act, the corridor candidate seats as before', () => {
+    const plan = composeAct([
+      unit('ca|corridor', 32.79, { angle: 'corridor' }),
+      unit('cb|corridor', 32.81, { angle: 'corridor' }),
+    ], 130);
+    assert.deepEqual(storyIds(plan), ['ca|corridor']);
+    assert.equal(plan.actsSummary.middle.corridor, 1);
+    assert.ok(!plan.actsSummary.opening.floorSub && !plan.actsSummary.middle.floorSub && !plan.actsSummary.climax.floorSub);
+  });
+  check('acts: sparse shelf parity — one feasible candidate per act tiles exactly as before', () => {
+    const plan = composeAct([
+      unit('o|corridor', 32.71, { angle: 'corridor' }),
+      unit('m|corridor', 32.79, { angle: 'corridor' }),
+      unit('c|corridor', 32.85, { angle: 'corridor' }),
+    ], 10000);
+    assert.deepEqual(storyIds(plan), ['o|corridor', 'm|corridor', 'c|corridor']);
+    assert.deepEqual(
+      [plan.actsSummary.opening.stories, plan.actsSummary.middle.stories, plan.actsSummary.climax.stories],
+      [1, 1, 1],
+    );
+    assert.deepEqual(
+      [plan.actsSummary.opening.corridor, plan.actsSummary.middle.corridor, plan.actsSummary.climax.corridor],
+      [1, 1, 1],
+    );
+    assert.ok(!plan.actsSummary.opening.floorSub && !plan.actsSummary.middle.floorSub && !plan.actsSummary.climax.floorSub);
+  });
+  check('acts: a corridor thread member does not yield (it carries rung-2 strength)', () => {
+    const plan = composeAct([
+      unit('t1|corridor', 32.75, { angle: 'corridor', topics: ['Coast'] }),
+      unit('t2|corridor', 32.77, { angle: 'corridor', topics: ['Coast'] }),
+      unit('t3|corridor', 32.79, { angle: 'corridor', topics: ['Coast'] }),
+      unit('lm|landmark_origin', 32.81),
+    ], 130);
+    assert.equal(plan.thread?.topic, 'Coast');
+    assert.deepEqual(storyIds(plan), ['t1|corridor']);
+    assert.equal(plan.actsSummary.middle.floorSub, false);
+  });
+  check('acts: the floor defers, never drops — a candidate yielded to a portal alternative seats in the mop-up when the portal never lands', () => {
+    const plan = composeAct([
+      unit('corr|corridor', 32.79, { angle: 'corridor', topics: ['Coast'] }),
+      unit('port|landmark_origin', 32.81, { lng: -117.05, topics: ['Coast'] }),
+    ], 10000);
+    // The portal unit shares the act + a topic, so the corridor
+    // candidate yields in every gated pass; the portal can
+    // never hop (portal cap needs >= 3 chosen stories), so the
+    // mop-up seats the corridor candidate — same final plan.
+    assert.deepEqual(storyIds(plan), ['corr|corridor']);
+    assert.equal(plan.actsSummary.middle.corridor, 1);
+    assert.equal(plan.actsSummary.middle.floorSub, false); // deferral resolved to the same candidate: no substitution seated
+  });
+  check('acts: chapter openers are counted in the act they open', () => {
+    const plan = composeAct([
+      unit('n1|neighborhood_intro', 32.79, { angle: 'neighborhood_intro' }),
+      unit('s1|landmark_origin', 32.81),
+    ], 10000);
+    assert.equal(plan.actsSummary.middle.openers, 1);
+    assert.equal(plan.actsSummary.middle.stories, 2); // the opener is a story item in its act
+  });
+  await checkAsync('acts: the decisions record carries the acts summary', async () => {
+    const plan = rm.composeRoutePlan(
+      [unit('o|landmark_origin', 32.71), unit('m|landmark_origin', 32.8), unit('c|landmark_origin', 32.88)],
+      path, dest, 'Dest', plainInput,
+      { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 10000 },
+    );
+    const events = [];
+    const runner = new rp.RoutePlanRunner({
+      audio: new RealFakeAudio(250),
+      synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+      onEvent: (t, p) => events.push({ t, p }),
+      onStoryHeard: () => {},
+    });
+    await runner.start(plan);
+    const started = events.find(e => e.t === 'route_plan_started');
+    assert.ok(started, 'route_plan_started filed');
+    assert.deepEqual(started.p.decisions.acts, plan.actsSummary);
+    const totalStories =
+      plan.actsSummary.opening.stories + plan.actsSummary.middle.stories + plan.actsSummary.climax.stories;
+    assert.equal(totalStories, plan.items.filter(i => i.kind === 'story').length);
+    runner.endTour();
+  });
+}
+
 // ---- composer v3, commit A: grader metric correctness ----
 // The grader (grader.mjs) is scored, not gated — but its metric
 // computations are pinned here against hand-computed plans.
