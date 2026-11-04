@@ -1,6 +1,6 @@
 // GENERATED — do not hand-edit. Built by
 // scripts/route-mode/build-route-presence.mjs from
-// presence-classes.csv (1264 rows, the Nov 4, 2026
+// presence-classes.csv (1294 rows, the Nov 4, 2026
 // presence audit). The route build joins library rows to this
 // map at runtime, so no DB change is needed for route mode to
 // know a story's presence register.
@@ -1285,6 +1285,36 @@ export const ROUTE_PRESENCE: Record<string, RoutePresenceEntry> = {
   "wonderland-park--v-heavy|filler_hosted": { presence: "safe", protected: false },
   "zonies|filler_hosted": { presence: "mixed", protected: false },
   "zonies--v-heavy|filler_hosted": { presence: "safe", protected: false },
+  "sr-75 north: imperial beach to coronado cays|corridor-woven-v1": { presence: "safe", protected: false },
+  "sr-75 north: coronado cays to coronado|corridor-woven-v1": { presence: "safe", protected: false },
+  "coronado ferry landing|landmark_event-woven-v1": { presence: "safe", protected: false },
+  "naval base point loma|landmark_origin-woven-v1": { presence: "safe", protected: false },
+  "coronado tent city|landmark_origin-woven-v1": { presence: "safe", protected: false },
+  "silver strand|landmark_origin-woven-v1": { presence: "safe", protected: false },
+  "silver strand|landmark_surroundings-woven-v1": { presence: "safe", protected: false },
+  "tijuana river estuary|landmark_origin-woven-v1": { presence: "safe", protected: false },
+  "coronado ferry landing|landmark_origin-woven-v1": { presence: "safe", protected: false },
+  "tijuana river estuary|landmark_surroundings-woven-v1": { presence: "safe", protected: false },
+  "silvergate|landmark_event-woven-v1": { presence: "safe", protected: false },
+  "birch aquarium at scripps|landmark_people-woven-v1": { presence: "safe", protected: false },
+  "silvergate|landmark_building-woven-v1": { presence: "safe", protected: false },
+  "ocean beach|landmark_cultural-woven-v1": { presence: "safe", protected: false },
+  "crystal pier|landmark_recent-woven-v1": { presence: "safe", protected: false },
+  "belmont park|landmark_event-woven-v1": { presence: "safe", protected: false },
+  "oceanside pier|landmark_origin-woven-v1": { presence: "safe", protected: false },
+  "sunny jim cave|landmark_legends-woven-v1": { presence: "safe", protected: false },
+  "the mushroom house|landmark_origin-woven-v1": { presence: "safe", protected: false },
+  "oceanside pier|landmark_building-woven-v1": { presence: "safe", protected: false },
+  "belmont park|landmark_building-woven-v1": { presence: "safe", protected: false },
+  "children's pool|landmark_event-woven-v1": { presence: "safe", protected: false },
+  "children's pool|landmark_recent-woven-v1": { presence: "safe", protected: false },
+  "tourmaline surfing park|landmark_sports-woven-v1": { presence: "safe", protected: false },
+  "sr-905 west: brown field to i-805|corridor-woven-v1": { presence: "safe", protected: false },
+  "sr-75 north: coronado to downtown san diego|corridor-woven-v1": { presence: "safe", protected: false },
+  "paradise hills|landmark_origin-woven-v1": { presence: "safe", protected: false },
+  "i-5 north: through camp pendleton|corridor-woven-v1": { presence: "safe", protected: false },
+  "i-5 south: through camp pendleton|corridor-woven-v1": { presence: "safe", protected: false },
+  "i-15 south: marine corps air station miramar to tierrasanta|corridor-woven-v1": { presence: "safe", protected: false },
 };
 
 export function presenceFor(placeKey: string, angle: string): RoutePresenceEntry | null {

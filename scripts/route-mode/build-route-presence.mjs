@@ -14,21 +14,53 @@
 // header carries only the row count (no timestamps). Same
 // CSV in → byte-identical file out.
 //
-// Usage: node scripts/route-mode/build-route-presence.mjs [csv-path]
-// Default csv path: ../../presence-classes.csv relative to
-// the repo root (the workspace layout). Re-run by hand when
-// the classes change (a re-audit, or new shelf rows the next
-// audit classifies); rows absent from the CSV are simply
-// not woven-eligible — the safe direction.
+// Usage: node scripts/route-mode/build-route-presence.mjs
+//   [presence-csv-path] [tags-csv-path] [out-path]
+// Default paths: ../../presence-classes.csv and
+// ../../story-tags.csv relative to the repo root (the
+// workspace layout), out = src/data/routePresence.ts. Re-run
+// by hand when the classes change (a re-audit, or new shelf
+// rows the next audit classifies); rows absent from the CSV
+// are simply not woven-eligible — the safe direction.
+//
+// WOVEN TWINS (Nov 4, 2026): the woven tranche's twins ride
+// the shelf as sibling rows whose angle is the source angle
+// + '-woven-v1' (see scripts/route-mode/woven-twins.md). A
+// twin is a host-told woven-register retelling BY
+// CONSTRUCTION — no presence anchoring — so it is weave-safe
+// by definition and never Protected. The audit CSV predates
+// the twins and is never edited (it is the audit's artifact);
+// instead this generator DERIVES each twin's entry from
+// story-tags.csv: any '-woven-v1' row whose key the audit CSV
+// does not already carry gains { presence: 'safe',
+// protected: false }, appended in tags-CSV order. An audit
+// row for the twin's own key would win (the audit is the
+// authority where it speaks). Two fail-closed guards:
+//   - a twin whose SOURCE row is Protected aborts the build
+//     — Protected register must never become woven material
+//     by suffix arithmetic; a human adjudicates that twin in
+//     the CSV by hand or the tranche does not ship it;
+//   - a twin whose source row the audit never classified is
+//     SKIPPED (with a warning): unclassified stays
+//     ineligible, the safe direction, until the audit speaks.
+// Because the derivation reads story-tags.csv, future twin
+// ingests (the December completion render) land seatable by
+// re-running the standard ingest + this generator — the
+// Commit E pattern: this regen is a mandatory final step of
+// ingest, and the twins ride it.
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, '..', '..');
 const csvPath = process.argv[2] ?? join(repoRoot, '..', 'presence-classes.csv');
-const outPath = join(repoRoot, 'src', 'data', 'routePresence.ts');
+const tagsPath = process.argv[3] ?? join(repoRoot, '..', 'story-tags.csv');
+const outPath = process.argv[4] ?? join(repoRoot, 'src', 'data', 'routePresence.ts');
+
+/** The woven-twin angle suffix (the tranche's key convention). */
+const WOVEN_TWIN_SUFFIX = '-woven-v1';
 
 function parseCsv(text) {
   // Proper CSV parse: quoted fields may contain commas and
@@ -93,6 +125,39 @@ for (const r of rows) {
   });
 }
 
+// Woven twins, derived from the tag index (see the header):
+// weave-safe by construction, never Protected, appended in
+// tags-CSV order after the audit's own rows — the audit rows
+// above are emitted byte-identically, twins are additions
+// only. A missing tags CSV (a bare repo checkout) simply
+// derives nothing: twins stay unclassified, hence ineligible.
+let twinCount = 0;
+if (existsSync(tagsPath)) {
+  const byKey = new Map(entries.map(e => [e.key, e]));
+  for (const r of parseCsv(readFileSync(tagsPath, 'utf8'))) {
+    const angle = r.angle ?? '';
+    if (!angle.endsWith(WOVEN_TWIN_SUFFIX)) continue;
+    const key = `${r.place_key}|${angle}`;
+    if (byKey.has(key)) continue; // the audit speaks for this key itself
+    const sourceKey = `${r.place_key}|${angle.slice(0, -WOVEN_TWIN_SUFFIX.length)}`;
+    const source = byKey.get(sourceKey);
+    if (!source) {
+      console.warn(`route-presence: twin ${key} skipped — source ${sourceKey} is unclassified`);
+      continue;
+    }
+    if (source.isProtected) {
+      throw new Error(
+        `route-presence: twin ${key} derives from Protected source ${sourceKey} — ` +
+          'Protected register is never woven material; adjudicate this twin in presence-classes.csv by hand',
+      );
+    }
+    const entry = { key, presence: 'safe', isProtected: false };
+    entries.push(entry);
+    byKey.set(key, entry);
+    twinCount += 1;
+  }
+}
+
 const body = entries
   .map(
     e =>
@@ -144,4 +209,4 @@ export function wovenEligibleFor(placeKey: string, angle: string): boolean {
 `;
 
 writeFileSync(outPath, out);
-console.log(`route-presence: ${entries.length} rows → ${outPath}`);
+console.log(`route-presence: ${entries.length} rows (${twinCount} woven twins derived) → ${outPath}`);
