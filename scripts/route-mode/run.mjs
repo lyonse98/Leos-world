@@ -3976,11 +3976,17 @@ check('lever detection: a thread is detected on index depth with a thin — or e
 
 check('lever seeking: fires only when local candidacy is insufficient AND the index promises more', () => {
   const support = new Map([[WT, 9]]);
-  // (a) Local candidacy at the cap → no fetch, however deep the index.
+  // (a) Local candidacy at the applicable NEED → no fetch,
+  // however deep the index. The need is the seat count the
+  // fetch provisions for (wovenMemberNeed): this fixture's
+  // plan sits below the thread-carried floor, so its need
+  // is the carried 8 — nine in hand clears any need.
   const rich = wFixtureUnits([
     wCand('w1|landmark_history', 300), wCand('w2|landmark_history', 290),
     wCand('w3|landmark_history', 280), wCand('w4|landmark_history', 270),
-    wCand('w5|landmark_history', 260),
+    wCand('w5|landmark_history', 260), wCand('w6|landmark_history', 250),
+    wCand('w7|landmark_history', 240), wCand('w8|landmark_history', 230),
+    wCand('w9|landmark_history', 220),
   ]);
   assert.equal(leverCompose(rich, 1800, { wovenIndexSupport: support }).wovenMembersSeeking, null);
   // (b) One local candidate + index depth → seeking the thread's topic.
@@ -4046,7 +4052,7 @@ check('lever staging: fetched members seat under every seating rule — cap, cli
   ]);
   const plan1 = leverCompose(units, 2400, { wovenIndexSupport: new Map([[WT, 12]]) });
   assert.equal(plan1.wovenMembersSeeking, WT, 'the thin local supply asks for the fetch');
-  // The fetch returns six survivors; one is the climax's own
+  // The fetch returns its survivors; one is the climax's own
   // place (another angle), one lands in the build's heard set
   // before seating — seating must refuse both.
   const memberUnits = [
@@ -4054,6 +4060,9 @@ check('lever staging: fetched members seat under every seating rule — cap, cli
     wCand('m2|landmark_history', 320, { placeName: 'Fetched Heard' }),
     wCand('m3|landmark_history', 300, { placeName: 'Fetched Three' }),
     wCand('m4|landmark_history', 280, { placeName: 'Fetched Four' }),
+    wCand('m5|landmark_history', 260, { placeName: 'Fetched Five' }),
+    wCand('m6|landmark_history', 240, { placeName: 'Fetched Six' }),
+    wCand('m7|landmark_history', 220, { placeName: 'Fetched Seven' }),
     wCand('gd|landmark_history', 330, { placeName: 'Climax Place Twin' }),
   ];
   const heardKeys = new Set(['m2|landmark_history']);
@@ -4064,7 +4073,7 @@ check('lever staging: fetched members seat under every seating rule — cap, cli
   });
   assert.equal(plan2.thread?.topic, WT);
   assert.ok(plan2.thread.memberIds.includes('m1|landmark_history'), 'fetched members join the cast in hand');
-  assert.equal(plan2.wovenMembersSeeking, null, 'supply in hand (local + fetched seatable) reaches the cap — no second fetch');
+  assert.equal(plan2.wovenMembersSeeking, null, 'supply in hand (local + fetched seatable) reaches the plan’s need — no second fetch');
   const seated = rm.seatWovenMembers(plan2, [...units, ...memberUnits], { heardKeys });
   const ids = memberIds(seated);
   assert.ok(ids.length >= 2 && ids.length <= rm.WOVEN_MEMBER_CAP, `cap respected (${ids.length} seated)`);
@@ -4115,6 +4124,249 @@ await checkAsync('lever telemetry: route_plan_started fetch record carries the m
   assert.equal(withFetch.p.fetch.reads, 100, 'the departure window’s counts are not folded with the member fetch');
   const without = await run({ ...baseStats });
   assert.equal(without.p.fetch.member_fetch, null, 'no member fetch on the build → null, one telemetry shape');
+});
+
+// ── Thread-carried episodes (Nov 4, 2026) ────────────────────
+// The exhausted-case rule: when the road itself cannot fill
+// roughly half the drive (geo stories + guarantee fills —
+// members excluded from the measure), the thread stops
+// filling an episode's silence and becomes the episode:
+// members anchor along the timeline under a raised cap (8),
+// the strongest member takes the climax position when no
+// geo climax exists, and the preview says so out loud.
+
+// A geo-healthy spine for this coarse fixture path: four
+// long stories whose sounding windows union past half the
+// budget even where the sequencer's act anchors cluster.
+const healthyGeo = () =>
+  [32.71, 32.74, 32.84, 32.88].map((lat, i) =>
+    wGeo(`h${i + 1}|landmark_origin`, lat, 700, `Healthy ${i + 1}`),
+  );
+const carriedCands = () =>
+  [350, 330, 310, 290, 270, 250, 230, 210, 190].map((d, i) =>
+    wCand(`c${i + 1}|landmark_history`, d, { placeName: `Carried ${i + 1}` }),
+  );
+
+check('carried predicate: fires below the floor with a thread; never on a healthy plan or without one', () => {
+  const healthy = leverCompose([...healthyGeo(), wCand('w1|landmark_history', 300)], 2400);
+  const ha = rm.assessThreadCarried(healthy);
+  assert.ok(ha.geoCoverageFraction >= rm.THREAD_CARRIED_FLOOR, `healthy fraction ${ha.geoCoverageFraction}`);
+  assert.equal(ha.active, false);
+  assert.equal(ha.memberCap, rm.WOVEN_MEMBER_CAP, 'the standing cap is the verdict on a healthy plan');
+  // A story-less plan: zero geo coverage, a detected thread.
+  const bare = leverCompose(carriedCands().slice(0, 3), 2400);
+  assert.equal(bare.thread?.topic, WT);
+  const ba = rm.assessThreadCarried(bare);
+  assert.equal(ba.geoCoverageFraction, 0);
+  assert.equal(ba.active, true);
+  assert.equal(ba.memberCap, rm.WOVEN_MEMBER_CAP_CARRIED, 'the raised cap is the verdict below the floor');
+  // Below the floor with NO thread: nothing can carry it.
+  const noThread = leverCompose([unit('x1|landmark_origin', 32.71, { topics: ['Coast'] })], 2400);
+  assert.equal(noThread.thread, null);
+  assert.equal(rm.assessThreadCarried(noThread).active, false);
+});
+
+check('carried sizing: the member fetch scales with the seat need', () => {
+  assert.deepEqual(rm.memberFetchSizing(rm.WOVEN_MEMBER_CAP), { readCap: 24, target: 8 });
+  assert.deepEqual(rm.memberFetchSizing(rm.WOVEN_MEMBER_CAP_CARRIED), { readCap: 48, target: 16 });
+  assert.equal(rm.memberFetchSizing(rm.WOVEN_MEMBER_CAP).readCap, rm.MEMBER_FETCH_READ_CAP);
+  assert.equal(rm.memberFetchSizing(rm.WOVEN_MEMBER_CAP).target, rm.MEMBER_FETCH_TARGET);
+  const entries = [];
+  for (let i = 0; i < 60; i++) {
+    entries.push({ place_key: `cap${i}`, angle: 'landmark_origin', lat: 32.0, lng: -117.05 });
+  }
+  const sel = rm.selectMemberFetchEntries(entries, {
+    topic: WT,
+    fetchedIds: new Set(),
+    path,
+    destination: dest,
+    tagsOf: () => ({ topics: [WT] }),
+    eligibleOf: () => true,
+    cap: rm.memberFetchSizing(rm.WOVEN_MEMBER_CAP_CARRIED).readCap,
+  });
+  assert.equal(sel.length, 48, 'the carried read cap binds the single fetch');
+});
+
+check('carried need: below the floor the plan provisions for eight; above it, four suffice', () => {
+  const support = new Map([[WT, 12]]);
+  const five = [300, 280, 260, 240, 220].map((d, i) =>
+    wCand(`n${i + 1}|landmark_history`, d, { placeName: `Need ${i + 1}` }),
+  );
+  const below = leverCompose(five, 2400, { wovenIndexSupport: support });
+  assert.equal(below.wovenMemberNeed, rm.WOVEN_MEMBER_CAP_CARRIED);
+  assert.equal(below.wovenMembersSeeking, WT, 'five in hand cannot fill eight seats — the fetch stays open');
+  const above = leverCompose([...healthyGeo(), ...five], 2400, { wovenIndexSupport: support });
+  assert.equal(above.wovenMemberNeed, rm.WOVEN_MEMBER_CAP);
+  assert.equal(above.wovenMembersSeeking, null, 'five in hand fills the standing need — no fetch');
+});
+
+check('carried anchoring: a story-less plan composes from the thread — spread, climax position, framing', () => {
+  const cands = carriedCands();
+  const plan = leverCompose(cands, 2400);
+  assert.equal(plan.thread?.topic, WT);
+  assert.equal(plan.items.filter(i => i.kind === 'story').length, 0, 'the composed plan has no stories at all');
+  // The standing rule still holds without the mode: normal
+  // seating cannot anchor — a story-less plan's only gap is
+  // the departure edge, which stays closed.
+  const normal = rm.seatWovenMembers(plan, cands, { heardKeys: new Set() });
+  assert.equal(memberIds(normal).length, 0);
+  const tc = rm.assessThreadCarried(plan);
+  assert.equal(tc.active, true);
+  const carried = rm.seatWovenMembers(plan, cands, { heardKeys: new Set(), maxMembers: tc.memberCap, threadCarried: true });
+  const members = carried.items.filter(i => i.woven);
+  assert.equal(members.length, 8, 'the raised cap binds: 8 of 9 candidates seat');
+  assert.equal(carried.wovenMembers?.count, 8);
+  const anchors = members.map(i => i.anchorProgress);
+  assert.ok(anchors.every((a, j) => j === 0 || a > anchors[j - 1]), 'member anchors increase along the drive');
+  assert.ok(anchors[0] < 0.15, 'a member anchors the opening act');
+  const acts = carried.actsSummary;
+  assert.ok(
+    acts.opening.stories >= 1 && acts.middle.stories >= 1 && acts.climax.stories >= 1,
+    `every act holds members: ${JSON.stringify(acts)}`,
+  );
+  // The climax position: the strongest member, final third,
+  // ending with the drive, marked as the plan's climax.
+  const climaxItems = carried.items.filter(i => i.climax);
+  assert.equal(climaxItems.length, 1);
+  assert.equal(climaxItems[0].id, 'c1|landmark_history', 'the strongest member (350 s) holds the climax position');
+  assert.ok(climaxItems[0].anchorProgress >= 2 / 3, 'the climax member sounds in the final third');
+  assert.ok(
+    Math.abs((climaxItems[0].anchorProgress ?? 0) + (climaxItems[0].durationSec ?? 0) / 2400 - 1) < 0.01,
+    'the designated climax ends where the drive ends',
+  );
+  assert.equal(carried.climaxUnitId, 'c1|landmark_history');
+  assert.equal(carried.climaxMode, 'thread');
+  assert.ok(members.every(i => i.releaseProgress === undefined), 'members stay windowless inserts');
+  const bridges = carried.items.filter(i => i.kind === 'bridge');
+  assert.ok(bridges.length >= members.length - 1, 'adjacent members are bridged — stitched, not stacked');
+  // Framing: the plan gains a preview, and it tells the truth.
+  const preview = carried.items.find(i => i.kind === 'preview');
+  assert.ok(preview, 'a story-less plan gains its preview from the rebuild');
+  assert.ok(preview.text.includes('quiet'), 'the preview names the quiet road');
+  assert.ok(preview.text.includes(WT), 'the preview names the thread');
+  assert.equal(carried.previewFacts?.threadPromised, true, 'the strongest member is the promised peak');
+});
+
+check('carried caps: normal mode never exceeds four; the carried top-up never exceeds eight total', () => {
+  const units = [
+    wGeo('ga|landmark_origin', 32.71, 120, 'Geo A'),
+    ...[300, 280, 260, 240, 220, 200, 180, 160, 140, 120].map((d, i) =>
+      wCand(`t${i + 1}|landmark_history`, d, { placeName: `Top ${i + 1}` }),
+    ),
+  ];
+  const plan = leverCompose(units, 2400);
+  assert.equal(plan.climaxMode, 'portal', 'the strongest candidate takes the open climax slot');
+  const normal = rm.seatWovenMembers(plan, units, { heardKeys: new Set() });
+  assert.equal(memberIds(normal).length, 4, 'normal seating stops at the standing cap');
+  const tc = rm.assessThreadCarried(normal);
+  assert.equal(tc.active, true, 'one geo story and a portal climax cannot fill half of 2400 s');
+  const topped = rm.seatWovenMembers(normal, units, { heardKeys: new Set(), maxMembers: tc.memberCap, threadCarried: true });
+  assert.equal(memberIds(topped).length, 8, 'the top-up fills to the carried cap and no further');
+  assert.equal(topped.wovenMembers?.count, 8, 'the record counts the plan total');
+  assert.equal(topped.climaxUnitId, 't1|landmark_history', 'the portal climax is untouched by the top-up');
+  assert.ok(!topped.items.some(i => i.climax && i.woven), 'no member is marked climax');
+});
+
+check('carried climax doctrine: an existing geo climax is never displaced, joined, or followed', () => {
+  const units = [
+    wGeo('ga|landmark_origin', 32.71, 120, 'Geo A'),
+    wGeo('gz|landmark_origin', 32.895, 500, 'Geo Z'),
+    ...[300, 280, 260, 240, 220, 200].map((d, i) =>
+      wCand(`g${i + 1}|landmark_history`, d, { placeName: `Guard ${i + 1}` }),
+    ),
+  ];
+  const plan = leverCompose(units, 2400);
+  assert.equal(plan.climaxUnitId, 'gz|landmark_origin');
+  assert.equal(plan.climaxMode, 'destination');
+  const tc = rm.assessThreadCarried(plan);
+  assert.equal(tc.active, true);
+  const carried = rm.seatWovenMembers(plan, units, { heardKeys: new Set(), maxMembers: tc.memberCap, threadCarried: true });
+  assert.ok(memberIds(carried).length >= 4, 'members anchor under the geo climax’s plan');
+  assert.equal(carried.climaxUnitId, 'gz|landmark_origin', 'the geo climax stands');
+  assert.equal(carried.climaxMode, 'destination');
+  assert.ok(!carried.items.some(i => i.climax && i.woven), 'no member is marked climax');
+  const climaxItem = carried.items.find(i => i.climax);
+  const climaxStart = climaxItem.releaseProgress ?? climaxItem.anchorProgress;
+  assert.ok(
+    carried.items.filter(i => i.woven).every(i => i.anchorProgress < climaxStart),
+    'no member sounds at or after the climax',
+  );
+});
+
+checkAsync('carried telemetry: route_plan_started decisions carry the thread_carried record', async () => {
+  const cands = carriedCands();
+  const plan0 = leverCompose(cands, 2400);
+  const tc = rm.assessThreadCarried(plan0);
+  const runStarted = async threadCarried => {
+    const p = {
+      ...rm.seatWovenMembers(plan0, cands, { heardKeys: new Set(), maxMembers: tc.memberCap, threadCarried: true }),
+      threadCarried,
+      fetchStats: null,
+    };
+    const events = [];
+    const runner = new rp.RoutePlanRunner({
+      audio: new RealFakeAudio(250),
+      synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+      onEvent: (t, payload) => events.push({ t, p: payload }),
+      onStoryHeard: () => {},
+    });
+    await runner.start(p);
+    runner.endTour();
+    return events.find(e => e.t === 'route_plan_started');
+  };
+  const withMode = await runStarted(tc);
+  assert.deepEqual(withMode.p.decisions.thread_carried, {
+    active: true,
+    geo_coverage_fraction: 0,
+    member_cap: 8,
+  });
+  const without = await runStarted(null);
+  assert.equal(without.p.decisions.thread_carried, null, 'an unassessed plan files null — one telemetry shape');
+});
+
+check('carried framing: the preview text and the manifest card name the quiet road — and only in mode', () => {
+  const ctx = {
+    threadTopic: WT,
+    destinationName: 'Dest',
+    storyCount: 8,
+    closingSubject: 'Carried 1',
+    climaxSubject: 'Carried 1',
+    climaxMode: 'thread',
+  };
+  const carriedText = rn.previewTextFor({ ...ctx, threadCarried: true });
+  assert.ok(carriedText.includes("road's quiet today"), carriedText);
+  assert.ok(carriedText.includes(WT), 'the carried preview names the thread');
+  assert.ok(!rn.previewTextFor(ctx).includes('quiet'), 'the standard thread preview is unchanged without the flag');
+  const cands = carriedCands();
+  const plan0 = leverCompose(cands, 2400);
+  const tc = rm.assessThreadCarried(plan0);
+  const carried = {
+    ...rm.seatWovenMembers(plan0, cands, { heardKeys: new Set(), maxMembers: tc.memberCap, threadCarried: true }),
+    threadCarried: tc,
+  };
+  const card = mf.buildManifest(carried, new Set(), { originName: 'Origin' });
+  assert.ok(card.threadLine?.includes('quiet'), card.threadLine);
+  const plainCard = mf.buildManifest(plan0, new Set(), { originName: 'Origin' });
+  assert.equal(plainCard.threadLine, `One thread all the way — ${mf.threadTitle(WT)}`, 'the card’s standard thread line is unchanged without the mode');
+});
+
+check('carried no-op: without eligibility the mode cannot engage, however silent the road', () => {
+  const units = [300, 280, 260].map((d, i) =>
+    unit(`n${i + 1}|landmark_history`, 32.0, {
+      lng: -117.05,
+      topics: [WT],
+      durationSec: d,
+      wovenEligible: false,
+      placeName: `Bound ${i + 1}`,
+    }),
+  );
+  const plan = leverCompose(units, 2400);
+  assert.equal(plan.thread, null, 'ineligible units are not thread support');
+  const tc = rm.assessThreadCarried(plan);
+  assert.equal(tc.geoCoverageFraction, 0);
+  assert.equal(tc.active, false, 'no thread → no mode, even at zero coverage');
+  const same = rm.seatWovenMembers(plan, units, { heardKeys: new Set(), threadCarried: true, maxMembers: tc.memberCap });
+  assert.equal(same, plan, 'the carried pass returns the plan untouched');
 });
 
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);
