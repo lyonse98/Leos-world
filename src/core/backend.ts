@@ -4,10 +4,13 @@
 // (spec §8), and the on-device pinned-audio cache (contract D).
 //
 // Posture: the public anon key only. story_library is read + append
-// (the shell only reads it), analytics is insert-only, story_likes is
+// (the shell reads it, and appends only route gap-story promotions —
+// see ingestRouteGapStory), analytics is insert-only, story_likes is
 // insert-only, heard_stories is scoped to the device key.
 
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { LEO_MODEL_ID, LEO_PERSONA_VERSION } from '../services/leoPersona';
+import { TTS_VOICE } from './gemini';
 
 declare const __BUILD_ID__: string;
 
@@ -325,6 +328,66 @@ export async function putCachedStory(
   void lng;
   void personaVersion;
   return;
+}
+
+/**
+ * Shelf promotion for a route-mode gap story (Coverage Guarantee,
+ * Nov 3, 2026): a story generated at plan time for a bare stretch
+ * — already style-gated by the caller — is written into
+ * story_library so future builds serve it from the shelf. This is
+ * NOT the shared tour_stories cache above (that containment
+ * stands): story_library is the shared shelf both editions read,
+ * and its rows are Miles-voiced library content by construction
+ * (persona leo-v14, voice Puck — the same voice the shelf's
+ * renders carry).
+ *
+ * The audio lands under a FRESH storage key carrying the
+ * -route-gap-v1 marker (the library ingest dialect:
+ * library/<place_key>/<angle>-…-route-gap-v1.wav) so these rows
+ * stay findable; the row insert is ignore-duplicates on
+ * (place_key, angle), matching the library tooling's Prefer
+ * header. Resolves the stored audio path when the upload landed
+ * (the caller plays the unit from the bucket; the row insert is
+ * best-effort behind it), null on any failure — ingest failure
+ * never affects the tour.
+ */
+export async function ingestRouteGapStory(args: {
+  /** Writer-dialect place key (normalizePlaceKey) — the row's identity. */
+  placeKey: string;
+  placeName: string;
+  angle: string;
+  lat: number;
+  lng: number;
+  storyText: string;
+  audio: Blob;
+}): Promise<string | null> {
+  if (!BACKEND_CONFIGURED) return null;
+  const discriminator = Math.random().toString(36).slice(2, 8);
+  const audioPath = `library/${args.placeKey}/${args.angle}-${discriminator}-route-gap-v1.wav`;
+  try {
+    const { error: uploadError } = await db.storage
+      .from(BUCKET)
+      .upload(audioPath, args.audio, { contentType: 'audio/wav', upsert: false });
+    if (uploadError) return null;
+    await db.from('story_library').upsert(
+      {
+        place_key: args.placeKey,
+        place_name: args.placeName,
+        angle: args.angle,
+        lat: args.lat,
+        lng: args.lng,
+        story_text: args.storyText,
+        audio_path: audioPath,
+        persona_version: LEO_PERSONA_VERSION,
+        model: LEO_MODEL_ID,
+        voice: TTS_VOICE,
+      },
+      { onConflict: 'place_key,angle', ignoreDuplicates: true },
+    );
+    return audioPath;
+  } catch {
+    return null;
+  }
 }
 
 // ------------------------------------------------------------ heard ledger + likes

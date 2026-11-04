@@ -800,5 +800,413 @@ await checkAsync('first sound: a refused first play holds at tap-to-hear (never 
   runner.endTour();
 });
 
+// ---- Coverage Guarantee (Nov 3, 2026): gap geometry, library-first
+// fill, generation cap/failure discipline, shelf promotion seams ----
+// Everything live is stubbed — discovery, generation, TTS and ingest
+// are injected fakes; zero network anywhere in these suites.
+const gfOut = join(mkdtempSync(join(tmpdir(), 'route-gap-')), 'routeGapFill.mjs');
+execFileSync(
+  join(repoRoot, 'node_modules', '.bin', 'esbuild'),
+  [
+    join(repoRoot, 'src', 'core', 'routeGapFill.ts'),
+    '--bundle',
+    '--format=esm',
+    '--platform=node',
+    '--define:import.meta.env={}',
+    `--outfile=${gfOut}`,
+    '--log-level=warning',
+  ],
+  { stdio: 'inherit' },
+);
+const gf = await import(pathToFileURL(gfOut).href);
+
+const mkPlan = items => ({
+  destinationName: 'Dest',
+  destination: denseDest,
+  path: densePath,
+  driveSec: 3000,
+  budgetSec: 3000,
+  items,
+  totalSec: items.reduce((s, i) => s + i.durationSec, 0),
+  skippedHeard: 0,
+  topicsMatched: false,
+  toneMatched: false,
+});
+const storyAtSec = (id, anchorSec, durSec, driveSec) => {
+  const w = rm.storyWindow(anchorSec / driveSec, durSec, driveSec);
+  return {
+    kind: 'story',
+    id,
+    label: id,
+    durationSec: durSec,
+    unit: unit(id, 32.7 + (anchorSec / driveSec) * 0.2),
+    ready: true,
+    anchorProgress: anchorSec / driveSec,
+    releaseProgress: w.release,
+    expireProgress: w.expire,
+  };
+};
+const noInput = { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] };
+
+check('gap geometry: stretches at or under 180 s are not gaps', () => {
+  const drive = 600;
+  const plan = mkPlan([storyAtSec('s1|x', 150, 120, drive), storyAtSec('s2|x', 390, 120, drive)]);
+  // windows [130,270] and [370,510]: departure 130, middle 100, arrival 90 — all ≤ 180.
+  assert.deepEqual(gf.detectStoryGaps(plan, drive), []);
+});
+
+check('gap geometry: a gap is measured between story windows — bridges and reactions do not close it', () => {
+  const drive = 2000;
+  const s1 = storyAtSec('s1|x', 200, 100, drive); // window [180, 300]
+  const s2 = storyAtSec('s2|x', 1800, 100, drive); // window [1780, 1900]
+  const bridge = { kind: 'bridge', id: 'bridge:s1|x>s2|x', label: 'Bridge', durationSec: 60, text: 'From s1 we keep rolling.', ready: true };
+  const reaction = { kind: 'reaction', id: 'reaction:0', label: 'Reaction', durationSec: 10, text: 'Still with me?', ready: true };
+  const gaps = gf.detectStoryGaps(mkPlan([s1, bridge, reaction, s2]), drive);
+  assert.equal(gaps.length, 1, `expected exactly the mid-drive gap, got ${JSON.stringify(gaps)}`);
+  assert.ok(Math.abs(gaps[0].gapSec - 1480) < 1, `gap ${gaps[0].gapSec} != 1480 (1780 - 300)`);
+  assert.ok(Math.abs(gaps[0].startSec - 300) < 1 && Math.abs(gaps[0].endSec - 1780) < 1);
+});
+
+check('gap geometry: departure and arrival edges count, ranked largest-first; exactly 180 s is not a gap', () => {
+  const drive = 2000;
+  const only = storyAtSec('only|x', 1000, 100, drive); // window [980, 1100]
+  const gaps = gf.detectStoryGaps(mkPlan([only]), drive);
+  assert.deepEqual(gaps.map(g => Math.round(g.gapSec)), [980, 900], 'departure edge 980, arrival edge 900, largest first');
+  const boundary = gf.detectStoryGaps(
+    mkPlan([storyAtSec('b1|x', 200, 100, 1000), storyAtSec('b2|x', 850, 100, 1000)]),
+    1000,
+  );
+  // windows [180,300] and [830,950]: departure is exactly 180 → not a gap; middle 530 is.
+  assert.equal(boundary.length, 1);
+  assert.ok(Math.abs(boundary[0].gapSec - 530) < 1);
+});
+
+check('gap style gate: clean text passes; the hard-fail classes reject', () => {
+  const good =
+    'The Old Mill has ground grain on this creek since the railroad came through. The miller, a stubborn Scot named Abernathy, once refused to sell flour to the railroad itself during a rate fight. I think about that every time I pass the place. The wheel still turns when the creek runs high, and the whole building hums like a held note. Abernathy lost the fight in the end, but the mill outlived the railroad that beat him.';
+  assert.equal(gf.gapStoryStyleGate(good, 'The Old Mill'), true);
+  assert.equal(gf.gapStoryStyleGate(good.replace('has ground grain', 'is coming up on your left and has ground grain'), 'The Old Mill'), false, 'relative direction rejects');
+  assert.equal(gf.gapStoryStyleGate(`# The Old Mill\n${good}`, 'The Old Mill'), false, 'markdown rejects');
+  const unnamed =
+    'The lighthouse has watched over this harbor since the eighteen eighties, when its keeper lit the lamp by hand every single night. The keeper, a former whaler named Okafor, once rowed out in a gale to pull three sailors off a wreck on the bar. I think about that row every time the fog comes in thick. The light still turns, the fog still argues with it, and the harbor still answers.';
+  assert.equal(gf.gapStoryStyleGate(unnamed, 'The Old Mill'), false, 'subject unnamed in the first two sentences rejects');
+  assert.equal(gf.gapStoryStyleGate('The Old Mill is old. It is quiet.', 'The Old Mill'), false, 'too thin rejects');
+  assert.equal(gf.gapStoryStyleGate('', 'The Old Mill'), false, 'empty rejects');
+});
+
+/** A gate-passing canned story that names its subject in sentence one. */
+const cannedStory = name =>
+  `${name} has watched this road change for a hundred years. The building went up when the streetcars still ran past its door, and the family that built it refused three offers to tear it down. I drive past it and think about the stubbornness that keeps a place standing. Inside, the original counter still runs the length of the room, scarred by a century of elbows and coffee cups. The story goes that the mayor himself tried to buy it in 1962 and walked out with nothing but a sandwich. It is still there, still open, still stubborn — and the road is better for it.`;
+const subjectFromPrompt = prompt => prompt.match(/Tell the story of (.+)\./)[1];
+
+await checkAsync('gapfill: library first — an untiled fetched unit tiles the gap, zero discovery/generation calls', async () => {
+  const drive = 900;
+  const sA = unit('sa|landmark_origin', 32.716, { topics: ['Coast'], durationSec: 90 });
+  const sB = unit('sb|landmark_origin', 32.884, { topics: ['Coast'], durationSec: 90 });
+  const mid = unit('mid|landmark_origin', 32.776, { topics: [], durationSec: 340 });
+  // The topic pool restriction leaves `mid` fetched but untiled —
+  // a real production shape (the composer tiles the topic pool).
+  const plan = rm.composeRoutePlan([sA, sB, mid], densePath, denseDest, 'Dest', { ...noInput, topics: ['Coast'] }, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: drive });
+  assert.ok(!plan.items.some(i => i.id === 'mid|landmark_origin'), 'fixture: mid starts untiled');
+  let discoverCalls = 0;
+  let generateCalls = 0;
+  const events = [];
+  const filled = await gf.fillRouteGaps(
+    plan,
+    { fetchedUnits: [sA, sB, mid], heardKeys: new Set(), input: { ...noInput, topics: ['Coast'] }, driveSec: drive },
+    {
+      discoverSubjects: async () => {
+        discoverCalls += 1;
+        return [];
+      },
+      generateStory: async () => {
+        generateCalls += 1;
+        return cannedStory('Should Never Generate');
+      },
+      onEvent: e => events.push(e),
+    },
+  );
+  assert.ok(filled.items.some(i => i.id === 'mid|landmark_origin'), 'the untiled shelf unit was tiled into the gap');
+  assert.equal(discoverCalls, 0, 'discovery never ran');
+  assert.equal(generateCalls, 0, 'generation never ran — the shelf beat it');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].result, 'shelf');
+  assert.equal(events[0].subject, 'mid|landmark_origin');
+  assert.ok(events[0].gap_sec > 500 && events[0].gap_sec < 750, `gap_sec ${events[0].gap_sec}`);
+});
+
+await checkAsync('gapfill: a fetched off-corridor (portal) candidate is never a gap fill — geographic only', async () => {
+  const drive = 2000;
+  const plan = mkPlan([storyAtSec('s1|x', 200, 100, drive), storyAtSec('s2|x', 1800, 100, drive)]);
+  plan.driveSec = drive;
+  plan.budgetSec = drive;
+  const offPathUnit = unit('off|landmark_origin', 32.8, { lng: -117.05 }); // projects mid-gap, ~18 km off the path
+  const events = [];
+  const filled = await gf.fillRouteGaps(
+    plan,
+    { fetchedUnits: [offPathUnit], heardKeys: new Set(), input: noInput, driveSec: drive },
+    { onEvent: e => events.push(e) }, // no generation deps at all: the lane is closed
+  );
+  assert.ok(!filled.items.some(i => i.id === 'off|landmark_origin'), 'portal candidate not tiled');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].result, 'skipped');
+});
+
+await checkAsync('gapfill: cap — 3 qualifying gaps get exactly 2 generated fills, largest first', async () => {
+  const drive = 3000;
+  const plan = mkPlan([
+    storyAtSec('s1|x', 150, 100, drive),
+    storyAtSec('s2|x', 770, 100, drive),
+    storyAtSec('s3|x', 1770, 100, drive),
+    storyAtSec('s4|x', 2650, 300, drive),
+  ]);
+  plan.driveSec = drive;
+  plan.budgetSec = drive;
+  // gaps: [250→750]=500, [870→1750]=880, [1870→2630]=760 — three qualify.
+  const names = ['Cap Subject One', 'Cap Subject Two', 'Cap Subject Three'];
+  let discoverCalls = 0;
+  const ingested = [];
+  const events = [];
+  const filled = await gf.fillRouteGaps(
+    plan,
+    { fetchedUnits: plan.items.map(i => i.unit), heardKeys: new Set(), input: noInput, driveSec: drive },
+    {
+      discoverSubjects: async points => {
+        const name = names[discoverCalls];
+        discoverCalls += 1;
+        return [{ name, lat: points[1].lat, lng: points[1].lng, types: ['museum'], rating: 4.6, userRatings: 1200, address: null, facts: [] }];
+      },
+      generateStory: async prompt => cannedStory(subjectFromPrompt(prompt)),
+      synthesize: async () => new Blob(['fake-audio']),
+      ingest: async ({ unit: u, text }) => {
+        ingested.push({ id: u.id, text });
+        return `library/${u.placeKey}/${u.angle}-zz-route-gap-v1.wav`;
+      },
+      onEvent: e => events.push(e),
+    },
+  );
+  const generated = filled.items.filter(i => i.kind === 'story' && i.unit && i.unit.audioPath && i.unit.audioPath.includes('-route-gap-v1'));
+  assert.equal(generated.length, 2, 'exactly two generated stories in the plan');
+  assert.equal(ingested.length, 2, 'both were shelf-promoted');
+  assert.ok(generated.every(i => i.portal === undefined), 'gap fills are geographic, never portals');
+  assert.ok(generated.every(i => i.releaseProgress !== undefined && i.expireProgress !== undefined), 'gap fills carry anchored windows');
+  assert.deepEqual(events.map(e => e.result), ['generated', 'generated', 'skipped']);
+  assert.deepEqual(events.map(e => e.gap_sec), [880, 760, 500], 'largest gaps filled first');
+  assert.equal(events[0].subject, 'Cap Subject One');
+  assert.equal(events[1].subject, 'Cap Subject Two');
+});
+
+await checkAsync('gapfill: generation failure → the plan ships intact, telemetry records failed', async () => {
+  const drive = 2000;
+  const plan = mkPlan([storyAtSec('s1|x', 200, 100, drive), storyAtSec('s2|x', 1800, 100, drive)]);
+  plan.driveSec = drive;
+  plan.budgetSec = drive;
+  const events = [];
+  const filled = await gf.fillRouteGaps(
+    plan,
+    { fetchedUnits: [], heardKeys: new Set(), input: noInput, driveSec: drive },
+    {
+      discoverSubjects: async points => [
+        { name: 'Fail Subject', lat: points[1].lat, lng: points[1].lng, types: ['museum'], rating: 4.5, userRatings: 800, address: null, facts: [] },
+      ],
+      generateStory: async () => {
+        throw new Error('quota or network — the lane is down');
+      },
+      onEvent: e => events.push(e),
+    },
+  );
+  assert.deepEqual(filled.items.map(i => i.id), plan.items.map(i => i.id), 'plan untouched');
+  assert.equal(filled.totalSec, plan.totalSec);
+  assert.deepEqual(events.map(e => e.result), ['failed']);
+  assert.equal(events[0].gap_sec, 1480);
+});
+
+await checkAsync('gapfill: generation timeout → the plan ships intact, telemetry records failed', async () => {
+  const drive = 2000;
+  const plan = mkPlan([storyAtSec('s1|x', 200, 100, drive), storyAtSec('s2|x', 1800, 100, drive)]);
+  plan.driveSec = drive;
+  plan.budgetSec = drive;
+  const events = [];
+  const filled = await gf.fillRouteGaps(
+    plan,
+    { fetchedUnits: [], heardKeys: new Set(), input: noInput, driveSec: drive },
+    {
+      discoverSubjects: async points => [
+        { name: 'Slow Subject', lat: points[1].lat, lng: points[1].lng, types: ['museum'], rating: 4.5, userRatings: 800, address: null, facts: [] },
+      ],
+      generateStory: () => new Promise(r => setTimeout(() => r(cannedStory('Slow Subject')), 250)),
+      timeoutMs: 40,
+      onEvent: e => events.push(e),
+    },
+  );
+  assert.deepEqual(filled.items.map(i => i.id), plan.items.map(i => i.id), 'plan untouched');
+  assert.deepEqual(events.map(e => e.result), ['failed']);
+});
+
+await checkAsync('gapfill: a style-gate reject is discarded entirely — not served, not ingested', async () => {
+  const drive = 2000;
+  const plan = mkPlan([storyAtSec('s1|x', 200, 100, drive), storyAtSec('s2|x', 1800, 100, drive)]);
+  plan.driveSec = drive;
+  plan.budgetSec = drive;
+  let ingestCalls = 0;
+  let synthCalls = 0;
+  const events = [];
+  const filled = await gf.fillRouteGaps(
+    plan,
+    { fetchedUnits: [], heardKeys: new Set(), input: noInput, driveSec: drive },
+    {
+      discoverSubjects: async points => [
+        { name: 'Gate Subject', lat: points[1].lat, lng: points[1].lng, types: ['museum'], rating: 4.5, userRatings: 800, address: null, facts: [] },
+      ],
+      // Names the subject early and is long enough — but carries a
+      // banned relative direction, so the gate must kill it.
+      generateStory: async () =>
+        'Gate Subject is coming up on your left, and it has a story worth hearing. The family that built it refused to sell for sixty years. I think about that stubbornness every time I pass. The counter inside still runs the length of the room, scarred by a century of coffee cups and elbows. It is still open, still stubborn, and still the best seat on this whole road.',
+      synthesize: async () => {
+        synthCalls += 1;
+        return new Blob(['x']);
+      },
+      ingest: async () => {
+        ingestCalls += 1;
+        return 'library/gate/x-route-gap-v1.wav';
+      },
+      onEvent: e => events.push(e),
+    },
+  );
+  assert.deepEqual(filled.items.map(i => i.id), plan.items.map(i => i.id), 'rejected text never entered the plan');
+  assert.equal(synthCalls, 0, 'rejected text never reached TTS');
+  assert.equal(ingestCalls, 0, 'rejected text was never ingested');
+  assert.deepEqual(events.map(e => e.result), ['failed']);
+});
+
+await checkAsync('gapfill: ingest failure never affects the tour — the item serves from its text', async () => {
+  const drive = 2000;
+  const plan = mkPlan([storyAtSec('s1|x', 200, 100, drive), storyAtSec('s2|x', 1800, 100, drive)]);
+  plan.driveSec = drive;
+  plan.budgetSec = drive;
+  const events = [];
+  const filled = await gf.fillRouteGaps(
+    plan,
+    { fetchedUnits: [], heardKeys: new Set(), input: noInput, driveSec: drive },
+    {
+      discoverSubjects: async points => [
+        { name: 'Orphan Subject', lat: points[1].lat, lng: points[1].lng, types: ['museum'], rating: 4.5, userRatings: 800, address: null, facts: [] },
+      ],
+      generateStory: async prompt => cannedStory(subjectFromPrompt(prompt)),
+      synthesize: async () => new Blob(['fake-audio']),
+      ingest: async () => null, // the shelf write failed — the tour must not care
+      onEvent: e => events.push(e),
+    },
+  );
+  const item = filled.items.find(i => i.unit && i.unit.placeName === 'Orphan Subject');
+  assert.ok(item, 'the generated story is in the plan despite the ingest failure');
+  assert.equal(item.unit.audioPath, null, 'no bucket path — the runner synthesizes from text');
+  assert.ok(item.unit.storyText && item.unit.storyText.includes('Orphan Subject'), 'text rides the unit for the runner synth fallback');
+  assert.deepEqual(events.map(e => e.result), ['generated']);
+});
+
+await checkAsync('gapfill: a plan with no gaps is returned untouched, with no events', async () => {
+  const drive = 600;
+  const plan = mkPlan([storyAtSec('s1|x', 150, 120, drive), storyAtSec('s2|x', 390, 120, drive)]);
+  plan.driveSec = drive;
+  plan.budgetSec = drive;
+  const events = [];
+  const filled = await gf.fillRouteGaps(
+    plan,
+    { fetchedUnits: [], heardKeys: new Set(), input: noInput, driveSec: drive },
+    { onEvent: e => events.push(e) },
+  );
+  assert.equal(filled, plan, 'same plan object — the pass stood down entirely');
+  assert.equal(events.length, 0);
+});
+
+await checkAsync('gapfill discovery: the Places walk tries every key — first blocked, second answers', async () => {
+  const tried = [];
+  const stub = async (url, opts) => {
+    tried.push(opts.headers['X-Goog-Api-Key']);
+    if (opts.headers['X-Goog-Api-Key'] === 'blocked-key') {
+      return { ok: false, status: 403, json: async () => ({ error: { status: 'PERMISSION_DENIED' } }) };
+    }
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        places: [
+          {
+            displayName: { text: 'Gap Museum' },
+            location: { latitude: 32.8, longitude: -117.25 },
+            rating: 4.7,
+            userRatingCount: 2100,
+            types: ['museum', 'tourist_attraction'],
+            formattedAddress: '1 Gap Way, San Diego, CA',
+          },
+        ],
+      }),
+    };
+  };
+  const subjects = await gf.discoverGapSubjects([{ lat: 32.8, lng: -117.25 }], ['blocked-key', 'working-key'], stub);
+  assert.deepEqual(tried.slice(0, 2), ['blocked-key', 'working-key'], 'keys walked in order');
+  assert.ok(subjects.some(s => s.name === 'Gap Museum'), 'the subject from the working key was discovered');
+});
+
+await checkAsync('gapfill runner: a generated item obeys window / drop / owed semantics', async () => {
+  const composed = rm.composeRoutePlan(
+    [unit('a|landmark_origin', 32.71), unit('b|landmark_origin', 32.78), unit('c|landmark_origin', 32.87)],
+    densePath,
+    denseDest,
+    'Dest',
+    noInput,
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 2000 },
+  );
+  composed.driveSec = 2000;
+  composed.budgetSec = 2000;
+  const names = ['Runner Subject One', 'Runner Subject Two'];
+  let discoverCalls = 0;
+  const filled = await gf.fillRouteGaps(
+    composed,
+    { fetchedUnits: composed.items.map(i => i.unit).filter(Boolean), heardKeys: new Set(), input: noInput, driveSec: 2000 },
+    {
+      discoverSubjects: async points => {
+        const name = names[discoverCalls];
+        discoverCalls += 1;
+        return [{ name, lat: points[1].lat, lng: points[1].lng, types: ['museum'], rating: 4.6, userRatings: 900, address: null, facts: [] }];
+      },
+      generateStory: async prompt => cannedStory(subjectFromPrompt(prompt)),
+      synthesize: async () => new Blob(['fake-audio']),
+      ingest: async ({ unit: u }) => `library/${u.placeKey}/${u.angle}-zz-route-gap-v1.wav`,
+    },
+  );
+  const generatedItems = filled.items.filter(i => i.unit && i.unit.audioPath && i.unit.audioPath.includes('-route-gap-v1'));
+  assert.equal(generatedItems.length, 2, 'fixture: both composed gaps generated a fill');
+  const target = generatedItems.reduce((a, b) => (a.anchorProgress <= b.anchorProgress ? a : b));
+  const audio = new RealFakeAudio(400);
+  const events = [];
+  const heard = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onEvent: (t, p) => events.push({ t, p }),
+    onStoryHeard: u => heard.push(u.id),
+  });
+  await runner.start(filled);
+  await until(() => heard.includes('a|landmark_origin'), 'the departure story sounded');
+  // Jump past the generated item's window without sounding it.
+  const jumpProgress = Math.min(0.97, target.expireProgress + 0.1);
+  runner.onPosition({ lat: 32.7 + jumpProgress * 0.2, lng: -117.25 });
+  await until(
+    () => events.some(e => e.t === 'story_dropped' && e.p.subject === target.unit.placeName),
+    'the generated item dropped stale at the feed gate',
+  );
+  assert.ok(!heard.includes(target.unit.id), 'the dropped generated story was never heard-recorded');
+  runner.onPosition(denseDest); // arrival with the dropped story unplayed → it is owed
+  await until(() => runner.view().closeoutDone, 'arrival closeout');
+  assert.equal(runner.view().endedKind, 'arrival-owed');
+  assert.ok(
+    runner.view().owed && runner.view().owed.includes(target.unit.placeName),
+    `owed tease names the dropped generated story (got: ${runner.view().owed})`,
+  );
+  runner.endTour();
+});
+
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

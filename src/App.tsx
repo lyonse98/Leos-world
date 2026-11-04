@@ -21,6 +21,7 @@ import {
   type TourMode,
 } from './core/routeMode';
 import { RoutePlanRunner, type RouteRunnerView } from './core/routePlayback';
+import { discoverGapSubjects, fillRouteGaps } from './core/routeGapFill';
 import { tagsFor } from './data/routeTags';
 import {
   deviceKey,
@@ -29,9 +30,10 @@ import {
   fetchHostedFillerRows,
   fetchLibraryIndex,
   fetchLibraryRow,
+  ingestRouteGapStory,
   recordHeard,
 } from './core/backend';
-import { generateAnswerText, synthesizeSpeech } from './core/gemini';
+import { generateAnswerText, generateStoryText, synthesizeSpeech } from './core/gemini';
 import { LEO_QA_MODEL_ID } from './services/leoPersona';
 
 /**
@@ -651,12 +653,16 @@ function MilesApp() {
 
   /**
    * Route build (v16.1; composer v2, Nov 3, 2026): ONE static
-   * composition pass at departure. Live calls, exactly three per
-   * build: one Gemini parse (local fallback), one Places text
-   * search, one Routes computeRoutes — each maps call walks ALL
-   * configured Google keys until one answers (Nov 3, 2026: the
-   * keys' API-restriction lists differ per key, so key selection
-   * is per call, never once per build). Library rows are fetched
+   * composition pass at departure. The composition's live calls
+   * are exactly three per build: one Gemini parse (local
+   * fallback), one Places text search, one Routes computeRoutes
+   * — each maps call walks ALL configured Google keys until one
+   * answers (Nov 3, 2026: the keys' API-restriction lists differ
+   * per key, so key selection is per call, never once per build).
+   * The Coverage Guarantee pass after composition may add bounded
+   * plan-time calls (discovery + generation + TTS + ingest, ≤2
+   * generated stories) ONLY when the composed plan has a dead
+   * stretch over 180 s — see fillRouteGaps. Library rows are fetched
    * for the FAIR fetch set (selectFetchCandidates: round-robin
    * across the whole path's progress deciles, ≤120 geographic +
    * ≤30 topic-connected portal candidates), read in parallel
@@ -850,13 +856,52 @@ function MilesApp() {
         audioPath: f.audio_path,
         storyText: f.story_text,
       }));
-      const plan = composeRoutePlan(units, route.path, geocoded.location, geocoded.name, input, {
+      let plan = composeRoutePlan(units, route.path, geocoded.location, geocoded.name, input, {
         nowMs,
         heardKeys,
         fillerUnits,
         budgetSecOverride: budget,
         driveSec: route.durationSec,
       });
+      // Coverage Guarantee (Nov 3, 2026 — route differentiator 1):
+      // walk the composed plan for dead stretches over 180 s and
+      // fill them at plan time. Untiled units from THIS build's
+      // fetched set tile first (library first, always); a stretch
+      // still bare after the shelf pass gets one plan-time
+      // generated story — fetch-ahead discovery over the build's
+      // Google keys, the freeform live-generation path, the style
+      // gate, the runner's own TTS path — capped at 2 per build,
+      // promoted into story_library on success, and every step
+      // timeout-guarded: any failure ships the composed plan as
+      // it was. One route_gap_fill telemetry event per gap.
+      plan = await fillRouteGaps(
+        plan,
+        { fetchedUnits: units, heardKeys, input, driveSec: route.durationSec },
+        {
+          discoverSubjects: points => discoverGapSubjects(points, googleKeys),
+          generateStory: prompt => generateStoryText(prompt),
+          synthesize: text => synthesizeSpeech(text),
+          ingest: ({ unit, audio }) =>
+            ingestRouteGapStory({
+              placeKey: unit.placeKey,
+              placeName: unit.placeName,
+              angle: unit.angle,
+              lat: unit.lat,
+              lng: unit.lng,
+              storyText: unit.storyText ?? '',
+              audio,
+            }),
+          onEvent: event => {
+            void emitEvent(
+              sessionId,
+              'route_gap_fill',
+              { ...event },
+              { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
+            );
+          },
+          onGenerateStart: () => setRouteStatus('Filling a quiet stretch…'),
+        },
+      );
       plan.driveSec = route.durationSec;
       plan.budgetSec = budget;
       const plannedIds = new Set(plan.items.map(it => it.id));

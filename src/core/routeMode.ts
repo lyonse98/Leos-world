@@ -1135,8 +1135,11 @@ export interface RouteOutcome {
  * order until one answers, and a 403 moves to the next key rather
  * than failing the call. Key selection is per call: Places and
  * Routes may legitimately succeed on different keys in one build.
+ * Exported for the route gap-fill discovery (routeGapFill.ts),
+ * which walks the same list for its Places calls — never a
+ * single-key call anywhere in route mode.
  */
-function configuredKeys(apiKeys: string[]): string[] {
+export function configuredKeys(apiKeys: string[]): string[] {
   return [...new Set(apiKeys.map(k => (typeof k === 'string' ? k.trim() : '')).filter(k => k.length > 0))];
 }
 
