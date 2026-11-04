@@ -20,6 +20,7 @@
 // No live calls happen at import time, in tests, or in the harness.
 //
 import { selectPriorDrive, type RouteDriveRecord } from './routeHistory';
+import type { WrapUpContext } from './narration';
 
 // Composer v2 (Erik, Nov 3, 2026): full-path fetch with segment
 // fairness (no first-60 early-route bias), position-anchored
@@ -576,6 +577,17 @@ export interface RoutePlan {
    * The pure composer cannot know the shelf beyond its inputs.
    */
   shelfTease?: LibraryUnit | null;
+  /**
+   * The generated wrap-up (addendum 3), authored + synthesized
+   * by the App at preparation (after gap-fill) and held by the
+   * runner as the plan's closing piece: ONE closing narration
+   * for the planned drive played to finish. Played only when
+   * the tour reaches arrival with the plan run out; an early
+   * end or an overrun simply never uses it. Null when its
+   * generation/synthesis failed at preparation — arrival then
+   * falls back to the standing closeout line exactly.
+   */
+  wrapUp?: { text: string; audioUrl: string } | null;
 }
 
 // ------------------------------------------------------------ through-line (differentiator 2)
@@ -1504,14 +1516,6 @@ export interface Closeout {
   teaseLabel: string | null;
   /** Overrun only: the freeform engine resumes the tail. */
   freeformTail: boolean;
-  /**
-   * Through-line wrap (differentiator 2): on ARRIVAL only, and
-   * only when at least two thread members actually played — a
-   * line naming the thread and the played members it ran
-   * through, first to last. A thread that collapsed through
-   * drops is never claimed; the owed tease proceeds as usual.
-   */
-  threadLine: string | null;
 }
 
 /**
@@ -1532,19 +1536,8 @@ export function decideCloseout(args: {
   planExhausted: boolean;
   unplayedPlanUnits: LibraryUnit[];
   unheardShelfUnits: LibraryUnit[];
-  /**
-   * The plan's thread + the thread members that ACTUALLY
-   * played, in plan order (differentiator 2). The wrap line is
-   * composed from these facts only.
-   */
-  thread?: { topic: string; playedNames: string[] } | null;
 }): Closeout | null {
   const { arrived, planExhausted, unplayedPlanUnits, unheardShelfUnits } = args;
-  const playedNames = args.thread?.playedNames ?? [];
-  const threadLine =
-    arrived && args.thread && playedNames.length >= 2
-      ? `And that was the thread of this drive — ${args.thread.topic}, from ${playedNames[0]} all the way to ${playedNames[playedNames.length - 1]}.`
-      : null;
   if (arrived && !planExhausted) {
     const tease = unplayedPlanUnits[0] ?? null;
     return {
@@ -1553,7 +1546,6 @@ export function decideCloseout(args: {
       teaseUnitId: tease ? tease.id : null,
       teaseLabel: tease ? tease.placeName : null,
       freeformTail: false,
-      threadLine,
     };
   }
   if (arrived && planExhausted) {
@@ -1564,7 +1556,6 @@ export function decideCloseout(args: {
       teaseUnitId: tease ? tease.id : null,
       teaseLabel: tease ? tease.placeName : null,
       freeformTail: false,
-      threadLine,
     };
   }
   if (!arrived && planExhausted) {
@@ -1574,10 +1565,24 @@ export function decideCloseout(args: {
       teaseUnitId: null,
       teaseLabel: null,
       freeformTail: true,
-      threadLine: null,
     };
   }
   return null;
+}
+
+/**
+ * The wrap-up's facts (addendum 3), assembled from the plan
+ * alone: destination + thread. Deliberately nothing else —
+ * no played set exists at preparation time, and none may
+ * leak in later: the wrap-up speaks the episode's arc, never
+ * a recap. The text itself is authored in the narration
+ * layer (narration.wrapUpTextFor) from this context.
+ */
+export function buildWrapUpContext(plan: RoutePlan): WrapUpContext {
+  return {
+    destinationName: plan.destinationName,
+    threadTopic: plan.thread?.topic ?? null,
+  };
 }
 
 /** 'Miles owes you' post-tour line for a teased unit (a line/state, not a screen). */

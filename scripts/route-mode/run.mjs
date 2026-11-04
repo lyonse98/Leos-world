@@ -674,19 +674,11 @@ check('previously on Miles: a destination-area heard subject is the nod when sev
   assert.ok(firstBridge.text.includes('dest-old|landmark_origin'), 'the destination-area subject carries the nod');
   assert.ok(!firstBridge.text.includes('corridor-old|landmark_origin'), 'exactly one nod subject');
 });
-check('closeout payoff: the thread wrap needs two played members and an arrival', () => {
-  const base = { planExhausted: true, unplayedPlanUnits: [], unheardShelfUnits: [] };
-  const wrapped = rm.decideCloseout({ ...base, arrived: true, thread: { topic: 'Navy Century', playedNames: ['Alpha', 'Beta'] } });
-  assert.ok(wrapped.threadLine && wrapped.threadLine.includes('Navy Century'), 'wrap names the thread');
-  assert.ok(wrapped.threadLine.includes('Alpha') && wrapped.threadLine.includes('Beta'), 'wrap runs first played to last played');
-  const collapsed = rm.decideCloseout({ ...base, arrived: true, thread: { topic: 'Navy Century', playedNames: ['Alpha'] } });
-  assert.equal(collapsed.threadLine, null, 'a thread that collapsed to one played member is not claimed');
-  const overrun = rm.decideCloseout({ ...base, arrived: false, thread: { topic: 'Navy Century', playedNames: ['Alpha', 'Beta'] } });
-  assert.equal(overrun.threadLine, null, 'no wrap on the overrun handoff');
-  const owed = rm.decideCloseout({ arrived: true, planExhausted: false, unplayedPlanUnits: [unit('z|landmark_origin', 32.88)], unheardShelfUnits: [], thread: { topic: 'Navy Century', playedNames: ['Alpha', 'Beta'] } });
+check('closeout accounting (post addendum 3): kinds and owed tease are exactly as before', () => {
+  const owed = rm.decideCloseout({ arrived: true, planExhausted: false, unplayedPlanUnits: [unit('z|landmark_origin', 32.88)], unheardShelfUnits: [] });
   assert.equal(owed.kind, 'arrival-owed');
-  assert.ok(owed.threadLine, 'the wrap rides an arrival-owed closeout too');
   assert.equal(owed.teaseUnitId, 'z|landmark_origin', 'the owed tease proceeds as usual');
+  assert.equal(owed.threadLine, undefined, 'the played-count thread wrap is gone — the wrap-up replaced it');
 });
 check('gist: first sentence, capped; no text, no gist', () => {
   assert.equal(rm.storyGist(unit('g|landmark_origin', 32.7, { storyText: 'First sentence here. Second follows.' })), 'First sentence here.');
@@ -974,12 +966,74 @@ const threadPlan = () =>
     noTopics,
     { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 2000 },
   );
-await checkAsync('thread runner: two played members → the arrival closeout wraps the thread', async () => {
-  const plan = threadPlan();
-  assert.equal(plan.thread?.topic, 'Navy Century', 'fixture plan is threaded');
+// ---- the wrap-up (addendum 3) + the narration seam (addendum 5) ----
+// ONE closing narration, authored at preparation from plan
+// facts only, played ONLY on arrival with the plan run out.
+// The runner's closeout kinds label its accounting; the
+// wrap-up gate reads the run-out accounting itself (every
+// story sounded, or the last one on the element now) — an
+// early end, an overrun, or a genuinely-owed arrival speaks
+// today's closeout line instead.
+const rnOut = join(mkdtempSync(join(tmpdir(), 'route-narration-')), 'narration.mjs');
+execFileSync(
+  join(repoRoot, 'node_modules', '.bin', 'esbuild'),
+  [
+    join(repoRoot, 'src', 'core', 'narration.ts'),
+    '--bundle',
+    '--format=esm',
+    '--platform=node',
+    '--define:import.meta.env={}',
+    `--outfile=${rnOut}`,
+    '--log-level=warning',
+  ],
+  { stdio: 'inherit' },
+);
+const rn = await import(pathToFileURL(rnOut).href);
+
+check('narration seam: requests stamp kind + the default solo voice; context passes through untouched', () => {
+  const ctx = { destinationName: 'Dest', threadTopic: null };
+  const req = rn.narrationRequest('wrapup', ctx);
+  assert.equal(req.kind, 'wrapup');
+  assert.equal(req.voice, 'miles-solo', 'voice defaults to Miles solo');
+  assert.equal(rn.DEFAULT_NARRATION_VOICE, 'miles-solo');
+  assert.equal(req.context, ctx, 'the seam carries structured facts, not prose');
+  assert.equal(rn.narrationRequest('bridge', ctx, 'miles-solo').kind, 'bridge', 'one uniform shape across kinds');
+});
+check('wrap-up context: plan facts only — destination + thread, and no played data anywhere', () => {
+  const threaded = rm.buildWrapUpContext(threadPlan());
+  assert.deepEqual(Object.keys(threaded).sort(), ['destinationName', 'threadTopic']);
+  assert.equal(threaded.destinationName, 'Dest');
+  assert.equal(threaded.threadTopic, 'Navy Century');
+  assert.ok(!JSON.stringify(threaded).toLowerCase().includes('played'), 'the context cannot carry a played set');
+  const plain = rm.buildWrapUpContext(qaPlan());
+  assert.equal(plain.destinationName, 'Dest');
+  assert.equal(plain.threadTopic, null, 'no thread → null, not an invented theme');
+});
+check('wrap-up text: destination + thread + sign-off — and never a played-recap claim', () => {
+  const t = rn.wrapUpTextFor({ destinationName: 'Dest', threadTopic: 'Navy Century' });
+  assert.ok(t.includes('Dest'), 'the arrival beat names the destination');
+  assert.ok(t.includes('Navy Century'), 'the thread payoff rides as arc language');
+  assert.ok(t.includes('This is Miles'), 'Miles signs off');
+  assert.ok(!t.toLowerCase().includes('you heard'), 'no "you heard X" recap is ever asserted');
+  const bare = rn.wrapUpTextFor({ destinationName: 'Dest', threadTopic: null });
+  assert.ok(bare.includes('Dest') && bare.includes('This is Miles'), 'a threadless plan still gets a full wrap-up');
+  assert.ok(!bare.toLowerCase().includes('you heard'));
+});
+
+const wrapPlan = (withWrapUp = true) => {
+  const plan = rm.composeRoutePlan(
+    [unit('a|landmark_origin', 32.71), unit('b|landmark_origin', 32.78), unit('c|landmark_origin', 32.87)],
+    densePath,
+    denseDest,
+    'Dest',
+    noTopics,
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 2000 },
+  );
+  if (withWrapUp) plan.wrapUp = { text: 'WRAPUP: the whole drive, tied off.', audioUrl: 'blob:wrapup' };
+  return plan;
+};
+const wrapRunner = (heard, synthTexts, events) => {
   const audio = new RealFakeAudio(300);
-  const synthTexts = [];
-  const heard = [];
   const runner = new rp.RoutePlanRunner({
     audio,
     synthUrl: async t => {
@@ -987,42 +1041,79 @@ await checkAsync('thread runner: two played members → the arrival closeout wra
       return 'blob:audio/' + encodeURIComponent(t.slice(0, 16));
     },
     onStoryHeard: u => heard.push(u.id),
-    onEvent: () => {},
+    onEvent: (t, p) => events.push({ t, p }),
   });
-  await runner.start(plan);
-  await until(() => heard.includes('n1|landmark_origin'), 'first thread member sounded');
-  runner.onPosition({ lat: 32.78, lng: -117.25 }); // inside n2's window
-  await until(() => heard.includes('n2|landmark_origin'), 'second thread member sounded');
-  runner.onPosition(denseDest); // arrival, n3 unplayed
+  return { audio, runner };
+};
+await checkAsync('wrap-up runner: arrival with the plan run out plays the prepared wrap-up, not the sign-off line', async () => {
+  const heard = [];
+  const synthTexts = [];
+  const events = [];
+  const { audio, runner } = wrapRunner(heard, synthTexts, events);
+  await runner.start(wrapPlan());
+  await until(() => heard.includes('a|landmark_origin'), 'first story sounded');
+  runner.onPosition({ lat: 32.78, lng: -117.25 });
+  await until(() => heard.includes('b|landmark_origin'), 'second story sounded');
+  runner.onPosition({ lat: 32.87, lng: -117.25 });
+  await until(() => audio.played.some(u => u.includes('c%7Clandmark_origin')), 'final story on the element');
+  runner.onPosition(denseDest); // arrival while the final story sounds: the plan has run out
   await until(() => runner.view().closeoutDone, 'arrival closeout');
-  assert.equal(runner.view().endedKind, 'arrival-owed');
-  const closeoutText = synthTexts.find(t => t.includes("that's our stop"));
-  assert.ok(closeoutText, 'the closeout line was synthesized');
-  assert.ok(closeoutText.includes('thread of this drive'), 'the wrap rides the closeout synthesis');
-  assert.ok(closeoutText.includes('Navy Century'), 'the wrap names the thread');
+  assert.ok(audio.played.includes('blob:wrapup'), 'the prepared wrap-up audio played as the closing piece');
+  assert.ok(!synthTexts.some(t => t.includes("that's our stop")), "today's closeout line was never synthesized");
+  const played = events.filter(e => e.t === 'route_wrap_up' && e.p.wrap_up === 'played');
+  assert.equal(played.length, 1, 'route_wrap_up {wrap_up: played} filed once it sounded');
   runner.endTour();
 });
-await checkAsync('thread runner: a thread collapsed to one played member is never claimed at closeout', async () => {
-  const audio = new RealFakeAudio(300);
-  const synthTexts = [];
+await checkAsync('wrap-up runner: an arrival that still owes stories speaks today\'s closeout — the wrap-up stays unused', async () => {
   const heard = [];
-  const runner = new rp.RoutePlanRunner({
-    audio,
-    synthUrl: async t => {
-      synthTexts.push(t);
-      return 'blob:audio/' + encodeURIComponent(t.slice(0, 16));
-    },
-    onStoryHeard: u => heard.push(u.id),
-    onEvent: () => {},
-  });
-  await runner.start(threadPlan());
-  await until(() => heard.includes('n1|landmark_origin'), 'first thread member sounded');
-  runner.onPosition(denseDest); // arrival with only n1 played — n2/n3 never sounded
+  const synthTexts = [];
+  const events = [];
+  const { audio, runner } = wrapRunner(heard, synthTexts, events);
+  await runner.start(wrapPlan());
+  await until(() => heard.includes('a|landmark_origin'), 'first story sounded');
+  runner.onPosition(denseDest); // arrival with b and c genuinely unplayed
   await until(() => runner.view().closeoutDone, 'arrival closeout');
-  const closeoutText = synthTexts.find(t => t.includes("that's our stop"));
-  assert.ok(closeoutText, 'the closeout line was synthesized');
-  assert.ok(!closeoutText.includes('thread of this drive'), 'no wrap claimed for a collapsed thread');
-  assert.ok(runner.view().owed && runner.view().owed.includes('Miles owes you'), 'the owed tease proceeds as usual');
+  assert.equal(runner.view().endedKind, 'arrival-owed');
+  assert.ok(!audio.played.includes('blob:wrapup'), 'the wrap-up never plays on a cut-short drive');
+  assert.ok(synthTexts.some(t => t.includes("I'll hold the rest for next time")), "today's owed line was synthesized");
+  assert.equal(events.filter(e => e.t === 'route_wrap_up').length, 0, 'no wrap-up telemetry on the owed path');
+  runner.endTour();
+});
+await checkAsync('wrap-up runner: overrun handoff and early End Tour never play it', async () => {
+  const heard = [];
+  const synthTexts = [];
+  const events = [];
+  const { audio, runner } = wrapRunner(heard, synthTexts, events);
+  await runner.start(wrapPlan());
+  await until(() => heard.includes('a|landmark_origin'), 'first story sounded');
+  runner.onPosition({ lat: 32.78, lng: -117.25 });
+  await until(() => heard.includes('b|landmark_origin'), 'second story sounded');
+  runner.onPosition({ lat: 32.87, lng: -117.25 });
+  await until(() => runner.view().closeoutDone, 'overrun closeout after the plan exhausts');
+  assert.equal(runner.view().endedKind, 'overrun');
+  assert.ok(!audio.played.includes('blob:wrapup'), 'no wrap-up on the overrun handoff');
+  assert.ok(synthTexts.some(t => t.includes('freeform')), "today's handoff line was synthesized");
+  const early = wrapRunner([], [], []);
+  await early.runner.start(wrapPlan());
+  early.runner.endTour();
+  await new Promise(r => setTimeout(r, 100));
+  assert.ok(!early.audio.played.includes('blob:wrapup'), 'no wrap-up on an early End Tour');
+});
+await checkAsync('wrap-up runner: a plan without a wrap-up (generation failed at build) falls back to today\'s closeout exactly', async () => {
+  const heard = [];
+  const synthTexts = [];
+  const events = [];
+  const { audio, runner } = wrapRunner(heard, synthTexts, events);
+  await runner.start(wrapPlan(false));
+  await until(() => heard.includes('a|landmark_origin'), 'first story sounded');
+  runner.onPosition({ lat: 32.78, lng: -117.25 });
+  await until(() => heard.includes('b|landmark_origin'), 'second story sounded');
+  runner.onPosition({ lat: 32.87, lng: -117.25 });
+  await until(() => audio.played.some(u => u.includes('c%7Clandmark_origin')), 'final story on the element');
+  runner.onPosition(denseDest);
+  await until(() => runner.view().closeoutDone, 'arrival closeout');
+  assert.ok(synthTexts.some(t => t.includes("that's our stop")), "today's closeout line carries the finish, as before");
+  assert.equal(events.filter(e => e.t === 'route_wrap_up').length, 0);
   runner.endTour();
 });
 

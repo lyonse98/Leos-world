@@ -673,29 +673,30 @@ export class RoutePlanRunner {
     const unplayed = plan.items
       .filter(it => it.kind === 'story' && it.unit && !this.playedStoryIds.has(it.unit.id))
       .map(it => it.unit as LibraryUnit);
-    // Through-line wrap (differentiator 2): the thread members
-    // that ACTUALLY sounded, in plan order. decideCloseout
-    // claims the thread only when at least two played — drops
-    // that collapsed the thread leave the closeout exactly as
-    // it was, owed tease included.
-    const threadPlayedNames = plan.thread
-      ? plan.items
-          .filter(
-            it =>
-              it.kind === 'story' &&
-              it.unit &&
-              plan.thread!.memberIds.includes(it.unit.id) &&
-              this.playedStoryIds.has(it.unit.id),
-          )
-          .map(it => (it.unit as LibraryUnit).placeName)
-      : [];
     const closeout = decideCloseout({
       arrived: kind !== 'overrun',
       planExhausted: kind !== 'arrival-owed',
       unplayedPlanUnits: unplayed,
       unheardShelfUnits: plan.shelfTease ? [plan.shelfTease] : [],
-      ...(plan.thread ? { thread: { topic: plan.thread.topic, playedNames: threadPlayedNames } } : {}),
     });
+    // The wrap-up's play gate (addendum 3): an ARRIVAL close
+    // with the plan run out. "Run out" is read off the runner's
+    // own accounting, not the closeout kind alone: every plan
+    // story has sounded, or the only unsounded story is the
+    // one on the element right now (it plays to its end, with
+    // the closing piece queued behind it), and nothing is held
+    // back by a window or still unfed. A story dropped stale,
+    // abandoned in the queue, or never fed fails the gate —
+    // that drive was cut short, and today's closeout line
+    // speaks instead. The overrun handoff never plays it.
+    const currentEntry = this.player.current
+      ? this.rendered.find(e => e.audible.id === this.player.current!.id)
+      : undefined;
+    const soundingStoryId =
+      currentEntry && currentEntry.planItem.kind === 'story' ? currentEntry.planItem.id : null;
+    const planRanOut =
+      this.feedIndex >= this.rendered.length && unplayed.every(u => u.id === soundingStoryId);
+    const useWrapUp = kind !== 'overrun' && planRanOut && plan.wrapUp != null;
     // The accounting just finalized — file the drive record
     // (addendum 2) with the closeout's actual owed list.
     this.writeDriveRecord(unplayed);
@@ -718,20 +719,24 @@ export class RoutePlanRunner {
     if (closeout) {
       this.owed = owedLine(closeout.teaseLabel);
       try {
-        // The thread wrap rides the same synthesis as the
-        // sign-off line — one closeout item, no extra live call.
-        const url = await this.deps.synthUrl(
-          closeout.threadLine ? `${closeout.line} ${closeout.threadLine}` : closeout.line,
-        );
+        // The wrap-up (addendum 3) replaces the synthesized
+        // sign-off on the completion path only — its audio was
+        // rendered at preparation, so this is no new live call.
+        // Every other close speaks today's line, synthesized
+        // exactly as before.
+        const url = useWrapUp ? plan.wrapUp!.audioUrl : await this.deps.synthUrl(closeout.line);
         this.player.enqueuePromised({
           id: `route-close-${++runnerSeq}`,
           kind: 'greeting',
-          label: closeout.kind === 'overrun' ? 'Handoff' : 'Sign-off',
+          label: useWrapUp ? 'Wrap-up' : closeout.kind === 'overrun' ? 'Handoff' : 'Sign-off',
           source: { kind: 'url', url },
-          durationSec: 8,
+          durationSec: useWrapUp ? estimateDurationSec(plan.wrapUp!.text) : 8,
           attempts: 0,
           settled: false,
-          onSettle: () => {
+          onSettle: rec => {
+            if (useWrapUp && rec.sounded) {
+              this.deps.onEvent?.('route_wrap_up', { wrap_up: 'played' });
+            }
             this.closing = false;
             this.closeoutDoneFlag = true;
             this.notify();

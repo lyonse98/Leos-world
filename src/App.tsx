@@ -6,6 +6,7 @@ import { isTesterUnlocked, tryTesterUnlock } from './core/accessGate';
 import { usePosition, useWakeLock } from './hooks';
 import {
   budgetSecFor,
+  buildWrapUpContext,
   composeRoutePlan,
   computeRoute,
   estimateDurationSec,
@@ -21,6 +22,12 @@ import {
   type TourMode,
 } from './core/routeMode';
 import { RoutePlanRunner, type RouteRunnerView } from './core/routePlayback';
+import {
+  DEFAULT_NARRATION_VOICE,
+  narrationRequest,
+  wrapUpTextFor,
+  type NarrationDeps,
+} from './core/narration';
 import { discoverGapSubjects, fillRouteGaps } from './core/routeGapFill';
 import { buildManifest, originAreaName, type RouteManifest } from './core/routeManifest';
 import {
@@ -733,10 +740,21 @@ function MilesApp() {
     // generator dep at all — the Q&A pipeline is unreachable in
     // it, not hidden.
     const qaAtBuild = qaGateOpen(ROUTE_MODE_ENABLED, tourMode);
+    // The narration seam (addendum 5): ONE deps object for
+    // every piece of route-mode live narration in this build —
+    // the runner's bridge/preview synthesis, the gap-fill
+    // pass's gap stories, and the wrap-up below all draw from
+    // it, in Miles' solo voice. A future second chair changes
+    // this wiring and the narration layer, nothing else.
+    const narration: NarrationDeps = {
+      voice: DEFAULT_NARRATION_VOICE,
+      synthesize: text => synthesizeSpeech(text),
+      generateStory: prompt => generateStoryText(prompt),
+    };
     const runner = new RoutePlanRunner({
       audio: createBrowserAudio(),
       synthUrl: async text => {
-        const blob = await synthesizeSpeech(text);
+        const blob = await narration.synthesize(text);
         return URL.createObjectURL(blob);
       },
       ...(qaAtBuild
@@ -925,8 +943,8 @@ function MilesApp() {
         { fetchedUnits: units, heardKeys, input, driveSec: route.durationSec },
         {
           discoverSubjects: points => discoverGapSubjects(points, googleKeys),
-          generateStory: prompt => generateStoryText(prompt),
-          synthesize: text => synthesizeSpeech(text),
+          generateStory: prompt => narration.generateStory(prompt),
+          synthesize: text => narration.synthesize(text),
           ingest: ({ unit, audio }) =>
             ingestRouteGapStory({
               placeKey: unit.placeKey,
@@ -952,6 +970,37 @@ function MilesApp() {
       plan.budgetSec = budget;
       const plannedIds = new Set(plan.items.map(it => it.id));
       plan.shelfTease = units.find(u => !plannedIds.has(u.id) && !heardKeys.has(u.id)) ?? null;
+      // The wrap-up (addendum 3): ONE closing narration for the
+      // episode, authored + synthesized NOW, at preparation,
+      // through the narration seam — written for the planned
+      // drive played to finish (destination arrival beat +
+      // thread payoff as arc language + sign-off; the context
+      // carries plan facts only, never a played set, so it can
+      // assert no recap). The runner holds it as the plan's
+      // closing piece and plays it only on arrival with the
+      // plan run out; an early end or overrun never uses it.
+      // Failure here never fails the build: the plan proceeds
+      // without it and arrival falls back to today's closeout.
+      try {
+        const wrapReq = narrationRequest('wrapup', buildWrapUpContext(plan));
+        const wrapText = wrapUpTextFor(wrapReq.context);
+        const wrapBlob = await narration.synthesize(wrapText);
+        plan.wrapUp = { text: wrapText, audioUrl: URL.createObjectURL(wrapBlob) };
+        void emitEvent(
+          sessionId,
+          'route_wrap_up',
+          { wrap_up: 'generated' },
+          { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
+        );
+      } catch {
+        plan.wrapUp = null;
+        void emitEvent(
+          sessionId,
+          'route_wrap_up',
+          { wrap_up: 'failed' },
+          { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
+        );
+      }
       // Hand the plan to the runner primed at the tap (above):
       // same runner, same element, latch already earned inside
       // the gesture window — item 1 now begins as a normal play,
