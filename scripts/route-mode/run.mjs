@@ -1121,6 +1121,61 @@ await checkAsync('first sound: a refused first play holds at tap-to-hear (never 
   runner.endTour();
 });
 
+// ---- manifest hold (differentiator 3): the staged runner waits
+// for the Start listening action — nothing sounds, no window is
+// fed, no guard fires while the episode card is up ----
+await checkAsync('manifest: a staged plan does not start until the start action fires', async () => {
+  const audio = new GateFakeAudio(300);
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onEvent: (t, p) => events.push({ t, p }),
+    onStoryHeard: () => {},
+  });
+  runner.prime(); // the Build tap, as in the App
+  await new Promise(r => setTimeout(r, 25));
+  assert.equal(runner.view().latch, 'earned');
+  const playedAfterPrime = audio.played.length;
+  await runner.stage(qaPlan());
+  assert.equal(runner.view().phase, 'ready', 'the staged plan presents as ready, not playing');
+  assert.equal(runner.view().awaitingGesture, false, 'no tap-to-hear while the card is up — the card IS the gesture surface');
+  assert.equal(audio.played.length, playedAfterPrime, 'nothing sounded while the card is up');
+  assert.equal(events.filter(e => e.t === 'route_plan_started').length, 0, 'the tour has not started');
+  runner.onPosition({ lat: 32.78, lng: -117.25 }); // the driver rolls while reading the card
+  assert.equal(runner.view().phase, 'ready', 'position updates do not start a held plan');
+  assert.equal(runner.view().endedKind, null, 'no guard closeout fires during the hold');
+  assert.equal(runner.submitQuestion('too early?'), false, 'no Q&A before the start action');
+  assert.equal(audio.played.length, playedAfterPrime, 'still nothing sounded');
+  runner.beginStaged(); // the Start listening tap
+  await until(() => audio.played.some(u => u.includes('s1%7Clandmark_origin')), 'item 1 begins on the start action');
+  assert.equal(events.filter(e => e.t === 'route_plan_started').length, 1, 'route_plan_started files at the real start');
+  assert.equal(runner.view().phase, 'playing');
+  runner.endTour();
+});
+await checkAsync('manifest: an empty staged plan ends as the standing overrun (no card could hold it)', async () => {
+  const audio = new RealFakeAudio(300);
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onStoryHeard: () => {},
+  });
+  const empty = rm.composeRoutePlan(
+    [unit('solo|landmark_origin', 32.75)],
+    path,
+    dest,
+    'Dest',
+    noTopics,
+    { nowMs: NOW, heardKeys: new Set(['solo|landmark_origin']), budgetSecOverride: 100000 },
+  );
+  assert.equal(empty.items.filter(i => i.kind === 'story').length, 0, 'fixture plan is empty');
+  await runner.stage(empty);
+  assert.equal(runner.view().phase, 'ended');
+  assert.equal(runner.view().endedKind, 'overrun');
+  assert.equal(runner.view().freeformTail, true);
+  runner.endTour();
+});
+
 // ---- Coverage Guarantee (Nov 3, 2026): gap geometry, library-first
 // fill, generation cap/failure discipline, shelf promotion seams ----
 // Everything live is stubbed — discovery, generation, TTS and ingest
@@ -1527,6 +1582,104 @@ await checkAsync('gapfill runner: a generated item obeys window / drop / owed se
     `owed tease names the dropped generated story (got: ${runner.view().owed})`,
   );
   runner.endTour();
+});
+
+// ---- manifest (route differentiator 3): the episode card is
+// read off the real plan — counts, closing story, thread title,
+// the new-to-you count against the heard ledger ----
+const mfOut = join(mkdtempSync(join(tmpdir(), 'route-manifest-')), 'routeManifest.mjs');
+execFileSync(
+  join(repoRoot, 'node_modules', '.bin', 'esbuild'),
+  [
+    join(repoRoot, 'src', 'core', 'routeManifest.ts'),
+    '--bundle',
+    '--format=esm',
+    '--platform=node',
+    `--outfile=${mfOut}`,
+    '--log-level=warning',
+  ],
+  { stdio: 'inherit' },
+);
+const mf = await import(pathToFileURL(mfOut).href);
+
+check('manifest: a threaded plan reads as an episode card', () => {
+  const plan = composeDense([
+    navy('n1|landmark_origin', 32.72),
+    navy('n2|landmark_origin', 32.78),
+    navy('n3|landmark_origin', 32.84),
+    navy('hq|landmark_origin', 32.887, { durationSec: 300 }),
+  ]);
+  plan.driveSec = 1500; // the App stamps the Routes estimate on the final plan
+  const m = mf.buildManifest(plan, new Set(['n1']), { originName: 'Originville' });
+  assert.equal(m.title, 'The Navy Century: Originville to Dest');
+  assert.equal(m.runtimeLine, 'About 25 minutes of driving');
+  assert.equal(m.storyCount, 4, 'the count is the plan’s own story items');
+  assert.equal(m.newCount, 3, 'n1’s place is in the heard ledger — every other place is new');
+  assert.equal(m.closingStoryName, 'hq|landmark_origin', 'the closing story is the plan’s actual final story (the reserved flagship)');
+  assert.equal(m.threadLine, 'One thread all the way — The Navy Century');
+});
+check('manifest: no thread → plain origin-to-destination title, no thread line', () => {
+  const plan = composeDense([unit('a|landmark_origin', 32.72), unit('b|landmark_origin', 32.8)]);
+  plan.driveSec = 1500;
+  const m = mf.buildManifest(plan, new Set(), { originName: 'Originville' });
+  assert.equal(m.title, 'Originville to Dest');
+  assert.equal(m.threadLine, null);
+  assert.equal(m.storyCount, 2);
+  assert.equal(m.newCount, 2);
+  assert.equal(m.closingStoryName, 'b|landmark_origin');
+});
+check('manifest: an unmapped topic falls back to its raw tag; runtime spans format in words', () => {
+  assert.equal(mf.threadTitle('Coast'), 'The Coast');
+  assert.equal(mf.threadTitle('Some New Topic'), 'Some New Topic');
+  assert.equal(mf.driveTimeLine(60), 'About 1 minute of driving');
+  assert.equal(mf.driveTimeLine(3600), 'About 1 hour of driving');
+  assert.equal(mf.driveTimeLine(3900), 'About 1 hour 5 minutes of driving');
+  const plan = {
+    destinationName: 'Dest',
+    destination: denseDest,
+    path: densePath,
+    driveSec: 900,
+    budgetSec: 900,
+    items: [{ kind: 'story', id: 'x|landmark_origin', label: 'x', durationSec: 120, unit: unit('x|landmark_origin', 32.7), ready: true }],
+    totalSec: 120,
+    skippedHeard: 0,
+    topicsMatched: false,
+    toneMatched: false,
+    thread: { topic: 'Some New Topic', memberIds: ['x|landmark_origin'], score: 3 },
+    climaxUnitId: null,
+    climaxReserved: false,
+    climaxReleased: false,
+  };
+  const m = mf.buildManifest(plan, new Set(), { originName: 'Here' });
+  assert.equal(m.title, 'Some New Topic: Here to Dest', 'unmapped thread titles degrade to the tag itself');
+});
+check('manifest: an empty plan still builds a card (no closing story, zero counts)', () => {
+  const plan = {
+    destinationName: 'Dest',
+    destination: denseDest,
+    path: densePath,
+    driveSec: null,
+    budgetSec: 1800,
+    items: [],
+    totalSec: 0,
+    skippedHeard: 0,
+    topicsMatched: false,
+    toneMatched: false,
+    thread: null,
+    climaxUnitId: null,
+    climaxReserved: false,
+    climaxReleased: false,
+  };
+  const m = mf.buildManifest(plan, new Set(), { originName: 'Here' });
+  assert.equal(m.storyCount, 0);
+  assert.equal(m.newCount, 0);
+  assert.equal(m.closingStoryName, null);
+  assert.equal(m.runtimeLine, 'About 30 minutes of driving', 'runtime falls back to the budget when no estimate rides the plan');
+});
+check('manifest: the origin area names itself from the nearest fetched unit, else the fallback', () => {
+  const units = [unit('near|landmark_origin', 32.71), unit('far|landmark_origin', 32.85)];
+  assert.equal(mf.originAreaName(units, { lat: 32.7, lng: -117.25 }, 'Fallback'), 'near|landmark_origin');
+  assert.equal(mf.originAreaName(units, { lat: 32.2, lng: -117.25 }, 'Fallback'), 'Fallback', 'nothing fetched is the origin’s ground from 50 km away');
 });
 
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);

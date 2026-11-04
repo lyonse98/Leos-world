@@ -59,8 +59,12 @@ export interface RouteRunnerView {
    * 'awaiting' = the tour is up but the audio unlock latch is
    * unearned/lost: nothing has sounded, and the view must say so
    * (tap-to-hear), never 'playing' (Nov 3, 2026 first-sound fix).
+   * 'ready' = the manifest hold (differentiator 3): the plan is
+   * rendered and staged behind its episode card, nothing has
+   * sounded, and playback begins only on the card's Start
+   * listening tap — a held plan is not 'playing' either.
    */
-  phase: 'idle' | 'awaiting' | 'playing' | 'ended';
+  phase: 'idle' | 'ready' | 'awaiting' | 'playing' | 'ended';
   /** A speaking claim, present only while sound is actually flowing. */
   nowPlaying: { label: string; kind: string } | null;
   /** True while phase is 'awaiting': surface the tap-to-hear affordance. */
@@ -121,6 +125,8 @@ export class RoutePlanRunner {
   /** Last known path progress (0 until the first GPS feed). */
   private lastProgress = 0;
   private begun = false;
+  /** Manifest hold (differentiator 3): a staged plan renders but does not begin until beginStaged(). */
+  private heldStart = false;
   private renderingDone = false;
   private closing = false;
   private closed = false;
@@ -208,9 +214,18 @@ export class RoutePlanRunner {
     // play still presented as Miles speaking over silence.
     const latch = snap.latch;
     const sounding = latch === 'earned' && this.player.isPlaying() && !snap.userPaused;
-    const awaiting = this.plan !== null && this.endedKind === null && latch !== 'earned';
+    const awaiting = this.plan !== null && this.endedKind === null && latch !== 'earned' && !this.heldStart;
     return {
-      phase: this.plan === null ? 'idle' : this.endedKind !== null ? 'ended' : awaiting ? 'awaiting' : 'playing',
+      phase:
+        this.plan === null
+          ? 'idle'
+          : this.endedKind !== null
+            ? 'ended'
+            : this.heldStart
+              ? 'ready'
+              : awaiting
+                ? 'awaiting'
+                : 'playing',
       nowPlaying: sounding && snap.currentLabel ? { label: snap.currentLabel, kind: snap.currentKind ?? '' } : null,
       awaitingGesture: awaiting,
       latch,
@@ -270,6 +285,56 @@ export class RoutePlanRunner {
    * next Miles story when its window opens.
    */
   async start(plan: RoutePlan): Promise<void> {
+    await this.renderPlan(plan, true);
+  }
+
+  /**
+   * Manifest hold (differentiator 3): render the whole plan
+   * exactly as start() does, but BEGIN nothing — the tour
+   * screen is showing the plan's episode card, and the runner
+   * must not consume story windows while the listener reads
+   * it. beginStaged() — the card's Start listening tap — is
+   * what sets the plan in motion.
+   */
+  async stage(plan: RoutePlan): Promise<void> {
+    this.heldStart = true;
+    await this.renderPlan(plan, false);
+    this.notify();
+  }
+
+  /**
+   * The manifest card's Start listening tap. The tap IS a user
+   * gesture, so it re-primes first, through the same noteGesture
+   * path the awaiting state uses — if the build tap's prime was
+   * refused, this tap gives item 1 a fresh carrier inside a live
+   * gesture window. Then item 1 begins and the feed gate takes
+   * over; any window the driver already passed while the card
+   * was up is handled by the dumb guards exactly as if they had
+   * set off early (drop stale, owe it at the closeout).
+   */
+  beginStaged(): void {
+    if (!this.heldStart || this.closed || this.endedKind !== null) return;
+    this.heldStart = false;
+    this.player.noteGesture(this.heldFirstItem());
+    if (this.rendered.length === 0) return; // an empty staged plan already ended in renderPlan
+    const first = this.rendered[0];
+    this.player.beginWithItem(first.audible);
+    this.begun = true;
+    this.feedIndex = 1;
+    this.filePlanStarted();
+    this.maybeFeed();
+    this.maybeExhaust();
+    this.notify();
+  }
+
+  /**
+   * Plan-time render of every item. With beginFirst, the first
+   * playable item begins as soon as it renders (start()'s
+   * standing behavior); without it, everything renders into the
+   * held list and nothing sounds (the manifest hold). A bridge
+   * whose render fails never lands in the held list either way.
+   */
+  private async renderPlan(plan: RoutePlan, beginFirst: boolean): Promise<void> {
     if (this.startStamp === null) this.startStamp = Date.now();
     this.plan = plan;
     for (const it of plan.items) {
@@ -277,7 +342,7 @@ export class RoutePlanRunner {
       const item = await this.toAudibleItem(it);
       if (!item) continue; // render failure → dropped, never wedged
       this.rendered.push({ planItem: it, audible: item });
-      if (!this.begun) {
+      if (beginFirst && !this.begun) {
         this.player.beginWithItem(item);
         this.begun = true;
         this.feedIndex = 1;
@@ -285,16 +350,27 @@ export class RoutePlanRunner {
       this.maybeFeed();
     }
     this.renderingDone = true;
-    if (!this.begun) {
+    if (this.rendered.length === 0) {
       // Empty plan (all heard / nothing near the route): the
       // handoff line is still owed — never dead air, never a
       // silent screen. The App treats this as an overrun tail.
+      this.heldStart = false;
       this.freeformTailFlag = true;
       this.endedKind = 'overrun';
       this.closeoutDoneFlag = true;
       this.notify();
       return;
     }
+    if (!beginFirst) return; // staged: route_plan_started files at beginStaged, when the tour actually starts
+    this.filePlanStarted();
+    this.maybeFeed();
+    this.maybeExhaust();
+    this.notify();
+  }
+
+  private filePlanStarted(): void {
+    const plan = this.plan;
+    if (!plan) return;
     this.deps.onEvent?.('route_plan_started', {
       destination: plan.destinationName,
       items: this.rendered.length,
@@ -307,9 +383,6 @@ export class RoutePlanRunner {
       climax_reserved: plan.climaxReserved ?? false,
       climax_released: plan.climaxReleased ?? false,
     });
-    this.maybeFeed();
-    this.maybeExhaust();
-    this.notify();
   }
 
   /**
@@ -456,6 +529,12 @@ export class RoutePlanRunner {
   onPosition(pos: GeoPoint): void {
     if (!this.plan || this.closed) return;
     this.lastProgress = progressAlongPath(pos, this.plan.path);
+    // Manifest hold (differentiator 3): while the episode card
+    // is up, a position update refreshes the progress reading
+    // only — no arrival closeout, no corridor pause, no window
+    // feed. The guards evaluate from the Start listening tap
+    // onward, against the progress the driver actually reached.
+    if (this.heldStart) return;
     // Arrival check first: it outranks the corridor guard.
     if (!this.arrivedFlag && hasArrived(pos, this.plan.destination, this.plan.path)) {
       this.arrivedFlag = true;
@@ -631,7 +710,7 @@ export class RoutePlanRunner {
    */
   submitQuestion(raw: string): boolean {
     const question = raw.trim();
-    if (!question || !this.plan || this.closed || this.endedKind !== null) return false;
+    if (!question || !this.plan || this.closed || this.endedKind !== null || this.heldStart) return false;
     if (!this.deps.generateAnswer || this.qaPhase !== 'idle') return false;
     this.qaPhase = 'generating';
     this.deps.onEvent?.('question_asked', {

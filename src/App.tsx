@@ -22,6 +22,7 @@ import {
 } from './core/routeMode';
 import { RoutePlanRunner, type RouteRunnerView } from './core/routePlayback';
 import { discoverGapSubjects, fillRouteGaps } from './core/routeGapFill';
+import { buildManifest, originAreaName, type RouteManifest } from './core/routeManifest';
 import { tagsFor } from './data/routeTags';
 import {
   deviceKey,
@@ -434,6 +435,9 @@ function MilesApp() {
   const [routeBuilding, setRouteBuilding] = useState(false);
   const [routeRunner, setRouteRunner] = useState<RoutePlanRunner | null>(null);
   const [routeView, setRouteView] = useState<RouteRunnerView | null>(null);
+  // Manifest (differentiator 3): the built plan's episode card,
+  // shown on the tour screen until the Start listening tap.
+  const [routeManifest, setRouteManifest] = useState<RouteManifest | null>(null);
   const [routeActive, setRouteActive] = useState(false);
   const [owedLine, setOwedLine] = useState<string | null>(null);
   const routeRunnerRef = useRef<RoutePlanRunner | null>(null);
@@ -917,7 +921,33 @@ function MilesApp() {
       setRouteActive(true);
       setRouteFormOpen(false);
       setRouteStatus('');
-      await runner.start(plan);
+      // Manifest (differentiator 3): the composed episode gets
+      // its card before it gets its first sound. The manifest
+      // is built from the FINAL plan (post-gap-fill) and the
+      // heard ledger this build already read: place-key set for
+      // the new-to-you count, nearest fetched unit for the
+      // origin area's name. The runner renders the plan and
+      // HOLDS it behind the card — no story window is consumed
+      // while the listener reads — and the card's Start
+      // listening tap begins (and re-primes) playback. An empty
+      // plan has no episode to present: it takes the standing
+      // overrun path immediately, exactly as before.
+      const storyCount = plan.items.filter(it => it.kind === 'story').length;
+      if (storyCount === 0) {
+        setRouteManifest(null);
+        await runner.start(plan);
+      } else {
+        const heardPlaceKeys = new Set(
+          units.filter(u => heardLabels.has(u.placeName)).map(u => u.placeKey),
+        );
+        const firstStory = plan.items.find(it => it.kind === 'story' && it.unit);
+        setRouteManifest(
+          buildManifest(plan, heardPlaceKeys, {
+            originName: originAreaName(units, origin, firstStory?.unit?.placeName ?? 'Here'),
+          }),
+        );
+        await runner.stage(plan);
+      }
     } catch {
       discardRunner();
       setRouteStatus('Something went wrong building the route — try again.');
@@ -932,6 +962,7 @@ function MilesApp() {
     if (routeRunnerRef.current?.view().owed) setOwedLine(routeRunnerRef.current.view().owed);
     routeRunnerRef.current?.endTour();
     setRouteActive(false);
+    setRouteManifest(null);
     setLandingStep('mode');
     routeRunnerRef.current = null;
     setRouteRunner(null);
@@ -1410,7 +1441,10 @@ function MilesApp() {
   // 'Miles owes you' tease lands on the landing as one line.
   // Phase 2 adds ONE thing, Passenger/Walking rides only: an Ask
   // pill in the bar opening the question sheet. Driving route
-  // tours render exactly the phase-1 screen.
+  // tours render exactly the phase-1 screen. Manifest
+  // (differentiator 3): before the Start listening tap the screen
+  // is the episode card instead of the bar — the face above it,
+  // the card under it, nothing scrolling.
   if (routeActive && routeRunner) {
     const rView = routeView;
     const routeNeedsResume = Boolean(rView?.userPaused || rView?.guardPaused);
@@ -1432,6 +1466,46 @@ function MilesApp() {
             />
           </div>
           <div className="w-full max-w-xl pb-1" onPointerDown={e => e.stopPropagation()}>
+            {rView?.phase === 'ready' && routeManifest && (
+              // The manifest (differentiator 3): the episode card,
+              // shown before the first sound — title, runtime,
+              // story count with the new-to-you count, the thread
+              // line when the plan has one, and the closing story.
+              // Start listening is the play gesture: it begins the
+              // staged runner and re-primes its audio on the tap.
+              <div className="mb-2 rounded-[2rem] bg-white/80 p-5 shadow-xl shadow-ink/15 backdrop-blur">
+                <p className="text-xs font-bold uppercase tracking-[0.18em] text-sagedeep">Your episode</p>
+                <h2 className="mt-1 text-xl font-black leading-tight">{routeManifest.title}</h2>
+                <p className="mt-2 text-sm font-semibold text-ink/70">{routeManifest.runtimeLine}</p>
+                <p className="text-sm font-semibold text-ink/70">
+                  {routeManifest.storyCount} {routeManifest.storyCount === 1 ? 'story' : 'stories'} ·{' '}
+                  {routeManifest.newCount} you’ve never heard
+                </p>
+                {routeManifest.threadLine && (
+                  <p className="text-sm font-semibold text-ink/70">{routeManifest.threadLine}</p>
+                )}
+                {routeManifest.closingStoryName && (
+                  <p className="text-sm font-semibold text-ink/70">Ends with {routeManifest.closingStoryName}</p>
+                )}
+                <button
+                  type="button"
+                  onClick={() => routeRunner.beginStaged()}
+                  aria-label="Start listening"
+                  className="mt-4 flex w-full items-center justify-center gap-2 rounded-full bg-ink px-5 py-3.5 text-base font-bold text-cream shadow-md shadow-ink/20 transition hover:bg-sagedeep active:scale-[0.99]"
+                >
+                  <Play className="h-5 w-5" />
+                  Start listening
+                </button>
+                <button
+                  type="button"
+                  onClick={endRoute}
+                  aria-label="End route"
+                  className="mt-1 w-full py-1.5 text-center text-sm font-bold text-ink/50 transition hover:text-ink"
+                >
+                  Not now
+                </button>
+              </div>
+            )}
             {rView?.awaitingGesture && (
               // Tap-to-hear (Nov 3, 2026): the first play was
               // refused and the latch is unearned — the tour is
@@ -1461,6 +1535,7 @@ function MilesApp() {
                 />
               </div>
             )}
+            {rView?.phase !== 'ready' && (
             <div className="flex items-center gap-2 rounded-full bg-white/75 p-2 shadow-xl shadow-ink/15 backdrop-blur">
               <button
                 type="button"
@@ -1493,6 +1568,7 @@ function MilesApp() {
                 End route
               </button>
             </div>
+            )}
           </div>
         </main>
       </div>
