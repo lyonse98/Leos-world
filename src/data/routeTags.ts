@@ -1,6 +1,6 @@
 // GENERATED — do not hand-edit. Built by
 // scripts/route-mode/build-route-tags.mjs from story-tags.csv
-// (1264 rows, Nov 1 tone/topic tagging). The route
+// (1294 rows, Nov 1 tone/topic tagging). The route
 // composer joins library-index rows to this map at runtime, so no
 // DB change is needed for route mode to see tone/topic tags.
 
@@ -1276,6 +1276,36 @@ export const ROUTE_TAGS: Record<string, RouteTagEntry> = {
   "naval base san diego|landmark_origin": { topics: ["Navy Century"], tone: "grand", toneSecondary: "reflective" },
   "naval base san diego|landmark_role": { topics: ["Navy Century"], tone: "warm", toneSecondary: "reflective" },
   "naval base san diego|landmark_event": { topics: ["Navy Century"], tone: "grand", toneSecondary: "reflective" },
+  "sr-75 north: imperial beach to coronado cays|corridor-woven-v1": { topics: ["Coast","Highway"], tone: "reflective", toneSecondary: "grand" },
+  "sr-75 north: coronado cays to coronado|corridor-woven-v1": { topics: ["Coast","Highway"], tone: "reflective", toneSecondary: "grand" },
+  "coronado ferry landing|landmark_event-woven-v1": { topics: ["Coast"], tone: "reflective", toneSecondary: null },
+  "naval base point loma|landmark_origin-woven-v1": { topics: ["Coast"], tone: "reflective", toneSecondary: "grand" },
+  "coronado tent city|landmark_origin-woven-v1": { topics: ["Coast"], tone: "warm", toneSecondary: null },
+  "silver strand|landmark_origin-woven-v1": { topics: ["Navy Century","Coast"], tone: "grand", toneSecondary: "reflective" },
+  "silver strand|landmark_surroundings-woven-v1": { topics: ["Navy Century","Coast"], tone: "grand", toneSecondary: "reflective" },
+  "tijuana river estuary|landmark_origin-woven-v1": { topics: ["Coast","Border / CaliBaja"], tone: "reflective", toneSecondary: "somber" },
+  "coronado ferry landing|landmark_origin-woven-v1": { topics: ["Boom & Bust","Coast"], tone: "reflective", toneSecondary: "grand" },
+  "tijuana river estuary|landmark_surroundings-woven-v1": { topics: ["Coast","Border / CaliBaja"], tone: "reflective", toneSecondary: "somber" },
+  "silvergate|landmark_event-woven-v1": { topics: ["Coast"], tone: "warm", toneSecondary: "light" },
+  "birch aquarium at scripps|landmark_people-woven-v1": { topics: ["Coast"], tone: "warm", toneSecondary: null },
+  "silvergate|landmark_building-woven-v1": { topics: ["Coast"], tone: "warm", toneSecondary: null },
+  "ocean beach|landmark_cultural-woven-v1": { topics: ["Coast"], tone: "warm", toneSecondary: "light" },
+  "crystal pier|landmark_recent-woven-v1": { topics: ["Coast"], tone: "warm", toneSecondary: "light" },
+  "belmont park|landmark_event-woven-v1": { topics: ["Coast"], tone: "warm", toneSecondary: "reflective" },
+  "oceanside pier|landmark_origin-woven-v1": { topics: ["Coast"], tone: "grand", toneSecondary: "warm" },
+  "sunny jim cave|landmark_legends-woven-v1": { topics: ["Coast","folklore"], tone: "warm", toneSecondary: "light" },
+  "the mushroom house|landmark_origin-woven-v1": { topics: ["Coast"], tone: "reflective", toneSecondary: "warm" },
+  "oceanside pier|landmark_building-woven-v1": { topics: ["Coast"], tone: "grand", toneSecondary: "warm" },
+  "belmont park|landmark_building-woven-v1": { topics: ["Coast"], tone: "grand", toneSecondary: "reflective" },
+  "children's pool|landmark_event-woven-v1": { topics: ["Coast"], tone: "reflective", toneSecondary: "warm" },
+  "children's pool|landmark_recent-woven-v1": { topics: ["Coast"], tone: "light", toneSecondary: "warm" },
+  "tourmaline surfing park|landmark_sports-woven-v1": { topics: ["Surf","Coast"], tone: "warm", toneSecondary: "reflective" },
+  "sr-905 west: brown field to i-805|corridor-woven-v1": { topics: ["Flight","Navy Century","Border / CaliBaja"], tone: "reflective", toneSecondary: "grand" },
+  "sr-75 north: coronado to downtown san diego|corridor-woven-v1": { topics: ["Navy Century","Highway"], tone: "grand", toneSecondary: "reflective" },
+  "paradise hills|landmark_origin-woven-v1": { topics: ["Navy Century"], tone: "warm", toneSecondary: "reflective" },
+  "i-5 north: through camp pendleton|corridor-woven-v1": { topics: ["Navy Century"], tone: "grand", toneSecondary: "reflective" },
+  "i-5 south: through camp pendleton|corridor-woven-v1": { topics: ["Navy Century"], tone: "reflective", toneSecondary: "grand" },
+  "i-15 south: marine corps air station miramar to tierrasanta|corridor-woven-v1": { topics: ["Navy Century","Flight"], tone: "grand", toneSecondary: "reflective" },
 };
 
 export function tagsFor(placeKey: string, angle: string): RouteTagEntry {
