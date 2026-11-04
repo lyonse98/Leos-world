@@ -393,11 +393,17 @@ export class RoutePlanRunner {
       portals: plan.items.filter(i => i.portal).length,
       budget_sec: plan.budgetSec,
       // Through-line (differentiator 2): the thread the plan was
-      // composed around, and whether the destination flagship
-      // is being held for the approach (or had to be released).
+      // composed around. Climax (addendums 4–5): how it
+      // resolved, its subject, the winner's fit reasons against
+      // today's declared tone/topics/thread, and whether the
+      // opening↔climax bookend pairing is live.
       thread: plan.thread ? { topic: plan.thread.topic, members: plan.thread.memberIds } : null,
-      climax_reserved: plan.climaxReserved ?? false,
-      climax_released: plan.climaxReleased ?? false,
+      climax: {
+        mode: plan.climaxMode ?? 'natural',
+        subject: plan.climaxSubject ?? null,
+        fit: plan.climaxFit ?? [],
+      },
+      bookend: plan.bookend ?? false,
     });
   }
 

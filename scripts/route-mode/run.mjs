@@ -7,7 +7,7 @@
 // Exit 0 = all checks pass; anything else prints failures.
 
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -31,6 +31,25 @@ execFileSync(
 );
 
 const rm = await import(pathToFileURL(out).href);
+
+// The narration seam module (addendum 5), bundled beside
+// routeMode: its text builders are exercised directly by the
+// wrap-up / bookend suites below.
+const rnOut = join(mkdtempSync(join(tmpdir(), 'route-narration-')), 'narration.mjs');
+execFileSync(
+  join(repoRoot, 'node_modules', '.bin', 'esbuild'),
+  [
+    join(repoRoot, 'src', 'core', 'narration.ts'),
+    '--bundle',
+    '--format=esm',
+    '--platform=node',
+    '--define:import.meta.env={}',
+    `--outfile=${rnOut}`,
+    '--log-level=warning',
+  ],
+  { stdio: 'inherit' },
+);
+const rn = await import(pathToFileURL(rnOut).href);
 
 let passed = 0;
 let failed = 0;
@@ -458,15 +477,20 @@ check('thread: three members along the path sustain a thread', () => {
 check('thread: two members do not reach the threshold', () => {
   const plan = composeDense([navy('n1|landmark_origin', 32.72), navy('n2|landmark_origin', 32.76), unit('x|landmark_origin', 32.82)]);
   assert.equal(plan.thread, null);
-  assert.equal(rm.detectRouteThread([navy('a|landmark_origin', 32.72), navy('b|landmark_origin', 32.76)], denseDest, []), null);
+  assert.equal(rm.detectRouteThread([navy('a|landmark_origin', 32.72), navy('b|landmark_origin', 32.76)], []), null);
 });
-check('thread: a destination-area member counts double — the thread can end at the destination', () => {
-  const shore = navy('shore|landmark_origin', 32.75); // score 1
-  const gate = navy('gate|landmark_origin', 32.895); // ~550 m from the pin: score 2
-  const t = rm.detectRouteThread([shore, gate], denseDest, []);
-  assert.ok(t, 'weighted score 3 qualifies');
-  assert.equal(t.score, 3);
-  assert.equal(t.memberIds.length, 2);
+check('thread (addendum 4): members count once each, wherever they sit — no destination weighting', () => {
+  const shore = navy('shore|landmark_origin', 32.75);
+  const gate = navy('gate|landmark_origin', 32.895); // ~550 m from the pin — worth 1 now, not 2
+  assert.equal(rm.detectRouteThread([shore, gate], []), null, 'two members are two members, even at the destination');
+  const mid = rm.detectRouteThread(
+    [navy('a|landmark_origin', 32.72), navy('b|landmark_origin', 32.76), navy('c|landmark_origin', 32.8)],
+    [],
+  );
+  assert.ok(mid, 'three members ending mid-corridor sustain a thread');
+  assert.equal(mid.score, 3);
+  const plan = composeDense([navy('n1|landmark_origin', 32.72), navy('n2|landmark_origin', 32.76), navy('n3|landmark_origin', 32.8)]);
+  assert.equal(plan.thread?.topic, 'Navy Century', 'a thread with no destination member is used, not discarded');
 });
 check('thread: a user-chosen topic wins over a stronger unpicked thread', () => {
   const units = [
@@ -520,7 +544,7 @@ check('thread: membership nudges selection inside a bucket (landmark class does 
   assert.ok(controlIds.includes('plain|landmark_origin'), 'without a thread, angle class decides as in v2');
   assert.ok(!controlIds.includes('member|corridor'));
 });
-check('climax: the destination flagship is reserved as the final story, anchored in the approach', () => {
+check('climax (addendum 4): the destination-strongest case — an unheard destination flagship wins and sequences last', () => {
   const units = [
     unit('m1|landmark_origin', 32.72),
     unit('m2|landmark_origin', 32.78),
@@ -529,8 +553,10 @@ check('climax: the destination flagship is reserved as the final story, anchored
   ];
   const plan = composeDense(units);
   assert.equal(plan.climaxUnitId, 'hq|landmark_origin');
-  assert.equal(plan.climaxReserved, true);
-  assert.equal(plan.climaxReleased, false);
+  assert.equal(plan.climaxMode, 'destination');
+  assert.equal(plan.climaxSubject, 'hq|landmark_origin');
+  assert.deepEqual(plan.climaxFit, [], 'nothing declared, no thread → no fit reasons');
+  assert.equal(plan.bookend, false);
   const stories = storyItems(plan);
   const last = stories[stories.length - 1];
   assert.equal(last.id, 'hq|landmark_origin', 'the flagship closes the plan, not the later-anchored annex');
@@ -539,7 +565,7 @@ check('climax: the destination flagship is reserved as the final story, anchored
   assert.ok(last.releaseProgress >= 0.7, 'its window opens in the approach');
   assert.ok(!stories.some(s => s.climax && s.id !== 'hq|landmark_origin'), 'exactly one climax');
 });
-check('climax: reservation released when the flagship is the only early coverage (coverage beats drama)', () => {
+check('climax (addendum 4): sequencing-infeasible → natural order + mode natural (coverage beats drama)', () => {
   const loopPath = [
     { lat: 32.7, lng: -117.25 },
     { lat: 32.9, lng: -117.25 },
@@ -556,13 +582,12 @@ check('climax: reservation released when the flagship is the only early coverage
     budgetSecOverride: 100000,
     driveSec: 2000,
   });
-  assert.equal(released.climaxUnitId, 'hq|landmark_origin');
-  assert.equal(released.climaxReleased, true);
-  assert.equal(released.climaxReserved, false);
+  assert.equal(released.climaxUnitId, 'hq|landmark_origin', 'the winner is still named');
+  assert.equal(released.climaxMode, 'natural', 'but nothing was repositioned');
   const stories = storyItems(released);
-  assert.equal(stories[stories.length - 1].id, 'late|landmark_origin', 'natural order kept — the flagship stays on its own early ground');
-  assert.ok(!stories.some(s => s.climax), 'no climax marking on a released reservation');
-  // Control: one more early story and the same geometry reserves.
+  assert.equal(stories[stories.length - 1].id, 'late|landmark_origin', 'natural order kept — the winner stays on its own early ground');
+  assert.equal(stories.find(s => s.id === 'hq|landmark_origin').climax, true, 'the winner carries the climax mark in every mode');
+  // Control: one more early story and the same geometry sequences it last.
   const mid = unit('mid|landmark_origin', 32.78, {});
   const held = rm.composeRoutePlan([hq, mid, late], loopPath, loopDest, 'Dest', noTopics, {
     nowMs: NOW,
@@ -570,8 +595,130 @@ check('climax: reservation released when the flagship is the only early coverage
     budgetSecOverride: 100000,
     driveSec: 2000,
   });
-  assert.equal(held.climaxReserved, true);
+  assert.equal(held.climaxMode, 'destination');
   assert.equal(storyItems(held)[storyItems(held).length - 1].id, 'hq|landmark_origin');
+});
+check('climax (addendum 4): commute-shaped — the destination shelf is heard out, so the strongest late-corridor story closes', () => {
+  const units = [
+    unit('home|landmark_origin', 32.72),
+    unit('mid|landmark_origin', 32.78),
+    unit('lateweak|corridor', 32.85, { angle: 'corridor' }),
+    unit('late|landmark_origin', 32.87, { durationSec: 300 }),
+    unit('tail|corridor', 32.88, { angle: 'corridor', durationSec: 60 }),
+    unit('work1|landmark_origin', 32.895),
+    unit('work2|landmark_origin', 32.897),
+  ];
+  const plan = composeDense(units, noTopics, {
+    heardKeys: new Set(['work1|landmark_origin', 'work2|landmark_origin']),
+  });
+  assert.equal(plan.climaxUnitId, 'late|landmark_origin', 'the late landmark beats the later corridor tail on weight');
+  assert.equal(plan.climaxMode, 'late');
+  assert.equal(plan.climaxSubject, 'late|landmark_origin');
+  const stories = storyItems(plan);
+  assert.equal(stories[stories.length - 1].id, 'late|landmark_origin', 'sequenced last, past the tail that anchors later');
+  assert.equal(stories[stories.length - 1].climax, true);
+  assert.ok(!stories.some(s => s.id.startsWith('work')), 'heard destination units never enter the plan');
+});
+check('climax fit (addendum 5): declared tone/topics make the fitting candidate beat the marginally heavier one', () => {
+  const units = [
+    unit('open|landmark_origin', 32.72),
+    unit('heavy|landmark_origin', 32.85, { durationSec: 320, topics: ['Coast'], tone: 'warm' }),
+    unit('fit|corridor', 32.87, { angle: 'corridor', durationSec: 300, topics: ['Coast'], tone: 'light' }),
+  ];
+  const declared = composeDense(units, { ...noTopics, tone: 'light', topics: ['Coast'] });
+  assert.equal(declared.climaxUnitId, 'fit|corridor', 'fit (tone + topic) outranks raw weight (landmark class, longer)');
+  assert.deepEqual([...declared.climaxFit].sort(), ['tone', 'topic'], "the winner's fit reasons ride the plan");
+  assert.equal(declared.climaxMode, 'late');
+  const undeclared = composeDense(units);
+  assert.equal(undeclared.climaxUnitId, 'heavy|landmark_origin', 'with nothing declared, the raw-weight winner stands');
+  assert.deepEqual(undeclared.climaxFit, []);
+});
+check('bookend (addendum 5): the opening story\'s late partner becomes the climax — preview opens the loop, wrap-up closes it', () => {
+  const units = [
+    unit('dawn|landmark_origin', 32.72, { topics: ['Harbor Lights'] }),
+    unit('mid|landmark_origin', 32.78),
+    unit('heavy|landmark_origin', 32.85, { durationSec: 320 }),
+    unit('dusk|corridor', 32.87, { angle: 'corridor', topics: ['Harbor Lights'] }),
+  ];
+  const plan = composeDense(units);
+  assert.equal(plan.climaxUnitId, 'dusk|corridor', 'the partner beats the heavier non-partner');
+  assert.equal(plan.bookend, true);
+  assert.equal(plan.bookendTopic, 'Harbor Lights');
+  assert.equal(plan.climaxMode, 'late');
+  assert.equal(plan.openingSubject, 'dawn|landmark_origin');
+  const opening = plan.items.find(i => i.kind === 'bridge');
+  assert.ok(opening.text.includes('hold onto dawn|landmark_origin'), 'the preview opens the loop with the opening subject');
+  const payoff = plan.items.filter(i => i.kind === 'bridge').find(b => b.nextUnitId === 'dusk|corridor');
+  assert.ok(payoff && payoff.text.includes('the end explains the beginning'), 'the final bridge closes the loop');
+  const ctx = rm.buildWrapUpContext(plan);
+  assert.deepEqual(ctx.bookend, {
+    openingSubject: 'dawn|landmark_origin',
+    sharedTopic: 'Harbor Lights',
+    climaxSubject: 'dusk|corridor',
+  });
+  const wrap = rn.wrapUpTextFor(ctx);
+  assert.ok(wrap.includes('dawn|landmark_origin') && wrap.includes('dusk|corridor'), 'the wrap-up states the connection — both real subjects');
+  assert.ok(wrap.includes('that was the heart of it'), "a 'late' climax is named as the drive's heart");
+});
+check('bookend (addendum 5): no pairing on the shelf → bookend false, and no context carries loop language', () => {
+  const units = [
+    unit('a|landmark_origin', 32.72, { topics: ['Solo'] }),
+    unit('b|landmark_origin', 32.78),
+    unit('c|landmark_origin', 32.87),
+  ];
+  const plan = composeDense(units);
+  assert.equal(plan.bookend, false);
+  assert.equal(plan.bookendTopic, null);
+  assert.equal(rm.buildWrapUpContext(plan).bookend, null);
+  assert.ok(!plan.items.some(i => i.text && i.text.includes('hold onto')), 'no loop language without a pairing');
+});
+check('bookend (addendum 5): the opening pick prefers a story with a late partner — threaded plans only', () => {
+  const shelf = threaded => [
+    unit('plain|landmark_origin', 32.721),
+    unit('paired|landmark_origin', 32.724, { topics: ['Harbor Lights'] }),
+    unit('m2|landmark_origin', 32.76, threaded ? { topics: ['Navy Century'] } : {}),
+    unit('m4|landmark_origin', 32.79, threaded ? { topics: ['Navy Century'] } : {}),
+    unit('m3|landmark_origin', 32.82, threaded ? { topics: ['Navy Century'] } : {}),
+    unit('partner|landmark_origin', 32.87, { topics: ['Harbor Lights'] }),
+  ];
+  const threaded = composeDense(shelf(true), noTopics, { maxStories: 4 });
+  assert.equal(threaded.thread?.topic, 'Navy Century');
+  const threadedIds = storyItems(threaded).map(s => s.id);
+  assert.ok(threadedIds.includes('paired|landmark_origin'), 'the paired opening wins its bucket under the cap');
+  assert.ok(!threadedIds.includes('plain|landmark_origin'));
+  const control = composeDense(shelf(false), noTopics, { maxStories: 4 });
+  assert.equal(control.thread, null);
+  const controlIds = storyItems(control).map(s => s.id);
+  assert.ok(controlIds.includes('plain|landmark_origin'), 'no thread → the preference is inert and v2 order decides');
+  assert.ok(!controlIds.includes('paired|landmark_origin'));
+});
+check('preview (addendum 4): a threaded plan promises its late-corridor climax by name', () => {
+  const units = [
+    navy('n1|landmark_origin', 32.72),
+    navy('n2|landmark_origin', 32.78),
+    navy('n3|landmark_origin', 32.84),
+    unit('tail|corridor', 32.88, { angle: 'corridor', durationSec: 60 }),
+  ];
+  const plan = composeDense(units);
+  assert.equal(plan.thread?.topic, 'Navy Century');
+  assert.equal(plan.climaxUnitId, 'n3|landmark_origin');
+  assert.equal(plan.climaxMode, 'late');
+  assert.equal(storyItems(plan)[storyItems(plan).length - 1].id, 'n3|landmark_origin', 'the climax sequences past the later tail');
+  const firstBridge = plan.items.find(i => i.kind === 'bridge');
+  assert.ok(firstBridge.text.includes("I'll tell you about n3|landmark_origin"), 'the preview teases the actual (late) climax');
+});
+check('narration seam (addendum 5): route logic never reaches the generation layer directly — one seam, stubbed once', () => {
+  const read = p => readFileSync(join(repoRoot, p), 'utf8');
+  for (const p of ['src/core/routeMode.ts', 'src/core/routePlayback.ts', 'src/core/routeGapFill.ts']) {
+    const src = read(p);
+    assert.ok(!src.includes("from './gemini'"), `${p} must not import the generation layer`);
+    assert.ok(!/synthesizeSpeech\(|generateStoryText\(/.test(src), `${p} must not call generation directly — deps only`);
+  }
+  const narration = read('src/core/narration.ts');
+  assert.ok(narration.includes('export function bridgeTextFor'), 'bridge text is authored in the narration layer');
+  assert.ok(narration.includes('export function wrapUpTextFor'), 'wrap-up text is authored in the narration layer');
+  assert.ok(!read('src/core/routeMode.ts').includes('export function bridgeTextFor'), 'routeMode composes facts; it does not author narration');
+  assert.ok(read('src/App.tsx').includes('const narration: NarrationDeps'), 'the App builds ONE narration deps object per route build');
 });
 check('no-thread parity: items, order and non-opening bridges are exactly composer v2', () => {
   const units = [
@@ -974,22 +1121,6 @@ const threadPlan = () =>
 // story sounded, or the last one on the element now) — an
 // early end, an overrun, or a genuinely-owed arrival speaks
 // today's closeout line instead.
-const rnOut = join(mkdtempSync(join(tmpdir(), 'route-narration-')), 'narration.mjs');
-execFileSync(
-  join(repoRoot, 'node_modules', '.bin', 'esbuild'),
-  [
-    join(repoRoot, 'src', 'core', 'narration.ts'),
-    '--bundle',
-    '--format=esm',
-    '--platform=node',
-    '--define:import.meta.env={}',
-    `--outfile=${rnOut}`,
-    '--log-level=warning',
-  ],
-  { stdio: 'inherit' },
-);
-const rn = await import(pathToFileURL(rnOut).href);
-
 check('narration seam: requests stamp kind + the default solo voice; context passes through untouched', () => {
   const ctx = { destinationName: 'Dest', threadTopic: null };
   const req = rn.narrationRequest('wrapup', ctx);
@@ -999,15 +1130,23 @@ check('narration seam: requests stamp kind + the default solo voice; context pas
   assert.equal(req.context, ctx, 'the seam carries structured facts, not prose');
   assert.equal(rn.narrationRequest('bridge', ctx, 'miles-solo').kind, 'bridge', 'one uniform shape across kinds');
 });
-check('wrap-up context: plan facts only — destination + thread, and no played data anywhere', () => {
+check('wrap-up context: plan facts only — destination + thread + climax + bookend, and no played data anywhere', () => {
   const threaded = rm.buildWrapUpContext(threadPlan());
-  assert.deepEqual(Object.keys(threaded).sort(), ['destinationName', 'threadTopic']);
+  assert.deepEqual(Object.keys(threaded).sort(), ['bookend', 'climaxMode', 'climaxSubject', 'destinationName', 'threadTopic']);
   assert.equal(threaded.destinationName, 'Dest');
   assert.equal(threaded.threadTopic, 'Navy Century');
+  assert.equal(threaded.climaxMode, 'late', 'the thread plan\'s climax is its late-corridor final member (addendum 4)');
+  assert.equal(threaded.climaxSubject, 'n3|landmark_origin');
+  assert.deepEqual(threaded.bookend, {
+    openingSubject: 'n1|landmark_origin',
+    sharedTopic: 'Navy Century',
+    climaxSubject: 'n3|landmark_origin',
+  });
   assert.ok(!JSON.stringify(threaded).toLowerCase().includes('played'), 'the context cannot carry a played set');
   const plain = rm.buildWrapUpContext(qaPlan());
   assert.equal(plain.destinationName, 'Dest');
   assert.equal(plain.threadTopic, null, 'no thread → null, not an invented theme');
+  assert.equal(plain.bookend, null, 'no pairing → no bookend context');
 });
 check('wrap-up text: destination + thread + sign-off — and never a played-recap claim', () => {
   const t = rn.wrapUpTextFor({ destinationName: 'Dest', threadTopic: 'Navy Century' });
@@ -1800,8 +1939,12 @@ check('manifest: an unmapped topic falls back to its raw tag; runtime spans form
     toneMatched: false,
     thread: { topic: 'Some New Topic', memberIds: ['x|landmark_origin'], score: 3 },
     climaxUnitId: null,
-    climaxReserved: false,
-    climaxReleased: false,
+    climaxMode: 'natural',
+    climaxSubject: null,
+    climaxFit: [],
+    bookend: false,
+    bookendTopic: null,
+    openingSubject: null,
   };
   const m = mf.buildManifest(plan, new Set(), { originName: 'Here' });
   assert.equal(m.title, 'Some New Topic: Here to Dest', 'unmapped thread titles degrade to the tag itself');
@@ -1820,8 +1963,12 @@ check('manifest: an empty plan still builds a card (no closing story, zero count
     toneMatched: false,
     thread: null,
     climaxUnitId: null,
-    climaxReserved: false,
-    climaxReleased: false,
+    climaxMode: 'natural',
+    climaxSubject: null,
+    climaxFit: [],
+    bookend: false,
+    bookendTopic: null,
+    openingSubject: null,
   };
   const m = mf.buildManifest(plan, new Set(), { originName: 'Here' });
   assert.equal(m.storyCount, 0);
