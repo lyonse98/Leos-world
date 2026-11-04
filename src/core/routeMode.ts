@@ -3062,7 +3062,15 @@ export function seatWovenMembers(
     const zoneStartSec = CLIMAX_ZONE_START * driveSec;
     const fits = memberGaps(items, driveSec, true)
       .map(g => {
-        const atSec = Math.max(g.start, zoneStartSec);
+        // In the tail gap the member takes the closing
+        // position proper — it ENDS where the drive ends,
+        // like a sequenced climax — when that position is
+        // inside the zone; elsewhere the earliest in-zone
+        // position in the gap.
+        const atSec =
+          g.next === null
+            ? Math.max(g.start, zoneStartSec, g.end - cand.durationSec)
+            : Math.max(g.start, zoneStartSec);
         return atSec + cand.durationSec <= g.end ? { gap: g, atSec } : null;
       })
       .filter((x): x is { gap: MemberGap; atSec: number } => x !== null)
