@@ -513,12 +513,16 @@ async function runBuild({ rm, gf, rh }, world, route, { heardNames, heardTexts, 
   // The member fetch (the lever): the App's bounded fetch,
   // mirrored — selectMemberFetchEntries over the world index,
   // reads counted per entry attempted in chunks of 12 toward
-  // MEMBER_FETCH_TARGET survivors, heard discarded at read
-  // time, one re-compose carrying the climax units forward.
+  // the seat need's survivor target (memberFetchSizing off
+  // plan.wovenMemberNeed: the lever's 8/24 at the standing
+  // cap, 16/48 when the composed plan already sits below the
+  // thread-carried floor), heard discarded at read time, one
+  // re-compose carrying the climax units forward.
   let memberUnits = [];
   let memberFetch = null;
   if (plan.wovenMembersSeeking) {
     const topic = plan.wovenMembersSeeking;
+    const sizing = rm.memberFetchSizing(plan.wovenMemberNeed ?? rm.WOVEN_MEMBER_CAP);
     const entries = rm.selectMemberFetchEntries(world.index, {
       topic,
       fetchedIds,
@@ -526,9 +530,10 @@ async function runBuild({ rm, gf, rh }, world, route, { heardNames, heardTexts, 
       destination: route.dest,
       tagsOf,
       eligibleOf,
+      cap: sizing.readCap,
     });
     let reads = 0;
-    for (let i = 0; i < entries.length && memberUnits.length < rm.MEMBER_FETCH_TARGET; i += 12) {
+    for (let i = 0; i < entries.length && memberUnits.length < sizing.target; i += 12) {
       const chunk = entries.slice(i, i + 12);
       reads += chunk.length;
       for (const e of chunk) {
@@ -560,6 +565,20 @@ async function runBuild({ rm, gf, rh }, world, route, { heardNames, heardTexts, 
   // (every pre-feature battery), so the standard grades are
   // untouched by its presence here.
   plan = rm.seatWovenMembers(plan, [...units, ...memberUnits], { heardKeys });
+  // Thread-carried episodes (Nov 4, 2026): the App's
+  // assessment + anchoring top-up, same staging position.
+  // assessThreadCarried reads the plan's own thread and geo
+  // coverage, so on an unmarked world (no thread can carry
+  // members — detection saw no eligible support) it never
+  // engages: the standard grades stay untouched here too.
+  plan.threadCarried = rm.assessThreadCarried(plan);
+  if (plan.threadCarried.active) {
+    plan = rm.seatWovenMembers(plan, [...units, ...memberUnits], {
+      heardKeys,
+      maxMembers: plan.threadCarried.memberCap,
+      threadCarried: true,
+    });
+  }
   return {
     plan,
     units,
@@ -573,9 +592,22 @@ async function runBuild({ rm, gf, rh }, world, route, { heardNames, heardTexts, 
 
 /** The eligible pool a plan's climax winner was picked from (for the percentile). */
 function climaxPoolFor(rm, build, route) {
-  const { plan, units, climaxOnlyUnits, heardKeys } = build;
+  const { plan, units, climaxOnlyUnits, memberUnits, heardKeys } = build;
   if (!plan.climaxUnitId) return null;
   const winnerItem = plan.items.find(i => i.climax);
+  if (plan.climaxMode === 'thread') {
+    // The designated member climax (thread-carried): the
+    // pool it was picked from is the member candidacy pool —
+    // fetched units plus the member fetch's survivors.
+    const topic = plan.thread?.topic ?? null;
+    return [...units, ...(memberUnits ?? [])].filter(
+      u =>
+        !heardKeys.has(u.id) &&
+        u.angle.startsWith('landmark') &&
+        u.wovenEligible === true &&
+        (topic === null || u.topics.includes(topic)),
+    );
+  }
   if (plan.climaxMode === 'portal') {
     const topic = plan.thread?.topic ?? null;
     return [...units, ...climaxOnlyUnits].filter(
@@ -1708,6 +1740,13 @@ export async function runWovenProduction(mods, { drives: driveCount = 40 } = {})
       climaxPresent: m.climaxPresent,
       members: build.plan.wovenMembers?.count ?? 0,
       memberFetch: build.memberFetch ?? null,
+      threadCarried: build.plan.threadCarried
+        ? {
+            active: build.plan.threadCarried.active,
+            geoCoverageFraction: Math.round(build.plan.threadCarried.geoCoverageFraction * 1000) / 1000,
+            memberCap: build.plan.threadCarried.memberCap,
+          }
+        : null,
     };
   }
 
@@ -1738,10 +1777,18 @@ export async function runWovenProduction(mods, { drives: driveCount = 40 } = {})
       silenceShare: metrics.silenceShare,
       threadTopic: plan.thread?.topic ?? null,
       climaxPresent: metrics.climaxPresent,
+      climaxMode: metrics.climaxMode,
       members,
       memberFetch: build.memberFetch ?? null,
       fetchReads: build.fetchStats.reads,
       ceilingHit: build.fetchStats.ceilingHit,
+      threadCarried: plan.threadCarried
+        ? {
+            active: plan.threadCarried.active,
+            geoCoverageFraction: Math.round(plan.threadCarried.geoCoverageFraction * 1000) / 1000,
+            memberCap: plan.threadCarried.memberCap,
+          }
+        : null,
     });
     for (const it of played) {
       heardNames.add(it.unit.placeName);
@@ -1776,6 +1823,20 @@ export async function runWovenProduction(mods, { drives: driveCount = 40 } = {})
     departureReads: list.reduce((s, d) => s + d.fetchReads, 0),
     ceilingHits: list.filter(d => d.ceilingHit).length,
   });
+  // Thread-carried bands (Nov 4, 2026): where the mode
+  // engaged across the battery's own phases — the geo-
+  // healthy head (1–13, must never fire), the thinning
+  // shoulder (14–16), the member-arithmetic band (17–21),
+  // and the exhausted tail (22–40) the rule was built for.
+  const band = list => ({
+    ...phase(list),
+    carriedFires: list.filter(d => d.threadCarried?.active).length,
+    carriedClimaxes: list.filter(d => d.climaxMode === 'thread').length,
+    meanSilenceShare:
+      list.length === 0
+        ? 0
+        : Math.round((list.reduce((s, d) => s + d.silenceShare, 0) / list.length) * 1000) / 1000,
+  });
   return {
     world: { census: world.census, shape: 'current' },
     eligibleUnits: eligible.length,
@@ -1799,20 +1860,31 @@ export async function runWovenProduction(mods, { drives: driveCount = 40 } = {})
         late: phase(drives.slice(13)),
         all: phase(drives),
       },
+      carried: {
+        fires: drives.filter(d => d.threadCarried?.active).length,
+        climaxes: drives.filter(d => d.climaxMode === 'thread').length,
+        bands: {
+          head: band(drives.slice(0, 13)),
+          shoulder: band(drives.slice(13, 16)),
+          arithmetic: band(drives.slice(16, 21)),
+          tail: band(drives.slice(21)),
+        },
+      },
     },
   };
 }
 
 function renderWovenProductionMarkdown(prod, label) {
   const lines = [];
-  lines.push('# Woven seated members — PRODUCTION acceptance (route mode)');
+  lines.push('# Woven seated members + thread-carried episodes — PRODUCTION acceptance (route mode)');
   lines.push('');
   lines.push(
     `Composer: ${label ?? 'working tree'} · synthetic shelf, current depth (${prod.world.census} units), seeded; ` +
       'the standard 40-drive commute battery with the heard-aware window and story-level heard (v3.1 A+B) underneath. ' +
       `Eligibility: the presence audit's measured per-topic usable shares (seed 9200) — ${prod.eligibleUnits} eligible units, ` +
-      'marked on the world units (unit.wovenEligible) and consulted by the PRODUCTION composer + seating pass ' +
-      '(runBuild mirrors App.buildRoute staging end to end; no sim post-pass). Guarantee pass is shelf-only ' +
+      'marked on the world units (unit.wovenEligible) and consulted by the PRODUCTION composer + seating passes ' +
+      '(runBuild mirrors App.buildRoute staging end to end — guarantee, normal seating, the thread-carried ' +
+      'assessment and its anchoring top-up; no sim post-pass). Guarantee pass is shelf-only ' +
       '(silence is an upper bound vs production).',
   );
   lines.push('');
@@ -1820,10 +1892,14 @@ function renderWovenProductionMarkdown(prod, label) {
   lines.push(
     `HEADLINE — substantive thread-bearing episodes (silence ≤ 50% AND a thread found) across 40 drives: ` +
       `**${s.substantiveThreadEpisodes}** (the seated-members SIMULATION predicted 26 at this eligibility; ` +
-      `climax-only production-equivalent is 9; the PRE-LEVER production run scored 13). Substantive episodes ${s.substantiveEpisodes}, ` +
+      `climax-only production-equivalent is 9; the PRE-LEVER production run scored 13; the LEVER run scored 16). ` +
+      `Substantive episodes ${s.substantiveEpisodes}, ` +
       `substantive-thread starvation ${s.substantiveStarvationDrive ?? 'none in 40'}, thread drives ${s.threadDrives}/40, ` +
       `climax ${s.climaxDrives}/40, mean silence ${fmtPct(s.meanSilenceShare)} (sim: 41%), ` +
-      `members seated ${s.totalMembers} across ${s.drivesWithMembers} drives, mean consecutive overlap ${s.meanConsecutiveOverlap}.`,
+      `members seated ${s.totalMembers} across ${s.drivesWithMembers} drives, mean consecutive overlap ${s.meanConsecutiveOverlap}. ` +
+      (s.carried
+        ? `Thread-carried engaged on ${s.carried.fires}/40 drives (${s.carried.climaxes} designated member climaxes).`
+        : ''),
   );
   lines.push('');
   if (s.funnel) {
@@ -1845,23 +1921,44 @@ function renderWovenProductionMarkdown(prod, label) {
     lines.push(row('all 40', f.all));
     lines.push('');
   }
+  if (s.carried) {
+    const c = s.carried;
+    lines.push('## Thread-carried — the exhausted-case rule, by band');
+    lines.push('');
+    lines.push(
+      'The floor predicate: post-guarantee geo-anchored coverage (stories + guarantee fills, members excluded) ' +
+        'under 50% of the drive, with a thread present. In mode, members anchor the episode (departure edge open), ' +
+        'the cap rises to 8 total, and the strongest member takes the climax position when the road crowned none. ' +
+        'The geo-healthy head (drives 1–13) must never fire; the tail (22–40) is the case the rule was built for.',
+    );
+    lines.push('');
+    lines.push('| band | thread drives | carried fires | member climaxes | substantive thread-bearing | members seated | member reads | mean silence |');
+    lines.push('|---|---|---|---|---|---|---|---|');
+    const crow = (label, b) =>
+      `| ${label} | ${b.threadDrives}/${b.drives} | ${b.carriedFires} | ${b.carriedClimaxes} | ${b.substantiveThread} | ${b.members} | ${b.memberReads} | ${fmtPct(b.meanSilenceShare)} |`;
+    lines.push(crow('drives 1–13 (geo-healthy head)', c.bands.head));
+    lines.push(crow('drives 14–16 (thinning shoulder)', c.bands.shoulder));
+    lines.push(crow('drives 17–21 (member arithmetic)', c.bands.arithmetic));
+    lines.push(crow('drives 22–40 (exhausted tail)', c.bands.tail));
+    lines.push('');
+  }
   lines.push('## Fresh drives on the marked world (vs grade-after-addendum-b, unmarked)');
   lines.push('');
-  lines.push('| route | stories | silence | thread | members |');
-  lines.push('|---|---|---|---|---|');
+  lines.push('| route | stories | silence | thread | members | carried |');
+  lines.push('|---|---|---|---|---|---|');
   for (const [name, f] of Object.entries(prod.fresh)) {
     lines.push(
-      `| ${name} | ${f.stories} | ${f.silenceSec}s (${fmtPct(f.silenceShare)}) | ${f.threadTopic ?? '—'} | ${f.members} |`,
+      `| ${name} | ${f.stories} | ${f.silenceSec}s (${fmtPct(f.silenceShare)}) | ${f.threadTopic ?? '—'} | ${f.members} | ${f.threadCarried?.active ? 'FIRED' : '—'} |`,
     );
   }
   lines.push('');
   lines.push('## The 40 drives');
   lines.push('');
-  lines.push('| drive | stories | silence | thread | members | climax |');
-  lines.push('|---|---|---|---|---|---|');
+  lines.push('| drive | stories | silence | thread | members | climax | carried |');
+  lines.push('|---|---|---|---|---|---|---|');
   for (const d of prod.drives) {
     lines.push(
-      `| ${d.drive} | ${d.stories} | ${fmtPct(d.silenceShare)} | ${d.threadTopic ?? '—'} | ${d.members} | ${d.climaxPresent ? 'yes' : '—'} |`,
+      `| ${d.drive} | ${d.stories} | ${fmtPct(d.silenceShare)} | ${d.threadTopic ?? '—'} | ${d.members} | ${d.climaxPresent ? d.climaxMode ?? 'yes' : '—'} | ${d.threadCarried?.active ? `yes (${fmtPct(d.threadCarried.geoCoverageFraction)})` : '—'} |`,
     );
   }
   lines.push('');
