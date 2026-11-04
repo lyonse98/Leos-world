@@ -20,6 +20,12 @@
 // No live calls happen at import time, in tests, or in the harness.
 //
 import { normalizePlaceName, selectPriorDrive, type RouteDriveRecord } from './routeHistory';
+
+// The place-name normalizer is part of this module's caller
+// contract (ComposeOptions.corridorTellingCounts is keyed by
+// it), so it is re-exported here: a caller building telling
+// counts uses the exact function the composer looks up with.
+export { normalizePlaceName } from './routeHistory';
 import {
   bridgeTextFor,
   previewTextFor,
@@ -508,6 +514,29 @@ export const BRIDGE_MAX_SEC = 90;
 /** Portal share cap (item 4): portals ≤ ¼ of the plan's story items ⟺ portals ≤ geoStories / 3. */
 export const PORTAL_CAP_DIVISOR = 3;
 
+/**
+ * Corridor membership radii (fetch order + composer partition
+ * + guarantee fill all read these, so the three never drift):
+ * the path radius for corridor rows and every non-landmark
+ * angle; the widened path radius for landmark-class rows
+ * (Nov 4, 2026, addendum B — doubled from the standing
+ * 1.5 km); and the destination circle, which stays at the
+ * standing radius for every class.
+ */
+export const CORRIDOR_PATH_RADIUS_M = 1500;
+export const LANDMARK_PATH_RADIUS_M = 3000;
+export const DESTINATION_RADIUS_M = 1500;
+
+/**
+ * Corridor lifetime cap (Nov 4, 2026, addendum B): a corridor
+ * stretch may be told at most this many times EVER, across
+ * all its angles, counted from the cross-day heard ledger.
+ * At the cap its corridor rows retire from route candidacy.
+ * Route-side predicate only — the ledger and freeform's
+ * corridor use are unchanged.
+ */
+export const CORRIDOR_TELLING_CAP = 3;
+
 /** Departure row-read bounds (item 1 + item 4): see selectFetchCandidates. */
 export const FETCH_GEO_LIMIT = 120;
 export const FETCH_PORTAL_LIMIT = 30;
@@ -557,6 +586,16 @@ const FETCH_EXCLUDED_ANGLES = new Set(['neighborhood_intro_greet', 'filler', 'fi
  * geographic pool's topics plus any user-chosen topics; at
  * least one shared topic is required.
  *
+ * The radius is class-aware (Nov 4, 2026, addendum B):
+ * landmark-class entries are geographic out to
+ * LANDMARK_PATH_RADIUS_M of the path — a landmark the driver
+ * keeps passing should be candidated as route material —
+ * while corridor rows and every other angle stay bound to
+ * CORRIDOR_PATH_RADIUS_M (a corridor row is about the road
+ * itself). The destination circle stays DESTINATION_RADIUS_M
+ * for every class: destination proximity is a different claim
+ * than passing something along the way.
+ *
  * Uncapped: how much of each order actually gets read is the
  * heard-aware driver's decision (fetchHeardAwareCandidates);
  * selectFetchCandidates below keeps the original bounded
@@ -570,8 +609,9 @@ export function orderFetchCandidates(
   opts: { userTopics?: string[] } = {},
 ): { geo: FetchIndexEntry[]; portals: FetchIndexEntry[] } {
   const near = (e: FetchIndexEntry) =>
-    distanceToPathM({ lat: e.lat, lng: e.lng }, path) <= 1500 ||
-    haversineM({ lat: e.lat, lng: e.lng }, destination) <= 1500;
+    haversineM({ lat: e.lat, lng: e.lng }, destination) <= DESTINATION_RADIUS_M ||
+    distanceToPathM({ lat: e.lat, lng: e.lng }, path) <=
+      (e.angle.startsWith('landmark') ? LANDMARK_PATH_RADIUS_M : CORRIDOR_PATH_RADIUS_M);
   const geo: { e: FetchIndexEntry; p: number }[] = [];
   const offPath: FetchIndexEntry[] = [];
   for (const e of entries) {
@@ -1063,16 +1103,30 @@ export interface ComposeOptions {
   driveRecords?: RouteDriveRecord[];
   /** The destination's library place_key when the build could derive one (addendum 2 matching). */
   destinationPlaceKey?: string | null;
+  /**
+   * Corridor lifetime telling counts (Nov 4, 2026, addendum
+   * B): lifetime tellings per place, keyed by
+   * normalizePlaceName(placeName) — the caller builds the map
+   * from the cross-day heard ledger's place labels (the
+   * ledger files topic = place name; see App.buildRoute). A
+   * corridor stretch at CORRIDOR_TELLING_CAP retires: its
+   * corridor rows leave route candidacy at partition. Absent
+   * (the grader's synthetic worlds) → no retirements, and the
+   * plan's corridorRetiredStretches is null.
+   */
+  corridorTellingCounts?: Map<string, number>;
 }
 
 /**
  * ONE static composition pass at departure (v16.1: no re-planning,
  * no live bridge generation; v2: fairness, windows, portals).
  * Library-first tiling:
- *  1. partition the shelf — geographic stories (inside the 1.5 km
- *     corridor), portal candidates (stories outside it);
+ *  1. partition the shelf — geographic stories (inside the
+ *     corridor radii: 3 km of path for landmark class, 1.5 km
+ *     for the rest), portal candidates (stories outside it);
  *     heard units and the greet/filler/intro angles are never
- *     served by the composer itself;
+ *     served by the composer itself, and corridor rows of a
+ *     stretch at its lifetime telling cap are retired here;
  *  2. SELECTION IS FAIR ACROSS THE PATH: candidates are bucketed
  *     by progress decile and picked round-robin — every stretch
  *     of the drive contributes before any stretch gets a second
@@ -1176,6 +1230,16 @@ export interface ComposeOptions {
  * as Coverage Guarantee fill (routeGapFill reads the fetched
  * set directly); the greet variant never tiles anywhere in
  * route. Freeform's welcome system is untouched.
+ *
+ * Corridor lifetime cap + landmark radius (Erik, Nov 4,
+ * 2026, addendum B): a corridor stretch retires after
+ * CORRIDOR_TELLING_CAP lifetime tellings across all its
+ * angles (opts.corridorTellingCounts, from the caller's
+ * cross-day ledger), and landmark-class candidates are
+ * geographic out to twice the corridor path radius — a
+ * landmark he keeps passing wins the slot over a fourth
+ * telling of a highway stretch. Both are partition/fetch
+ * predicates; the ladder below them is unchanged.
  * The plan is a value, not a promise: nothing here touches the
  * network, so the harness can prove every invariant offline.
  */
@@ -1197,12 +1261,35 @@ export function composeRoutePlan(
     }
     return p;
   };
-  // Corridor membership: within 1.5 km of the path (generous —
-  // the shelf is place-anchored, not path-anchored), or the
-  // destination itself.
+  // Corridor membership (addendum B): the same class-aware
+  // radii the fetch order used — landmarks are geographic out
+  // to LANDMARK_PATH_RADIUS_M of the path, corridor rows and
+  // every other angle stay at CORRIDOR_PATH_RADIUS_M, and the
+  // destination circle is DESTINATION_RADIUS_M for all.
   const inCorridor = (u: LibraryUnit): boolean =>
-    distanceToPathM({ lat: u.lat, lng: u.lng }, path) <= 1500 ||
-    haversineM({ lat: u.lat, lng: u.lng }, destination) <= 1500;
+    haversineM({ lat: u.lat, lng: u.lng }, destination) <= DESTINATION_RADIUS_M ||
+    distanceToPathM({ lat: u.lat, lng: u.lng }, path) <=
+      (u.angle.startsWith('landmark') ? LANDMARK_PATH_RADIUS_M : CORRIDOR_PATH_RADIUS_M);
+
+  // Corridor lifetime cap (addendum B): the stretches whose
+  // corridor rows retire from this plan. A stretch's identity
+  // is its place — the corridor place_key names road +
+  // direction + segment endpoints, and every corridor row
+  // carries exactly that one subject — while the COUNT comes
+  // from the ledger's place labels, so all angles of a stretch
+  // (and every re-telling of the same angle) count together.
+  // Computed over the whole candidate set, heard rows
+  // included: retirement is a fact about the stretch, not
+  // about this plan's heard state.
+  const retiredStretches = new Set<string>();
+  if (opts.corridorTellingCounts) {
+    for (const u of units) {
+      if (u.angle !== 'corridor') continue;
+      if ((opts.corridorTellingCounts.get(normalizePlaceName(u.placeName)) ?? 0) >= CORRIDOR_TELLING_CAP) {
+        retiredStretches.add(u.placeKey);
+      }
+    }
+  }
 
   let skippedHeard = 0;
   const geoAll: LibraryUnit[] = [];
@@ -1229,6 +1316,10 @@ export function composeRoutePlan(
       continue;
     }
     if (u.angle === 'neighborhood_intro') continue;
+    // A retired stretch's corridor rows are out of every lane
+    // — tiling, thread support, climax pools — exactly like a
+    // heard exclusion, one rung of the partition.
+    if (u.angle === 'corridor' && retiredStretches.has(u.placeKey)) continue;
     if (inCorridor(u)) geoAll.push(u);
     else portalAll.push(u);
   }
@@ -2006,7 +2097,7 @@ export function composeRoutePlan(
     previewFacts,
     openingSubject: openingUnit?.placeName ?? null,
     actsSummary,
-    corridorRetiredStretches: null,
+    corridorRetiredStretches: opts.corridorTellingCounts ? retiredStretches.size : null,
   };
 }
 

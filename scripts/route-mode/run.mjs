@@ -565,6 +565,97 @@ check('v2 fetch fairness: selectFetchCandidates round-robins buckets under the b
   });
 }
 
+// ---- addendum B (Nov 4, 2026): corridor lifetime cap + landmark radius ----
+// A corridor stretch retires at 3 lifetime tellings (counted
+// across all its angles from the cross-day ledger); landmark
+// candidates are geographic out to ~3 km of the path while
+// corridor rows stay bound to 1.5 km.
+{
+  const bInput = { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] };
+  const bIds = plan => plan.items.filter(i => i.kind === 'story').map(i => i.id);
+  // ~2 km east of the path at lat 32.8 (1° lng ≈ 93.5 km there):
+  // outside the old 1.5 km radius, inside the widened 3 km net,
+  // and far from the destination circle.
+  const EAST_2KM = -117.25 + 2000 / 93500;
+  const EAST_3_2KM = -117.25 + 3200 / 93500;
+
+  check('cap B: a stretch at 2 lifetime tellings still candidated; at 3 it retires', () => {
+    const mk = () => [
+      unit('stretch|corridor', 32.8, { angle: 'corridor', placeName: 'Stretch' }),
+      unit('other|landmark_origin', 32.75),
+    ];
+    const key = rm.normalizePlaceName('Stretch');
+    const at2 = rm.composeRoutePlan(mk(), path, dest, 'Dest', bInput, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, corridorTellingCounts: new Map([[key, 2]]) });
+    assert.ok(bIds(at2).includes('stretch|corridor'), 'two tellings: the stretch still tiles');
+    assert.equal(at2.corridorRetiredStretches, 0);
+    const at3 = rm.composeRoutePlan(mk(), path, dest, 'Dest', bInput, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, corridorTellingCounts: new Map([[key, 3]]) });
+    assert.ok(!bIds(at3).includes('stretch|corridor'), 'three tellings: the stretch retires');
+    assert.ok(bIds(at3).includes('other|landmark_origin'), 'the rest of the plan is unaffected');
+    assert.equal(at3.corridorRetiredStretches, 1);
+  });
+
+  check('cap B: the count is per place across angles — mixed-angle tellings retire the corridor row; the cap touches corridor rows only', () => {
+    // The ledger count for the place totals 3 tellings spread
+    // over angles (the map is built from place labels, so it
+    // cannot be per-angle by construction). The corridor row
+    // retires; a landmark angle of the SAME place — not a
+    // corridor row — is not the cap's business and still tiles.
+    const units = [
+      unit('mix|corridor', 32.8, { angle: 'corridor', placeName: 'Mix' }),
+      unit('mix|landmark_origin', 32.8, { placeName: 'Mix' }),
+      unit('other|landmark_origin', 32.75),
+    ];
+    const plan = rm.composeRoutePlan(units, path, dest, 'Dest', bInput, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, corridorTellingCounts: new Map([[rm.normalizePlaceName('Mix'), 3]]) });
+    assert.ok(!bIds(plan).includes('mix|corridor'), 'corridor row retired by the place-level count');
+    assert.ok(bIds(plan).includes('mix|landmark_origin'), 'the landmark angle of the same place still tiles');
+    assert.equal(plan.corridorRetiredStretches, 1);
+  });
+
+  check('cap B: no counts supplied → nothing retires and the plan reports null', () => {
+    const units = [unit('stretch|corridor', 32.8, { angle: 'corridor', placeName: 'Stretch' })];
+    const plan = rm.composeRoutePlan(units, path, dest, 'Dest', bInput, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000 });
+    assert.ok(bIds(plan).includes('stretch|corridor'));
+    assert.equal(plan.corridorRetiredStretches, null);
+  });
+
+  check('radius B: in the fetch order, a landmark at ~2 km is geographic; a corridor row at the same distance is not', () => {
+    const entries = [
+      { place_key: 'near', angle: 'landmark_origin', lat: 32.8, lng: -117.25 },
+      { place_key: 'wide-mark', angle: 'landmark_origin', lat: 32.8, lng: EAST_2KM },
+      { place_key: 'wide-corr', angle: 'corridor', lat: 32.8, lng: EAST_2KM },
+      { place_key: 'far-mark', angle: 'landmark_origin', lat: 32.8, lng: EAST_3_2KM },
+    ];
+    const dWide = rm.distanceToPathM({ lat: 32.8, lng: EAST_2KM }, path);
+    assert.ok(dWide > 1500 && dWide < 3000, `fixture distance ${Math.round(dWide)} m sits between the radii`);
+    const order = rm.orderFetchCandidates(entries, path, dest, () => ({ topics: ['Coast'] }), { userTopics: ['Coast'] });
+    const geoKeys = order.geo.map(e => e.place_key);
+    assert.ok(geoKeys.includes('wide-mark'), 'the widened landmark is a geographic candidate');
+    assert.ok(!geoKeys.includes('wide-corr'), 'the corridor row at the same distance is NOT geographic');
+    assert.ok(!geoKeys.includes('far-mark'), 'beyond the widened net the landmark leaves the geo order');
+    assert.ok(order.portals.map(e => e.place_key).includes('far-mark'), '... and returns to portal treatment');
+  });
+
+  check('radius B: in composition, the widened landmark tiles as a geographic story; the corridor row at the same distance does not', () => {
+    const mark = rm.composeRoutePlan(
+      [unit('anchor|landmark_origin', 32.75), unit('wide|landmark_origin', 32.8, { lng: EAST_2KM })],
+      path, dest, 'Dest', bInput, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000 },
+    );
+    assert.ok(bIds(mark).includes('wide|landmark_origin'), 'landmark at ~2 km tiles in the geo pool');
+    assert.ok(!mark.items.find(i => i.id === 'wide|landmark_origin')?.portal, 'and it is not a portal hop');
+    const corr = rm.composeRoutePlan(
+      [unit('anchor|landmark_origin', 32.75), unit('wide|corridor', 32.8, { angle: 'corridor', lng: EAST_2KM })],
+      path, dest, 'Dest', bInput, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000 },
+    );
+    assert.ok(!bIds(corr).includes('wide|corridor'), 'corridor row at ~2 km gains nothing from the widening');
+    const corrControl = rm.composeRoutePlan(
+      [unit('anchor|landmark_origin', 32.75), unit('wide|corridor', 32.8, { angle: 'corridor' })],
+      path, dest, 'Dest', bInput, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000 },
+    );
+    assert.ok(bIds(corrControl).includes('wide|corridor'), 'control: the same corridor row on the path tiles');
+  });
+
+}
+
 check('v2 weighting: landmark beats corridor at the same anchor (no user topics)', () => {
   const units = [unit('corr|corridor', 32.75, { angle: 'corridor' }), unit('mark|landmark_origin', 32.75)];
   const tight = rm.composeRoutePlan(units, path, dest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: NOW + 130 * 1000, tone: null, topics: [] }, { nowMs: NOW, heardKeys: new Set() });
@@ -1594,6 +1685,27 @@ await checkAsync('manifest: an empty staged plan ends as the standing overrun (n
   assert.equal(runner.view().phase, 'ended');
   assert.equal(runner.view().endedKind, 'overrun');
   assert.equal(runner.view().freeformTail, true);
+  runner.endTour();
+});
+
+await checkAsync('cap B telemetry: route_plan_started decisions carry the retired-stretch count', async () => {
+  const plan = rm.composeRoutePlan(
+    [unit('stretch|corridor', 32.8, { angle: 'corridor', placeName: 'Stretch' }), unit('other|landmark_origin', 32.75)],
+    path, dest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, corridorTellingCounts: new Map([[rm.normalizePlaceName('Stretch'), 4]]) },
+  );
+  assert.equal(plan.corridorRetiredStretches, 1);
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio: new RealFakeAudio(250),
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onEvent: (t, p) => events.push({ t, p }),
+    onStoryHeard: () => {},
+  });
+  await runner.start(plan);
+  const started = events.find(e => e.t === 'route_plan_started');
+  assert.ok(started, 'route_plan_started filed');
+  assert.equal(started.p.decisions.corridor_retired_stretches, 1);
   runner.endTour();
 });
 

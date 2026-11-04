@@ -876,6 +876,20 @@ function MilesApp() {
       ]);
       const heardLabels = new Set(heardLabelList);
       const heardTexts = new Set(heardTextList);
+      // Corridor lifetime cap (Nov 4, 2026, addendum B): the
+      // ledger files one row per telling with topic = the
+      // place name, so counting a place's labels counts its
+      // tellings across ALL angles — the input to the route
+      // composer's stretch-retirement predicate. The ledger
+      // read carries its standing 500-row window, the same
+      // evidence window story-level heard already works from.
+      // Keyed by the shared place-name normalizer the composer
+      // looks up with.
+      const corridorTellingCounts = new Map<string, number>();
+      for (const label of heardLabelList) {
+        const key = normalizePlaceName(label);
+        corridorTellingCounts.set(key, (corridorTellingCounts.get(key) ?? 0) + 1);
+      }
       // Heard-aware fetch (composer v3.1, commit B): walk the
       // fair candidate order in parallel chunks of 12, filing
       // each read row heard/unheard by its story text, and keep
@@ -956,6 +970,7 @@ function MilesApp() {
         driveSec: route.durationSec,
         driveRecords,
         destinationPlaceKey: destPlaceKey,
+        corridorTellingCounts,
       };
       let plan = composeRoutePlan(units, route.path, geocoded.location, geocoded.name, input, composeOpts);
       // The off-route portal climax (consolidation §4): when the

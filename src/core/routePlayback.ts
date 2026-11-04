@@ -564,6 +564,10 @@ export class RoutePlanRunner {
         // act's quality floor fired. (The openers tally retired
         // with the welcome demotion, Nov 4, 2026.)
         acts: plan.actsSummary,
+        // Corridor lifetime cap (addendum B): stretches this
+        // plan retired at 3 lifetime tellings. Null when the
+        // build supplied no telling counts.
+        corridor_retired_stretches: plan.corridorRetiredStretches ?? null,
       },
     });
   }

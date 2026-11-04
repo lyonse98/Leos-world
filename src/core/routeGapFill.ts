@@ -42,9 +42,12 @@
 import {
   angleClassRank,
   configuredKeys,
+  CORRIDOR_PATH_RADIUS_M,
+  DESTINATION_RADIUS_M,
   distanceToPathM,
   estimateDurationSec,
   haversineM,
+  LANDMARK_PATH_RADIUS_M,
   progressAlongPath,
   storyWindow,
   type GeoPoint,
@@ -648,9 +651,14 @@ export async function fillRouteGaps(
     ...[...ctx.fetchedUnits].map(u => u.placeKey),
     ...items.filter(i => i.unit).map(i => (i.unit as LibraryUnit).placeKey),
   ]);
+  // The composer's corridor membership, same class-aware
+  // radii (addendum B): a landmark up to 3 km off the path can
+  // fill a dead stretch it anchors; corridor rows stay at
+  // 1.5 km; the destination circle is 1.5 km for all.
   const inCorridor = (u: LibraryUnit): boolean =>
-    distanceToPathM({ lat: u.lat, lng: u.lng }, plan.path) <= 1500 ||
-    haversineM({ lat: u.lat, lng: u.lng }, plan.destination) <= 1500;
+    haversineM({ lat: u.lat, lng: u.lng }, plan.destination) <= DESTINATION_RADIUS_M ||
+    distanceToPathM({ lat: u.lat, lng: u.lng }, plan.path) <=
+      (u.angle.startsWith('landmark') ? LANDMARK_PATH_RADIUS_M : CORRIDOR_PATH_RADIUS_M);
   const toneRank = (u: LibraryUnit): number =>
     ctx.input.tone && (u.tone === ctx.input.tone || u.toneSecondary === ctx.input.tone) ? 0 : 1;
 
