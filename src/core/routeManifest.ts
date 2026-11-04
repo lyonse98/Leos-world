@@ -87,7 +87,17 @@ export function buildManifest(
     storyCount: stories.length,
     newCount,
     closingStoryName: closing ? (closing.unit as LibraryUnit).placeName : null,
-    threadLine: thread ? `One thread all the way — ${threadTitle(thread.topic)}` : null,
+    // The thread line is the card's framing text, so a
+    // thread-carried episode is framed as one (Nov 4,
+    // 2026): the road is quiet today and the drive follows
+    // the thread — the same honest sentence the spoken
+    // preview opens with, never a member placed on the
+    // route.
+    threadLine: thread
+      ? plan.threadCarried?.active
+        ? `The road's quiet today — this drive follows one thread: ${threadTitle(thread.topic)}`
+        : `One thread all the way — ${threadTitle(thread.topic)}`
+      : null,
   };
 }
 

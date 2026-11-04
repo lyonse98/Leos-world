@@ -5,6 +5,7 @@ import { createBrowserAudio } from './core/player';
 import { isTesterUnlocked, tryTesterUnlock } from './core/accessGate';
 import { usePosition, useWakeLock } from './hooks';
 import {
+  assessThreadCarried,
   budgetSecFor,
   buildWrapUpContext,
   composeRoutePlan,
@@ -16,6 +17,7 @@ import {
   haversineM,
   heardKeysForStories,
   isRouteModeEnabled,
+  memberFetchSizing,
   orderFetchCandidates,
   parseRouteInput,
   qaGateOpen,
@@ -23,7 +25,7 @@ import {
   seatWovenMembers,
   selectMemberFetchEntries,
   wovenIndexSupportByTopic,
-  MEMBER_FETCH_TARGET,
+  WOVEN_MEMBER_CAP,
   ROUTE_TONES,
   ROUTE_TOPICS,
   type LibraryUnit,
@@ -1064,8 +1066,14 @@ function MilesApp() {
       // class, woven-eligible units carrying the thread's
       // topic from anywhere in the county, drawn from the
       // same library index (selectMemberFetchEntries), read
-      // in the heard-aware chunk size toward MEMBER_FETCH_
-      // TARGET survivors and never past the read cap.
+      // in the heard-aware chunk size toward the seat need's
+      // survivor target and never past its read cap. The
+      // need is the plan's own (wovenMemberNeed): the
+      // standing 4 seats, or 8 when the composed plan's geo
+      // coverage already sits below the thread-carried
+      // floor — the fetch provisions for the cap the
+      // post-guarantee assessment may raise (memberFetch-
+      // Sizing scales both numbers off the seat count).
       // Survivors join a SINGLE re-compose as member units:
       // they can seat as thread members and nothing else —
       // they never tile, hop, or contest the climax (the
@@ -1077,6 +1085,7 @@ function MilesApp() {
       let memberFetchRecord: { topic: string; reads: number; candidates: number } | null = null;
       if (plan.wovenMembersSeeking) {
         const topic = plan.wovenMembersSeeking;
+        const sizing = memberFetchSizing(plan.wovenMemberNeed ?? WOVEN_MEMBER_CAP);
         const entries = selectMemberFetchEntries(index, {
           topic,
           fetchedIds: fetchedIdSet,
@@ -1084,9 +1093,10 @@ function MilesApp() {
           destination: geocoded.location,
           tagsOf: (pk, ang) => tagsFor(pk, ang),
           eligibleOf: (pk, ang) => wovenEligibleFor(pk, ang),
+          cap: sizing.readCap,
         });
         let reads = 0;
-        for (let i = 0; i < entries.length && memberUnits.length < MEMBER_FETCH_TARGET; i += 12) {
+        for (let i = 0; i < entries.length && memberUnits.length < sizing.target; i += 12) {
           const chunk = entries.slice(i, i + 12);
           const rows = await Promise.all(chunk.map(e => fetchLibraryRow(e.place_key, e.angle)));
           reads += chunk.length;
@@ -1174,6 +1184,28 @@ function MilesApp() {
       // level set, and the pass is a no-op when the plan has
       // no thread or no eligible candidate fits a real gap.
       plan = seatWovenMembers(plan, [...units, ...memberUnits], { heardKeys });
+      // Thread-carried episodes (Nov 4, 2026): the
+      // assessment runs on the guaranteed plan — geo-
+      // anchored coverage (stories + guarantee fills,
+      // members excluded) under half the drive, with a
+      // thread to carry it, engages the mode. The record
+      // rides the plan into route_plan_started; when
+      // active, the seating pass runs once more in its
+      // anchoring mode — members may open and anchor the
+      // episode under the raised cap (8 total), the
+      // strongest takes the climax position when the road
+      // crowned none, and the preview is reframed around
+      // the quiet road and the thread. Inactive (every
+      // geo-healthy plan): nothing below changes the plan.
+      const threadCarried = assessThreadCarried(plan);
+      plan = { ...plan, threadCarried };
+      if (threadCarried.active) {
+        plan = seatWovenMembers(plan, [...units, ...memberUnits], {
+          heardKeys,
+          maxMembers: threadCarried.memberCap,
+          threadCarried: true,
+        });
+      }
       const plannedIds = new Set(plan.items.map(it => it.id));
       plan.shelfTease = units.find(u => !plannedIds.has(u.id) && !heardKeys.has(u.id)) ?? null;
       // The fetch's read accounting rides the plan into the

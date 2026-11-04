@@ -588,6 +588,20 @@ export class RoutePlanRunner {
           count: plan.wovenMembers?.count ?? 0,
           topics: plan.wovenMembers?.topics ?? [],
         },
+        // Thread-carried episodes (Nov 4, 2026): the
+        // staging's assessment of the guaranteed plan —
+        // whether the mode engaged, the geo-anchored
+        // coverage fraction that decided it (members
+        // excluded), and the member cap seating ran under.
+        // Null when the plan never went through the route
+        // staging's assessment.
+        thread_carried: plan.threadCarried
+          ? {
+              active: plan.threadCarried.active,
+              geo_coverage_fraction: Math.round(plan.threadCarried.geoCoverageFraction * 1000) / 1000,
+              member_cap: plan.threadCarried.memberCap,
+            }
+          : null,
       },
     });
   }
