@@ -47,7 +47,6 @@ import {
   haversineM,
   progressAlongPath,
   storyWindow,
-  NON_STORY_ANGLES,
   type GeoPoint,
   type LibraryUnit,
   type ParsedRouteInput,
@@ -655,26 +654,38 @@ export async function fillRouteGaps(
   const toneRank = (u: LibraryUnit): number =>
     ctx.input.tone && (u.tone === ctx.input.tone || u.toneSecondary === ctx.input.tone) ? 0 : 1;
 
-  /** Best untiled shelf unit anchored inside a sub-gap (composer ranking: tone → angle class → nearest the middle). */
+  /**
+   * Best untiled shelf unit anchored inside a sub-gap (ranking:
+   * tone → angle class → stories before intros → nearest the
+   * middle). Plain neighborhood intros ARE fill candidates
+   * (welcome demotion, Nov 4, 2026: intros left the composer's
+   * chapter-opener lane, and the guarantee's library-first pool
+   * is where they belong in route) — heard-excluded exactly
+   * like stories, and ranked after story angles so a real
+   * story always wins its gap first. The greet variant and the
+   * filler lanes never tile anywhere in route.
+   */
   const bestShelfCandidate = (sub: StoryGap): LibraryUnit | null => {
     let best: LibraryUnit | null = null;
-    let bestKey: [number, number, number] | null = null;
+    let bestKey: [number, number, number, number] | null = null;
     for (const u of ctx.fetchedUnits) {
       if (plannedIds.has(u.id) || ctx.heardKeys.has(u.id)) continue;
-      if (NON_STORY_ANGLES.has(u.angle)) continue; // welcomes + filler lanes are not gap stories
+      if (u.angle === 'neighborhood_intro_greet' || u.angle === 'filler' || u.angle === 'filler_hosted') continue;
       if (!inCorridor(u)) continue; // geographic only — a fetched portal candidate never becomes a gap fill
       const anchor = progressAlongPath({ lat: u.lat, lng: u.lng }, plan.path);
       if (anchor < sub.startProgress - 1e-9 || anchor > sub.endProgress + 1e-9) continue;
-      const key: [number, number, number] = [
+      const key: [number, number, number, number] = [
         toneRank(u),
         angleClassRank(u.angle),
+        u.angle === 'neighborhood_intro' ? 1 : 0,
         Math.abs(anchor - sub.midProgress),
       ];
       if (
         !bestKey ||
         key[0] < bestKey[0] ||
         (key[0] === bestKey[0] && key[1] < bestKey[1]) ||
-        (key[0] === bestKey[0] && key[1] === bestKey[1] && key[2] < bestKey[2])
+        (key[0] === bestKey[0] && key[1] === bestKey[1] && key[2] < bestKey[2]) ||
+        (key[0] === bestKey[0] && key[1] === bestKey[1] && key[2] === bestKey[2] && key[3] < bestKey[3])
       ) {
         best = u;
         bestKey = key;

@@ -560,8 +560,9 @@ export class RoutePlanRunner {
         climax: { mode: plan.climaxMode ?? 'natural', subject: plan.climaxSubject ?? null },
         preview: plan.previewFacts ?? { threadPromised: false, previouslyDrive: false, previouslySubject: false },
         // Composer v3 (commit B): the plan's act structure —
-        // per act, story count, class tallies, openers seated,
-        // and whether the act's quality floor fired.
+        // per act, story count, class tallies, and whether the
+        // act's quality floor fired. (The openers tally retired
+        // with the welcome demotion, Nov 4, 2026.)
         acts: plan.actsSummary,
       },
     });

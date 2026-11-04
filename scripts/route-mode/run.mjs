@@ -166,7 +166,7 @@ check('v3.1 granularity: an unheard angle of a heard place is selectable; the he
   assert.ok(ids.includes('p|landmark_event'), 'the unheard angle tiles');
 });
 
-check('v3.1 granularity: a heard intro excludes only the intro; a heard story leaves the intro its chapter', () => {
+check('v3.1 granularity: a heard intro excludes only the intro; intros never compose (welcome demotion)', () => {
   const mk = () => [
     unit('p|neighborhood_intro', 32.75, { angle: 'neighborhood_intro', durationSec: 60 }),
     unit('p|landmark_origin', 32.75),
@@ -178,7 +178,10 @@ check('v3.1 granularity: a heard intro excludes only the intro; a heard story le
   assert.ok(!introHeard.items.some(i => i.id === 'p|neighborhood_intro'));
   const storyHeard = rm.composeRoutePlan(mk(), path, dest, 'Dest', input, { nowMs: NOW, heardKeys: new Set(['p|landmark_origin']), budgetSecOverride: 100000 });
   assert.ok(!storyHeard.items.some(i => i.id === 'p|landmark_origin'));
-  assert.ok(storyHeard.items.some(i => i.id === 'p|neighborhood_intro' && i.opener), 'the unheard intro still opens a chapter');
+  // Welcome demotion (Nov 4, 2026): the unheard intro does NOT
+  // open a chapter — intros are not composer candidacy at all;
+  // they serve a route only as Coverage Guarantee fill.
+  assert.ok(!storyHeard.items.some(i => i.id === 'p|neighborhood_intro'), 'the unheard intro never composes');
 });
 
 check('v3.1 one per place: three unheard angles of one place tile exactly once in a plan', () => {
@@ -570,31 +573,40 @@ check('v2 weighting: landmark beats corridor at the same anchor (no user topics)
   assert.deepEqual(storyItems(wide).map(i => i.id), ['mark|landmark_origin', 'corr|corridor']);
 });
 
-check('v2 openers: chapter heads cap at 3 and precede their area stories', () => {
+check('demotion: intros never seat as chapter furniture; stories tile and bridge adjacently', () => {
   const units = [];
   [32.72, 32.77, 32.82, 32.87].forEach((lat, i) => {
     units.push(unit(`area${i + 1}|neighborhood_intro`, lat, { angle: 'neighborhood_intro', durationSec: 60 }));
+    units.push(unit(`area${i + 1}|neighborhood_intro_greet`, lat, { angle: 'neighborhood_intro_greet', durationSec: 60 }));
     units.push(unit(`story${i + 1}|landmark_origin`, lat + 0.005));
   });
   const plan = rm.composeRoutePlan(units, densePath, denseDest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] }, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000 });
-  const openers = plan.items.filter(i => i.opener);
-  assert.equal(openers.length, 3, 'opener cap is 3 per plan');
-  for (const op of openers) {
-    const at = plan.items.indexOf(op);
-    const nextStory = plan.items.slice(at + 1).find(i => i.kind === 'story');
-    assert.ok(nextStory && nextStory.anchorProgress >= op.anchorProgress - 0.001, 'opener precedes its area story');
+  // No intro of either variant is a plan item, and no item
+  // carries the retired opener flag.
+  assert.ok(!plan.items.some(i => i.unit && (i.unit.angle === 'neighborhood_intro' || i.unit.angle === 'neighborhood_intro_greet')), 'no intro tiles in a composed plan');
+  assert.ok(!plan.items.some(i => 'opener' in i), 'the opener flag is gone from plan items');
+  // The four area stories all tile, and consecutive stories are
+  // joined by a pair bridge — the seam an opener used to sit on
+  // is covered by the bridge between the now-adjacent stories.
+  const stories = plan.items.filter(i => i.kind === 'story');
+  assert.equal(stories.length, 4);
+  for (let k = 0; k + 1 < stories.length; k++) {
+    const a = plan.items.indexOf(stories[k]);
+    const b = plan.items.indexOf(stories[k + 1]);
+    const between = plan.items.slice(a + 1, b);
+    assert.ok(between.some(i => i.kind === 'bridge' && i.prevUnitId === stories[k].id && i.nextUnitId === stories[k + 1].id), `a pair bridge joins stories ${k} and ${k + 1}`);
   }
 });
 
-check('v2 openers: heard intro is excluded, cap does not bind the rest', () => {
+check('demotion: a heard intro changes nothing; an unheard intro still never composes', () => {
   const units = [];
   [32.72, 32.77, 32.82, 32.87].forEach((lat, i) => {
     units.push(unit(`area${i + 1}|neighborhood_intro`, lat, { angle: 'neighborhood_intro', durationSec: 60 }));
     units.push(unit(`story${i + 1}|landmark_origin`, lat + 0.005));
   });
   const plan = rm.composeRoutePlan(units, densePath, denseDest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] }, { nowMs: NOW, heardKeys: new Set(['area2|neighborhood_intro']), budgetSecOverride: 100000 });
-  const openerIds = plan.items.filter(i => i.opener).map(i => i.id);
-  assert.deepEqual(openerIds, ['area1|neighborhood_intro', 'area3|neighborhood_intro', 'area4|neighborhood_intro']);
+  assert.ok(!plan.items.some(i => i.unit && i.unit.angle === 'neighborhood_intro'), 'no intro item, heard or not');
+  assert.equal(plan.items.filter(i => i.kind === 'story').length, 4, 'all four stories still tile');
 });
 
 const portalUnits = heardP1 => {
@@ -1054,7 +1066,9 @@ check('monte carlo: 200 random plans hold the invariants', () => {
     assert.ok(reactions <= Math.ceil(stories / 3), `too many reactions: ${reactions} for ${stories} stories`);
     const bridges = plan.items.filter(i => i.kind === 'bridge').length;
     assert.ok(bridges <= Math.max(0, stories - 1), 'bridge count exceeds story pairs');
-    // v2 invariants: portal share + adjacency, opener cap.
+    // v2 invariants: portal share + adjacency. (Welcome
+    // demotion, Nov 4, 2026: the opener-cap invariant became
+    // "no intro ever composes".)
     const portals = plan.items.filter(i => i.portal);
     assert.ok(portals.length / Math.max(1, stories) <= 0.25, `portal share ${portals.length}/${stories} exceeds 25%`);
     for (const p of portals) {
@@ -1062,7 +1076,7 @@ check('monte carlo: 200 random plans hold the invariants', () => {
       const prevStory = [...plan.items.slice(0, at)].reverse().find(i => i.kind === 'story');
       assert.ok(prevStory && prevStory.id === p.portalParentId, 'portal does not directly follow its parent');
     }
-    assert.ok(plan.items.filter(i => i.opener).length <= 3, 'chapter opener cap exceeded');
+    assert.ok(!plan.items.some(i => i.unit && (i.unit.angle === 'neighborhood_intro' || i.unit.angle === 'neighborhood_intro_greet')), 'an intro composed');
   }
 });
 
@@ -1778,6 +1792,70 @@ await checkAsync('gapfill: library first — an untiled fetched unit tiles the g
   assert.equal(events[0].result, 'shelf');
   assert.equal(events[0].subject, 'mid|landmark_origin');
   assert.ok(events[0].gap_sec > 500 && events[0].gap_sec < 750, `gap_sec ${events[0].gap_sec}`);
+});
+
+await checkAsync('gapfill: a plain intro tiles as guarantee fill when no story candidate remains (welcome demotion)', async () => {
+  const drive = 2000;
+  const plan = mkPlan([storyAtSec('s1|x', 200, 100, drive), storyAtSec('s2|x', 1800, 100, drive)]);
+  plan.driveSec = drive;
+  plan.budgetSec = drive;
+  const intro = unit('nb|neighborhood_intro', 32.8, { angle: 'neighborhood_intro', durationSec: 200 });
+  const events = [];
+  const filled = await gf.fillRouteGaps(
+    plan,
+    { fetchedUnits: [intro], heardKeys: new Set(), input: noInput, driveSec: drive },
+    { onEvent: e => events.push(e) },
+  );
+  const fill = filled.items.find(i => i.id === 'nb|neighborhood_intro');
+  assert.ok(fill && fill.kind === 'story', 'the plain intro filled the gap as a story item');
+  assert.equal(events.length, 1);
+  assert.equal(events[0].result, 'shelf');
+  assert.equal(events[0].subject, 'nb|neighborhood_intro');
+});
+
+await checkAsync('gapfill: a story candidate beats an intro for the same gap; a heard intro never fills', async () => {
+  const drive = 2000;
+  const mk = () => {
+    const p = mkPlan([storyAtSec('s1|x', 200, 100, drive), storyAtSec('s2|x', 1800, 100, drive)]);
+    p.driveSec = drive;
+    p.budgetSec = drive;
+    return p;
+  };
+  // The story's window covers the whole gap span, so once it
+  // seats there is nothing left for the intro to fill.
+  const story = unit('mid|landmark_origin', 32.732, { durationSec: 1500 });
+  const intro = unit('nb|neighborhood_intro', 32.8, { angle: 'neighborhood_intro', durationSec: 200 });
+  const both = await gf.fillRouteGaps(
+    mk(),
+    { fetchedUnits: [intro, story], heardKeys: new Set(), input: noInput, driveSec: drive },
+    { onEvent: () => {} },
+  );
+  assert.ok(both.items.some(i => i.id === 'mid|landmark_origin'), 'the story filled');
+  assert.ok(!both.items.some(i => i.id === 'nb|neighborhood_intro'), 'the intro yielded to the story');
+  const heardEvents = [];
+  const heardOnly = await gf.fillRouteGaps(
+    mk(),
+    { fetchedUnits: [intro], heardKeys: new Set(['nb|neighborhood_intro']), input: noInput, driveSec: drive },
+    { onEvent: e => heardEvents.push(e) },
+  );
+  assert.ok(!heardOnly.items.some(i => i.id === 'nb|neighborhood_intro'), 'a heard intro never fills');
+  assert.equal(heardEvents[0].result, 'skipped');
+});
+
+await checkAsync('gapfill: the greet variant never tiles as fill', async () => {
+  const drive = 2000;
+  const plan = mkPlan([storyAtSec('s1|x', 200, 100, drive), storyAtSec('s2|x', 1800, 100, drive)]);
+  plan.driveSec = drive;
+  plan.budgetSec = drive;
+  const greet = unit('nb|neighborhood_intro_greet', 32.8, { angle: 'neighborhood_intro_greet', durationSec: 200 });
+  const events = [];
+  const filled = await gf.fillRouteGaps(
+    plan,
+    { fetchedUnits: [greet], heardKeys: new Set(), input: noInput, driveSec: drive },
+    { onEvent: e => events.push(e) },
+  );
+  assert.ok(!filled.items.some(i => i.id === 'nb|neighborhood_intro_greet'), 'greet never tiles anywhere in route');
+  assert.equal(events[0].result, 'skipped');
 });
 
 await checkAsync('gapfill: a fetched off-corridor (portal) candidate is never a gap fill — geographic only', async () => {
@@ -2635,18 +2713,23 @@ await checkAsync('wart (§5): the exclusion is surgical — a genuinely dropped 
     const records = [rec(['other|landmark_origin']), rec(['top|landmark_origin'])];
     assert.deepEqual(storyIds(composeC(units, 140, records)), ['top|landmark_origin']);
   });
-  check('rotation r2: the prior drive’s opener area does not repeat when a fresh opener exists (cap pressure)', () => {
+  check('rotation r2 (retired): opener variation is gone — intros never seat, prior-drive records change nothing', () => {
+    // Rotation rule 2 lived inside the chapter-opener lane and
+    // retired with it (welcome demotion, Nov 4, 2026). The
+    // prior drive's intro areas no longer influence anything:
+    // with and without the record, no intro composes and the
+    // story set is identical.
     const units = [
       unit('s1|landmark_origin', 32.73),
       unit('s2|landmark_origin', 32.81),
       unit('na|neighborhood_intro', 32.71, { angle: 'neighborhood_intro' }),
       unit('nb|neighborhood_intro', 32.79, { angle: 'neighborhood_intro' }),
     ];
-    // Budget leaves room for exactly one opener after the stories tile.
     const rotated = composeC(units, 280, [rec(['na|neighborhood_intro'])]);
-    assert.deepEqual(rotated.items.filter(i => i.opener).map(i => i.id), ['nb|neighborhood_intro']);
     const control = composeC(units, 280, []);
-    assert.deepEqual(control.items.filter(i => i.opener).map(i => i.id), ['na|neighborhood_intro']);
+    assert.ok(!rotated.items.some(i => i.unit && i.unit.angle === 'neighborhood_intro'));
+    assert.ok(!control.items.some(i => i.unit && i.unit.angle === 'neighborhood_intro'));
+    assert.deepEqual(storyIds(rotated), storyIds(control));
   });
   check('rotation r4: among near-equal climax candidates, the one with more unheard alternatives wins', () => {
     const plan = composeC([
@@ -2744,13 +2827,18 @@ await checkAsync('wart (§5): the exclusion is surgical — a genuinely dropped 
     assert.equal(plan.actsSummary.middle.corridor, 1);
     assert.equal(plan.actsSummary.middle.floorSub, false); // deferral resolved to the same candidate: no substitution seated
   });
-  check('acts: chapter openers are counted in the act they open', () => {
+  check('acts: the summary carries no openers tally (welcome demotion shape change)', () => {
     const plan = composeAct([
       unit('n1|neighborhood_intro', 32.79, { angle: 'neighborhood_intro' }),
       unit('s1|landmark_origin', 32.81),
     ], 10000);
-    assert.equal(plan.actsSummary.middle.openers, 1);
-    assert.equal(plan.actsSummary.middle.stories, 2); // the opener is a story item in its act
+    // The intro does not compose, so the middle act holds only
+    // the story — and the acts line has no openers field at all
+    // (the decisions-record shape changed with the demotion).
+    assert.equal(plan.actsSummary.middle.stories, 1);
+    for (const line of [plan.actsSummary.opening, plan.actsSummary.middle, plan.actsSummary.climax]) {
+      assert.ok(!('openers' in line), 'openers tally retired from the acts summary');
+    }
   });
   await checkAsync('acts: the decisions record carries the acts summary', async () => {
     const plan = rm.composeRoutePlan(

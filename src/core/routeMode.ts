@@ -435,7 +435,7 @@ export function progressBucket(progress: number): number {
 /**
  * Angle-class preference at similar progress (item 3a): Erik's
  * lean-away direction — landmark/place stories first, corridor
- * narration last. (Chapter openers travel their own lane.)
+ * narration last.
  */
 export function angleClassRank(angle: string): number {
   return angle === 'corridor' ? 1 : 0;
@@ -462,11 +462,10 @@ export function actIndexForProgress(progress: number): number {
 
 /** One act's line in a plan's acts summary (carried into the decisions record). */
 export interface ActSummary {
-  /** Story items seated in the act (chapter openers included — they are story items). */
+  /** Story items seated in the act. */
   stories: number;
   landmark: number;
   corridor: number;
-  openers: number;
   /** A corridor-class candidate yielded to a stronger same-act candidate while this act was tiled. */
   floorSub: boolean;
 }
@@ -506,8 +505,6 @@ export function storyWindow(anchorProgress: number, durationSec: number, driveDu
 /** Elastic bridge bounds: never shorter than the phase-1 line, never a story in disguise. */
 export const BRIDGE_MIN_SEC = 8;
 export const BRIDGE_MAX_SEC = 90;
-/** Chapter openers per plan at most (item 3b), and at most one per named area. */
-export const CHAPTER_OPENER_MAX = 3;
 /** Portal share cap (item 4): portals ≤ ¼ of the plan's story items ⟺ portals ≤ geoStories / 3. */
 export const PORTAL_CAP_DIVISOR = 3;
 
@@ -828,8 +825,6 @@ export interface PlanItem {
   portal?: boolean;
   /** For a portal item: the chosen story unit id it hangs off. */
   portalParentId?: string;
-  /** Chapter opener (item 3b): a neighborhood intro heading an area's chapter. */
-  opener?: boolean;
   /** Bridges: the elastic target the text was composed toward, seconds. */
   targetDurationSec?: number;
 }
@@ -899,12 +894,20 @@ export interface RoutePlan {
   openingSubject: string | null;
   /**
    * Composer v3 (commit B): the settled plan's act structure —
-   * per act, the story count, the class tallies, the chapter
-   * openers seated, and whether the act's quality floor fired.
-   * Counted from the final items at compose time; carried into
-   * the route_plan_started decisions record.
+   * per act, the story count, the class tallies, and whether
+   * the act's quality floor fired. Counted from the final
+   * items at compose time; carried into the route_plan_started
+   * decisions record.
    */
   actsSummary: ActsSummary;
+  /**
+   * Corridor lifetime cap (Nov 4, 2026 addendum B): stretches
+   * whose corridor rows this plan retired at the cap, counted
+   * at partition. Null when the caller supplied no telling
+   * counts (the grader's worlds carry none, so its numbers
+   * stay comparable to the pre-cap baselines).
+   */
+  corridorRetiredStretches: number | null;
   /**
    * Optional shelf tease for the arrival-signoff closeout, set by
    * the App after composing (an unheard, unplanned shelf unit).
@@ -1067,9 +1070,9 @@ export interface ComposeOptions {
  * no live bridge generation; v2: fairness, windows, portals).
  * Library-first tiling:
  *  1. partition the shelf — geographic stories (inside the 1.5 km
- *     corridor), chapter openers (plain neighborhood intros in
- *     the corridor), portal candidates (stories outside it);
- *     heard units and the greet/filler angles are never served;
+ *     corridor), portal candidates (stories outside it);
+ *     heard units and the greet/filler/intro angles are never
+ *     served by the composer itself;
  *  2. SELECTION IS FAIR ACROSS THE PATH: candidates are bucketed
  *     by progress decile and picked round-robin — every stretch
  *     of the drive contributes before any stretch gets a second
@@ -1081,8 +1084,10 @@ export interface ComposeOptions {
  *     corridor angles (Erik's lean-away), then progress. A
  *     user-topic pool restriction applies before all of it, as
  *     in phase 1;
- *  4. chapter openers head the first story at-or-after their
- *     area's ground (≤1 per area, ≤3 per plan, heard-excluded);
+ *  4. (retired Nov 4, 2026 — welcome demotion: chapter openers
+ *     no longer exist in route; bridges own chapter
+ *     transitions, and plain intros serve only as Coverage
+ *     Guarantee fill from the fetched set);
  *  5. portal hops: off-corridor units tied by shared topics to a
  *     chosen story, ≤ geoStories/3 (a quarter of story items),
  *     one per parent, inserted directly after the parent;
@@ -1096,7 +1101,7 @@ export interface ComposeOptions {
  * Through-line (differentiator 2) layers onto the same pass,
  * never against it: thread detection on the pool (a rank nudge
  * beside tone in byRank — heard exclusion, budget tiling,
- * anchored windows and the portal/opener caps are untouched),
+ * anchored windows and the portal caps are untouched),
  * a generalized climax sequenced as the closing story when
  * the early drive stays covered without it (addendum 4: the
  * candidate set is the final third plus any destination units,
@@ -1130,12 +1135,11 @@ export interface ComposeOptions {
  *       decisions record. ROTATION (commit C) lives inside
  *       this rung as well, BELOW the thread: preferences
  *       among the base candidates driven by this route's own
- *       drive records — place recency, opener variation,
- *       second-choice wins, and a scarcity-aware climax
- *       tiebreak. Rotation never overrides heard exclusion,
- *       the budget, the windows, or the portal bar; it only
- *       chooses among candidates the higher rungs left tied
- *       or near-tied;
+ *       drive records — place recency, second-choice wins,
+ *       and a scarcity-aware climax tiebreak. Rotation never
+ *       overrides heard exclusion, the budget, the windows,
+ *       or the portal bar; it only chooses among candidates
+ *       the higher rungs left tied or near-tied;
  *   (2) thread selection — the detected thread, or the
  *       listener's own chosen topic (detectRouteThread);
  *   (3) climax placement — the in-corridor generalized climax,
@@ -1157,10 +1161,21 @@ export interface ComposeOptions {
  * climax eligibility and scarcity, and the portal pools —
  * while the sweep seats at most ONE telling per place per
  * plan, so the new depth spends across drives, never twice
- * in one episode. Rotation's place-level rules (recency,
- * opener variation) still read the drive records' subjects:
- * a place heard yesterday yields today even when it holds
- * an unheard angle, exactly as commit C specified.
+ * in one episode. Rotation's place-level rules (recency)
+ * still read the drive records' subjects: a place heard
+ * yesterday yields today even when it holds an unheard
+ * angle, exactly as commit C specified.
+ *
+ * Welcome demotion (Erik, Nov 4, 2026): plain neighborhood
+ * intros no longer seat as chapter openers — the opener lane
+ * (and rotation's opener-variation rule, which lived inside
+ * it) retired. Bridges own chapter transitions: the item
+ * builder bridges every consecutive story pair, so a seam an
+ * opener used to sit on is covered by the pair bridge of the
+ * stories that now stand adjacent. Intros serve a route only
+ * as Coverage Guarantee fill (routeGapFill reads the fetched
+ * set directly); the greet variant never tiles anywhere in
+ * route. Freeform's welcome system is untouched.
  * The plan is a value, not a promise: nothing here touches the
  * network, so the harness can prove every invariant offline.
  */
@@ -1191,7 +1206,6 @@ export function composeRoutePlan(
 
   let skippedHeard = 0;
   const geoAll: LibraryUnit[] = [];
-  const openerAll: LibraryUnit[] = [];
   const portalAll: LibraryUnit[] = [];
   // Heard STORY units on this route's own ground (corridor or
   // destination area), collected at partition for the opening
@@ -1202,19 +1216,19 @@ export function composeRoutePlan(
   for (const u of units) {
     // The route composer's own partition (freeform never reads
     // this): the greet variant is a welcome, not a chapter head,
-    // and the filler lanes are not stories. Plain intros are the
-    // one NON_STORY_ANGLES member whose handling changed — they
-    // moved to the chapter-opener lane below.
+    // and the filler lanes are not stories. Plain intros are
+    // not route candidacy either (welcome demotion, Nov 4,
+    // 2026): the chapter-opener lane retired, so an intro
+    // serves a route only through the Coverage Guarantee's
+    // library-first fill pool, which reads the fetched set
+    // directly — never as composed chapter furniture.
     if (u.angle === 'neighborhood_intro_greet' || u.angle === 'filler' || u.angle === 'filler_hosted') continue;
     if (opts.heardKeys.has(u.id)) {
       skippedHeard += 1;
       if (u.angle !== 'neighborhood_intro' && inCorridor(u)) priorHeard.push(u);
       continue;
     }
-    if (u.angle === 'neighborhood_intro') {
-      if (inCorridor(u)) openerAll.push(u);
-      continue;
-    }
+    if (u.angle === 'neighborhood_intro') continue;
     if (inCorridor(u)) geoAll.push(u);
     else portalAll.push(u);
   }
@@ -1344,8 +1358,7 @@ export function composeRoutePlan(
   // unheard angles to the SAME plan — the sweep seats at most
   // one of them. The other angles stay unheard for a future
   // drive; that rotation across drives is the depth the
-  // shelf's angles exist for. (Chapter openers are exempt by
-  // design: an intro heads its own area's chapter.)
+  // shelf's angles exist for.
   const chosenPlaces = new Set<string>();
   // Fit-skipped candidates are consumed permanently — total
   // only grows, so a candidate that cannot fit now never fits
@@ -1366,7 +1379,7 @@ export function composeRoutePlan(
    * sweep's own budget-fit rule is the feasibility test).
    * Every existing cap still binds the alternative: heard
    * exclusion already partitioned it out, and budget, windows
-   * and the portal/opener caps apply downstream as before.
+   * and the portal caps apply downstream as before.
    */
   const floorYields = (cand: LibraryUnit): boolean => {
     if (angleClassRank(cand.angle) === 0) return false;
@@ -1663,11 +1676,11 @@ export function composeRoutePlan(
     }
   }
 
-  // The playback sequence: chosen stories, then chapter openers,
-  // then portal hops spliced after their parents.
+  // The playback sequence: chosen stories, then portal hops
+  // spliced after their parents. (Chapter openers retired with
+  // the welcome demotion — bridges own the transitions now.)
   interface SeqEntry {
     unit: LibraryUnit;
-    opener?: boolean;
     portal?: boolean;
     portalParentId?: string;
     sharedTopic?: string;
@@ -1675,44 +1688,11 @@ export function composeRoutePlan(
   }
   const sequence: SeqEntry[] = chosen.map(u => ({ unit: u }));
   // The portal climax rides the sequence's tail (consolidation
-  // §4): appended after the chosen order, before openers and
-  // hops assemble around it — the opener clamp and the hop
-  // exclusions both key off climaxUnitId, so the tail entry is
-  // protected exactly like a sequenced in-corridor winner.
+  // §4): appended after the chosen order, before hops assemble
+  // around it — the hop exclusions key off climaxUnitId, so the
+  // tail entry is protected exactly like a sequenced
+  // in-corridor winner.
   if (portalClimaxUnit) sequence.push({ unit: portalClimaxUnit, portalClimax: true });
-
-  // Chapter openers (item 3b): the first story at-or-after the
-  // area's ground gets the area's intro as its chapter head.
-  const openerByKey = new Map<string, LibraryUnit>();
-  for (const u of openerAll) if (!openerByKey.has(u.placeKey)) openerByKey.set(u.placeKey, u);
-  // Rotation rule 2 (opener variation): an opener whose area
-  // sounded on the immediately prior drive on this route is
-  // considered after the fresh areas — under the global cap,
-  // the fresh areas claim their chapters first. When every
-  // opener fits under the caps, all still seat; the ordering
-  // changes nothing else about their placement.
-  const openers = [...openerByKey.values()].sort(
-    (a, b) =>
-      Number(playedOnLastDrive.has(normalizePlaceName(a.placeName))) -
-        Number(playedOnLastDrive.has(normalizePlaceName(b.placeName))) ||
-      prog(a) - prog(b),
-  );
-  let openersUsed = 0;
-  for (const op of openers) {
-    if (openersUsed >= CHAPTER_OPENER_MAX || sequence.length === 0) break;
-    if (Number.isFinite(budgetSec) && total + op.durationSec > budgetSec * 1.5) continue;
-    let at = sequence.findIndex(s => prog(s.unit) >= prog(op) - 1e-9);
-    if (at === -1) at = sequence.length;
-    // A chapter opener never lands after a sequenced climax —
-    // nothing heads a chapter beyond the closing story.
-    if (climaxSequenced && climaxUnitId) {
-      const flagshipAt = sequence.findIndex(s => s.unit.id === climaxUnitId);
-      if (flagshipAt >= 0 && at > flagshipAt) at = flagshipAt;
-    }
-    sequence.splice(at, 0, { unit: op, opener: true });
-    total += op.durationSec;
-    openersUsed += 1;
-  }
 
   // Portal hops (item 4): connection = shared topics with a
   // chosen geographic story; user-chosen topics strengthen the
@@ -1951,7 +1931,6 @@ export function composeRoutePlan(
       ...(isClimax ? { climax: true } : {}),
       ...(entry.portal ? { portal: true, portalParentId: entry.portalParentId } : {}),
       ...(entry.portalClimax ? { portalClimax: true } : {}),
-      ...(entry.opener ? { opener: true } : {}),
     });
     storiesSinceReaction += 1;
     if (storiesSinceReaction >= 3 && i < sequence.length - 1) {
@@ -1992,9 +1971,9 @@ export function composeRoutePlan(
   // floor flags come from the sweep; the rest is the plan as
   // built, so the decisions record describes what shipped.
   const actsSummary: ActsSummary = {
-    opening: { stories: 0, landmark: 0, corridor: 0, openers: 0, floorSub: floorSubByAct[0] },
-    middle: { stories: 0, landmark: 0, corridor: 0, openers: 0, floorSub: floorSubByAct[1] },
-    climax: { stories: 0, landmark: 0, corridor: 0, openers: 0, floorSub: floorSubByAct[2] },
+    opening: { stories: 0, landmark: 0, corridor: 0, floorSub: floorSubByAct[0] },
+    middle: { stories: 0, landmark: 0, corridor: 0, floorSub: floorSubByAct[1] },
+    climax: { stories: 0, landmark: 0, corridor: 0, floorSub: floorSubByAct[2] },
   };
   const actLines = [actsSummary.opening, actsSummary.middle, actsSummary.climax];
   for (const it of items) {
@@ -2003,7 +1982,6 @@ export function composeRoutePlan(
     line.stories += 1;
     if (it.unit.angle.startsWith('landmark')) line.landmark += 1;
     else if (it.unit.angle === 'corridor') line.corridor += 1;
-    if (it.opener) line.openers += 1;
   }
 
   const totalSec = items.reduce((s, it) => s + it.durationSec, 0);
@@ -2028,6 +2006,7 @@ export function composeRoutePlan(
     previewFacts,
     openingSubject: openingUnit?.placeName ?? null,
     actsSummary,
+    corridorRetiredStretches: null,
   };
 }
 
