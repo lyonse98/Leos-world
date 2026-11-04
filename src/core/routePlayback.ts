@@ -568,6 +568,14 @@ export class RoutePlanRunner {
         // plan retired at 3 lifetime tellings. Null when the
         // build supplied no telling counts.
         corridor_retired_stretches: plan.corridorRetiredStretches ?? null,
+        // Woven seated members (Nov 4, 2026): how many
+        // off-route thread members the seating pass placed in
+        // the plan's silent gaps, and the thread topic they
+        // were seated under. Zero/empty when none seated.
+        woven_members: {
+          count: plan.wovenMembers?.count ?? 0,
+          topics: plan.wovenMembers?.topics ?? [],
+        },
       },
     });
   }
@@ -588,7 +596,8 @@ export class RoutePlanRunner {
    *     both rules: it opens the drive, behind the preview item
    *     or in slot 1 itself — see departureEntry);
    *   - everything else (bridges, reactions, fillers, portal
-   *     stories) feeds.
+   *     stories, woven members — windowless by design, seated
+   *     into silence by plan order) feeds.
    * Feeding one entry can empty the FIFO instantly (an idle
    * Player takes it as current), so the loop re-checks.
    */
@@ -603,7 +612,7 @@ export class RoutePlanRunner {
         this.resolvedCount += 1;
         continue;
       }
-      if (it.kind === 'story' && !it.portal && entry !== this.departureEntry) {
+      if (it.kind === 'story' && !it.portal && !it.woven && entry !== this.departureEntry) {
         const release = it.releaseProgress ?? 0;
         const expire = it.expireProgress ?? Number.POSITIVE_INFINITY;
         if (this.lastProgress > expire) {

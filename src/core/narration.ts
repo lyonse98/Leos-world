@@ -294,6 +294,16 @@ export interface BridgeContext {
    * ahead holds it.
    */
   offRouteSubject?: string;
+  /**
+   * Mid role only (Nov 4, 2026): the next story is a WOVEN
+   * MEMBER — an off-route story seated in a silent gap as a
+   * member of the plan's through-line. Its real place name,
+   * carried so the bridge frames the range honestly: the host
+   * is following the thread across the county, and no
+   * proximity, visibility, or passing language is ever used
+   * for it.
+   */
+  wovenSubject?: string;
 }
 
 /**
@@ -328,13 +338,25 @@ export function bridgeTextFor(
   // An off-route climax gets no "just ahead" head — the story
   // is not ahead, it is across the county, and the bridge
   // says so (consolidation §4: honest framing, no proximity
-  // language).
+  // language). A woven member's bridge is under the same
+  // discipline: the next story is not ahead either — the host
+  // is ranging along the thread, and the head says that
+  // instead of pointing at the road.
   let text = opts.portalTopic
     ? `From ${prev.placeName}, there is a thread worth following — ${opts.portalTopic} ties it to ${next.placeName}, a little way off our road, and the connection is too good to skip.`
-    : ctx?.offRouteSubject
+    : ctx?.offRouteSubject || ctx?.wovenSubject
       ? `From ${prev.placeName} we keep rolling.`
       : `From ${prev.placeName} we keep rolling — just ahead is ${next.placeName}, and it has its own story to tell.`;
   if (ctx && !opts.portalTopic) {
+    if (ctx.wovenSubject && ctx.role !== 'payoff') {
+      // The woven range, framed honestly (Nov 4, 2026): the
+      // story is NOT on this road — Miles is following the
+      // drive's thread to where that same story is told,
+      // clear across the county, and says so plainly.
+      text += ctx.threadTopic
+        ? ` This next one isn't on our road at all — it's ${ctx.wovenSubject}, clear across the county. But the ${ctx.threadTopic} thread runs straight through it, so we're following the thread for a while.`
+        : ` This next one isn't on our road at all — it's ${ctx.wovenSubject}, clear across the county. But it belongs in this drive, so we're ranging off the road for it.`;
+    }
     if (ctx.role === 'payoff') {
       if (ctx.threadTopic) {
         text += ctx.promiseMade

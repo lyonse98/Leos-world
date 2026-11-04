@@ -20,6 +20,7 @@ import {
   parseRouteInput,
   qaGateOpen,
   rideEstimateLine,
+  seatWovenMembers,
   ROUTE_TONES,
   ROUTE_TOPICS,
   type LibraryUnit,
@@ -42,6 +43,7 @@ import {
   stillOwedSubjects,
 } from './core/routeHistory';
 import { tagsFor } from './data/routeTags';
+import { wovenEligibleFor } from './data/routePresence';
 import {
   deviceKey,
   emitEvent,
@@ -925,6 +927,11 @@ function MilesApp() {
           toneSecondary: tags.toneSecondary,
           audioPath: row.audio_path,
           storyText: row.story_text,
+          // Woven eligibility (Nov 4, 2026): the presence
+          // audit's register call for this telling, from the
+          // bundled presence data — the composer consults it
+          // for thread support, the seating pass for members.
+          wovenEligible: wovenEligibleFor(row.place_key, row.angle),
         });
       }
       // Story-level heard (composer v3.1): a unit is excluded
@@ -1068,6 +1075,16 @@ function MilesApp() {
       );
       plan.driveSec = route.durationSec;
       plan.budgetSec = budget;
+      // Woven seated members (Nov 4, 2026): AFTER the Coverage
+      // Guarantee has claimed its ground — off-route,
+      // woven-eligible stories on the plan's through-line
+      // thread seat into the silence that remains, up to 4,
+      // as windowless members with honest ranging bridges.
+      // The climax is already settled (a member is never the
+      // climax), heard exclusion is the build's own story-
+      // level set, and the pass is a no-op when the plan has
+      // no thread or no eligible candidate fits a real gap.
+      plan = seatWovenMembers(plan, units, { heardKeys });
       const plannedIds = new Set(plan.items.map(it => it.id));
       plan.shelfTease = units.find(u => !plannedIds.has(u.id) && !heardKeys.has(u.id)) ?? null;
       // The fetch's read accounting rides the plan into the
