@@ -149,9 +149,21 @@ export interface PlayerHooks {
   onCommit(item: AudibleItem): void;
   /** Any state change the UI cares about. */
   onState(): void;
+  /**
+   * Inter-item gap override (route runner's produced breath,
+   * composer v3.1 commit D): consulted at each settle with
+   * the promised FIFO's head (null when empty) for the delay
+   * before the pump takes it. Absent → the standing GAP_MS.
+   * Freeform never sets it, so its spacing is exactly as
+   * before; the route runner returns its breath only for a
+   * back-to-back sounded plan-item transition and GAP_MS
+   * otherwise (pauses, window waits and the closeout boundary
+   * keep the standing timing).
+   */
+  interItemGapMs?: (next: AudibleItem | null) => number;
 }
 
-const GAP_MS = 600;
+export const GAP_MS = 600;
 const RETRY_MS = 1200;
 const STALL_AFTER_MS = 4000;
 /**
@@ -226,6 +238,8 @@ export class Player {
   private lossDeclared = false;
   private probeTimer: unknown = null;
   private gapTimer: unknown = null;
+  /** True only while a settle callback runs (see settleItem / kickPump). */
+  private settling = false;
   private retryTimer: unknown = null;
   private driveGen = 0;
   private stallUsedFor = new Set<string>();
@@ -308,7 +322,7 @@ export class Player {
     }
     this.promised.push(item);
     this.markHeldIfNeeded();
-    this.pump();
+    this.kickPump();
     this.hooks.onState();
   }
 
@@ -337,7 +351,7 @@ export class Player {
     }
     this.promised.unshift(item);
     this.markHeldIfNeeded();
-    this.pump();
+    this.kickPump();
     this.hooks.onState();
   }
 
@@ -770,6 +784,27 @@ export class Player {
       this.heldSince = this.clock.now();
     }
     if (!this.holdActive()) this.heldSince = null;
+  }
+
+  /**
+   * The intake paths' pump (composer v3.1, commit D): normally
+   * a plain pump. While a settle callback is running AND the
+   * owner installed the inter-item gap hook, the take is
+   * deferred — afterSettle is about to schedule the gap-timed
+   * pump, and the fallback timer armed here covers any settle
+   * path that ends without one. Without the hook (freeform),
+   * this is exactly the plain pump it replaces: the hook is
+   * what opts a player into gap-timed takes.
+   */
+  private kickPump(): void {
+    if (this.settling && this.hooks.interItemGapMs) {
+      if (this.gapTimer === null && !this.tornDown) {
+        const gap = Math.max(0, this.hooks.interItemGapMs(this.promised[0] ?? null));
+        this.gapTimer = this.clock.setTimeout(() => this.pump(), gap);
+      }
+      return;
+    }
+    this.pump();
   }
 
   private pump(): void {
@@ -1224,7 +1259,10 @@ export class Player {
       this.hooks.onSlotEmpty();
     }
     if (this.gapTimer !== null) this.clock.clearTimeout(this.gapTimer);
-    this.gapTimer = this.clock.setTimeout(() => this.pump(), GAP_MS);
+    const gapMs = this.hooks.interItemGapMs
+      ? Math.max(0, this.hooks.interItemGapMs(this.promised[0] ?? null))
+      : GAP_MS;
+    this.gapTimer = this.clock.setTimeout(() => this.pump(), gapMs);
     this.markHeldIfNeeded();
     this.hooks.onState();
   }
@@ -1233,7 +1271,17 @@ export class Player {
     if (item.settled) return;
     item.settled = true;
     if (this.progressFor === item.id) this.clearProgressWatchdog();
-    item.onSettle(rec);
+    // The settle callback runs BEFORE afterSettle: an owner
+    // that feeds the successor from inside its settle handler
+    // (the route runner does) must not have that successor
+    // taken this instant — kickPump defers the take to the
+    // gap-timed pump so the inter-item gap actually applies.
+    this.settling = true;
+    try {
+      item.onSettle(rec);
+    } finally {
+      this.settling = false;
+    }
   }
 }
 

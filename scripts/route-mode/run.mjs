@@ -2846,5 +2846,182 @@ const grader = await import('./grader.mjs');
   });
 }
 
+// ── Audio finish + the produced breath (v3.1, commit D) ─────
+// The finish is pure over PCM arrays; the harness drives it
+// with synthetic WAVs and zero live calls. The breath decision
+// is a pure function; two real-timer runner integrations pin
+// the Player seam end to end.
+const afOut = join(mkdtempSync(join(tmpdir(), 'route-af-')), 'audioFinish.mjs');
+execFileSync(
+  join(repoRoot, 'node_modules', '.bin', 'esbuild'),
+  [
+    join(repoRoot, 'src', 'core', 'audioFinish.ts'),
+    '--bundle',
+    '--format=esm',
+    '--platform=node',
+    `--outfile=${afOut}`,
+    '--log-level=warning',
+  ],
+  { stdio: 'inherit' },
+);
+const af = await import(pathToFileURL(afOut).href);
+const sinePcm = (rmsDb, seconds = 0.25, sampleRate = 24000) => {
+  const amp = Math.pow(10, rmsDb / 20) * Math.SQRT2;
+  const n = Math.floor(seconds * sampleRate);
+  const ch = new Float32Array(n);
+  for (let i = 0; i < n; i++) ch[i] = amp * Math.sin((2 * Math.PI * 440 * i) / sampleRate);
+  return { sampleRate, channels: [ch] };
+};
+check('audio finish (D): a quiet render is gained up toward the shelf target', () => {
+  const quiet = sinePcm(-27); // 6 dB under the −21 target
+  assert.equal(af.planLoudnessGainDb(quiet), 6, 'the full distance, at the clamp edge');
+  const gained = af.applyGainDb(quiet, af.planLoudnessGainDb(quiet));
+  assert.ok(Math.abs(af.measureRmsDb(gained) - -21) < 0.15, `lands on target (got ${af.measureRmsDb(gained)})`);
+});
+check('audio finish (D): a loud render is gained down, and gain clamps at ±6 dB', () => {
+  assert.equal(af.planLoudnessGainDb(sinePcm(-15)), -6, 'a loud render comes down to target');
+  assert.equal(af.planLoudnessGainDb(sinePcm(-40)), 6, 'a very quiet render stops at the +6 clamp');
+  assert.equal(af.planLoudnessGainDb(sinePcm(-21)), 0, 'an at-target render is untouched');
+  assert.equal(af.planLoudnessGainDb({ sampleRate: 24000, channels: [new Float32Array(100)] }), 0, 'silence is never gained');
+});
+check('audio finish (D): peak protection — a hot peak is never pushed into clipping', () => {
+  // A spiky render: rare hot peaks (0.98) over a quiet bed —
+  // peak 0.98, RMS ≈ −24. Raw gain would be +3 dB; the peak
+  // ceiling (0.99) caps it at ≈ +0.09 dB.
+  const n = 24000;
+  const ch = new Float32Array(n);
+  for (let i = 0; i < n; i++) ch[i] = i % 250 === 0 ? (i % 500 === 0 ? 0.98 : -0.98) : i % 2 === 0 ? 0.005 : -0.005;
+  const hot = { sampleRate: 24000, channels: [ch] };
+  assert.ok(Math.abs(af.measureRmsDb(hot) - -24.2) < 0.6, `fixture RMS near −24 (got ${af.measureRmsDb(hot)})`);
+  const gain = af.planLoudnessGainDb(hot);
+  assert.ok(gain > 0 && gain <= 0.1, `gain capped by the peak, not the target (got ${gain})`);
+  const out = af.applyGainDb(hot, gain);
+  assert.ok(af.measurePeak(out) <= af.PEAK_CEILING + 1e-9, `peak stays under the ceiling (got ${af.measurePeak(out)})`);
+});
+check('audio finish (D): WAV encode/decode round-trips samples and rate', () => {
+  const src = sinePcm(-24, 0.1);
+  const bytes = af.encodeWavPcm16(src);
+  const back = af.decodeWavPcm16(bytes);
+  assert.ok(back, 'decodes');
+  assert.equal(back.sampleRate, 24000);
+  assert.equal(back.channels.length, 1);
+  assert.equal(back.channels[0].length, src.channels[0].length);
+  let maxErr = 0;
+  for (let i = 0; i < src.channels[0].length; i++) {
+    maxErr = Math.max(maxErr, Math.abs(back.channels[0][i] - src.channels[0][i]));
+  }
+  assert.ok(maxErr < 1 / 16000, `16-bit round-trip error is quantization only (got ${maxErr})`);
+  assert.equal(af.decodeWavPcm16(new Uint8Array([1, 2, 3])), null, 'garbage bytes decode to null, never throw');
+});
+await checkAsync('audio finish (D): the blob seam finishes a quiet WAV and passes level/undecodable renders through', async () => {
+  const decode = async blob => af.decodeWavPcm16(new Uint8Array(await blob.arrayBuffer()));
+  const quietBlob = new Blob([af.encodeWavPcm16(sinePcm(-30))], { type: 'audio/wav' });
+  const finished = await af.finishLiveRenderBlob(quietBlob, decode);
+  assert.notEqual(finished, quietBlob, 'a quiet render is re-rendered at level');
+  const out = af.decodeWavPcm16(new Uint8Array(await finished.arrayBuffer()));
+  assert.ok(Math.abs(af.measureRmsDb(out) - -24) < 0.3, `gained +6 (the clamp) from −30 toward −21 (got ${af.measureRmsDb(out)})`);
+  assert.ok(af.measurePeak(out) <= af.PEAK_CEILING + 1e-9, 'and never clips');
+  const levelBlob = new Blob([af.encodeWavPcm16(sinePcm(-21))], { type: 'audio/wav' });
+  assert.equal(await af.finishLiveRenderBlob(levelBlob, decode), levelBlob, 'an at-level render returns untouched');
+  const junk = new Blob([new Uint8Array([9, 9, 9])], { type: 'audio/wav' });
+  assert.equal(await af.finishLiveRenderBlob(junk, async () => null), junk, 'an undecodable render returns untouched — the finish never fails a render');
+});
+const GAP = 600; // player.GAP_MS — the standing inter-item gap the breath falls back to
+const settledStory = { sounded: true, skipped: false, planItem: true };
+const nextStory = { planItem: true, expireProgress: null, departure: false };
+check('breath (D): back-to-back sounded plan items are separated by the 700 ms breath', () => {
+  assert.equal(
+    rp.routeInterItemGapMs({ closing: false, lastSettled: settledStory, next: nextStory, lastProgress: 0, progressPerSec: null }),
+    rp.ROUTE_BREATH_MS,
+  );
+  assert.equal(rp.ROUTE_BREATH_MS, 700);
+});
+check('breath (D): the breath yields — closeout, skips, failures, answers, and empty FIFO keep the standing gap', () => {
+  const base = { closing: false, lastSettled: settledStory, next: nextStory, lastProgress: 0, progressPerSec: null };
+  assert.equal(rp.routeInterItemGapMs({ ...base, closing: true }), GAP, 'never before the closeout');
+  assert.equal(rp.routeInterItemGapMs({ ...base, lastSettled: { ...settledStory, skipped: true } }), GAP, 'after a skip the listener wants the next thing now');
+  assert.equal(rp.routeInterItemGapMs({ ...base, lastSettled: { ...settledStory, sounded: false } }), GAP, 'a failed item earns no breath');
+  assert.equal(rp.routeInterItemGapMs({ ...base, lastSettled: { ...settledStory, planItem: false } }), GAP);
+  assert.equal(rp.routeInterItemGapMs({ ...base, next: { ...nextStory, planItem: false } }), GAP, 'a Q&A answer follows at the standing gap');
+  assert.equal(rp.routeInterItemGapMs({ ...base, next: null }), GAP, 'nothing promised — the gap is moot but standing');
+  assert.equal(rp.routeInterItemGapMs({ ...base, lastSettled: null }), GAP, 'the first item never waits for a breath');
+});
+check('breath (D): a window that would close during the breath skips it — and only then', () => {
+  const windowed = { planItem: true, expireProgress: 0.435, departure: false };
+  // Moving fast: 0.425 + 1.25/s × 0.7 s projects past the window's close.
+  assert.equal(
+    rp.routeInterItemGapMs({ closing: false, lastSettled: settledStory, next: windowed, lastProgress: 0.425, progressPerSec: 1.25 }),
+    GAP,
+    'the breath yields to the closing window',
+  );
+  // Same window, gentle pace: the breath fits comfortably.
+  assert.equal(
+    rp.routeInterItemGapMs({ closing: false, lastSettled: settledStory, next: windowed, lastProgress: 0.38, progressPerSec: 0.005 }),
+    rp.ROUTE_BREATH_MS,
+    'a safe window keeps the breath',
+  );
+  // Stationary or unmeasured: no projection, no risk.
+  assert.equal(
+    rp.routeInterItemGapMs({ closing: false, lastSettled: settledStory, next: windowed, lastProgress: 0.43, progressPerSec: null }),
+    rp.ROUTE_BREATH_MS,
+  );
+  // The departure story is stale-exempt everywhere, breath included.
+  assert.equal(
+    rp.routeInterItemGapMs({ closing: false, lastSettled: settledStory, next: { ...windowed, departure: true }, lastProgress: 0.425, progressPerSec: 1.25 }),
+    rp.ROUTE_BREATH_MS,
+  );
+});
+await checkAsync('breath (D): runner integration — consecutive plan items start a breath apart', async () => {
+  const audio = new RealFakeAudio(200);
+  const starts = [];
+  const play0 = audio.play.bind(audio);
+  audio.play = () => {
+    starts.push(Date.now());
+    return play0();
+  };
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onStoryHeard: () => {},
+  });
+  await runner.start(anchorPlan());
+  await until(() => starts.length >= 3, 'preview, departure story, and its bridge all started');
+  const gap1 = starts[1] - starts[0] - 200; // preview → departure story
+  const gap2 = starts[2] - starts[1] - 200; // departure story → bridge
+  assert.ok(gap1 >= 660, `preview→story gap is the breath (got ${gap1} ms)`);
+  assert.ok(gap2 >= 660, `story→bridge gap is the breath (got ${gap2} ms)`);
+  runner.endTour();
+});
+await checkAsync('breath (D): runner integration — a window about to close skips the breath and still plays', async () => {
+  const audio = new RealFakeAudio(200);
+  const starts = [];
+  const play0 = audio.play.bind(audio);
+  audio.play = () => {
+    starts.push(Date.now());
+    return play0();
+  };
+  const heard = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onStoryHeard: u => heard.push(u.id),
+  });
+  await runner.start(anchorPlan());
+  // During the opening items, drive the progress to just
+  // inside story B's window [0.365, 0.435] at speed: the
+  // bridge→B gap must then fall back to the standing 600 ms,
+  // and B must still sound (fed in-window, never stale).
+  await until(() => starts.length >= 2, 'the departure story is playing');
+  runner.onPosition({ lat: 32.775, lng: -117.25 }); // progress 0.375
+  await new Promise(r => setTimeout(r, 40));
+  runner.onPosition({ lat: 32.785, lng: -117.25 }); // progress 0.425 → rate ≈ 1.25/s
+  await until(() => heard.includes('b|landmark_origin'), 'story B sounded');
+  const bIdx = audio.played.findIndex(u => u.includes('b%7Clandmark_origin'));
+  assert.ok(bIdx >= 2, 'B played after its bridge');
+  const gap = starts[bIdx] - starts[bIdx - 1] - 200;
+  assert.ok(gap < 660 && gap >= 540, `the breath yielded: bridge→B gap is the standing gap (got ${gap} ms)`);
+  runner.endTour();
+});
+
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

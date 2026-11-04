@@ -26,6 +26,7 @@ import {
   type TourMode,
 } from './core/routeMode';
 import { RoutePlanRunner, routeStartButtonState, type RouteRunnerView } from './core/routePlayback';
+import { finishLiveRenderBlob } from './core/audioFinish';
 import {
   DEFAULT_NARRATION_VOICE,
   narrationRequest,
@@ -1072,7 +1073,9 @@ function MilesApp() {
         const wrapReq = narrationRequest('wrapup', buildWrapUpContext(plan));
         const wrapText = wrapUpTextFor(wrapReq.context);
         const wrapBlob = await narration.synthesize(wrapText);
-        plan.wrapUp = { text: wrapText, audioUrl: URL.createObjectURL(wrapBlob) };
+        // v3.1 (commit D): the wrap-up is a live render too —
+        // it gets the same shelf-level finish.
+        plan.wrapUp = { text: wrapText, audioUrl: URL.createObjectURL(await finishLiveRenderBlob(wrapBlob)) };
         void emitEvent(
           sessionId,
           'route_wrap_up',

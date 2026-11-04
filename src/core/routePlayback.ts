@@ -39,7 +39,7 @@
 // Player.enqueueNext), and the plan resumes at the next unplayed
 // item. One question at a time, mirroring freeform's lock.
 
-import { Player, type AudibleItem, type AudioPort, type LatchState, systemClock } from './player';
+import { GAP_MS, Player, type AudibleItem, type AudioPort, type LatchState, systemClock } from './player';
 import { bucketUrl } from './backend';
 import type { RouteDriveRecord } from './routeHistory';
 import {
@@ -114,6 +114,53 @@ export function routeStartButtonState(view: { narrationReady: boolean }): {
     : { label: 'Generating tour…', disabled: true };
 }
 
+/**
+ * The produced breath (composer v3.1, commit D): ONE
+ * consistent pause between consecutive plan items that play
+ * back-to-back — a produced episode breathes between its
+ * pieces instead of butting them together as hard cuts. It
+ * is a FLOOR on spacing for adjacent items only.
+ */
+export const ROUTE_BREATH_MS = 700;
+
+/**
+ * The breath decision, pure for the harness: the gap the
+ * runner's Player should use after a settle — ROUTE_BREATH_MS
+ * for a true back-to-back transition (the previous plan item
+ * SOUNDED — not skipped, not failed — and another plan item
+ * follows), the Player's standing GAP_MS in every other case.
+ * It yields, by construction:
+ *   - to a closing/closed tour (the closeout's timing
+ *     semantics are untouched: no breath before it, ever);
+ *   - across pauses and window waits — those never pass
+ *     through a sounded settle with a plan item at the FIFO
+ *     head, and a held story's feed starts it immediately;
+ *   - to a window about to close: when the next item is a
+ *     windowed story and the driver's recent progress rate
+ *     would carry them past its expire progress during the
+ *     breath, the breath is skipped and the standing gap
+ *     applies — the breath never makes an item stale. (The
+ *     departure story is exempt from stale rules everywhere,
+ *     so it is exempt here too.)
+ */
+export function routeInterItemGapMs(args: {
+  closing: boolean;
+  lastSettled: { sounded: boolean; skipped: boolean; planItem: boolean } | null;
+  next: { planItem: boolean; expireProgress: number | null; departure: boolean } | null;
+  lastProgress: number;
+  progressPerSec: number | null;
+}): number {
+  const { closing, lastSettled, next, lastProgress, progressPerSec } = args;
+  if (closing) return GAP_MS;
+  if (!lastSettled || !lastSettled.sounded || lastSettled.skipped || !lastSettled.planItem) return GAP_MS;
+  if (!next || !next.planItem) return GAP_MS;
+  if (next.expireProgress !== null && !next.departure && progressPerSec !== null && progressPerSec > 0) {
+    const projected = lastProgress + progressPerSec * (ROUTE_BREATH_MS / 1000);
+    if (projected >= next.expireProgress) return GAP_MS;
+  }
+  return ROUTE_BREATH_MS;
+}
+
 export interface RouteRunnerDeps {
   audio: AudioPort;
   /** Synthesize text → playable blob URL (App wires gemini.synthesizeSpeech). */
@@ -171,6 +218,11 @@ export class RoutePlanRunner {
   private departureEntry: { planItem: PlanItem; audible: AudibleItem } | null = null;
   /** Last known path progress (0 until the first GPS feed). */
   private lastProgress = 0;
+  /** When lastProgress was sampled, and the recent progress rate (per second) — the breath's stale-risk input. */
+  private lastProgressAt = 0;
+  private progressPerSec: number | null = null;
+  /** The most recent plan-item settle (the breath's back-to-back input). */
+  private lastSettle: { sounded: boolean; skipped: boolean; planItem: boolean } | null = null;
   private begun = false;
   /** Manifest hold (differentiator 3): a staged plan renders but does not begin until beginStaged(). */
   private heldStart = false;
@@ -239,6 +291,29 @@ export class RoutePlanRunner {
       onWaiting: () => undefined,
       onCommit: () => undefined,
       onState: () => this.notify(),
+      // The produced breath (composer v3.1, commit D): the
+      // Player consults this at each settle for the gap
+      // before the promised head. The decision itself is
+      // routeInterItemGapMs above; here it is fed the
+      // runner's live state — the last settle, the FIFO
+      // head's plan entry (window + departure status), and
+      // the recent progress rate.
+      interItemGapMs: next => {
+        const entry = next ? this.rendered.find(e => e.audible.id === next.id) : undefined;
+        return routeInterItemGapMs({
+          closing: this.closing || this.closed,
+          lastSettled: this.lastSettle,
+          next: next
+            ? {
+                planItem: entry !== undefined,
+                expireProgress: entry?.planItem.expireProgress ?? null,
+                departure: entry !== undefined && entry === this.departureEntry,
+              }
+            : null,
+          lastProgress: this.lastProgress,
+          progressPerSec: this.progressPerSec,
+        });
+      },
     });
   }
 
@@ -558,7 +633,7 @@ export class RoutePlanRunner {
 
   private async toAudibleItem(it: PlanItem): Promise<AudibleItem | null> {
     const id = `route-${++runnerSeq}`;
-    const onSettle = (rec: { sounded: boolean }) => this.onItemSettle(it, rec.sounded);
+    const onSettle = (rec: { sounded: boolean; skipped: boolean }) => this.onItemSettle(it, rec);
     if (it.kind === 'story' || it.kind === 'filler') {
       const unit = it.unit;
       if (!unit) return null;
@@ -622,7 +697,12 @@ export class RoutePlanRunner {
     }
   }
 
-  private onItemSettle(it: PlanItem, sounded: boolean): void {
+  private onItemSettle(it: PlanItem, rec: { sounded: boolean; skipped: boolean }): void {
+    const sounded = rec.sounded;
+    // The breath's input (commit D): every plan-item settle
+    // is recorded before anything else reads it — the Player
+    // consults the gap hook immediately after this returns.
+    this.lastSettle = { sounded, skipped: rec.skipped, planItem: true };
     if (it.kind === 'story' && it.unit && sounded) {
       this.playedStoryIds.add(it.unit.id);
       this.deps.onStoryHeard?.(it.unit);
@@ -643,7 +723,16 @@ export class RoutePlanRunner {
   /** GPS feed (App's usePosition already drives this). Dumb guards only. */
   onPosition(pos: GeoPoint): void {
     if (!this.plan || this.closed) return;
-    this.lastProgress = progressAlongPath(pos, this.plan.path);
+    const progress = progressAlongPath(pos, this.plan.path);
+    // Recent progress rate — the breath's stale-risk input
+    // (commit D): sampled from consecutive position fixes.
+    const nowMs = Date.now();
+    if (this.lastProgressAt > 0 && nowMs > this.lastProgressAt) {
+      const rate = (progress - this.lastProgress) / ((nowMs - this.lastProgressAt) / 1000);
+      if (Number.isFinite(rate) && rate > 0) this.progressPerSec = rate;
+    }
+    this.lastProgress = progress;
+    this.lastProgressAt = nowMs;
     // Manifest hold (differentiator 3): while the episode card
     // is up, a position update refreshes the progress reading
     // only — no arrival closeout, no corridor pause, no window
