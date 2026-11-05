@@ -7,13 +7,23 @@
 // payload shape against the capture spec, and prints a
 // compact summary per row.
 //
+// Payload schemas: 1 = the original full-settle capture
+// (plan row at full settle, no render_results); 2 = the
+// render-ahead pipeline (plan row at OPENING settle with every
+// text; outcome row carries per-item render_results and
+// render_queue_drained_ms). Both are valid history; the
+// validators below are also exported for the route harness's
+// fixture checks (importing this file does not run the live
+// read-back).
+//
 // Usage: node scripts/route-mode/verify-episode-capture.mjs [rows]
 // Exit 0 = rows read + shape-valid. Exit 2 = the route_episodes
 // table does not exist yet (SQL not pasted). Exit 1 = other
 // failure (no key, bad shape, network).
 
+import { pathToFileURL } from 'node:url';
+
 const SITE = 'https://miles-dbky.bolt.host';
-const LIMIT = Number(process.argv[2] ?? 5);
 
 async function fetchText(url, headers = {}) {
   const res = await fetch(url, { headers });
@@ -39,10 +49,19 @@ async function loadAnonKey() {
   throw new Error('Supabase anon key not found in live bundle');
 }
 
-function validatePlan(p) {
+const RENDER_RESULTS = new Set(['pre-start', 'ahead', 'skipped-late', 'failed', 'pending']);
+
+export function validatePlan(p) {
   const problems = [];
-  if (p.schema !== 1) problems.push('schema !== 1');
+  if (p.schema !== 1 && p.schema !== 2) problems.push(`schema ${p.schema} not in {1, 2}`);
   if (!Array.isArray(p.items)) problems.push('items not an array');
+  else {
+    for (const [i, it] of p.items.entries()) {
+      if (typeof it.index !== 'number' || it.index !== i) problems.push(`items[${i}].index mismatch`);
+      if (typeof it.id !== 'string' || !it.id) problems.push(`items[${i}].id missing`);
+      if (!(typeof it.text === 'string' || it.text === null)) problems.push(`items[${i}].text not string|null`);
+    }
+  }
   if (!p.route_plan_started || typeof p.route_plan_started !== 'object') problems.push('route_plan_started missing');
   else if (!p.route_plan_started.decisions) problems.push('route_plan_started.decisions missing');
   if (!p.stage_timings_ms || typeof p.stage_timings_ms.total !== 'number') problems.push('stage_timings_ms.total missing');
@@ -50,16 +69,35 @@ function validatePlan(p) {
   return problems;
 }
 
-function validateOutcome(p) {
+export function validateOutcome(p) {
   const problems = [];
-  if (p.schema !== 1) problems.push('schema !== 1');
+  if (p.schema !== 1 && p.schema !== 2) problems.push(`schema ${p.schema} not in {1, 2}`);
   if (typeof p.end_reason !== 'string' || !p.end_reason) problems.push('end_reason missing');
   if (!Array.isArray(p.played)) problems.push('played not an array');
   if (!Array.isArray(p.dropped)) problems.push('dropped not an array');
   if (typeof p.driven !== 'boolean') problems.push('driven not a boolean');
+  if (p.schema === 2) {
+    if (!Array.isArray(p.render_results)) problems.push('render_results not an array (schema 2)');
+    else {
+      for (const [i, r] of p.render_results.entries()) {
+        if (typeof r.index !== 'number') problems.push(`render_results[${i}].index not a number`);
+        if (typeof r.id !== 'string' || !r.id) problems.push(`render_results[${i}].id missing`);
+        if (!RENDER_RESULTS.has(r.result)) problems.push(`render_results[${i}].result '${r.result}' unknown`);
+      }
+    }
+    if (!(typeof p.render_queue_drained_ms === 'number' || p.render_queue_drained_ms === null)) {
+      problems.push('render_queue_drained_ms not number|null (schema 2)');
+    }
+  }
   return problems;
 }
 
+const IS_MAIN = !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (!IS_MAIN) {
+  // Imported (the route harness validates fixtures through
+  // these validators) — the live read-back below must not run.
+} else {
+const LIMIT = Number(process.argv[2] ?? 5);
 const { supabaseUrl, anonKey } = await loadAnonKey();
 const res = await fetch(
   `${supabaseUrl}/rest/v1/route_episodes?select=id,tour_id,kind,build_id,created_at,payload&order=created_at.desc&limit=${LIMIT}`,
@@ -104,12 +142,17 @@ for (const row of rows) {
         (problems.length ? ` PROBLEMS: ${problems.join('; ')}` : ' shape=ok'),
     );
   } else {
+    const renders = Array.isArray(p.render_results)
+      ? p.render_results.reduce((acc, r) => ((acc[r.result] = (acc[r.result] ?? 0) + 1), acc), {})
+      : null;
     console.log(
       `${row.created_at} OUTCOME tour=${row.tour_id} build=${row.build_id} end=${p.end_reason} begun=${p.begun} ` +
         `played=${(p.played ?? []).length} dropped=${(p.dropped ?? []).length} driven=${p.driven} max_displacement_m=${p.max_displacement_m}` +
+        (renders ? ` renders=${JSON.stringify(renders)} queue_drained_ms=${p.render_queue_drained_ms}` : '') +
         (problems.length ? ` PROBLEMS: ${problems.join('; ')}` : ' shape=ok'),
     );
   }
 }
 console.log(`\n${rows.length} row(s) read; ${bad} with shape problems.`);
 process.exit(bad === 0 ? 0 : 1);
+}

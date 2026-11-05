@@ -9,16 +9,46 @@
 // SHAPE; this is the instrument that grades its TEXT.
 //
 // Two append-only rows per episode, joined by tour_id:
-//   kind 'plan'    — written when the build SETTLES (the
-//                    manifest card is up / narration ready),
-//                    even if the tour never starts, so
-//                    stationary tests are captured too;
+//   kind 'plan'    — written when the OPENING SETTLES (the
+//                    spoken preview + first bridge are rendered
+//                    and the Start gate is ready — Erik's
+//                    render-ahead ruling, Nov 4, 2026), even if
+//                    the tour never starts, so stationary tests
+//                    are captured too. EVERY live text already
+//                    exists at that moment: bridge, preview and
+//                    wrap-up texts are authored deterministically
+//                    from plan facts at compose time, and gap
+//                    stories are generated before handover —
+//                    only speech synthesis is pipelined, never
+//                    text generation. So the plan row is
+//                    textually complete; rendering outcomes ride
+//                    the outcome row.
 //   kind 'outcome' — written at tour close by whatever path
 //                    ends the tour (arrival, overrun, user
 //                    end): what actually played, what was
-//                    dropped and why, the end reason, and the
-//                    driven/stationary discriminator.
+//                    dropped and why, the end reason, the
+//                    driven/stationary discriminator, and (schema
+//                    2) a per-item render result for every plan
+//                    item plus the wrap-up: 'pre-start' (audio in
+//                    hand when the tour began — or at opening
+//                    settle for a tour that never began), 'ahead'
+//                    (rendered after the tour began, before its
+//                    moment), 'skipped-late' (its moment arrived
+//                    first; the story sounds without it, bridges
+//                    are never load-bearing), 'failed' (synthesis
+//                    errored), 'pending' (still in flight when
+//                    the tour closed). Reconstruction rule: an
+//                    item was HEARD iff its index is in the
+//                    outcome's played list; anything else in the
+//                    plan row was not heard, with dropped[]
+//                    saying why the feed passed it and
+//                    render_results[] saying how its render went.
 // No UPDATE anywhere: a row is written once or not at all.
+//
+// Schema 1 rows (written before the render-ahead pipeline)
+// predate render_results entirely: their plan rows filed at
+// full settle, when every piece was already rendered or
+// dropped, so `rendered` there means the whole render pass.
 //
 // This module is PURE assembly (plus one injectable deliver
 // helper) — no backend, no network. The App and the runner
@@ -43,9 +73,13 @@ export interface EpisodeCaptureContext {
    * Build stage durations, ms — the boundaries the Nov 4
    * resilience build made visible: the maps stage (tap →
    * route computed, with geocode/routes sub-marks), the
-   * compose stage (route computed → live renders begin), the
-   * recording stage (live renders begin → settle), and the
-   * total. This doubles as the field build-latency dataset.
+   * compose stage (route computed → plan fixed and the render
+   * queue starts), the recording stage (plan fixed → the
+   * OPENING settled: preview + first bridge rendered, Start
+   * ready — the remaining pieces keep rendering ahead of the
+   * listener and ride the outcome row's render_results), and
+   * the total (tap → opening settled). This doubles as the
+   * field build-latency dataset.
    */
   stageTimingsMs: {
     geocode: number | null;
@@ -91,7 +125,13 @@ export interface CapturedItem {
   portal: boolean;
   /** The plan's designated climax. */
   climax: boolean;
-  /** Rendered successfully at plan time (false = skip-fallback dropped it before anything played). */
+  /**
+   * Audio in hand when the plan row was filed (at opening
+   * settle). False no longer means dropped: under the
+   * render-ahead pipeline the piece may still render ahead of
+   * its moment — the outcome row's render_results[] carries
+   * the final verdict for every item.
+   */
   rendered: boolean;
   /** Bridges/reactions: the subjects joined (from → to), by place name when known. */
   fromSubject: string | null;
@@ -167,11 +207,13 @@ export function pathLengthM(path: GeoPoint[]): number {
 
 /**
  * The plan's items, in order, fully self-contained — plus the
- * wrap-up as a trailing pseudo-item (it is a plan-level field,
- * not a PlanItem, but it is part of the episode as served when
- * its gate opens). renderedItemIds is the runner's rendered
- * set: an item absent from it was dropped by skip-fallback
- * before anything played, and the outcome row will say so.
+ * wrap-up as a trailing pseudo-item (id 'wrap-up'; it is a
+ * plan-level field, not a PlanItem, but it is part of the
+ * episode as served when its gate opens). renderedItemIds is
+ * the runner's audio-in-hand set at the moment the plan row is
+ * filed (opening settle): an item absent from it was still
+ * rendering or had failed — the outcome row's render_results[]
+ * carries each item's final verdict, so nothing is lost.
  */
 export function assemblePlanItems(plan: RoutePlan, renderedItemIds: ReadonlySet<string>): CapturedItem[] {
   const driveSec = plan.driveSec ?? plan.budgetSec;
@@ -230,7 +272,7 @@ export function assemblePlanItems(plan: RoutePlan, renderedItemIds: ReadonlySet<
       woven: false,
       portal: false,
       climax: false,
-      rendered: true,
+      rendered: renderedItemIds.has('wrap-up'),
       fromSubject: null,
       toSubject: null,
       durationSec: 0,
@@ -247,7 +289,7 @@ export function assemblePlanItems(plan: RoutePlan, renderedItemIds: ReadonlySet<
 
 /** The kind='plan' row payload. */
 export interface RouteEpisodePlanPayload {
-  schema: 1;
+  schema: 2;
   tour_id: string;
   build_id: string;
   /** Declared mode, spec vocabulary: 'driving' | 'passenger-walking'. */
@@ -278,7 +320,7 @@ export function assemblePlanCapture(args: {
 }): RouteEpisodePlanPayload {
   const { context, plan } = args;
   return {
-    schema: 1,
+    schema: 2,
     tour_id: args.tourId,
     build_id: args.buildId,
     mode: context.declaredMode === 'driving' ? 'driving' : 'passenger-walking',
@@ -316,6 +358,21 @@ export interface EpisodeOutcomeAccounting {
   gateSkippedItemIds: ReadonlySet<string>;
   /** Item ids that never rendered (skip-fallback at plan time). */
   unrenderedItemIds: ReadonlySet<string>;
+  /**
+   * Tissue item ids the feed gate late-skipped (schema 2,
+   * optional: older accounting shapes omit it). Their moment
+   * arrived before their render; the story sounded without
+   * them.
+   */
+  lateSkippedItemIds?: ReadonlySet<string>;
+  /**
+   * Per-item render verdicts for every plan item plus the
+   * wrap-up pseudo-item, in plan order (schema 2, optional).
+   * Supplied by the runner at close; see CapturedRenderResult.
+   */
+  renderResults?: CapturedRenderResult[];
+  /** Ms from plan-fix until the render queue drained (null = never drained before close). */
+  queueDrainedMs?: number | null;
   /** Heard recording: story unit ids that sounded (the ledger's own list). */
   heardUnitIds: string[];
   /** Movement evidence for the driven/stationary call. */
@@ -330,7 +387,9 @@ export interface CapturedDrop {
   index: number;
   id: string;
   /**
-   * 'stale-window' | 'parent-dropped' | 'render-failed' |
+   * 'stale-window' | 'parent-dropped' | 'skipped-late'
+   * (schema 2: its render was not in hand when its moment
+   * arrived; playback continued without it) | 'render-failed' |
    * 'skipped' (settled without sounding — a user skip and a
    * close-time abandon are indistinguishable at this seam) |
    * 'unplayed' (never fed, never settled when the tour ended).
@@ -338,9 +397,27 @@ export interface CapturedDrop {
   reason: string;
 }
 
+/** One render-ahead verdict, as recorded on the outcome row. */
+export interface CapturedRenderResult {
+  /** Index into the plan row's items array (the wrap-up rides last). */
+  index: number;
+  /** Plan item id ('wrap-up' for the wrap-up pseudo-item). */
+  id: string;
+  /**
+   * 'pre-start' — audio in hand when the tour began (or at
+   * opening settle for a tour that never began);
+   * 'ahead' — rendered after the tour began, before its moment;
+   * 'skipped-late' — its moment arrived first; never sounded;
+   * 'failed' — synthesis errored; 'pending' — still in flight
+   * when the tour closed (a very early close; the piece's text
+   * is still complete in the plan row).
+   */
+  result: 'pre-start' | 'ahead' | 'skipped-late' | 'failed' | 'pending';
+}
+
 /** The kind='outcome' row payload. */
 export interface RouteEpisodeOutcomePayload {
-  schema: 1;
+  schema: 2;
   tour_id: string;
   build_id: string;
   end_reason: string;
@@ -349,6 +426,10 @@ export interface RouteEpisodeOutcomePayload {
   played: number[];
   played_item_ids: string[];
   dropped: CapturedDrop[];
+  /** Per-item render verdicts (schema 2); empty when the accounting predates them. */
+  render_results: CapturedRenderResult[];
+  /** Ms from plan-fix until the render queue drained; null if it never did before close. */
+  render_queue_drained_ms: number | null;
   heard_unit_ids: string[];
   max_displacement_m: number;
   max_progress_fraction: number;
@@ -378,6 +459,7 @@ export function assembleOutcomeCapture(
     let reason: string;
     if (acc.droppedStaleItemIds.has(id)) reason = 'stale-window';
     else if (acc.gateSkippedItemIds.has(id)) reason = 'parent-dropped';
+    else if (acc.lateSkippedItemIds?.has(id)) reason = 'skipped-late';
     else if (acc.unrenderedItemIds.has(id)) reason = 'render-failed';
     else if (acc.settledUnplayed.has(id)) reason = 'skipped';
     else reason = 'unplayed';
@@ -385,7 +467,7 @@ export function assembleOutcomeCapture(
   });
   const maxDisplacementM = Math.round(acc.maxDisplacementM);
   return {
-    schema: 1,
+    schema: 2,
     tour_id: tourId,
     build_id: buildId,
     end_reason: acc.endReason,
@@ -393,6 +475,8 @@ export function assembleOutcomeCapture(
     played,
     played_item_ids: [...acc.playedItemIds],
     dropped,
+    render_results: acc.renderResults ? [...acc.renderResults] : [],
+    render_queue_drained_ms: acc.queueDrainedMs ?? null,
     heard_unit_ids: [...acc.heardUnitIds],
     max_displacement_m: maxDisplacementM,
     max_progress_fraction: Math.round(acc.maxProgressFraction * 1000) / 1000,
