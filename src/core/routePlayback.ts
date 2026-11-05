@@ -105,8 +105,7 @@ import {
   type RouteEpisodePlanPayload,
 } from './episodeCapture';
 import {
-  BRIDGE_MAX_SEC,
-  BRIDGE_MIN_SEC,
+  bridgeEpisodeStateFromTexts,
   bridgeTextFor,
   buildBridgeContext,
   decideCloseout,
@@ -116,8 +115,8 @@ import {
   isOffCorridor,
   owedLine,
   progressAlongPath,
-  WINDOW_LEAD_SEC,
   type BridgeContext,
+  type BridgeEpisodeState,
   type GeoPoint,
   type LibraryUnit,
   type MapsFailure,
@@ -361,6 +360,17 @@ export const RENDER_CONCURRENCY = 3;
 export const REBRIDGE_MAX_PER_TOUR = 4;
 
 /**
+ * A re-bridge commission's hard character cap (field fix
+ * lane 1, Nov 5, 2026): a commission is a TRANSITION, not a
+ * wait-cover — the field drive's ~1,150-char commission ran
+ * ~75 s and the story it led into expired while it played.
+ * ~350 chars ≈ 25 s spoken: head + one earned sentence, and
+ * the narration seam drops the optional callback sentence
+ * before it ever truncates a head or a payoff.
+ */
+export const REBRIDGE_MAX_CHARS = 350;
+
+/**
  * How fresh the last progress interval must be for a
  * suppression judgment (drop coherence): the rate is sampled
  * from the last two GPS fixes, and a judgment made on a
@@ -599,6 +609,29 @@ export class RoutePlanRunner {
    * no stamp (never suppress on a guess).
    */
   private soundStartStamp: { audibleId: string; atMs: number } | null = null;
+  /**
+   * The episode's bridge ledger for commissions (field fix
+   * lane 1b): seeded lazily from the plan's composed bridge
+   * texts at the first commission, then extended by every
+   * commission authored.
+   */
+  private bridgeLedger: BridgeEpisodeState | null = null;
+  /**
+   * The last suppression judgment per story (field fix lane
+   * 3): the near-miss record — attached to story_dropped when
+   * the gate, not suppression, makes the drop, so the field
+   * can answer how close suppression came and why it didn't
+   * fire. Keyed by story item id.
+   */
+  private suppressionNotes = new Map<
+    string,
+    {
+      reason: 'judged_not_doomed' | 'no_rate' | 'no_remaining' | 'paused';
+      predictedStartProgress: number | null;
+      expireProgress: number;
+      ratePerSec: number | null;
+    }
+  >();
   private progressPerSec: number | null = null;
   /** The most recent plan-item settle (the breath's back-to-back input). */
   private lastSettle: { sounded: boolean; skipped: boolean; planItem: boolean } | null = null;
@@ -1531,12 +1564,33 @@ export class RoutePlanRunner {
         // leave it dangling. A doomed story drops stale HERE
         // (the bridge is skipped as its dependent, exactly as
         // the orphan rule treats it), and the re-bridge
-        // commission repairs the transition. When the
-        // judgment cannot be made confidently, the bridge
-        // feeds exactly as it always has.
+        // commission repairs the transition.
+        //
+        // HOLD WHEN UNJUDGED (field fix lane 3, Nov 5, 2026):
+        // phase 1's field drive dropped three stories at the
+        // gate and suppression never fired — because the
+        // gate's first look at a bridge lands in the gap
+        // before the current item's sound-start stamp exists
+        // (the Player stamps onSoundStart only after play()
+        // resolves) or before a rate sample exists, and the
+        // old code read "cannot judge" as "safe": it promised
+        // the bridge on the spot, and a promised bridge is
+        // never judged again. Now an unjudged bridge HOLDS
+        // while anything is sounding — the bridge could not
+        // sound before the current item settles either way, so
+        // holding costs no playback — and the gate re-judges
+        // on every fix and settle with the stamp and rate the
+        // moment actually offers. At an empty stage the hold
+        // ends: remaining reads 0, the judgment proceeds, and
+        // a still-absent rate leaves the standing feed (the
+        // gate remains the backstop, as ever).
         const target = this.suppressionTarget(entry);
         if (target) {
-          const prediction = this.suppressionPrediction(it, target);
+          const judgment = this.suppressionJudgment(it, target);
+          if (judgment.kind === 'unjudged' && this.player.current !== null) {
+            return; // held for a sharper judgment; see above
+          }
+          const prediction = judgment.kind === 'doomed' ? judgment.prediction : null;
           if (prediction) {
             entry.state = 'dropped';
             this.gateSkippedItemIds.add(it.id);
@@ -1633,29 +1687,75 @@ export class RoutePlanRunner {
   }
 
   /**
-   * The doom prediction for a bridge's story, or null when
-   * the story is NOT confidently doomed — including every
-   * case where the judgment cannot be made, in which the
-   * standing behavior applies unchanged. A story's earliest
-   * start is bounded below by physics: the current item's
-   * remaining time, then this bridge, then the breath. If
-   * the driver's progress at even that earliest start is
-   * past the story's expire progress, the story cannot
-   * start inside its window — its lead-in is a promise the
-   * episode cannot keep.
+   * The doom judgment for a bridge's story (field fix lane
+   * 3): three outcomes, kept distinct because the field
+   * taught them apart —
+   *   'doomed'   — a confident prediction (fresh rate, known
+   *                remaining): the driver's progress at the
+   *                story's earliest possible start — bounded
+   *                below by physics: the current item's
+   *                remaining time, then this bridge, then the
+   *                breath — is past its expire progress. The
+   *                story cannot start inside its window; its
+   *                lead-in is a promise the episode cannot
+   *                keep.
+   *   'safe'     — the same confident judgment, answered no.
+   *   'unjudged' — the judgment cannot be made: paused, no
+   *                usable rate sample, or the current item's
+   *                remaining time is unknowable yet (its
+   *                sound-start stamp has not landed). The
+   *                caller holds the bridge for a later,
+   *                sharper judgment rather than promising it
+   *                blind (see maybeFeed) — and every outcome
+   *                is recorded in suppressionNotes, so a gate
+   *                drop can carry how close suppression came
+   *                and why it did not fire.
    */
-  private suppressionPrediction(bridge: PlanItem, target: RenderEntry): SuppressionPrediction | null {
+  private suppressionJudgment(
+    bridge: PlanItem,
+    target: RenderEntry,
+  ):
+    | { kind: 'doomed'; prediction: SuppressionPrediction }
+    | { kind: 'safe' }
+    | { kind: 'unjudged'; reason: 'no_rate' | 'no_remaining' | 'paused' } {
     const expire = target.planItem.expireProgress;
-    if (expire === undefined || !Number.isFinite(expire)) return null;
-    if (this.userPausedFlag || this.guardPausedFlag) return null;
+    if (expire === undefined || !Number.isFinite(expire)) return { kind: 'safe' };
+    const note = (
+      reason: 'judged_not_doomed' | 'no_rate' | 'no_remaining' | 'paused',
+      predictedStartProgress: number | null,
+      ratePerSec: number | null,
+    ): void => {
+      this.suppressionNotes.set(target.planItem.id, {
+        reason,
+        predictedStartProgress,
+        expireProgress: expire,
+        ratePerSec,
+      });
+    };
+    if (this.userPausedFlag || this.guardPausedFlag) {
+      note('paused', null, null);
+      return { kind: 'unjudged', reason: 'paused' };
+    }
     const rate = this.suppressionRatePerSec(Date.now());
-    if (rate === null) return null;
+    if (rate === null) {
+      note('no_rate', null, null);
+      return { kind: 'unjudged', reason: 'no_rate' };
+    }
     const remaining = this.currentRemainingSec();
-    if (remaining === null) return null;
+    if (remaining === null) {
+      note('no_remaining', null, rate);
+      return { kind: 'unjudged', reason: 'no_remaining' };
+    }
     const delaySec = remaining + bridge.durationSec + ROUTE_BREATH_MS / 1000;
     const predictedStartProgress = this.lastProgress + rate * delaySec;
-    if (predictedStartProgress <= expire) return null;
-    return { ratePerSec: rate, delaySec, predictedStartProgress, expireProgress: expire };
+    if (predictedStartProgress <= expire) {
+      note('judged_not_doomed', predictedStartProgress, rate);
+      return { kind: 'safe' };
+    }
+    return {
+      kind: 'doomed',
+      prediction: { ratePerSec: rate, delaySec, predictedStartProgress, expireProgress: expire },
+    };
   }
 
   /**
@@ -1699,9 +1799,38 @@ export class RoutePlanRunner {
   ): void {
     const it = storyEntry.planItem;
     this.droppedStoryIds.add(it.id);
+    // The suppression near-miss record (field fix lane 3):
+    // every drop carries how suppression stood toward this
+    // story — the fired prediction, the last judgment's
+    // margin when it judged and stood down, or the reason no
+    // judgment ever landed — so the next field drive can
+    // answer what the first one could not.
+    const r3 = (x: number) => Math.round(x * 1000) / 1000;
+    const r4 = (x: number) => Math.round(x * 10000) / 10000;
+    const note = this.suppressionNotes.get(it.id);
+    const suppression =
+      via === 'suppression' && prediction
+        ? {
+            fired: true,
+            predicted_start_progress: r3(prediction.predictedStartProgress),
+            expire_progress: r3(prediction.expireProgress),
+            progress_rate_per_sec: r4(prediction.ratePerSec),
+          }
+        : note
+          ? {
+              fired: false,
+              reason_not_fired: note.reason,
+              predicted_start_progress: note.predictedStartProgress !== null ? r3(note.predictedStartProgress) : null,
+              expire_progress: r3(note.expireProgress),
+              progress_rate_per_sec: note.ratePerSec !== null ? r4(note.ratePerSec) : null,
+              margin_progress:
+                note.predictedStartProgress !== null ? r3(note.expireProgress - note.predictedStartProgress) : null,
+            }
+          : { fired: false, reason_not_fired: 'not_judged' };
     this.deps.onEvent?.('story_dropped', {
       subject: it.unit?.placeName ?? it.label,
       reason: 'stale-window',
+      suppression,
       mode: 'route',
     });
     this.maybeCommissionRebridge(it, via, prediction);
@@ -1836,19 +1965,26 @@ export class RoutePlanRunner {
       // bridge must not pretend the ground ahead holds it.
       context.wovenSubject = nextUnit.placeName;
     }
-    // Elastic target, the composer's own formula: expected
-    // travel from the prev story's end to the next story's
-    // anchor, clamped to the bridge bounds.
-    const driveSec = plan.driveSec ?? plan.budgetSec;
-    const gapSec = Math.max(
-      0,
-      ((next.anchorProgress ?? 0) - (prevEntry?.planItem.anchorProgress ?? 0)) * driveSec - prevUnit.durationSec,
-    );
-    const targetSec = Math.max(
-      BRIDGE_MIN_SEC,
-      Math.min(BRIDGE_MAX_SEC, Math.round(gapSec - WINDOW_LEAD_SEC)),
-    );
-    const text = bridgeTextFor(prevUnit, nextUnit, { targetSec, context });
+    // Honest length, capped (field fix lanes 1/1b): the
+    // commission is authored through the seam with the
+    // EPISODE's bridge ledger — seeded once from the plan's
+    // composed bridge texts and extended by every commission
+    // since — so it cannot repeat an opening, a bank line, or
+    // the thread callout the episode already spent; and it is
+    // hard-capped at REBRIDGE_MAX_CHARS, a transition's size,
+    // whatever the wait ahead of it. (The elastic target it
+    // used to compose toward is gone: a commission that fills
+    // time eats its own story's window.)
+    if (!this.bridgeLedger) {
+      this.bridgeLedger = bridgeEpisodeStateFromTexts(
+        plan.items.filter(i => i.kind === 'bridge' && typeof i.text === 'string').map(i => i.text as string),
+      );
+    }
+    const text = bridgeTextFor(prevUnit, nextUnit, {
+      context,
+      episode: this.bridgeLedger,
+      maxChars: REBRIDGE_MAX_CHARS,
+    });
     const id = `rebridge:${dropped.id}>${next.id}`;
     const item: PlanItem = {
       kind: 'bridge',
@@ -1859,7 +1995,7 @@ export class RoutePlanRunner {
       nextUnitId: nextUnit.id,
       text,
       ready: true,
-      targetDurationSec: targetSec,
+      targetDurationSec: spokenSecEstimate(text),
     };
     const entry: RenderEntry = { planItem: item, audible: null, state: 'pending' };
     const rec: CommissionRecord = {
