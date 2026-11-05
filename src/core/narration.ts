@@ -369,7 +369,7 @@ function openingShapeOf(text: string): BridgeOpeningShape | null {
   if (text.includes('we range off the road for a story')) return 'portal';
   if (/we keep rolling — just ahead is/.test(text)) return 'ahead';
   if (text.includes('the road carries us on to')) return 'carries';
-  if (/^That was .+\. Next along the road:/.test(text)) return 'next';
+  if (text.includes('Next along the road:')) return 'next';
   if (/we keep rolling\./.test(text)) return 'rolling';
   return null;
 }
@@ -447,7 +447,7 @@ const STANDARD_HEADS: { shape: BridgeOpeningShape; make: (prev: string, next: st
     make: (prev, next) => `From ${prev} we keep rolling — just ahead is ${next}, and it has its own story to tell.`,
   },
   { shape: 'carries', make: (prev, next) => `From ${prev}, the road carries us on to ${next}.` },
-  { shape: 'next', make: (prev, next) => `That was ${prev}. Next along the road: ${next}.` },
+  { shape: 'next', make: (prev, next) => `From ${prev} we roll on. Next along the road: ${next}.` },
 ];
 
 /**
