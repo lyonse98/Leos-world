@@ -4783,5 +4783,412 @@ await checkAsync('capture: a throwing outcome dep leaves the tour identical', as
   assert.equal(runner.view().endedKind, 'arrival-owed', 'the closeout completed exactly as without capture');
 });
 
+// ---- render-ahead pipeline (Nov 4, 2026) ----
+// Erik's latency ruling: Start flips when the OPENING settles
+// (spoken preview + first bridge + departure story); the rest
+// renders through a bounded-concurrency queue in plan order,
+// starting at plan-fix, and playback never stalls for a late
+// piece. These suites drive the real runner with gated synth
+// stubs — no live calls anywhere.
+const verifier = await import(pathToFileURL(join(here, 'verify-episode-capture.mjs')).href);
+const pipePlan = () =>
+  rm.composeRoutePlan(
+    [unit('a|landmark_origin', 32.71), unit('b|landmark_origin', 32.76), unit('c|landmark_origin', 32.81), unit('d|landmark_origin', 32.86)],
+    densePath,
+    denseDest,
+    'Dest',
+    noTopics,
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 2000 },
+  );
+const tissueOf = plan => plan.items.filter(i => i.kind === 'preview' || i.kind === 'bridge' || i.kind === 'reaction');
+const makeGate = () => {
+  let resolve;
+  const promise = new Promise(r => {
+    resolve = r;
+  });
+  return { promise, resolve };
+};
+const withTimeout = (p, ms, what) =>
+  Promise.race([
+    p,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`timeout: ${what}`)), ms)),
+  ]);
+
+await checkAsync('pipeline: opening-settle gate — Start readiness needs the preview + first bridge, NOT later pieces', async () => {
+  const plan = pipePlan();
+  const tissue = tissueOf(plan);
+  assert.ok(tissue.length >= 3, `fixture needs preview + 2 bridges, got ${tissue.length} tissue pieces`);
+  const gates = new Map(tissue.map(i => [i.text, makeGate()]));
+  const started = [];
+  const runner = new rp.RoutePlanRunner({
+    audio: new RealFakeAudio(250),
+    synthUrl: t => {
+      started.push(t);
+      const g = gates.get(t);
+      return g ? g.promise.then(() => 'blob:audio/' + encodeURIComponent(t.slice(0, 16))) : Promise.resolve('blob:audio/x');
+    },
+    onEvent: () => {},
+  });
+  let staged = false;
+  const staging = runner.stage(plan).then(() => {
+    staged = true;
+  });
+  await new Promise(r => setTimeout(r, 200));
+  assert.equal(staged, false, 'stage must not resolve while the opening is still rendering');
+  assert.equal(runner.view().narrationReady, false);
+  // Release exactly the opening's tissue: the preview + the first bridge.
+  gates.get(tissue[0].text).resolve();
+  gates.get(tissue[1].text).resolve();
+  await withTimeout(staging, 4000, 'stage resolves at the opening settle');
+  assert.equal(runner.view().narrationReady, true, 'readiness flipped on the opening alone');
+  assert.deepEqual(
+    rp.routeStartButtonState(runner.view()),
+    { label: 'Start tour', disabled: false },
+    'the Start button enables while later pieces are still rendering',
+  );
+  assert.ok(started.includes(tissue[2].text), 'the queue already reached the third piece (render-ahead, not render-on-demand)');
+  for (const g of gates.values()) g.resolve();
+  runner.beginStaged();
+  await until(() => runner.view().phase === 'playing' || runner.view().phase === 'awaiting', 'tour begins after the gated opening');
+  runner.endTour();
+});
+
+await checkAsync('pipeline: queue order is plan order under concurrency — bound never exceeded, no piece rendered twice', async () => {
+  const plan = pipePlan();
+  plan.wrapUp = { text: 'WRAPUP: the whole drive, tied off.', audioUrl: null };
+  const tissue = tissueOf(plan);
+  const starts = [];
+  let inFlight = 0;
+  let maxInFlight = 0;
+  let completed = 0;
+  const track = async t => {
+    starts.push(t);
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise(r => setTimeout(r, 25));
+    inFlight -= 1;
+    completed += 1;
+    return 'blob:audio/' + encodeURIComponent(t.slice(0, 16));
+  };
+  const runner = new rp.RoutePlanRunner({
+    audio: new RealFakeAudio(250),
+    synthUrl: track,
+    synthFinishedUrl: async t => {
+      const url = await track(t);
+      return url.replace('blob:audio/', 'blob:wrap/');
+    },
+    onEvent: () => {},
+  });
+  await runner.stage(plan);
+  const expectedTotal = tissue.length + 1; // tissue + the wrap-up queue item
+  await until(() => completed === expectedTotal, 'the whole queue drains during the manifest hold');
+  assert.equal(rp.RENDER_CONCURRENCY, 3, 'the concurrency bound is 3');
+  assert.ok(maxInFlight <= rp.RENDER_CONCURRENCY, `in-flight peak ${maxInFlight} exceeded the bound`);
+  assert.ok(maxInFlight >= 2, `in-flight peak ${maxInFlight}: renders actually overlapped`);
+  assert.deepEqual(
+    starts,
+    [...tissue.map(i => i.text), plan.wrapUp.text],
+    'pieces started strictly in plan order, the wrap-up last',
+  );
+  assert.equal(new Set(starts).size, starts.length, 'no piece was rendered twice');
+  runner.endTour();
+});
+
+await checkAsync('pipeline: the queue runs while the manifest sits untapped', async () => {
+  const plan = pipePlan();
+  const tissue = tissueOf(plan);
+  let completed = 0;
+  const audio = new RealFakeAudio(250);
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => {
+      await new Promise(r => setTimeout(r, 10));
+      completed += 1;
+      return 'blob:audio/' + encodeURIComponent(t.slice(0, 16));
+    },
+    onEvent: () => {},
+  });
+  await runner.stage(plan);
+  await until(() => completed === tissue.length, 'every piece rendered behind the untapped card');
+  assert.equal(audio.played.length, 0, 'nothing sounded while the card sat untapped');
+  assert.equal(runner.view().phase, 'ready', 'the hold is intact: rendered, staged, silent');
+  runner.beginStaged();
+  await until(() => audio.played.length > 0, 'the tour sounds on the Start tap');
+  runner.endTour();
+});
+
+await checkAsync('pipeline: late bridge — the story sounds without it, the skip is recorded + telemetered, no stall', async () => {
+  const plan = pipePlan();
+  const cItem = plan.items.find(i => i.unit?.id === 'c|landmark_origin');
+  const lateBridge = plan.items.find(i => i.kind === 'bridge' && i.nextUnitId === 'c|landmark_origin');
+  assert.ok(lateBridge, 'fixture has a bridge into story c');
+  const gate = makeGate();
+  const events = [];
+  const heard = [];
+  const outcomes = [];
+  const audio = new RealFakeAudio(250);
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: t =>
+      t === lateBridge.text
+        ? gate.promise.then(() => 'blob:audio/late-bridge')
+        : Promise.resolve('blob:audio/' + encodeURIComponent(t.slice(0, 16))),
+    onStoryHeard: u => heard.push(u.id),
+    onEvent: (t, p) => events.push({ t, p }),
+    episodeIds: { tourId: 'route-pipeline-late', buildId: 'fresh-test' },
+    onEpisodeOutcome: p => outcomes.push(p),
+  });
+  await withTimeout(runner.start(plan), 4000, 'start resolves at the opening settle (the gated bridge is not in the opening)');
+  await until(() => heard.includes('a|landmark_origin'), 'story a sounded');
+  runner.onPosition({ lat: 32.76, lng: -117.25 });
+  await until(() => heard.includes('b|landmark_origin'), 'story b sounded');
+  runner.onPosition({ lat: 32.81, lng: -117.25 });
+  await until(() => heard.includes('c|landmark_origin'), 'story c sounded WITHOUT its bridge');
+  const late = events.filter(e => e.t === 'route_render_late');
+  assert.equal(late.length, 1, 'exactly one late-skip was telemetered');
+  assert.equal(late[0].p.item_id, lateBridge.id);
+  assert.equal(late[0].p.kind, 'bridge');
+  assert.equal(typeof late[0].p.ms_since_plan_fix, 'number', 'the event says how long the queue had been running');
+  assert.equal(typeof late[0].p.in_flight, 'number', 'the event says what was in flight at the skip');
+  assert.equal(typeof late[0].p.queued, 'number', 'the event says how much work was still queued');
+  assert.ok(!audio.played.includes('blob:audio/late-bridge'), 'the late bridge never sounded');
+  gate.resolve(); // the render completes after its moment: it must be discarded, never fed late
+  await new Promise(r => setTimeout(r, 120));
+  assert.ok(!audio.played.includes('blob:audio/late-bridge'), 'the completed-late render was discarded, not fed');
+  runner.endTour();
+  assert.equal(outcomes.length, 1);
+  const out = outcomes[0];
+  const rr = out.render_results.find(r => r.id === lateBridge.id);
+  assert.ok(rr && rr.result === 'skipped-late', `capture render verdict is skipped-late (got ${JSON.stringify(rr)})`);
+  const drop = out.dropped.find(d => d.id === lateBridge.id);
+  assert.ok(drop && drop.reason === 'skipped-late', `capture drop reason is skipped-late (got ${JSON.stringify(drop)})`);
+  assert.ok(out.played_item_ids.includes(cItem.id), 'story c is recorded as played');
+});
+
+await checkAsync('pipeline: wrap-up renders mid-tour as a queue item; its failure falls back to the standing closeout', async () => {
+  // Mid-tour render, gated so it can only complete after the tour begins.
+  {
+    const plan = wrapPlan();
+    plan.wrapUp = { text: 'WRAPUP: the whole drive, tied off.', audioUrl: null };
+    const gate = makeGate();
+    const events = [];
+    const synthTexts = [];
+    const audio = new RealFakeAudio(250);
+    const runner = new rp.RoutePlanRunner({
+      audio,
+      synthUrl: async t => {
+        synthTexts.push(t);
+        return 'blob:audio/' + encodeURIComponent(t.slice(0, 16));
+      },
+      synthFinishedUrl: t => gate.promise.then(() => 'blob:wrapup-rendered'),
+      onEvent: (t, p) => events.push({ t, p }),
+    });
+    await runner.start(plan);
+    assert.equal(events.filter(e => e.t === 'route_wrap_up' && e.p.wrap_up === 'generated').length, 0, 'not rendered before its queue turn completes');
+    gate.resolve();
+    await until(() => events.some(e => e.t === 'route_wrap_up' && e.p.wrap_up === 'generated'), 'wrap-up rendered mid-tour');
+    await until(() => audio.played.some(u => u.includes('a%7Clandmark_origin')), 'first story on the element');
+    runner.onPosition({ lat: 32.78, lng: -117.25 });
+    await until(() => audio.played.some(u => u.includes('b%7Clandmark_origin')), 'second story on the element');
+    runner.onPosition({ lat: 32.87, lng: -117.25 });
+    await until(() => audio.played.some(u => u.includes('c%7Clandmark_origin')), 'final story on the element');
+    runner.onPosition(denseDest); // arrival with the plan run out
+    await until(() => runner.view().closeoutDone, 'arrival closeout');
+    assert.ok(audio.played.includes('blob:wrapup-rendered'), 'the queue-rendered wrap-up played as the closing piece');
+    assert.ok(!synthTexts.some(t => t.includes("that's our stop")), "today's closeout line was never synthesized");
+    assert.equal(events.filter(e => e.t === 'route_wrap_up' && e.p.wrap_up === 'played').length, 1);
+    runner.endTour();
+  }
+  // Failure variant: the wrap render throws → the standing closeout speaks.
+  {
+    const plan = wrapPlan();
+    plan.wrapUp = { text: 'WRAPUP: the whole drive, tied off.', audioUrl: null };
+    const events = [];
+    const synthTexts = [];
+    const audio = new RealFakeAudio(250);
+    const runner = new rp.RoutePlanRunner({
+      audio,
+      synthUrl: async t => {
+        synthTexts.push(t);
+        return 'blob:audio/' + encodeURIComponent(t.slice(0, 16));
+      },
+      synthFinishedUrl: async () => {
+        throw new Error('wrap synthesis down');
+      },
+      onEvent: (t, p) => events.push({ t, p }),
+    });
+    await runner.start(plan);
+    await until(() => events.some(e => e.t === 'route_wrap_up' && e.p.wrap_up === 'failed'), 'wrap-up failure telemetered');
+    await until(() => audio.played.some(u => u.includes('a%7Clandmark_origin')), 'first story on the element');
+    runner.onPosition({ lat: 32.78, lng: -117.25 });
+    await until(() => audio.played.some(u => u.includes('b%7Clandmark_origin')), 'second story on the element');
+    runner.onPosition({ lat: 32.87, lng: -117.25 });
+    await until(() => audio.played.some(u => u.includes('c%7Clandmark_origin')), 'final story on the element');
+    runner.onPosition(denseDest);
+    await until(() => runner.view().closeoutDone, 'arrival closeout');
+    assert.ok(synthTexts.some(t => t.includes("that's our stop")), "today's closeout line carried the finish after the wrap failure");
+    assert.equal(events.filter(e => e.t === 'route_wrap_up' && e.p.wrap_up === 'played').length, 0, 'a failed wrap-up never claims played');
+    runner.endTour();
+  }
+});
+
+await checkAsync('pipeline: a mid-tour render failure degrades per-piece — never a build-failure state', async () => {
+  const plan = pipePlan();
+  const badBridge = plan.items.find(i => i.kind === 'bridge' && i.nextUnitId === 'c|landmark_origin');
+  assert.ok(badBridge, 'fixture has a bridge into story c');
+  const events = [];
+  const heard = [];
+  const outcomes = [];
+  const runner = new rp.RoutePlanRunner({
+    audio: new RealFakeAudio(250),
+    synthUrl: async t => {
+      if (t === badBridge.text) throw new Error('synthesis down for one bridge');
+      return 'blob:audio/' + encodeURIComponent(t.slice(0, 16));
+    },
+    onStoryHeard: u => heard.push(u.id),
+    onEvent: (t, p) => events.push({ t, p }),
+    episodeIds: { tourId: 'route-pipeline-fail', buildId: 'fresh-test' },
+    onEpisodeOutcome: p => outcomes.push(p),
+  });
+  await withTimeout(runner.start(plan), 4000, 'start resolves despite the doomed bridge (it is past the opening)');
+  await until(() => heard.includes('a|landmark_origin'), 'story a sounded');
+  runner.onPosition({ lat: 32.76, lng: -117.25 });
+  await until(() => heard.includes('b|landmark_origin'), 'story b sounded');
+  runner.onPosition({ lat: 32.81, lng: -117.25 });
+  await until(() => heard.includes('c|landmark_origin'), 'story c sounded without its failed bridge');
+  assert.equal(events.filter(e => e.t === 'route_build_failed').length, 0, 'no build-failure event from a mid-tour render failure');
+  assert.equal(events.filter(e => e.t === 'route_render_late').length, 0, 'a failed render is not misreported as a late skip');
+  runner.endTour();
+  const out = outcomes[0];
+  const rr = out.render_results.find(r => r.id === badBridge.id);
+  assert.ok(rr && rr.result === 'failed', `capture render verdict is failed (got ${JSON.stringify(rr)})`);
+  const drop = out.dropped.find(d => d.id === badBridge.id);
+  assert.ok(drop && drop.reason === 'render-failed', `capture drop reason is render-failed (got ${JSON.stringify(drop)})`);
+});
+
+await checkAsync('pipeline: capture rows stay complete under pipelining — every text at settle, per-item verdicts at close', async () => {
+  const plan = pipePlan();
+  plan.wrapUp = { text: 'WRAPUP: the whole drive, tied off.', audioUrl: null };
+  const bridges = plan.items.filter(i => i.kind === 'bridge');
+  const failedBridge = bridges.find(b => b.nextUnitId === 'b|landmark_origin') ?? bridges[0];
+  const lastBridge = bridges[bridges.length - 1];
+  const lastGate = makeGate();
+  const wrapGate = makeGate();
+  const events = [];
+  const heard = [];
+  const outcomes = [];
+  const runner = new rp.RoutePlanRunner({
+    audio: new RealFakeAudio(250),
+    synthUrl: t => {
+      if (t === failedBridge.text) return Promise.reject(new Error('one bridge fails'));
+      if (t === lastBridge.text) return lastGate.promise.then(() => 'blob:audio/last-bridge');
+      return Promise.resolve('blob:audio/' + encodeURIComponent(t.slice(0, 16)));
+    },
+    synthFinishedUrl: t => wrapGate.promise.then(() => 'blob:wrap-finished'),
+    onStoryHeard: u => heard.push(u.id),
+    onEvent: (t, p) => events.push({ t, p }),
+    episodeIds: { tourId: 'route-pipeline-capture', buildId: 'fresh-test' },
+    onEpisodeOutcome: p => outcomes.push(p),
+  });
+  await withTimeout(runner.stage(plan), 4000, 'stage resolves at the opening settle');
+  const cap = runner.episodePlanCapture(captureCtx);
+  assert.ok(cap, 'plan capture assembles at opening settle');
+  assert.equal(cap.schema, 2, 'the plan row is schema 2');
+  assert.equal(cap.items.length, plan.items.length + 1, 'every plan item plus the wrap-up pseudo-item');
+  assert.ok(
+    cap.items.every(i => typeof i.text === 'string' && i.text.length > 0),
+    'EVERY live text is present at opening settle — only synthesis is pipelined, never text',
+  );
+  const wrapItem = cap.items.find(i => i.kind === 'wrap_up');
+  assert.ok(wrapItem && wrapItem.text === plan.wrapUp.text, 'the wrap-up text rides the plan row');
+  assert.deepEqual(verifier.validatePlan(cap), [], 'the live verifier accepts the schema-2 plan row');
+  assert.deepEqual(
+    verifier.validatePlan({ ...cap, schema: 1 }),
+    [],
+    'the verifier still accepts schema-1 (legacy) plan rows',
+  );
+  // Finish the wrap render during the hold → its verdict must be 'pre-start'.
+  wrapGate.resolve();
+  await until(() => events.some(e => e.t === 'route_wrap_up' && e.p.wrap_up === 'generated'), 'wrap rendered during the hold');
+  runner.beginStaged();
+  await until(() => heard.includes('a|landmark_origin'), 'story a sounded');
+  lastGate.resolve(); // the last bridge renders after the tour began, before its moment → 'ahead'
+  runner.onPosition({ lat: 32.76, lng: -117.25 });
+  await until(() => heard.includes('b|landmark_origin'), 'story b sounded (its bridge failed; the story is load-bearing, the bridge is not)');
+  runner.onPosition({ lat: 32.81, lng: -117.25 });
+  await until(() => heard.includes('c|landmark_origin'), 'story c sounded');
+  runner.onPosition({ lat: 32.86, lng: -117.25 });
+  await until(() => heard.includes('d|landmark_origin'), 'story d sounded');
+  runner.endTour();
+  assert.equal(outcomes.length, 1);
+  const out = outcomes[0];
+  assert.equal(out.schema, 2, 'the outcome row is schema 2');
+  assert.deepEqual(verifier.validateOutcome(out), [], 'the live verifier accepts the schema-2 outcome row');
+  assert.deepEqual(
+    verifier.validateOutcome({ schema: 1, end_reason: 'user-ended', played: [], dropped: [], driven: false }),
+    [],
+    'the verifier still accepts schema-1 (legacy) outcome rows',
+  );
+  assert.equal(out.render_results.length, plan.items.length + 1, 'a render verdict for every item plus the wrap-up');
+  const byId = new Map(out.render_results.map(r => [r.id, r.result]));
+  assert.equal(byId.get(failedBridge.id), 'failed', 'the failed bridge verdict');
+  assert.equal(byId.get(lastBridge.id), 'ahead', 'the post-begin render verdict');
+  assert.equal(byId.get('wrap-up'), 'pre-start', 'the hold-rendered wrap-up verdict');
+  assert.ok(out.played_item_ids.includes(lastBridge.id), 'the ahead-rendered bridge still sounded');
+  assert.equal(typeof out.render_queue_drained_ms, 'number', 'the queue drain time is recorded');
+});
+
+await checkAsync('pipeline: time-to-start anatomy — at Start readiness, later pieces have not even started rendering', async () => {
+  const plan = pipePlan();
+  const tissue = tissueOf(plan);
+  assert.ok(tissue.length >= 4, `fixture needs at least 4 tissue pieces, got ${tissue.length}`);
+  const gates = new Map(tissue.map(i => [i.text, makeGate()]));
+  const started = [];
+  const completed = [];
+  const runner = new rp.RoutePlanRunner({
+    audio: new RealFakeAudio(250),
+    synthUrl: t => {
+      started.push(t);
+      const g = gates.get(t);
+      return g
+        ? g.promise.then(() => {
+            completed.push(t);
+            return 'blob:audio/' + encodeURIComponent(t.slice(0, 16));
+          })
+        : Promise.resolve('blob:audio/x');
+    },
+    onEvent: () => {},
+  });
+  let startedDone = false;
+  const starting = runner.start(plan).then(() => {
+    startedDone = true;
+  });
+  await new Promise(r => setTimeout(r, 200));
+  assert.equal(startedDone, false, 'start() waits for the opening');
+  gates.get(tissue[0].text).resolve(); // the preview
+  gates.get(tissue[1].text).resolve(); // the first bridge
+  await withTimeout(starting, 4000, 'start() resolves at the opening settle');
+  assert.equal(runner.view().narrationReady, true);
+  // The pre-start critical path, counted in COMPLETED renders:
+  // exactly the opening's tissue — every later piece was still
+  // in flight or queued when Start flipped (only the two
+  // released gates could complete, so this is exact). Under
+  // the old sequential settle, completed would have read ALL
+  // tissue pieces here: every render sat on the path.
+  assert.deepEqual(
+    completed,
+    [tissue[0].text, tissue[1].text],
+    'exactly the opening renders completed before Start readiness',
+  );
+  assert.deepEqual(
+    started.slice(0, rp.RENDER_CONCURRENCY),
+    tissue.slice(0, rp.RENDER_CONCURRENCY).map(i => i.text),
+    "the queue's first slice is the plan-order prefix",
+  );
+  for (const g of gates.values()) g.resolve();
+  await until(() => runner.view().phase !== 'idle', 'tour underway');
+  runner.endTour();
+});
+
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
