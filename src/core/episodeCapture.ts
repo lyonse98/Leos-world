@@ -460,12 +460,14 @@ export interface CapturedCommission {
   text: string | null;
   /**
    * 'sounded' — it played, as the next story's incoming
-   * bridge; 'skipped-late' — still rendering when its moment
-   * arrived, discarded (the story sounded without it);
-   * 'failed' — synthesis errored; 'discarded-cap' — the
-   * per-tour commission cap blocked it before authoring;
-   * 'pending' — no verdict by tour close (rendered but its
-   * moment never came, or still in flight at an early close).
+   * bridge; 'skipped-late' — discarded unsounded: still
+   * rendering when its moment arrived (the story sounded
+   * without it), or itself suppressed when its target story
+   * was judged doomed before it could sound; 'failed' —
+   * synthesis errored; 'discarded-cap' — the per-tour
+   * commission cap blocked it before authoring; 'pending' —
+   * no verdict by tour close (rendered but its moment never
+   * came, or still in flight at an early close).
    */
   result: 'sounded' | 'skipped-late' | 'failed' | 'discarded-cap' | 'pending';
 }

@@ -33,6 +33,39 @@
 // degrades the same way, per piece; the build-failure state is
 // pre-start only and this pipeline never produces it.
 //
+// Drop coherence (Nov 4, 2026 — adaptive slice, phase 1): a
+// dropped story used to leave two tears in the episode — its
+// incoming bridge could already be promised (even sounding)
+// before the gate judged the story stale, a lead-in to a
+// story that never comes; and the next story arrived
+// bridgeless, its own bridge skipped for naming the dropped
+// one. Phase 1 repairs both, conservatively:
+//   - DOOMED LEAD-IN SUPPRESSION: before a bridge into a
+//     windowed story is fed, the story's viability is judged
+//     from the recent progress rate — if it cannot start
+//     before its window closes (current item's remaining
+//     time + the bridge's own duration + the breath), the
+//     bridge is not fed and the story drops stale at that
+//     moment, owed exactly as a gate drop. No usable rate
+//     sample (stationary, unmeasured, paused) = no
+//     suppression, ever: the gate remains the backstop.
+//   - RE-BRIDGE COMMISSION: a stale drop (either path) with
+//     a next viable story commissions ONE replacement
+//     bridge, authored at drive time through the narration
+//     seam from the last story that actually SOUNDED into
+//     that next story — true facts only, the dropped story
+//     never named. It rides the render queue as a dynamic
+//     tissue entry at the next story's incoming-bridge
+//     position: rendered in time, it sounds; still rendering
+//     when its moment arrives, it is skipped late and
+//     discarded — the story never waits, and sounds
+//     bridgeless exactly as before this mechanism existed.
+//     Bounded per tour (REBRIDGE_MAX_PER_TOUR). A dropped
+//     climax earns no fabricated payoff: any re-bridge past
+//     it is a plain mid bridge, and a climax dropped last
+//     commissions nothing — the owed closeout is the honest
+//     repair.
+//
 // Composer v2 (Nov 3, 2026): POSITION-ANCHORED RELEASE. The
 // runner no longer pours the whole plan into the Player at
 // start. It renders every item at plan time, then FEEDS the
@@ -65,12 +98,17 @@ import {
   assemblePlanCapture,
   assemblePlanItems,
   pathLengthM,
+  type CapturedCommission,
   type CapturedRenderResult,
   type EpisodeCaptureContext,
   type RouteEpisodeOutcomePayload,
   type RouteEpisodePlanPayload,
 } from './episodeCapture';
 import {
+  BRIDGE_MAX_SEC,
+  BRIDGE_MIN_SEC,
+  bridgeTextFor,
+  buildBridgeContext,
   decideCloseout,
   estimateDurationSec,
   hasArrived,
@@ -78,6 +116,8 @@ import {
   isOffCorridor,
   owedLine,
   progressAlongPath,
+  WINDOW_LEAD_SEC,
+  type BridgeContext,
   type GeoPoint,
   type LibraryUnit,
   type MapsFailure,
@@ -308,6 +348,86 @@ export function routeInterItemGapMs(args: {
  */
 export const RENDER_CONCURRENCY = 3;
 
+/**
+ * Re-bridge commissions per tour, at most (drop coherence,
+ * Nov 4, 2026). A commission is a live synthesis spent on a
+ * repair; four covers a genuinely bad drive (a drop every
+ * few stories) without letting a pathological plan turn the
+ * tour into a synthesis storm. A drop past the cap leaves
+ * the standing behavior — the next story sounds bridgeless —
+ * and files a 'discarded-cap' commission record + telemetry
+ * so the field can judge whether the cap is sized right.
+ */
+export const REBRIDGE_MAX_PER_TOUR = 4;
+
+/**
+ * How fresh the last progress interval must be for a
+ * suppression judgment (drop coherence): the rate is sampled
+ * from the last two GPS fixes, and a judgment made on a
+ * sample older than this is a judgment about a drive that
+ * may no longer exist. Fixes arrive every second or so at
+ * driving speed; 30 s is generous headroom that still
+ * refuses ancient samples (a long tunnel, a stalled feed).
+ */
+const SUPPRESSION_RATE_FRESH_MS = 30_000;
+
+/**
+ * The largest single-interval progress advance that still
+ * reads as SPEED (drop coherence). A fix pair that jumps
+ * more than this share of the route in one interval is a
+ * discontinuity — a teleport, a GPS reacquisition after a
+ * tunnel, a test jump — not a measurement of how fast the
+ * driver is moving, and extrapolating it would condemn
+ * stories the gate itself would serve. Real driving feeds
+ * advance a tenth of a percent or so per interval; 5% of a
+ * half-hour route is ninety seconds of driving compressed
+ * into one step. On a discontinuous sample suppression
+ * stands down and the gate's absolute window checks govern
+ * — the dumb-guard philosophy, kept.
+ */
+const SUPPRESSION_MAX_INTERVAL_PROGRESS = 0.05;
+
+/** routeMode's spokenSec, mirrored (bridges estimate at 150 wpm, floored at 3 s) — the runner stays import-light. */
+function spokenSecEstimate(text: string): number {
+  const words = text.trim().split(/\s+/).filter(Boolean).length;
+  return Math.max(3, Math.round((words / 150) * 60));
+}
+
+/** A confident doom judgment (drop coherence): the inputs and the projected start, kept for the commission's telemetry. */
+interface SuppressionPrediction {
+  ratePerSec: number;
+  delaySec: number;
+  predictedStartProgress: number;
+  expireProgress: number;
+}
+
+/**
+ * One re-bridge commission's ledger record (drop coherence).
+ * The entry rides this.entries as a dynamic tissue entry;
+ * this record is its capture/telemetry trace — the plan
+ * never names it. State flow: 'pending' (authored; rendered
+ * or not, its moment has not resolved it) → 'sounded' /
+ * 'late' (skipped unsounded — late at the gate, its render
+ * discarded, or itself suppressed when its own target was
+ * judged doomed) / 'failed' (synthesis errored). A 'cap'
+ * record is filed without an entry at all: the cap blocked
+ * the commission before authoring.
+ */
+interface CommissionRecord {
+  /** Pseudo-item id: 'rebridge:<dropped>><next>' ('rebridge-cap:<dropped>' when capped). */
+  id: string;
+  /** The dropped story item whose transition this repairs. */
+  forStoryId: string;
+  /** The story the text speaks FROM (unit id). Null only on a cap record. */
+  prevStoryId: string | null;
+  /** The story the commission leads INTO (item id). */
+  nextStoryId: string;
+  via: 'suppression' | 'gate';
+  /** The authored text. Null only on a cap record. */
+  text: string | null;
+  state: 'pending' | 'sounded' | 'late' | 'failed' | 'cap';
+}
+
 export interface RouteRunnerDeps {
   audio: AudioPort;
   /** Synthesize text → playable blob URL (App wires gemini.synthesizeSpeech). */
@@ -412,6 +532,20 @@ export class RoutePlanRunner {
   private resolvedCount = 0;
   /** Stories dropped at the feed gate for an expired window (their outgoing bridges are skipped too). */
   private droppedStoryIds = new Set<string>();
+  /**
+   * Drop coherence (Nov 4, 2026): re-bridge commissions by
+   * pseudo-item id, plus the same records in firing order
+   * for the capture outcome. A commission's dynamic entry
+   * rides this.entries at its target story's incoming-bridge
+   * position; these records are how the runner tells an
+   * entry is a commission (the gate's orphan check, the
+   * settle verdicts, and the capture's plan-item accounting
+   * all treat it as the pseudo-item it is).
+   */
+  private commissions = new Map<string, CommissionRecord>();
+  private commissionList: CommissionRecord[] = [];
+  /** The most recent story item that SOUNDED (settled sounded) — a re-bridge's prev when nothing is sounding now. */
+  private lastSoundedStoryId: string | null = null;
   /** Render queue: entries started strictly in plan order, at most RENDER_CONCURRENCY in flight. */
   private renderNextIndex = 0;
   private renderInFlight = 0;
@@ -448,6 +582,23 @@ export class RoutePlanRunner {
   private lastProgress = 0;
   /** When lastProgress was sampled, and the recent progress rate (per second) — the breath's stale-risk input. */
   private lastProgressAt = 0;
+  /**
+   * The fix BEFORE lastProgress (drop coherence): suppression
+   * judges from the most recent interval honestly — including
+   * a zero interval (a stopped driver), which the breath's
+   * stored rate never records. Two samples or no judgment.
+   */
+  private prevProgress = 0;
+  private prevProgressAt = 0;
+  /**
+   * When the Player's current item started sounding, and
+   * which item (drop coherence): the suppression judgment's
+   * current-remaining input. Stamped from the Player's
+   * onSoundStart hook — the runner has no other clock on the
+   * element. A stamp that doesn't name the current item is
+   * no stamp (never suppress on a guess).
+   */
+  private soundStartStamp: { audibleId: string; atMs: number } | null = null;
   private progressPerSec: number | null = null;
   /** The most recent plan-item settle (the breath's back-to-back input). */
   private lastSettle: { sounded: boolean; skipped: boolean; planItem: boolean } | null = null;
@@ -514,7 +665,10 @@ export class RoutePlanRunner {
       onDeferred: () => undefined,
       onSlotEmpty: () => undefined,
       onStoryCommitted: () => undefined,
-      onSoundStart: () => this.notify(),
+      onSoundStart: item => {
+        this.soundStartStamp = { audibleId: item.id, atMs: Date.now() };
+        this.notify();
+      },
       onWaiting: () => undefined,
       onCommit: () => undefined,
       onState: () => this.notify(),
@@ -785,6 +939,21 @@ export class RoutePlanRunner {
       // and exhaustion can complete without it.
       entry.state = 'failed';
       this.resolvedCount += 1;
+      // Drop coherence: a failed commission is a verdict, not
+      // a wedge — its story sounds bridgeless, as it always
+      // did before the mechanism existed.
+      const rec = this.commissions.get(it.id);
+      if (rec && rec.state === 'pending') {
+        rec.state = 'failed';
+        this.deps.onEvent?.('route_rebridge_skipped', {
+          reason: 'failed',
+          commission_id: rec.id,
+          dropped_id: rec.forStoryId,
+          into_id: rec.nextStoryId,
+          via: rec.via,
+          mode: 'route',
+        });
+      }
     }
     this.afterTaskSettle();
   }
@@ -1155,6 +1324,7 @@ export class RoutePlanRunner {
           ),
           lateSkippedItemIds: this.lateSkippedItemIds,
           renderResults: this.renderResults(),
+          commissions: this.commissionsCapture(),
           queueDrainedMs:
             this.queueDrainedAtMs !== null ? this.queueDrainedAtMs - this.planFixAtMs : null,
           heardUnitIds,
@@ -1180,18 +1350,28 @@ export class RoutePlanRunner {
    */
   private renderResults(): CapturedRenderResult[] {
     const mark = this.begunAtMs ?? this.openingSettledAtMs ?? Number.POSITIVE_INFINITY;
-    const out: CapturedRenderResult[] =
-      this.entries.map((e, index) => {
-        let result: CapturedRenderResult['result'];
-        if (e.state === 'failed') result = 'failed';
-        else if (e.state === 'late') result = 'skipped-late';
-        else {
-          const doneAt = this.renderDoneAtMs.get(e.planItem.id);
-          if (doneAt === undefined) result = 'pending';
-          else result = doneAt <= mark ? 'pre-start' : 'ahead';
-        }
-        return { index, id: e.planItem.id, result };
-      });
+    // Indexes are PLAN indexes (drop coherence): a commission's
+    // dynamic entry can sit inside this.entries and shift entry
+    // positions, but a render verdict's index must always name
+    // the item's place in the plan row. Commissions are not
+    // plan items — they carry their own records, never a
+    // render verdict.
+    const planIndexById = new Map((this.plan?.items ?? []).map((it, i) => [it.id, i]));
+    const out: CapturedRenderResult[] = [];
+    for (const e of this.entries) {
+      if (this.commissions.has(e.planItem.id)) continue;
+      const index = planIndexById.get(e.planItem.id);
+      if (index === undefined) continue;
+      let result: CapturedRenderResult['result'];
+      if (e.state === 'failed') result = 'failed';
+      else if (e.state === 'late') result = 'skipped-late';
+      else {
+        const doneAt = this.renderDoneAtMs.get(e.planItem.id);
+        if (doneAt === undefined) result = 'pending';
+        else result = doneAt <= mark ? 'pre-start' : 'ahead';
+      }
+      out.push({ index, id: e.planItem.id, result });
+    }
     if (this.wrapUpState !== 'none' && this.plan) {
       let result: CapturedRenderResult['result'];
       if (this.wrapUpState === 'adopted') result = 'pre-start';
@@ -1231,6 +1411,14 @@ export class RoutePlanRunner {
    *     story sounded early (the departure story is exempt from
    *     both rules: it opens the drive, behind the preview item
    *     or in slot 1 itself — see firstReadyStoryEntry);
+   *   - a READY bridge into a windowed story is judged first
+   *     (drop coherence): if the story cannot start before
+   *     its window closes at the recent progress rate, the
+   *     bridge is NOT fed and the story drops stale at that
+   *     moment instead — no dangling lead-in. Either drop
+   *     path may commission a re-bridge into the next viable
+   *     story (see maybeCommissionRebridge), which then sits
+   *     in this same gate as a dynamic tissue entry;
    *   - everything else (bridges, reactions, fillers, portal
    *     stories, woven members — windowless by design, seated
    *     into silence by plan order) feeds.
@@ -1247,7 +1435,23 @@ export class RoutePlanRunner {
         this.feedCursor += 1; // resolved in the accounting when it happened
         continue;
       }
-      if (it.kind === 'bridge' && it.prevUnitId && this.droppedStoryIds.has(it.prevUnitId)) {
+      if (it.kind === 'story' && this.droppedStoryIds.has(it.id)) {
+        // Marked dropped AHEAD of its head turn (doomed
+        // lead-in suppression judged it while its bridge was
+        // the head): resolve it here, in the gate's own
+        // accounting — the drop itself (telemetry, owed,
+        // commission) already happened at the judgment.
+        entry.state = 'dropped';
+        this.feedCursor += 1;
+        this.resolvedCount += 1;
+        continue;
+      }
+      if (
+        it.kind === 'bridge' &&
+        it.prevUnitId &&
+        this.droppedStoryIds.has(it.prevUnitId) &&
+        !this.commissions.has(it.id)
+      ) {
         entry.state = 'dropped';
         this.feedCursor += 1;
         this.resolvedCount += 1;
@@ -1257,6 +1461,28 @@ export class RoutePlanRunner {
       if (entry.state === 'pending') {
         const isTissue = it.kind === 'bridge' || it.kind === 'reaction' || it.kind === 'preview';
         if (isTissue && this.player.current === null) {
+          // Drop coherence grace: a commission can be BORN at
+          // a settle boundary (its story dropped as the
+          // previous item ended) — the stage is empty at its
+          // birth through no fault of its render. While its
+          // target story's window is still closed, the stage
+          // is idle for the GROUND, not for the render: the
+          // commission may render into that wait, like any
+          // wait-cover. The moment the window opens — its
+          // story's feed moment — the standing late-skip
+          // discipline below applies to it unchanged.
+          const graceRec = this.commissions.get(it.id);
+          if (graceRec && graceRec.state === 'pending') {
+            const targetEntry = this.entries[this.feedCursor + 1];
+            if (
+              targetEntry &&
+              targetEntry.planItem.id === graceRec.nextStoryId &&
+              targetEntry.planItem.releaseProgress !== undefined &&
+              this.lastProgress < targetEntry.planItem.releaseProgress
+            ) {
+              return; // window-held: the commission may still render into the wait
+            }
+          }
           // Its moment arrived before its render: skip it and
           // let the story behind it sound. The telemetry
           // carries the queue's state at the skip so the field
@@ -1277,9 +1503,67 @@ export class RoutePlanRunner {
             ms_since_plan_fix: Date.now() - this.planFixAtMs,
             mode: 'route',
           });
+          // Drop coherence: a late-skipped commission is a
+          // verdict — its story sounds bridgeless, exactly
+          // the floor the mechanism promised. (Its render,
+          // when it lands, is discarded by runEntryTask.)
+          const rec = this.commissions.get(it.id);
+          if (rec && rec.state === 'pending') {
+            rec.state = 'late';
+            this.deps.onEvent?.('route_rebridge_skipped', {
+              reason: 'late',
+              commission_id: rec.id,
+              dropped_id: rec.forStoryId,
+              into_id: rec.nextStoryId,
+              via: rec.via,
+              mode: 'route',
+            });
+          }
           continue;
         }
         return; // still rendering and its moment has not come (or it is a story): wait
+      }
+      if (it.kind === 'bridge' && entry.state === 'ready') {
+        // DOOMED LEAD-IN SUPPRESSION (drop coherence): judge
+        // the story this bridge leads into BEFORE the bridge
+        // is promised — once promised, it sounds, and a story
+        // that cannot start before its window closes would
+        // leave it dangling. A doomed story drops stale HERE
+        // (the bridge is skipped as its dependent, exactly as
+        // the orphan rule treats it), and the re-bridge
+        // commission repairs the transition. When the
+        // judgment cannot be made confidently, the bridge
+        // feeds exactly as it always has.
+        const target = this.suppressionTarget(entry);
+        if (target) {
+          const prediction = this.suppressionPrediction(it, target);
+          if (prediction) {
+            entry.state = 'dropped';
+            this.gateSkippedItemIds.add(it.id);
+            this.feedCursor += 1;
+            this.resolvedCount += 1;
+            // A commission is a bridge like any other at this
+            // gate: if ITS story is judged doomed, the repair
+            // is suppressed too (its record closes as a skip —
+            // authored, never sounded, discarded) and the
+            // drop cascades to the next viable story, bounded
+            // by the commission cap.
+            const rec = this.commissions.get(it.id);
+            if (rec && rec.state === 'pending') {
+              rec.state = 'late';
+              this.deps.onEvent?.('route_rebridge_skipped', {
+                reason: 'suppressed',
+                commission_id: rec.id,
+                dropped_id: rec.forStoryId,
+                into_id: rec.nextStoryId,
+                via: rec.via,
+                mode: 'route',
+              });
+            }
+            this.dropStoryStale(target, 'suppression', prediction);
+            continue;
+          }
+        }
       }
       if (it.kind === 'story' && !it.portal && !it.woven && entry !== this.firstReadyStoryEntry()) {
         const release = it.releaseProgress ?? 0;
@@ -1287,12 +1571,7 @@ export class RoutePlanRunner {
         if (this.lastProgress > expire) {
           this.feedCursor += 1;
           this.resolvedCount += 1;
-          this.droppedStoryIds.add(it.id);
-          this.deps.onEvent?.('story_dropped', {
-            subject: it.unit?.placeName ?? it.label,
-            reason: 'stale-window',
-            mode: 'route',
-          });
+          this.dropStoryStale(entry, 'gate');
           continue;
         }
         if (this.lastProgress < release) return; // window not open yet: wait for the ground
@@ -1312,6 +1591,343 @@ export class RoutePlanRunner {
     } else {
       void this.close('overrun');
     }
+  }
+
+  /**
+   * The suppression judgment's rate: the most recent progress
+   * interval (the last two GPS fixes), per second. Null = no
+   * usable sample: fewer than two fixes, a non-positive
+   * interval (a stationary driver's last interval is zero —
+   * endangering nothing — and GPS jitter can read backwards),
+   * a DISCONTINUOUS interval (one step larger than
+   * SUPPRESSION_MAX_INTERVAL_PROGRESS — a jump, not a
+   * speed), or a sample too old to describe the current
+   * drive.
+   */
+  private suppressionRatePerSec(nowMs: number): number | null {
+    if (this.prevProgressAt <= 0 || this.lastProgressAt <= this.prevProgressAt) return null;
+    if (nowMs - this.lastProgressAt > SUPPRESSION_RATE_FRESH_MS) return null;
+    const advanced = this.lastProgress - this.prevProgress;
+    if (advanced > SUPPRESSION_MAX_INTERVAL_PROGRESS) return null;
+    const dtSec = (this.lastProgressAt - this.prevProgressAt) / 1000;
+    const rate = advanced / dtSec;
+    return Number.isFinite(rate) && rate > 0 ? rate : null;
+  }
+
+  /**
+   * Seconds until the Player's current item finishes: 0 when
+   * the stage is empty; null when something is current but
+   * its remaining time cannot be known confidently — not
+   * actually sounding (paused: audio time is frozen and no
+   * judgment is made on a frozen clock), or the sound-start
+   * stamp names another item.
+   */
+  private currentRemainingSec(): number | null {
+    const current = this.player.current;
+    if (current === null) return 0;
+    if (!this.player.isPlaying()) return null;
+    const stamp = this.soundStartStamp;
+    if (!stamp || stamp.audibleId !== current.id) return null;
+    const elapsedSec = (Date.now() - stamp.atMs) / 1000;
+    return Math.max(0, current.durationSec - elapsedSec);
+  }
+
+  /**
+   * The doom prediction for a bridge's story, or null when
+   * the story is NOT confidently doomed — including every
+   * case where the judgment cannot be made, in which the
+   * standing behavior applies unchanged. A story's earliest
+   * start is bounded below by physics: the current item's
+   * remaining time, then this bridge, then the breath. If
+   * the driver's progress at even that earliest start is
+   * past the story's expire progress, the story cannot
+   * start inside its window — its lead-in is a promise the
+   * episode cannot keep.
+   */
+  private suppressionPrediction(bridge: PlanItem, target: RenderEntry): SuppressionPrediction | null {
+    const expire = target.planItem.expireProgress;
+    if (expire === undefined || !Number.isFinite(expire)) return null;
+    if (this.userPausedFlag || this.guardPausedFlag) return null;
+    const rate = this.suppressionRatePerSec(Date.now());
+    if (rate === null) return null;
+    const remaining = this.currentRemainingSec();
+    if (remaining === null) return null;
+    const delaySec = remaining + bridge.durationSec + ROUTE_BREATH_MS / 1000;
+    const predictedStartProgress = this.lastProgress + rate * delaySec;
+    if (predictedStartProgress <= expire) return null;
+    return { ratePerSec: rate, delaySec, predictedStartProgress, expireProgress: expire };
+  }
+
+  /**
+   * The story a bridge leads into, when suppression may
+   * judge it at all: a windowed geographic story (portal /
+   * woven / portal-climax stories are windowless and never
+   * drop stale), still ahead of the feed and unresolved,
+   * and NOT the departure story — the departure is exempt
+   * from stale rules everywhere (it opens the drive), under
+   * both derivations of that exemption (plan order, and the
+   * gate's first-ready rule).
+   */
+  private suppressionTarget(bridgeEntry: RenderEntry): RenderEntry | null {
+    const nextUnitId = bridgeEntry.planItem.nextUnitId;
+    if (!nextUnitId) return null;
+    const idx = this.entries.findIndex(e => e.planItem.kind === 'story' && e.planItem.id === nextUnitId);
+    if (idx < 0 || idx <= this.feedCursor) return null; // not ahead of the feed: already passed the gate
+    const entry = this.entries[idx];
+    const it = entry.planItem;
+    if (it.portal || it.woven || it.portalClimax) return null;
+    if (entry.state === 'failed' || entry.state === 'late' || entry.state === 'dropped') return null;
+    if (this.droppedStoryIds.has(it.id)) return null;
+    if (entry === this.entries.find(e => e.planItem.kind === 'story')) return null; // the departure, by plan order
+    if (entry === this.firstReadyStoryEntry()) return null; // the departure, by the gate's derivation
+    return entry;
+  }
+
+  /**
+   * The one stale-drop path (drop coherence): the story is
+   * marked and telemetered exactly as the gate has always
+   * telemetered it, then handed to the re-bridge commission.
+   * The caller owns the entry's cursor/resolved accounting:
+   * the gate resolves a head entry in place, while
+   * suppression marks a story ahead of its turn and the
+   * gate's step-over resolves it when the cursor arrives.
+   */
+  private dropStoryStale(
+    storyEntry: RenderEntry,
+    via: 'suppression' | 'gate',
+    prediction?: SuppressionPrediction,
+  ): void {
+    const it = storyEntry.planItem;
+    this.droppedStoryIds.add(it.id);
+    this.deps.onEvent?.('story_dropped', {
+      subject: it.unit?.placeName ?? it.label,
+      reason: 'stale-window',
+      mode: 'route',
+    });
+    this.maybeCommissionRebridge(it, via, prediction);
+  }
+
+  /**
+   * The story a re-bridge speaks FROM: the story sounding on
+   * the element right now (it is what the listener is
+   * hearing); else the most recent story that sounded; else
+   * the departure story — a drop before anything sounded
+   * takes the departure/preview context as its origin. Null
+   * only on a story-less plan, which cannot drop.
+   */
+  private prevStoryEntry(): RenderEntry | null {
+    const current = this.player.current;
+    if (current) {
+      const sounding = this.entries.find(
+        e => e.audible !== null && e.audible.id === current.id && e.planItem.kind === 'story',
+      );
+      if (sounding) return sounding;
+    }
+    if (this.lastSoundedStoryId) {
+      const sounded = this.entries.find(e => e.planItem.id === this.lastSoundedStoryId);
+      if (sounded) return sounded;
+    }
+    return this.entries.find(e => e.planItem.kind === 'story') ?? null;
+  }
+
+  /**
+   * RE-BRIDGE COMMISSION (drop coherence): after a stale
+   * drop, author ONE replacement bridge from the last story
+   * that actually sounded into the next viable story,
+   * through the narration seam, true facts only — the
+   * context is assembled by routeMode.buildBridgeContext
+   * from the plan's real facts exactly as the composer
+   * assembles it (thread; callbacks among SOUNDED stories
+   * only; the honest hop framings for portal/woven targets),
+   * under the climax discipline: a dropped climax earns no
+   * fabricated payoff (any re-bridge past it is a plain mid
+   * bridge, promiseMade false), while a re-bridge INTO an
+   * intact climax keeps the payoff treatment the composer
+   * would have given that pair. The commission rides the
+   * render queue as a dynamic tissue entry immediately
+   * before its story; the feed gate then treats it like any
+   * bridge — it sounds if ready when its moment comes,
+   * late-skips if not, and its story never waits for it.
+   */
+  private maybeCommissionRebridge(
+    dropped: PlanItem,
+    via: 'suppression' | 'gate',
+    prediction?: SuppressionPrediction,
+  ): void {
+    const plan = this.plan;
+    if (!plan || this.closed || this.closing) return;
+    const droppedIdx = this.entries.findIndex(e => e.planItem === dropped);
+    if (droppedIdx < 0) return;
+    // The next viable story: ahead, unresolved, undropped.
+    let cEntry: RenderEntry | null = null;
+    for (let i = droppedIdx + 1; i < this.entries.length; i++) {
+      const e = this.entries[i];
+      if (e.planItem.kind !== 'story' || !e.planItem.unit) continue;
+      if (e.state === 'failed' || e.state === 'late' || e.state === 'dropped') continue;
+      if (this.droppedStoryIds.has(e.planItem.id)) continue;
+      cEntry = e;
+      break;
+    }
+    if (!cEntry) return; // nothing ahead to repair toward — the owed closeout carries the drop
+    const next = cEntry.planItem;
+    const nextUnit = next.unit as LibraryUnit;
+    // One live commission per target story.
+    if (this.commissionList.some(r => r.nextStoryId === next.id && r.state === 'pending')) return;
+    const firedCount = this.commissionList.filter(r => r.state !== 'cap').length;
+    if (firedCount >= REBRIDGE_MAX_PER_TOUR) {
+      const rec: CommissionRecord = {
+        id: `rebridge-cap:${dropped.id}`,
+        forStoryId: dropped.id,
+        prevStoryId: null,
+        nextStoryId: next.id,
+        via,
+        text: null,
+        state: 'cap',
+      };
+      this.commissionList.push(rec);
+      this.deps.onEvent?.('route_rebridge_skipped', {
+        reason: 'cap',
+        commission_id: rec.id,
+        dropped_id: dropped.id,
+        into_id: next.id,
+        via,
+        commissions_used: firedCount,
+        mode: 'route',
+      });
+      return;
+    }
+    const prevEntry = this.prevStoryEntry();
+    const prevUnit = prevEntry?.planItem.unit ?? null;
+    if (!prevUnit) return; // a story-less plan cannot drop; defensive
+    // Callbacks may name only stories the listener has
+    // actually heard: sounded stories, plus the prev story
+    // itself (it is sounding now, or is the departure
+    // context). In plan order, prev last.
+    const earlierUnits: LibraryUnit[] = [];
+    for (const e of this.entries) {
+      const u = e.planItem.unit;
+      if (e.planItem.kind !== 'story' || !u) continue;
+      if ((this.playedStoryIds.has(u.id) || e === prevEntry) && !earlierUnits.some(x => x.id === u.id)) {
+        earlierUnits.push(u);
+      }
+    }
+    if (!earlierUnits.some(u => u.id === prevUnit.id)) earlierUnits.push(prevUnit);
+    const droppedIsClimax = dropped.climax === true || dropped.portalClimax === true;
+    const nextIsClimax = plan.climaxUnitId !== null && nextUnit.id === plan.climaxUnitId;
+    const isClimaxBridge = nextIsClimax && !droppedIsClimax;
+    const lastStory = [...this.entries].reverse().find(e => e.planItem.kind === 'story');
+    const context: BridgeContext = buildBridgeContext({
+      earlier: earlierUnits,
+      prev: prevUnit,
+      next: nextUnit,
+      thread: plan.thread,
+      isClimaxBridge,
+      climaxLast: isClimaxBridge && lastStory === cEntry,
+      promiseMade: isClimaxBridge && plan.previewFacts !== null,
+      offRoute: next.portalClimax === true,
+      nextWoven: next.woven === true && !nextIsClimax,
+    });
+    if (next.portal === true && context.role === 'mid') {
+      // A portal hop's composed bridge names the connection
+      // topic that earned the hop — data the runner does not
+      // carry. The honest no-proximity framing the seam
+      // already owns (the woven range) is the truthful
+      // substitute: the story is not on this road, and the
+      // bridge must not pretend the ground ahead holds it.
+      context.wovenSubject = nextUnit.placeName;
+    }
+    // Elastic target, the composer's own formula: expected
+    // travel from the prev story's end to the next story's
+    // anchor, clamped to the bridge bounds.
+    const driveSec = plan.driveSec ?? plan.budgetSec;
+    const gapSec = Math.max(
+      0,
+      ((next.anchorProgress ?? 0) - (prevEntry?.planItem.anchorProgress ?? 0)) * driveSec - prevUnit.durationSec,
+    );
+    const targetSec = Math.max(
+      BRIDGE_MIN_SEC,
+      Math.min(BRIDGE_MAX_SEC, Math.round(gapSec - WINDOW_LEAD_SEC)),
+    );
+    const text = bridgeTextFor(prevUnit, nextUnit, { targetSec, context });
+    const id = `rebridge:${dropped.id}>${next.id}`;
+    const item: PlanItem = {
+      kind: 'bridge',
+      id,
+      label: `Bridge — ${prevUnit.placeName} to ${nextUnit.placeName}`,
+      durationSec: spokenSecEstimate(text),
+      prevUnitId: prevUnit.id,
+      nextUnitId: nextUnit.id,
+      text,
+      ready: true,
+      targetDurationSec: targetSec,
+    };
+    const entry: RenderEntry = { planItem: item, audible: null, state: 'pending' };
+    const rec: CommissionRecord = {
+      id,
+      forStoryId: dropped.id,
+      prevStoryId: prevUnit.id,
+      nextStoryId: next.id,
+      via,
+      text,
+      state: 'pending',
+    };
+    this.commissions.set(id, rec);
+    this.commissionList.push(rec);
+    // Enter the render queue at the target story's
+    // incoming-bridge position. If the queue's start
+    // frontier has already passed that position (the common
+    // case — renders run ahead of the feed), start the entry
+    // out of band, counted in flight exactly like the
+    // wrap-up's closeout start; otherwise the pump reaches
+    // it in plan order.
+    const at = this.entries.indexOf(cEntry);
+    const behindFrontier = at < this.renderNextIndex;
+    this.entries.splice(at, 0, entry);
+    if (behindFrontier) this.renderNextIndex += 1;
+    this.deps.onEvent?.('route_rebridge_fired', {
+      commission_id: id,
+      dropped_id: dropped.id,
+      into_id: next.id,
+      prev_id: prevUnit.id,
+      via,
+      commissions_used: firedCount + 1,
+      ...(prediction
+        ? {
+            predicted_start_progress: Math.round(prediction.predictedStartProgress * 1000) / 1000,
+            expire_progress: Math.round(prediction.expireProgress * 1000) / 1000,
+            progress_rate_per_sec: Math.round(prediction.ratePerSec * 10000) / 10000,
+          }
+        : {}),
+      mode: 'route',
+    });
+    if (behindFrontier) {
+      this.renderInFlight += 1;
+      void this.runEntryTask(entry);
+    } else {
+      this.pumpQueue();
+    }
+  }
+
+  /** Episode capture (schema 2): the commissions' outcome records, in firing order. */
+  private commissionsCapture(): CapturedCommission[] {
+    return this.commissionList.map(r => ({
+      id: r.id,
+      for_story_id: r.forStoryId,
+      prev_story_id: r.prevStoryId,
+      next_story_id: r.nextStoryId,
+      via: r.via,
+      text: r.text,
+      result:
+        r.state === 'sounded'
+          ? 'sounded'
+          : r.state === 'late'
+            ? 'skipped-late'
+            : r.state === 'failed'
+              ? 'failed'
+              : r.state === 'cap'
+                ? 'discarded-cap'
+                : 'pending',
+    }));
   }
 
   private async toAudibleItem(it: PlanItem): Promise<AudibleItem | null> {
@@ -1386,14 +2002,37 @@ export class RoutePlanRunner {
     // before anything else — including settles the closeout
     // itself causes (queued items abandoned at close count as
     // settled-without-sounding in the outcome row).
-    if (sounded) this.playedOrderIds.push(it.id);
-    else this.settledUnplayed.set(it.id, { skipped: rec.skipped });
+    const commission = this.commissions.get(it.id);
+    if (sounded) {
+      if (commission) {
+        // A commission is a pseudo-item (drop coherence): its
+        // sounding is its own record's verdict, never a plan
+        // played entry — the wrap-up precedent (the outcome's
+        // played list names plan items only; the commission's
+        // trace rides commissions[]).
+        if (commission.state === 'pending') {
+          commission.state = 'sounded';
+          this.deps.onEvent?.('route_rebridge_sounded', {
+            commission_id: commission.id,
+            dropped_id: commission.forStoryId,
+            into_id: commission.nextStoryId,
+            via: commission.via,
+            mode: 'route',
+          });
+        }
+      } else {
+        this.playedOrderIds.push(it.id);
+      }
+    } else {
+      this.settledUnplayed.set(it.id, { skipped: rec.skipped });
+    }
     // The breath's input (commit D): every plan-item settle
     // is recorded before anything else reads it — the Player
     // consults the gap hook immediately after this returns.
     this.lastSettle = { sounded, skipped: rec.skipped, planItem: true };
     if (it.kind === 'story' && it.unit && sounded) {
       this.playedStoryIds.add(it.unit.id);
+      this.lastSoundedStoryId = it.id;
       this.deps.onStoryHeard?.(it.unit);
     }
     // The preview is not a story (consolidation §2): it is
@@ -1420,6 +2059,11 @@ export class RoutePlanRunner {
       const rate = (progress - this.lastProgress) / ((nowMs - this.lastProgressAt) / 1000);
       if (Number.isFinite(rate) && rate > 0) this.progressPerSec = rate;
     }
+    // Keep the previous fix as well (drop coherence): the
+    // suppression judgment reads the LAST interval from this
+    // pair, zeros included.
+    this.prevProgress = this.lastProgress;
+    this.prevProgressAt = this.lastProgressAt;
     this.lastProgress = progress;
     this.lastProgressAt = nowMs;
     // Episode capture movement evidence (Nov 4, 2026): how
