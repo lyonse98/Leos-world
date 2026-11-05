@@ -1,6 +1,6 @@
 // GENERATED — do not hand-edit. Built by
 // scripts/route-mode/build-route-tags.mjs from story-tags.csv
-// (1294 rows, Nov 1 tone/topic tagging). The route
+// (1310 rows, Nov 1 tone/topic tagging). The route
 // composer joins library-index rows to this map at runtime, so no
 // DB change is needed for route mode to see tone/topic tags.
 
@@ -1306,6 +1306,22 @@ export const ROUTE_TAGS: Record<string, RouteTagEntry> = {
   "i-5 north: through camp pendleton|corridor-woven-v1": { topics: ["Navy Century"], tone: "grand", toneSecondary: "reflective" },
   "i-5 south: through camp pendleton|corridor-woven-v1": { topics: ["Navy Century"], tone: "reflective", toneSecondary: "grand" },
   "i-15 south: marine corps air station miramar to tierrasanta|corridor-woven-v1": { topics: ["Navy Century","Flight"], tone: "grand", toneSecondary: "reflective" },
+  "casa de estudillo|landmark_origin": { topics: [], tone: "reflective", toneSecondary: null },
+  "casa de estudillo|landmark_people": { topics: [], tone: "warm", toneSecondary: null },
+  "seeley stables|landmark_origin": { topics: [], tone: "warm", toneSecondary: null },
+  "seeley stables|landmark_role": { topics: ["Highway"], tone: "reflective", toneSecondary: null },
+  "cosmopolitan hotel|landmark_origin": { topics: [], tone: "warm", toneSecondary: null },
+  "cosmopolitan hotel|landmark_event": { topics: [], tone: "warm", toneSecondary: null },
+  "casa de bandini|landmark_origin": { topics: ["Boom & Bust"], tone: "grand", toneSecondary: null },
+  "robinson-rose house|landmark_origin": { topics: ["Boom & Bust"], tone: "reflective", toneSecondary: null },
+  "colorado house|landmark_origin": { topics: [], tone: "warm", toneSecondary: null },
+  "heritage park victorian village|landmark_origin": { topics: [], tone: "warm", toneSecondary: null },
+  "heritage park victorian village|landmark_building": { topics: [], tone: "reflective", toneSecondary: null },
+  "el campo santo cemetery|landmark_origin": { topics: [], tone: "somber", toneSecondary: null },
+  "el campo santo cemetery|landmark_legends": { topics: ["folklore"], tone: "spooky", toneSecondary: null },
+  "bazaar del mundo|landmark_origin": { topics: ["Boom & Bust"], tone: "warm", toneSecondary: null },
+  "louis rose & temple beth israel|landmark_people": { topics: ["Faith"], tone: "warm", toneSecondary: null },
+  "san diego presidio|landmark_origin": { topics: [], tone: "reflective", toneSecondary: null },
 };
 
 export function tagsFor(placeKey: string, angle: string): RouteTagEntry {
