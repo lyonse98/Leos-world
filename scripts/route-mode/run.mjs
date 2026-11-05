@@ -4502,5 +4502,286 @@ check('carried no-op: without eligibility the mode cannot engage, however silent
   assert.equal(same, plan, 'the carried pass returns the plan untouched');
 });
 
+// ---- episode capture (Nov 4, 2026) ----
+// The plan/outcome rows that carry an episode's full text to
+// route_episodes for offline analysis. Assembly is pure
+// (episodeCapture.ts, bundled here); the runner suites drive
+// the real runner with the capture deps wired; the backend
+// suite proves the send is inert without a configured
+// backend. No live calls anywhere: inserts are stubs or the
+// unconfigured no-op.
+const ecOut = join(mkdtempSync(join(tmpdir(), 'episode-capture-')), 'episodeCapture.mjs');
+execFileSync(
+  join(repoRoot, 'node_modules', '.bin', 'esbuild'),
+  [
+    join(repoRoot, 'src', 'core', 'episodeCapture.ts'),
+    '--bundle',
+    '--format=esm',
+    '--platform=node',
+    `--outfile=${ecOut}`,
+    '--log-level=warning',
+  ],
+  { stdio: 'inherit' },
+);
+const ec = await import(pathToFileURL(ecOut).href);
+
+const beOut = join(mkdtempSync(join(tmpdir(), 'backend-')), 'backend.mjs');
+execFileSync(
+  join(repoRoot, 'node_modules', '.bin', 'esbuild'),
+  [
+    join(repoRoot, 'src', 'core', 'backend.ts'),
+    '--bundle',
+    '--format=esm',
+    '--platform=node',
+    '--define:import.meta.env={}',
+    "--banner:js=import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);",
+    `--outfile=${beOut}`,
+    '--log-level=warning',
+  ],
+  { stdio: 'inherit' },
+);
+const be = await import(pathToFileURL(beOut).href);
+
+const captureCtx = {
+  declaredMode: 'driving',
+  destinationText: 'Dest',
+  tone: null,
+  topics: [],
+  stageTimingsMs: { geocode: 120, routes: 340, maps: 510, compose: 4200, recording: 9800, total: 14510 },
+  settledAtMs: 1762000000000,
+};
+
+check('capture: plan payload covers every item kind with full texts', () => {
+  const storyUnit = unit('s1|landmark_origin', 32.71);
+  const wovenUnit = unit('w1|landmark_history', 32.8);
+  const items = [
+    { kind: 'preview', id: 'preview', label: 'Preview', durationSec: 20, text: 'PREVIEW TEXT', ready: true },
+    { kind: 'story', id: storyUnit.id, label: 'S1', durationSec: 100, unit: storyUnit, ready: true, anchorProgress: 0.1, releaseProgress: 0.1, expireProgress: 0.3 },
+    { kind: 'story', id: 'n1|neighborhood_intro', label: 'N1', durationSec: 60, unit: unit('n1|neighborhood_intro', 32.75, { angle: 'neighborhood_intro' }), ready: true },
+    { kind: 'story', id: 'g1|landmark_origin', label: 'G1', durationSec: 90, unit: unit('g1|landmark_origin', 32.77, { audioPath: 'library/g1/landmark_origin-route-gap-v1.wav' }), ready: true },
+    { kind: 'story', id: wovenUnit.id, label: 'W1', durationSec: 110, unit: wovenUnit, ready: true, woven: true, anchorProgress: 0.5 },
+    { kind: 'story', id: 'c1|landmark_event', label: 'C1', durationSec: 130, unit: unit('c1|landmark_event', 32.85, { angle: 'landmark_event' }), ready: true, climax: true },
+    { kind: 'filler', id: 'f1|filler_hosted', label: 'F1', durationSec: 15, unit: unit('f1|filler_hosted', 32.86, { angle: 'filler_hosted' }), ready: true },
+    { kind: 'bridge', id: 'bridge-1', label: 'Bridge', durationSec: 8, text: 'BRIDGE TEXT', prevUnitId: storyUnit.id, nextUnitId: wovenUnit.id, ready: true },
+    { kind: 'reaction', id: 'reaction-1', label: 'Reaction', durationSec: 5, text: 'REACTION TEXT', ready: true },
+  ];
+  const plan = {
+    destinationName: 'Dest',
+    destination: dest,
+    path,
+    driveSec: 1000,
+    budgetSec: 1000,
+    items,
+    wrapUp: { text: 'WRAP TEXT', audioUrl: 'blob:wrap' },
+  };
+  const renderedIds = new Set(items.filter(i => i.id !== 'reaction-1').map(i => i.id));
+  const sentinel = { destination: 'Dest', decisions: { thread: null } };
+  const payload = ec.assemblePlanCapture({
+    tourId: 'route-1',
+    buildId: 'fresh-test',
+    context: captureCtx,
+    plan,
+    routePlanStarted: sentinel,
+    items: ec.assemblePlanItems(plan, renderedIds),
+  });
+  assert.equal(payload.route_plan_started, sentinel, 'the decisions object rides verbatim (identity, not reconstruction)');
+  assert.equal(payload.mode, 'driving');
+  assert.equal(payload.budget_sec, 1000);
+  assert.equal(payload.route_duration_sec, 1000);
+  assert.ok(payload.route_distance_m > 20000, 'path length computed from the route path');
+  assert.deepEqual(
+    payload.items.map(i => i.kind),
+    ['preview', 'story', 'intro', 'gap_fill', 'story', 'story', 'filler', 'bridge', 'bridge', 'wrap_up'],
+    'normalized kinds in plan order, wrap-up trailing',
+  );
+  const byKind = k => payload.items.find(i => i.kind === k);
+  assert.equal(byKind('preview').text, 'PREVIEW TEXT');
+  assert.equal(byKind('preview').textSource, 'live');
+  assert.equal(byKind('story').text, storyUnit.storyText, 'library text verbatim as served');
+  assert.equal(byKind('story').textSource, 'library');
+  assert.equal(byKind('story').windowStartSec, 100, 'window = release × driveSec (soundingSpans model)');
+  assert.equal(byKind('story').windowEndSec, 300, 'window end = expire × driveSec');
+  assert.equal(payload.items[2].kind, 'intro', 'neighborhood-intro angle → intro');
+  assert.equal(payload.items[3].kind, 'gap_fill', '-route-gap-v1 audio key → gap_fill');
+  assert.equal(payload.items[4].woven, true);
+  assert.equal(payload.items[4].windowStartSec, 500, 'windowless member sounds at its seated anchor (soundingSpans model)');
+  assert.equal(payload.items[4].windowEndSec, 610, 'anchor + its duration');
+  assert.equal(byKind('preview').windowStartSec, null, 'tissue sounds by plan order, not by ground — no window');
+  assert.equal(payload.items[5].climax, true);
+  const bridge = payload.items[7];
+  assert.equal(bridge.text, 'BRIDGE TEXT');
+  assert.equal(bridge.fromSubject, 's1|landmark_origin', 'bridge from-subject resolved from prevUnitId');
+  assert.equal(bridge.toSubject, 'w1|landmark_history', 'bridge to-subject resolved from nextUnitId');
+  const reaction = payload.items[8];
+  assert.equal(reaction.planKind, 'reaction', 'verbatim plan kind preserved under the normalized kind');
+  assert.equal(reaction.rendered, false, 'render failure is visible in the plan row');
+  const wrap = payload.items[9];
+  assert.equal(wrap.text, 'WRAP TEXT');
+  assert.equal(wrap.conditional, 'arrival-plan-ran-out');
+  assert.equal(payload.items[1].sequenceStartSec, 20, 'sequence position accumulates durations');
+  assert.equal(payload.stage_timings_ms.total, 14510);
+  const passenger = ec.assemblePlanCapture({
+    tourId: 'route-2',
+    buildId: 'fresh-test',
+    context: { ...captureCtx, declaredMode: 'passenger' },
+    plan,
+    routePlanStarted: sentinel,
+    items: [],
+  });
+  assert.equal(passenger.mode, 'passenger-walking', 'passenger maps to the spec vocabulary');
+});
+
+check('capture: outcome assembly — played order, drop reasons, driven discriminator', () => {
+  const acc = {
+    endReason: 'arrival-owed',
+    begun: true,
+    planItemIds: ['i0', 'i1', 'i2', 'i3', 'i4', 'i5', 'i6'],
+    playedItemIds: ['i0', 'i2'],
+    settledUnplayed: new Map([['i1', { skipped: true }]]),
+    droppedStaleItemIds: new Set(['i3']),
+    gateSkippedItemIds: new Set(['i4']),
+    unrenderedItemIds: new Set(['i5']),
+    heardUnitIds: ['u0', 'u2'],
+    maxDisplacementM: 40,
+    maxProgressFraction: 0.5,
+    pathLengthM: 10000,
+    endedAtMs: 1762000100000,
+  };
+  const out = ec.assembleOutcomeCapture('route-1', 'fresh-test', acc);
+  assert.deepEqual(out.played, [0, 2], 'played as plan indexes, in sounding order');
+  assert.deepEqual(
+    out.dropped.map(d => `${d.index}:${d.reason}`),
+    ['1:skipped', '3:stale-window', '4:parent-dropped', '5:render-failed', '6:unplayed'],
+    'every unplayed item carries its reason, in plan order',
+  );
+  assert.equal(out.driven, false, 'a stationary test stays under the displacement floor');
+  assert.equal(out.distance_along_route_m, 5000, 'progress fraction × path length');
+  const driven = ec.assembleOutcomeCapture('route-1', 'fresh-test', { ...acc, maxDisplacementM: 450 });
+  assert.equal(driven.driven, true, 'a real drive clears the displacement floor');
+});
+
+await checkAsync('capture: deliver never throws — insert false, insert throw, insert success', async () => {
+  const row = { tourId: 'route-1', kind: 'plan', buildId: 'fresh-test', payload: {} };
+  let failures = 0;
+  const onFailure = () => {
+    failures += 1;
+  };
+  await ec.deliverEpisodeCapture({ insert: async () => false, row, onFailure });
+  assert.equal(failures, 1, 'a missing-table insert (resolved false) files exactly one failure signal');
+  await ec.deliverEpisodeCapture({
+    insert: async () => {
+      throw new Error('network down');
+    },
+    row,
+    onFailure,
+  });
+  assert.equal(failures, 2, 'a throwing insert is swallowed and still signals once');
+  await ec.deliverEpisodeCapture({ insert: async () => true, row, onFailure });
+  assert.equal(failures, 2, 'a landed insert signals nothing');
+});
+
+await checkAsync('capture: unconfigured backend insert is an inert no-op', async () => {
+  const ok = await be.captureRouteEpisode({ tourId: 'route-1', kind: 'plan', buildId: 'fresh-test', payload: {} });
+  assert.equal(ok, false, 'no configured backend → nothing lands, nothing throws, no network attempted');
+});
+
+await checkAsync('capture: plan row assembles at settle without the tour ever starting', async () => {
+  const outcomes = [];
+  const runner = new rp.RoutePlanRunner({
+    audio: new RealFakeAudio(),
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    episodeIds: { tourId: 'route-capture-1', buildId: 'fresh-test' },
+    onEpisodeOutcome: p => outcomes.push(p),
+    onEvent: () => {},
+  });
+  const plan = qaPlan();
+  await runner.stage(plan);
+  const cap = runner.episodePlanCapture(captureCtx);
+  assert.ok(cap, 'capture assembles at settle (the manifest hold)');
+  assert.equal(cap.tour_id, 'route-capture-1');
+  assert.equal(cap.items.length, plan.items.length, 'no wrap-up was authored for this plan, so no pseudo-item');
+  assert.equal(cap.items[0].kind, 'preview', 'the preview item opens the captured episode');
+  const story = cap.items.find(i => i.kind === 'story');
+  assert.ok(story && story.text && story.text.length > 100, 'story texts ride in full');
+  assert.ok(cap.route_plan_started.decisions, 'the decisions record rides verbatim');
+  assert.equal(outcomes.length, 0, 'no outcome before any close path runs');
+  runner.endTour();
+  const bare = new rp.RoutePlanRunner({ audio: new RealFakeAudio(), synthUrl: async () => 'blob:x' });
+  await bare.stage(qaPlan());
+  assert.equal(bare.episodePlanCapture(captureCtx), null, 'no episodeIds → capture is not wired, by construction');
+  bare.endTour();
+});
+
+await checkAsync('capture: outcome at arrival close — played, stale drop, heard, once only', async () => {
+  const outcomes = [];
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio: new RealFakeAudio(),
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onStoryHeard: () => {},
+    onEvent: (kind, payload) => events.push({ kind, payload }),
+    episodeIds: { tourId: 'route-capture-2', buildId: 'fresh-test' },
+    onEpisodeOutcome: p => outcomes.push(p),
+  });
+  const plan = anchorPlan();
+  const aItem = plan.items.find(i => i.unit?.id === 'a|landmark_origin');
+  const bItem = plan.items.find(i => i.unit?.id === 'b|landmark_origin');
+  await runner.start(plan);
+  runner.onPosition({ lat: 32.8, lng: -117.25 }); // progress ≈ 0.475 — past B's window end
+  await until(() => events.some(e => e.kind === 'story_dropped' && e.payload.subject === 'b|landmark_origin'), 'stale drop event for the outrun story');
+  runner.onPosition({ lat: 32.9, lng: -117.25 }); // arrival
+  await until(() => runner.view().closeoutDone, 'arrival closeout completed');
+  assert.equal(outcomes.length, 1, 'outcome filed exactly once at close');
+  const out = outcomes[0];
+  assert.equal(out.end_reason, 'arrival-owed');
+  assert.equal(out.begun, true);
+  assert.equal(out.tour_id, 'route-capture-2');
+  const bDrop = out.dropped.find(d => d.id === bItem.id);
+  assert.ok(bDrop && bDrop.reason === 'stale-window', `the outrun story's drop is named (dropped: ${JSON.stringify(out.dropped)})`);
+  assert.ok(out.played_item_ids.includes(aItem.id), 'the departure story is in the played list (sounded or sounding-at-close)');
+  assert.ok(out.heard_unit_ids.includes('a|landmark_origin'), 'the heard list carries the departure unit');
+  runner.endTour();
+  assert.equal(outcomes.length, 1, 'an End Tour after the closeout files nothing twice');
+});
+
+await checkAsync('capture: user end on a staged, never-begun plan files a user-ended outcome', async () => {
+  const outcomes = [];
+  const runner = new rp.RoutePlanRunner({
+    audio: new RealFakeAudio(),
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    episodeIds: { tourId: 'route-capture-3', buildId: 'fresh-test' },
+    onEpisodeOutcome: p => outcomes.push(p),
+    onEvent: () => {},
+  });
+  const plan = qaPlan();
+  await runner.stage(plan);
+  runner.endTour();
+  assert.equal(outcomes.length, 1);
+  const out = outcomes[0];
+  assert.equal(out.end_reason, 'user-ended');
+  assert.equal(out.begun, false, 'backed out of the card: the tour never began');
+  assert.deepEqual(out.played, [], 'nothing played');
+  assert.equal(out.dropped.length, plan.items.length, 'every item accounted for');
+  assert.ok(out.dropped.every(d => d.reason === 'unplayed'), 'rendered but never fed → unplayed');
+  assert.equal(out.driven, false);
+});
+
+await checkAsync('capture: a throwing outcome dep leaves the tour identical', async () => {
+  const runner = new rp.RoutePlanRunner({
+    audio: new RealFakeAudio(),
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onStoryHeard: () => {},
+    onEvent: () => {},
+    episodeIds: { tourId: 'route-capture-4', buildId: 'fresh-test' },
+    onEpisodeOutcome: () => {
+      throw new Error('capture sink exploded');
+    },
+  });
+  await runner.start(anchorPlan());
+  runner.onPosition({ lat: 32.9, lng: -117.25 }); // arrival
+  await until(() => runner.view().closeoutDone, 'arrival closeout completed despite the throwing capture dep');
+  assert.equal(runner.view().endedKind, 'arrival-owed', 'the closeout completed exactly as without capture');
+});
+
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
