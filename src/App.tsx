@@ -807,9 +807,11 @@ function MilesApp() {
     // The narration seam (addendum 5): ONE deps object for
     // every piece of route-mode live narration in this build —
     // the runner's bridge/preview synthesis, the gap-fill
-    // pass's gap stories, and the wrap-up below all draw from
-    // it, in Miles' solo voice. A future second chair changes
-    // this wiring and the narration layer, nothing else.
+    // pass's gap stories, and the wrap-up (text authored
+    // below; its synthesis rides the runner's render queue
+    // through synthFinishedUrl) all draw from it, in Miles'
+    // solo voice. A future second chair changes this wiring
+    // and the narration layer, nothing else.
     const narration: NarrationDeps = {
       voice: DEFAULT_NARRATION_VOICE,
       synthesize: text => synthesizeSpeech(text),
@@ -820,6 +822,15 @@ function MilesApp() {
       synthUrl: async text => {
         const blob = await narration.synthesize(text);
         return URL.createObjectURL(blob);
+      },
+      // The wrap-up's seam (render-ahead pipeline, Nov 4,
+      // 2026): synthesis WITH the standing audio finish — the
+      // finish the wrap-up always carried when it rendered at
+      // preparation time, now applied when its queue render
+      // runs during the tour.
+      synthFinishedUrl: async text => {
+        const blob = await narration.synthesize(text);
+        return URL.createObjectURL(await finishLiveRenderBlob(blob));
       },
       ...(qaAtBuild
         ? {
@@ -1288,36 +1299,35 @@ function MilesApp() {
         ? { ...fetched.stats, memberFetch: memberFetchRecord }
         : fetched.stats;
       // The wrap-up (addendum 3): ONE closing narration for the
-      // episode, authored + synthesized NOW, at preparation,
-      // through the narration seam — written for the planned
-      // drive played to finish (destination arrival beat +
-      // thread payoff as arc language + sign-off; the context
-      // carries plan facts only, never a played set, so it can
-      // assert no recap). The runner holds it as the plan's
-      // closing piece and plays it only on arrival with the
-      // plan run out; an early end or overrun never uses it.
-      // Failure here never fails the build: the plan proceeds
-      // without it and arrival falls back to today's closeout.
-      // The wrap-up is the build's first LIVE RENDER — the
-      // recording phase begins at this exact milestone (the
-      // runner's bridges + preview continue it behind the
-      // manifest card, under the same stage label).
+      // episode, written for the planned drive played to finish
+      // (destination arrival beat + thread payoff as arc
+      // language + sign-off; the context carries plan facts
+      // only, never a played set, so it can assert no recap).
+      // Its TEXT is authored NOW, at preparation — deterministic
+      // from plan facts, like every live piece's text. Its
+      // SYNTHESIS is a render-ahead queue item in the runner
+      // (last in plan order, through the finished-audio seam):
+      // the runner holds it as the plan's closing piece and
+      // plays it only on arrival with the plan run out; an
+      // early end or overrun never uses it. Failure here never
+      // fails the build: a text-authoring failure proceeds
+      // without it, and a synthesis failure degrades the same
+      // way at close — arrival falls back to today's closeout
+      // either way. route_wrap_up 'generated'/'failed' for the
+      // SYNTHESIS now fire from the runner when the render
+      // completes; the 'failed' below is text-authoring only.
+      // The recording phase begins at this exact milestone:
+      // the plan is about to be fixed and the runner's render
+      // queue IS the recording — the opening completes behind
+      // the manifest card, under the same stage label, and the
+      // remaining pieces record ahead of the listener.
       const recordingStartMs = Date.now();
       setRouteBuildStage(s => advanceRouteBuildStage(s, 'recording'));
       setRouteStatus(ROUTE_BUILD_STAGE_LABELS.recording);
       try {
         const wrapReq = narrationRequest('wrapup', buildWrapUpContext(plan));
         const wrapText = wrapUpTextFor(wrapReq.context);
-        const wrapBlob = await narration.synthesize(wrapText);
-        // v3.1 (commit D): the wrap-up is a live render too —
-        // it gets the same shelf-level finish.
-        plan.wrapUp = { text: wrapText, audioUrl: URL.createObjectURL(await finishLiveRenderBlob(wrapBlob)) };
-        void emitEvent(
-          sessionId,
-          'route_wrap_up',
-          { wrap_up: 'generated' },
-          { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
-        );
+        plan.wrapUp = { text: wrapText, audioUrl: null };
       } catch {
         plan.wrapUp = null;
         void emitEvent(
@@ -1365,13 +1375,19 @@ function MilesApp() {
         );
         await runner.stage(plan);
       }
-      // Episode capture (Nov 4, 2026): the build has SETTLED
-      // — every live render has succeeded or fallen back and
-      // the runner holds the finished plan (behind the
-      // manifest card, or already running for an empty plan).
-      // File the plan row NOW, tour or no tour: stationary
-      // builds are episodes too, and the analysis needs their
-      // words. Fire-and-forget by construction.
+      // Episode capture (Nov 4, 2026; schema 2 under the
+      // render-ahead pipeline): the OPENING has settled —
+      // stage()/start() resolved when the runner's Start gate
+      // flipped ready (behind the manifest card, or already
+      // running for an empty plan) — and every live text
+      // exists, since texts are authored at compose time and
+      // only synthesis is pipelined. The stage timings read
+      // accordingly: recording = plan-fix → opening settled,
+      // total = tap → opening settled. File the plan row NOW,
+      // tour or no tour: stationary builds are episodes too,
+      // and the analysis needs their words. The render
+      // verdicts for pieces still in flight ride the outcome
+      // row. Fire-and-forget by construction.
       const settledAtMs = Date.now();
       const planCapture = runner.episodePlanCapture({
         declaredMode: tourMode,
@@ -1956,8 +1972,10 @@ function MilesApp() {
     const rView = routeView;
     // Composer v3 (commit D): the manifest card's primary
     // button is honest about preparation — disabled under the
-    // recording-stage label until the runner's narration has
-    // fully settled, then enabled 'Start tour'.
+    // recording-stage label until the runner's OPENING has
+    // settled (render-ahead pipeline, Nov 4, 2026: the rest
+    // of the episode records ahead of the listener), then
+    // enabled 'Start tour'.
     const startBtn = routeStartButtonState(rView ?? { narrationReady: false });
     const routeNeedsResume = Boolean(rView?.userPaused || rView?.guardPaused);
     return (
@@ -1985,11 +2003,11 @@ function MilesApp() {
               // line when the plan has one, and the closing story.
               // Start tour is the play gesture: it begins the
               // staged runner and re-primes its audio on the tap.
-              // Until the plan-time narration has settled the
-              // button sits disabled under the recording-stage
-              // label — the card is up while preparation
-              // finishes, and says which phase it's in
-              // (composer v3, commit D; stage labels Nov 4).
+              // Until the opening has settled the button sits
+              // disabled under the recording-stage label — the
+              // card is up while the opening records, and says
+              // which phase it's in (composer v3, commit D;
+              // stage labels + opening settle Nov 4).
               <div className="mb-2 rounded-[2rem] bg-white/80 p-5 shadow-xl shadow-ink/15 backdrop-blur">
                 <p className="text-xs font-bold uppercase tracking-[0.18em] text-sagedeep">Your episode</p>
                 <h2 className="mt-1 text-xl font-black leading-tight">{routeManifest.title}</h2>
