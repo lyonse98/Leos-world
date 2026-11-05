@@ -78,6 +78,32 @@ export interface NarrationDeps {
   generateStory: (prompt: string) => Promise<string>;
 }
 
+// ------------------------------------------------------------ spoken forms (field fix, lane 5)
+
+/**
+ * Spoken-form normalization for LIVE tissue (field fix lane 5,
+ * Nov 5, 2026): highway and route labels as they appear in
+ * place names ("SR-905 West: Brown Field to I-805") read badly
+ * when a TTS voice meets the raw abbreviation — the field
+ * drive's bridges said the highway names "weird" because the
+ * raw labels went to synthesis verbatim. Every live-authored
+ * text (bridge, preview, wrap-up, reaction, commission) passes
+ * through here as its final step BEFORE synthesis, so the
+ * captured text is the spoken text, exactly. Word-boundary
+ * anchored, digits required: the pronoun "I", "SR" inside a
+ * word, and ordinary numbers are never touched. Library story
+ * texts, unit ids, and place keys never pass through here —
+ * this is a property of the live tissue only.
+ */
+export function spokenFormText(text: string): string {
+  return text
+    .replace(/\bPCF\s+(\d+)\b/g, 'P C F $1')
+    .replace(/\bSR-(\d+)\b/g, 'State Route $1')
+    .replace(/\bCA-(\d+)\b/g, 'State Route $1')
+    .replace(/\bUS-(\d+)\b/g, 'U.S. $1')
+    .replace(/\bI-(\d+)\b/g, 'Interstate $1');
+}
+
 // ------------------------------------------------------------ wrap-up text (addendum 3)
 
 /**
@@ -133,7 +159,7 @@ export function wrapUpTextFor(ctx: WrapUpContext): string {
         ? `And ${ctx.climaxSubject} — that was the heart of it. `
         : '';
   const signOff = `Thanks for riding with me. This is Miles — I'll be here for the next one.`;
-  return `${arrival}${arc}${climax}${signOff}`;
+  return spokenFormText(`${arrival}${arc}${climax}${signOff}`);
 }
 
 // ------------------------------------------------------------ the spoken preview (consolidation §2)
@@ -254,23 +280,23 @@ export function previewTextFor(ctx: PreviewContext): string {
   } else if (ctx.previouslyHeardSubject) {
     text += ` Last time we came this way, you heard about ${ctx.previouslyHeardSubject} — today, new ground.`;
   }
-  return text;
+  return spokenFormText(text);
 }
 
 // ------------------------------------------------------------ bridge text
 
-/** Unfloored spoken-length estimate for short composed lines (bridges). */
-function estimateSpokenSec(text: string): number {
-  const words = text.trim().split(/\s+/).filter(Boolean).length;
-  return Math.max(3, Math.round((words / 150) * 60));
-}
-
 /**
- * Authored connective sentences for elastic bridges. Place-free
- * by design — a bridge may stretch over any ground, so these
- * lines carry the drive, never facts about a place. The
- * pair-specific head line carries the names; these carry
- * the time.
+ * Authored connective sentences, once the elastic bridges'
+ * padding (composer v2). Place-free by design — they carry
+ * the drive, never facts about a place. Field fix lane 1
+ * (Nov 5, 2026) retired them from bridge authoring: a bridge
+ * is its pair's facts at honest length, never stretched with
+ * stock lines. The bank remains as the episode ledger's
+ * fingerprint set — bridgeEpisodeStateFromTexts recognizes
+ * these lines in existing texts so the no-repeat invariant
+ * (lane 1b) stays checkable across passes — and as the
+ * historical record of the lines the field drive heard
+ * repeat.
  */
 export const BRIDGE_CONNECTIVE_LINES: string[] = [
   'The road has a way of stitching this county together, one valley at a time.',
@@ -293,6 +319,82 @@ export const REACTION_BANK: string[] = [
   'Plenty of road left. Plenty of stories on it, too.',
   'I could drive these roads every day and still find something new.',
 ];
+
+/**
+ * The head shapes a bridge can open with (field fix lane 1b).
+ * The standard on-road head rotates through three phrasings
+ * of the same facts; the off-route heads are their own shapes
+ * (the range, the portal hop). Recorded in the episode ledger
+ * so no two consecutive bridges open alike and the rotation
+ * spreads across the episode.
+ */
+export type BridgeOpeningShape = 'ahead' | 'carries' | 'next' | 'rolling' | 'portal';
+
+/**
+ * The EPISODE LEDGER for bridges (field fix lane 1b, Nov 5,
+ * 2026 — Erik, from the first real route drive: "the bridges
+ * didn't seem to be aware of each other"). Bridges were
+ * authored pair-locally, so one episode repeated its own
+ * devices: the same connective-bank lines padded bridge after
+ * bridge, and the thread callout ("two ends of the same
+ * story") fired on nearly every bridge. The ledger is the
+ * episode's memory, carried as DATA through the seam: the
+ * composer threads one ledger through a plan's bridges in
+ * order; member surgery and the runner's commissions seed
+ * theirs from the texts already in the episode
+ * (bridgeEpisodeStateFromTexts) and extend it. The rules it
+ * enforces live in bridgeTextFor: no bank line ever repeats
+ * within an episode (lane 1 removed bank padding outright —
+ * the ledger still records any bank line an existing text
+ * carries, so the invariant is checkable), the thread callout
+ * fires at most once per episode, and standard openings
+ * rotate.
+ */
+export interface BridgeEpisodeState {
+  /** Connective-bank lines already present in this episode's bridges. */
+  bankLinesUsed: string[];
+  /** The thread callout has fired in this episode. */
+  threadCalloutUsed: boolean;
+  /** Opening shapes authored so far, in order. */
+  openings: BridgeOpeningShape[];
+}
+
+/** A fresh episode ledger (a plan's first bridge starts here). */
+export function newBridgeEpisodeState(): BridgeEpisodeState {
+  return { bankLinesUsed: [], threadCalloutUsed: false, openings: [] };
+}
+
+/** Which head shape a bridge text opens with, by its fingerprint. Null when it matches none (fixtures, foreign texts). */
+function openingShapeOf(text: string): BridgeOpeningShape | null {
+  if (text.includes('we range off the road for a story')) return 'portal';
+  if (/we keep rolling — just ahead is/.test(text)) return 'ahead';
+  if (text.includes('the road carries us on to')) return 'carries';
+  if (/^That was .+\. Next along the road:/.test(text)) return 'next';
+  if (/we keep rolling\./.test(text)) return 'rolling';
+  return null;
+}
+
+/**
+ * Rebuild an episode ledger from bridge texts already in the
+ * episode — the seam-side memory for passes that author into
+ * a plan they did not compose (member surgery, drive-time
+ * commissions). Detection is by fingerprint (bank lines
+ * verbatim, the callout formula, opening shapes), so a ledger
+ * seeded this way knows exactly what the listener has already
+ * heard.
+ */
+export function bridgeEpisodeStateFromTexts(texts: string[]): BridgeEpisodeState {
+  const state = newBridgeEpisodeState();
+  for (const t of texts) {
+    for (const line of BRIDGE_CONNECTIVE_LINES) {
+      if (t.includes(line) && !state.bankLinesUsed.includes(line)) state.bankLinesUsed.push(line);
+    }
+    if (t.includes('two ends of the same story')) state.threadCalloutUsed = true;
+    const shape = openingShapeOf(t);
+    if (shape) state.openings.push(shape);
+  }
+  return state;
+}
 
 /**
  * The real context a bridge is composed with (differentiator
@@ -338,35 +440,86 @@ export interface BridgeContext {
   wovenSubject?: string;
 }
 
+/** The standard on-road head shapes, in rotation order (lane 1b). Each is pure phrasing around the same two facts. */
+const STANDARD_HEADS: { shape: BridgeOpeningShape; make: (prev: string, next: string) => string }[] = [
+  {
+    shape: 'ahead',
+    make: (prev, next) => `From ${prev} we keep rolling — just ahead is ${next}, and it has its own story to tell.`,
+  },
+  { shape: 'carries', make: (prev, next) => `From ${prev}, the road carries us on to ${next}.` },
+  { shape: 'next', make: (prev, next) => `That was ${prev}. Next along the road: ${next}.` },
+];
+
+/**
+ * Pick the next standard head shape from the episode ledger:
+ * never the shape the immediately previous bridge opened with
+ * (when any alternative exists), otherwise the least-used
+ * shape in the episode — deterministic, ties by rotation
+ * order. The choice is recorded by the caller.
+ */
+function pickStandardHead(episode: BridgeEpisodeState): (typeof STANDARD_HEADS)[number] {
+  const last = episode.openings[episode.openings.length - 1];
+  const counts = new Map<BridgeOpeningShape, number>();
+  for (const s of episode.openings) counts.set(s, (counts.get(s) ?? 0) + 1);
+  const pool = STANDARD_HEADS.filter(h => h.shape !== last);
+  const candidates = pool.length > 0 ? pool : STANDARD_HEADS;
+  return candidates.reduce((best, h) => ((counts.get(h.shape) ?? 0) < (counts.get(best.shape) ?? 0) ? h : best));
+}
+
 /**
  * Pair-specific bridge text, composed at plan time, Miles-solo
  * — authored HERE, in the narration layer, from the context's
  * structured facts (addendum 5: persona phrasing lives in this
  * layer and the persona source, never in composition logic).
- * Elastic: given a target, connective sentences are appended —
- * in a rotation seeded by the pair, so a given bridge is stable
- * across rebuilds but pairs differ — until the spoken estimate
- * reaches the target or the bank runs out (a bridge composes
- * TOWARD its target; the authored bank tops out around a
- * minute, and longer anchor gaps are window-wait, by design).
- * A portal hop's bridge names the connection that earned the
- * hop. Through-line: a mid bridge may call back an earlier
- * story on the thread, and the bridge into a sequenced climax
- * pays the preview's promise off — for an off-route portal
- * climax, it says so plainly: the story is not on this road,
- * and Miles is choosing it because it is what the drive has
- * been about. The authored lines are built only from the
- * context's real plan facts, and elastic fill composes around
- * them. Without a context, the text is exactly the composer-v2
- * bridge.
+ *
+ * HONEST LENGTH (field fix lane 1, Nov 5, 2026): a bridge is
+ * its head plus whatever the pair's facts earn — a thread
+ * sentence, a payoff beat, an honest hop framing. It is NEVER
+ * stretched toward a time target with connective-bank filler:
+ * the elastic padding was the field drive's awkwardness (84 s
+ * bridges of stock lines) and its window burn (tissue seconds
+ * are sequence seconds at highway speed). opts.targetSec is
+ * still accepted from standing callers but no longer shapes
+ * the text; genuine long waits belong to the composer's own
+ * devices (window-wait, fillers, stories), never to a bridge.
+ * opts.maxChars (the runner's re-bridge cap) drops the one
+ * optional sentence — the mid thread callback — before it
+ * ever truncates a head or a payoff mid-sentence.
+ *
+ * EPISODE AWARENESS (lane 1b): opts.episode is the episode
+ * ledger (see BridgeEpisodeState). The standard head rotates
+ * so consecutive bridges never open alike; the thread callout
+ * ("two ends of the same story") fires at most once per
+ * episode — later mid bridges name the callback plainly
+ * instead. Without a ledger, a fresh one is used (a lone
+ * bridge behaves exactly as the first bridge of an episode).
+ *
+ * A portal hop's bridge frames the story as one being TOLD
+ * from across the county and names the connection that earned
+ * the hop (lane 4) — no proximity language, ever. Through-
+ * line: a mid bridge may call back an earlier story on the
+ * thread, and the bridge into a sequenced climax pays the
+ * preview's promise off — for an off-route portal climax, it
+ * says so plainly: the story is not on this road, and Miles
+ * is choosing it because it is what the drive has been about.
+ * The authored lines are built only from the context's real
+ * plan facts. The final text passes through spokenFormText
+ * (lane 5), so what is captured is what is spoken.
  */
 export function bridgeTextFor(
   prev: { id: string; placeName: string },
   next: { id: string; placeName: string },
-  opts: { targetSec?: number; portalTopic?: string; context?: BridgeContext } = {},
+  opts: {
+    targetSec?: number;
+    portalTopic?: string;
+    context?: BridgeContext;
+    episode?: BridgeEpisodeState;
+    maxChars?: number;
+  } = {},
 ): string {
-  const target = opts.targetSec ?? 8; // routeMode's BRIDGE_MIN_SEC, mirrored (this layer stays import-free)
   const ctx = opts.context;
+  const episode = opts.episode ?? newBridgeEpisodeState();
+  const sentences: string[] = [];
   // An off-route climax gets no "just ahead" head — the story
   // is not ahead, it is across the county, and the bridge
   // says so (consolidation §4: honest framing, no proximity
@@ -374,48 +527,73 @@ export function bridgeTextFor(
   // discipline: the next story is not ahead either — the host
   // is ranging along the thread, and the head says that
   // instead of pointing at the road.
-  let text = opts.portalTopic
-    ? `From ${prev.placeName}, there is a thread worth following — ${opts.portalTopic} ties it to ${next.placeName}, a little way off our road, and the connection is too good to skip.`
-    : ctx?.offRouteSubject || ctx?.wovenSubject
-      ? `From ${prev.placeName} we keep rolling.`
-      : `From ${prev.placeName} we keep rolling — just ahead is ${next.placeName}, and it has its own story to tell.`;
+  if (opts.portalTopic) {
+    // A portal hop (lane 4 framing): a story ranged for and
+    // TOLD from across the county — the connection that earned
+    // the hop is named, the distance is never hidden, and no
+    // proximity language pretends the ground ahead holds it.
+    sentences.push(
+      `From ${prev.placeName}, we range off the road for a story — ${next.placeName}, clear across the county. The ${opts.portalTopic} thread ties it to ${prev.placeName}, and the connection is too good to skip.`,
+    );
+    episode.openings.push('portal');
+  } else if (ctx?.offRouteSubject || ctx?.wovenSubject) {
+    sentences.push(`From ${prev.placeName} we keep rolling.`);
+    episode.openings.push('rolling');
+  } else {
+    const head = pickStandardHead(episode);
+    sentences.push(head.make(prev.placeName, next.placeName));
+    episode.openings.push(head.shape);
+  }
+  /** The one optional sentence's index (the mid thread callback/callout) — droppable under a char cap. */
+  let optionalIdx = -1;
   if (ctx && !opts.portalTopic) {
     if (ctx.wovenSubject && ctx.role !== 'payoff') {
       // The woven range, framed honestly (Nov 4, 2026): the
       // story is NOT on this road — Miles is following the
       // drive's thread to where that same story is told,
       // clear across the county, and says so plainly.
-      text += ctx.threadTopic
-        ? ` This next one isn't on our road at all — it's ${ctx.wovenSubject}, clear across the county. But the ${ctx.threadTopic} thread runs straight through it, so we're following the thread for a while.`
-        : ` This next one isn't on our road at all — it's ${ctx.wovenSubject}, clear across the county. But it belongs in this drive, so we're ranging off the road for it.`;
+      sentences.push(
+        ctx.threadTopic
+          ? `This next one isn't on our road at all — it's ${ctx.wovenSubject}, clear across the county. But the ${ctx.threadTopic} thread runs straight through it, so we're following the thread for a while.`
+          : `This next one isn't on our road at all — it's ${ctx.wovenSubject}, clear across the county. But it belongs in this drive, so we're ranging off the road for it.`,
+      );
     }
     if (ctx.role === 'payoff') {
       if (ctx.threadTopic) {
-        text += ctx.promiseMade
-          ? ` And here it is — ${ctx.nextSubject}. I pointed at this one when we set out: this drive's ${ctx.threadTopic} thread lands here.`
-          : ` And here it is — ${ctx.nextSubject}, where this drive's ${ctx.threadTopic} thread comes together.`;
+        sentences.push(
+          ctx.promiseMade
+            ? `And here it is — ${ctx.nextSubject}. I pointed at this one when we set out: this drive's ${ctx.threadTopic} thread lands here.`
+            : `And here it is — ${ctx.nextSubject}, where this drive's ${ctx.threadTopic} thread comes together.`,
+        );
       }
       // The off-route hop, framed honestly (consolidation §4):
       // the story is NOT on the road — Miles is choosing it
       // because it is the story the drive has been about.
       if (ctx.offRouteSubject) {
-        text += ` Now — this next one isn't on our road at all. ${ctx.offRouteSubject} is clear across the county from here. But it's the story this whole drive has been about, so we're making the hop.`;
+        sentences.push(
+          `Now — this next one isn't on our road at all. ${ctx.offRouteSubject} is clear across the county from here. But it's the story this whole drive has been about, so we're making the hop.`,
+        );
       }
     } else if (ctx.threadTopic && ctx.role === 'mid' && ctx.callbackSubject) {
-      text += ` There's that ${ctx.threadTopic} thread again — ${ctx.callbackSubject} and ${ctx.nextSubject} are two ends of the same story.`;
+      // The thread callout fires at most once per episode
+      // (lane 1b): the first mid bridge that can name it gets
+      // the formula; later ones connect on the callback fact
+      // plainly, in different words.
+      optionalIdx = sentences.length;
+      if (!episode.threadCalloutUsed) {
+        sentences.push(
+          `There's that ${ctx.threadTopic} thread again — ${ctx.callbackSubject} and ${ctx.nextSubject} are two ends of the same story.`,
+        );
+        episode.threadCalloutUsed = true;
+      } else {
+        sentences.push(
+          `We heard the ${ctx.threadTopic} thread in ${ctx.callbackSubject} — it runs through ${ctx.nextSubject} too.`,
+        );
+      }
     }
   }
-  if (estimateSpokenSec(text) < target) {
-    let seed = 0;
-    const key = `${prev.id}>${next.id}`;
-    for (let i = 0; i < key.length; i++) seed = (seed * 31 + key.charCodeAt(i)) & 0x7fffffff;
-    let idx = seed % BRIDGE_CONNECTIVE_LINES.length;
-    let guard = 0;
-    while (estimateSpokenSec(text) < target && guard < BRIDGE_CONNECTIVE_LINES.length) {
-      text += ` ${BRIDGE_CONNECTIVE_LINES[idx % BRIDGE_CONNECTIVE_LINES.length]}`;
-      idx += 1;
-      guard += 1;
-    }
+  if (opts.maxChars !== undefined && optionalIdx >= 0 && sentences.join(' ').length > opts.maxChars) {
+    sentences.splice(optionalIdx, 1);
   }
-  return text;
+  return spokenFormText(sentences.join(' '));
 }
