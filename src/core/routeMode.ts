@@ -3549,20 +3549,33 @@ function mergeFailure(current: MapsFailure, next: MapsFailure): MapsFailure {
   return next;
 }
 
+/** Knobs for the maps calls' retry pass (tests inject a no-op sleep). */
+export interface MapsCallOptions {
+  /** Backoff between the two key-walk passes. */
+  retryDelayMs?: number;
+  /** Injectable sleep; defaults to a real timer. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** Backoff before a maps call's second key-walk pass. */
+export const MAPS_RETRY_DELAY_MS = 1200;
+
+const mapsSleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+
 /**
- * Places (New) text search for the destination, across ALL
+ * ONE pass of the Places (New) text search across all
  * configured keys (see configuredKeys). Returns the top candidate
  * from the first key that answers; a key that answers with zero
  * places is definitive ('no_results') — later keys are not tried
  * for a query the service itself rejected as empty.
+ * geocodeDestination decides whether a non-definitive outcome
+ * earns a second pass.
  */
-export async function geocodeDestination(
+async function geocodePass(
   query: string,
-  apiKeys: string[],
-  fetchFn: typeof fetch = fetch,
+  keys: string[],
+  fetchFn: typeof fetch,
 ): Promise<GeocodeOutcome> {
-  const keys = configuredKeys(apiKeys);
-  if (keys.length === 0) return { destination: null, failure: 'no_keys' };
   let failure: MapsFailure = 'network';
   for (const apiKey of keys) {
     let res: Response;
@@ -3616,6 +3629,72 @@ export async function geocodeDestination(
   return { destination: null, failure };
 }
 
+/**
+ * Places (New) text search for the destination, across ALL
+ * configured keys — with ONE retry pass (Nov 4, 2026, Erik's
+ * first stationary test of the published stack). Tap 1's build
+ * died here ~5 s in, classed 'permission', and tap 2 — the
+ * identical call, 9 s later — succeeded. The single-pass walk
+ * could not tell the two apart: the Places-named key is
+ * deterministically 403-blocked for SearchText (probe-verified),
+ * so every build rides on a later key answering; the failure
+ * merge makes 'permission' sticky, so ONE transient transport
+ * failure on the working key (cold connections, seconds after
+ * launch) merged with that standing 403 into a fatal
+ * 'permission'. A non-definitive outcome — no key answered —
+ * therefore earns exactly one more full walk after a short
+ * backoff before the build is allowed to die. Definitive
+ * outcomes (a key answered: success, or 'no_results') never
+ * retry, and 'no_keys' never walks at all.
+ */
+export async function geocodeDestination(
+  query: string,
+  apiKeys: string[],
+  fetchFn: typeof fetch = fetch,
+  opts: MapsCallOptions = {},
+): Promise<GeocodeOutcome> {
+  const keys = configuredKeys(apiKeys);
+  if (keys.length === 0) return { destination: null, failure: 'no_keys' };
+  const first = await geocodePass(query, keys, fetchFn);
+  if (first.destination || first.failure === 'no_results') return first;
+  await (opts.sleep ?? mapsSleep)(opts.retryDelayMs ?? MAPS_RETRY_DELAY_MS);
+  const second = await geocodePass(query, keys, fetchFn);
+  if (second.destination || second.failure === 'no_results') return second;
+  return { destination: null, failure: mergeFailure(first.failure ?? 'network', second.failure ?? 'network') };
+}
+
+export type DestinationSource = 'selection' | 'places';
+
+export interface DestinationResolution {
+  destination: GeocodedDestination | null;
+  /** Null on success; otherwise the failure class above. */
+  failure: MapsFailure | null;
+  source: DestinationSource;
+}
+
+/**
+ * The build's ONE destination resolution (Nov 4, 2026). A
+ * destination that arrived WITH coordinates (a Places
+ * selection) needs no geocode at all — it resolves locally,
+ * zero network calls, immune to key restrictions by
+ * construction. Free text goes through geocodeDestination
+ * (rotation + retry pass). The shipped intake is text-only
+ * today, so the App passes no selection; the selection branch
+ * is the guarantee a future picker plugs into, harness-pinned
+ * so it cannot rot.
+ */
+export async function resolveDestination(
+  query: string,
+  apiKeys: string[],
+  selected: GeocodedDestination | null,
+  fetchFn: typeof fetch = fetch,
+  opts: MapsCallOptions = {},
+): Promise<DestinationResolution> {
+  if (selected) return { destination: selected, failure: null, source: 'selection' };
+  const outcome = await geocodeDestination(query, apiKeys, fetchFn, opts);
+  return { ...outcome, source: 'places' };
+}
+
 export interface ComputedRoute {
   path: GeoPoint[];
   distanceMeters: number;
@@ -3623,20 +3702,20 @@ export interface ComputedRoute {
 }
 
 /**
- * Routes API computeRoutes with traffic (TRAFFIC_AWARE), DRIVE
- * mode, across ALL configured keys (see configuredKeys — Routes
- * was added to one key's restriction list Nov 2, 2026, Places
- * (New) evidently sits on another's; a 403 tries the next key).
- * A key that answers with no route is definitive ('no_results').
+ * ONE pass of Routes API computeRoutes with traffic
+ * (TRAFFIC_AWARE), DRIVE mode, across ALL configured keys (see
+ * configuredKeys — Routes was added to one key's restriction
+ * list Nov 2, 2026, Places (New) evidently sits on another's; a
+ * 403 tries the next key). A key that answers with no route is
+ * definitive ('no_results'). computeRoute decides whether a
+ * non-definitive outcome earns a second pass.
  */
-export async function computeRoute(
+async function computeRoutePass(
   origin: GeoPoint,
   destination: GeoPoint,
-  apiKeys: string[],
-  fetchFn: typeof fetch = fetch,
+  keys: string[],
+  fetchFn: typeof fetch,
 ): Promise<RouteOutcome> {
-  const keys = configuredKeys(apiKeys);
-  if (keys.length === 0) return { route: null, failure: 'no_keys' };
   let failure: MapsFailure = 'network';
   for (const apiKey of keys) {
     let res: Response;
@@ -3693,6 +3772,32 @@ export async function computeRoute(
     };
   }
   return { route: null, failure };
+}
+
+/**
+ * Routes API computeRoutes, across ALL configured keys — with
+ * the same one-retry-pass discipline as geocodeDestination
+ * (Nov 4, 2026): a non-definitive failure (no key answered)
+ * earns one more full walk after a short backoff, because the
+ * merged failure class cannot distinguish a truly blocked key
+ * set from a transient failure on the one key that carries
+ * Routes. Definitive outcomes never retry.
+ */
+export async function computeRoute(
+  origin: GeoPoint,
+  destination: GeoPoint,
+  apiKeys: string[],
+  fetchFn: typeof fetch = fetch,
+  opts: MapsCallOptions = {},
+): Promise<RouteOutcome> {
+  const keys = configuredKeys(apiKeys);
+  if (keys.length === 0) return { route: null, failure: 'no_keys' };
+  const first = await computeRoutePass(origin, destination, keys, fetchFn);
+  if (first.route || first.failure === 'no_results') return first;
+  await (opts.sleep ?? mapsSleep)(opts.retryDelayMs ?? MAPS_RETRY_DELAY_MS);
+  const second = await computeRoutePass(origin, destination, keys, fetchFn);
+  if (second.route || second.failure === 'no_results') return second;
+  return { route: null, failure: mergeFailure(first.failure ?? 'network', second.failure ?? 'network') };
 }
 
 /**
