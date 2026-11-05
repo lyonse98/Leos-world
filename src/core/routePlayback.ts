@@ -43,9 +43,19 @@ import { GAP_MS, Player, type AudibleItem, type AudioPort, type LatchState, syst
 import { bucketUrl } from './backend';
 import type { RouteDriveRecord } from './routeHistory';
 import {
+  assembleOutcomeCapture,
+  assemblePlanCapture,
+  assemblePlanItems,
+  pathLengthM,
+  type EpisodeCaptureContext,
+  type RouteEpisodeOutcomePayload,
+  type RouteEpisodePlanPayload,
+} from './episodeCapture';
+import {
   decideCloseout,
   estimateDurationSec,
   hasArrived,
+  haversineM,
   isOffCorridor,
   owedLine,
   progressAlongPath,
@@ -283,6 +293,23 @@ export interface RouteRunnerDeps {
   onDriveRecord?: (record: RouteDriveRecord) => void;
   /** Best-effort telemetry (App wires backend.emitEvent). */
   onEvent?: (type: string, payload: Record<string, unknown>) => void;
+  /**
+   * Episode capture (Nov 4, 2026): fired ONCE at tour close
+   * with the outcome row's payload (played / dropped / end
+   * reason / movement). The App persists it to route_episodes
+   * (backend.captureRouteEpisode). Absent dep = no outcome
+   * row, by construction — the same posture as onDriveRecord.
+   */
+  onEpisodeOutcome?: (payload: RouteEpisodeOutcomePayload) => void;
+  /**
+   * Episode capture identity: the tour/session id and build
+   * id the capture rows carry. The App mints the session id
+   * before constructing the runner, so it can hand both over
+   * here; the runner cannot know them itself (the drive
+   * record's enrichment pattern, moved to construction).
+   * Absent = capture is not wired for this runner.
+   */
+  episodeIds?: { tourId: string; buildId: string };
 }
 
 let runnerSeq = 0;
@@ -293,6 +320,22 @@ export class RoutePlanRunner {
   private plan: RoutePlan | null = null;
   private listeners = new Set<() => void>();
   private playedStoryIds = new Set<string>();
+  // Episode capture accounting (Nov 4, 2026): per-item settle
+  // outcomes for the outcome row — every plan item that SOUNDED,
+  // in sounding order, and every item that settled without
+  // sounding. Recorded in onItemSettle before any early return,
+  // so close-time abandons are counted too. Observation only:
+  // nothing in playback reads these.
+  private playedOrderIds: string[] = [];
+  private settledUnplayed = new Map<string, { skipped: boolean }>();
+  /** Bridges the feed gate skipped because their parent story was dropped stale. */
+  private gateSkippedItemIds = new Set<string>();
+  /** Episode capture: filed at most once per runner, like the drive record. */
+  private episodeOutcomeWritten = false;
+  /** Movement evidence (episode capture's driven/stationary discriminator). */
+  private firstFix: GeoPoint | null = null;
+  private maxDisplacementM = 0;
+  private maxProgress = 0;
   /** Rendered plan items in plan order (render failures never land here — skip-fallback). */
   private rendered: { planItem: PlanItem; audible: AudibleItem }[] = [];
   /** Next rendered entry the feed gate will consider. Entry 0 is begun directly by start(). */
@@ -598,6 +641,10 @@ export class RoutePlanRunner {
       this.writeDriveRecord(
         plan.items.filter(it => it.kind === 'story' && it.unit).map(it => it.unit as LibraryUnit),
       );
+      // Episode capture (Nov 4, 2026): an empty plan ends
+      // here, never reaching close() — its outcome row files
+      // from the same branch.
+      this.fileEpisodeOutcome('overrun');
       this.heldStart = false;
       this.freeformTailFlag = true;
       this.endedKind = 'overrun';
@@ -612,10 +659,16 @@ export class RoutePlanRunner {
     this.notify();
   }
 
-  private filePlanStarted(): void {
-    const plan = this.plan;
-    if (!plan) return;
-    this.deps.onEvent?.('route_plan_started', {
+  /**
+   * The route_plan_started payload, factored out of
+   * filePlanStarted (episode capture, Nov 4, 2026): the
+   * capture's plan row embeds this EXACT object, so offline
+   * analysis reads the same decisions record telemetry
+   * filed — never a reconstruction of it.
+   */
+  private planStartedPayload(): Record<string, unknown> {
+    const plan = this.plan as RoutePlan;
+    return {
       destination: plan.destinationName,
       items: this.rendered.length,
       portals: plan.items.filter(i => i.portal).length,
@@ -700,7 +753,89 @@ export class RoutePlanRunner {
             }
           : null,
       },
+    };
+  }
+
+  private filePlanStarted(): void {
+    if (!this.plan) return;
+    this.deps.onEvent?.('route_plan_started', this.planStartedPayload());
+  }
+
+  /**
+   * Episode capture (Nov 4, 2026): the kind='plan' payload,
+   * assembled from the runner's own state at build settle —
+   * the App calls this once stage()/start() resolves and
+   * sends it through backend.captureRouteEpisode. The items
+   * are the plan's, fully self-contained (full texts as
+   * served); the decisions are planStartedPayload() verbatim.
+   * Null when capture is not wired for this runner
+   * (episodeIds absent) or no plan was ever handed over.
+   */
+  episodePlanCapture(context: EpisodeCaptureContext): RouteEpisodePlanPayload | null {
+    const plan = this.plan;
+    const ids = this.deps.episodeIds;
+    if (!plan || !ids) return null;
+    const renderedIds = new Set(this.rendered.map(e => e.planItem.id));
+    return assemblePlanCapture({
+      tourId: ids.tourId,
+      buildId: ids.buildId,
+      context,
+      plan,
+      routePlanStarted: this.planStartedPayload(),
+      items: assemblePlanItems(plan, renderedIds),
     });
+  }
+
+  /**
+   * Episode capture (Nov 4, 2026): file the kind='outcome'
+   * row, ONCE, from the runner's own accounting — the same
+   * lists the drive record and the owed tease are drawn
+   * from. Fired from close() (arrival / overrun), from the
+   * empty-plan branch of renderPlan (an overrun that never
+   * reaches close()), and from endTour() (user end, begun or
+   * backed out of the card). A failure inside the dep is
+   * swallowed: capture never breaks a tour.
+   *
+   * extraPlayedIds: on an arrival close, the story sounding
+   * on the element plays to completion behind the closeout
+   * (consolidation §5) — its settle lands after this files,
+   * so close() names it played explicitly. On overrun the
+   * Player cuts it off mid-flight; it is NOT named.
+   */
+  private fileEpisodeOutcome(endReason: string, extraPlayedIds: string[] = []): void {
+    if (this.episodeOutcomeWritten || !this.plan || !this.deps.onEpisodeOutcome || !this.deps.episodeIds) return;
+    this.episodeOutcomeWritten = true;
+    try {
+      const plan = this.plan;
+      const renderedIds = new Set(this.rendered.map(e => e.planItem.id));
+      const playedIds = [...this.playedOrderIds];
+      for (const id of extraPlayedIds) {
+        if (!playedIds.includes(id)) playedIds.push(id);
+      }
+      const playedIdSet = new Set(playedIds);
+      const heardUnitIds = plan.items
+        .filter(it => it.unit && playedIdSet.has(it.id))
+        .map(it => (it.unit as LibraryUnit).id);
+      this.deps.onEpisodeOutcome(
+        assembleOutcomeCapture(this.deps.episodeIds.tourId, this.deps.episodeIds.buildId, {
+          endReason,
+          begun: this.begun,
+          planItemIds: plan.items.map(it => it.id),
+          playedItemIds: playedIds,
+          settledUnplayed: this.settledUnplayed,
+          droppedStaleItemIds: this.droppedStoryIds,
+          gateSkippedItemIds: this.gateSkippedItemIds,
+          unrenderedItemIds: new Set(plan.items.filter(it => !renderedIds.has(it.id)).map(it => it.id)),
+          heardUnitIds,
+          maxDisplacementM: this.maxDisplacementM,
+          maxProgressFraction: this.maxProgress,
+          pathLengthM: pathLengthM(plan.path),
+          endedAtMs: Date.now(),
+        }),
+      );
+    } catch {
+      /* capture is a nicety — never a tour failure */
+    }
   }
 
   /**
@@ -733,6 +868,7 @@ export class RoutePlanRunner {
       if (it.kind === 'bridge' && it.prevUnitId && this.droppedStoryIds.has(it.prevUnitId)) {
         this.feedIndex += 1;
         this.resolvedCount += 1;
+        this.gateSkippedItemIds.add(it.id); // episode capture: the outcome row names this drop
         continue;
       }
       if (it.kind === 'story' && !it.portal && !it.woven && entry !== this.departureEntry) {
@@ -836,6 +972,12 @@ export class RoutePlanRunner {
 
   private onItemSettle(it: PlanItem, rec: { sounded: boolean; skipped: boolean }): void {
     const sounded = rec.sounded;
+    // Episode capture accounting (Nov 4, 2026): recorded
+    // before anything else — including settles the closeout
+    // itself causes (queued items abandoned at close count as
+    // settled-without-sounding in the outcome row).
+    if (sounded) this.playedOrderIds.push(it.id);
+    else this.settledUnplayed.set(it.id, { skipped: rec.skipped });
     // The breath's input (commit D): every plan-item settle
     // is recorded before anything else reads it — the Player
     // consults the gap hook immediately after this returns.
@@ -870,6 +1012,19 @@ export class RoutePlanRunner {
     }
     this.lastProgress = progress;
     this.lastProgressAt = nowMs;
+    // Episode capture movement evidence (Nov 4, 2026): how
+    // far the device ever got from its first fix, and how far
+    // along the path it ever read — the raw material for the
+    // outcome row's driven/stationary call. Recorded before
+    // the manifest-hold return: movement is movement, card or
+    // no card.
+    if (this.firstFix === null) {
+      this.firstFix = pos;
+    } else {
+      const displacement = haversineM(this.firstFix, pos);
+      if (displacement > this.maxDisplacementM) this.maxDisplacementM = displacement;
+    }
+    if (progress > this.maxProgress) this.maxProgress = progress;
     // Manifest hold (differentiator 3): while the episode card
     // is up, a position update refreshes the progress reading
     // only — no arrival closeout, no corridor pause, no window
@@ -1084,6 +1239,13 @@ export class RoutePlanRunner {
     } else {
       this.closeoutDoneFlag = true;
     }
+    // Episode capture (Nov 4, 2026): the outcome row files
+    // after the queued abandons above, so their settles are
+    // already in the accounting (settled-without-sounding).
+    // On an arrival close the sounding story plays to
+    // completion behind the closeout — name it played; on
+    // overrun it is cut off and stays unplayed.
+    this.fileEpisodeOutcome(kind, kind !== 'overrun' && soundingStoryId ? [soundingStoryId] : []);
     this.deps.onEvent?.('route_plan_ended', { kind, owed: this.owed, questions: this.questionsAnsweredCount });
     this.notify();
   }
@@ -1183,6 +1345,13 @@ export class RoutePlanRunner {
         .map(it => it.unit as LibraryUnit);
       this.writeDriveRecord(unplayed);
     }
+    // Episode capture (Nov 4, 2026): a user end files the
+    // outcome row whenever a plan exists — begun (the drive's
+    // partial accounting) or backed out of the manifest card
+    // unbegun (played empty, end 'user-ended'). A tour that
+    // already closed out filed its row in close(); the
+    // once-guard makes this a no-op there.
+    if (this.plan) this.fileEpisodeOutcome('user-ended');
     this.endedKind = this.endedKind ?? 'user-ended';
     this.closed = true;
     this.player.teardown();
