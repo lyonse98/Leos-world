@@ -29,9 +29,13 @@ export { normalizePlaceName } from './routeHistory';
 import {
   bridgeTextFor,
   previewTextFor,
+  spokenFormText,
+  newBridgeEpisodeState,
+  bridgeEpisodeStateFromTexts,
   BRIDGE_CONNECTIVE_LINES,
   REACTION_BANK,
   type BridgeContext,
+  type BridgeEpisodeState,
   type PreviewContext,
   type WrapUpContext,
 } from './narration';
@@ -39,7 +43,18 @@ import {
 // The narration text layer lives in the narration seam
 // (addendum 5); these re-exports keep its long-standing
 // import surface.
-export { bridgeTextFor, previewTextFor, BRIDGE_CONNECTIVE_LINES, REACTION_BANK, type BridgeContext, type PreviewContext };
+export {
+  bridgeTextFor,
+  previewTextFor,
+  spokenFormText,
+  newBridgeEpisodeState,
+  bridgeEpisodeStateFromTexts,
+  BRIDGE_CONNECTIVE_LINES,
+  REACTION_BANK,
+  type BridgeContext,
+  type BridgeEpisodeState,
+  type PreviewContext,
+};
 
 // Composer v2 (Erik, Nov 3, 2026): full-path fetch with segment
 // fairness (no first-60 early-route bias), position-anchored
@@ -524,8 +539,59 @@ export function storyWindow(anchorProgress: number, durationSec: number, driveDu
 /** Elastic bridge bounds: never shorter than the phase-1 line, never a story in disguise. */
 export const BRIDGE_MIN_SEC = 8;
 export const BRIDGE_MAX_SEC = 90;
+
+/**
+ * The serial sounding model's pace safety factor (field fix
+ * lane 2, Nov 5, 2026). Windows live in route PROGRESS; items
+ * sound in sequence TIME; the two meet only through pace, and
+ * real pace outruns the Routes average on freeway stretches —
+ * the field drive's first stories burned roughly a quarter
+ * again as much ground as the expected-time map allowed.
+ * Doom judgments (below, and the composer's portal repair)
+ * therefore evaluate a story's start at 1.25× the expected
+ * pace: a placement that only works at exactly the predicted
+ * pace is not a placement that works.
+ */
+export const SERIAL_PACE_SAFETY = 1.25;
+/** The serial model's tissue estimates, seconds (the preview is ~30 s as authored; a post-lane-1 bridge is its facts at honest length; a reaction is a bank line). */
+export const SERIAL_PREVIEW_EST_SEC = 30;
+export const SERIAL_BRIDGE_EST_SEC = 20;
+export const SERIAL_REACTION_EST_SEC = 5;
 /** Portal share cap (item 4): portals ≤ ¼ of the plan's story items ⟺ portals ≤ geoStories / 3. */
 export const PORTAL_CAP_DIVISOR = 3;
+
+/**
+ * Woven twins (field fix lane 4, Nov 5, 2026): a twin is the
+ * ABOUT-register telling of a place+angle — its angle is the
+ * source angle + '-woven-v1' (the tranche convention; tour.ts
+ * keeps freeform off them by the same suffix). Portal seats
+ * prefer the twin of the same place+angle when the pool
+ * carries one: an off-route story should be told in the
+ * register that does not pretend the driver is there. The
+ * helpers are local to this module (tour's stay private to
+ * freeform).
+ */
+export const WOVEN_TWIN_SUFFIX = '-woven-v1';
+
+export function isWovenTwinAngle(angle: string): boolean {
+  return angle.endsWith(WOVEN_TWIN_SUFFIX);
+}
+
+/** "placeKey|baseAngle" → the woven twin unit a pool carries for it, when it carries one. */
+function wovenTwinsByBase(pool: LibraryUnit[]): Map<string, LibraryUnit> {
+  const map = new Map<string, LibraryUnit>();
+  for (const u of pool) {
+    if (isWovenTwinAngle(u.angle)) {
+      map.set(`${u.placeKey}|${u.angle.slice(0, -WOVEN_TWIN_SUFFIX.length)}`, u);
+    }
+  }
+  return map;
+}
+
+/** True when a pool unit is a presence original whose woven twin stands in the same pool (the twin is the candidate). */
+function shadowedByTwin(u: LibraryUnit, twins: Map<string, LibraryUnit>): boolean {
+  return !isWovenTwinAngle(u.angle) && twins.has(`${u.placeKey}|${u.angle}`);
+}
 
 /**
  * Corridor membership radii (fetch order + composer partition
@@ -1035,7 +1101,12 @@ export interface PlanItem {
    * climax: true alongside this flag.
    */
   woven?: boolean;
-  /** Bridges: the elastic target the text was composed toward, seconds. */
+  /**
+   * Bridges: the anchor gap the bridge spans, in seconds (the
+   * standing elastic-target formula). Bookkeeping since field
+   * fix lane 1 (Nov 5, 2026): bridge TEXT no longer composes
+   * toward it — a bridge is its pair's facts at honest length.
+   */
   targetDurationSec?: number;
 }
 
@@ -2115,10 +2186,17 @@ export function composeRoutePlan(
   const portalTopic = thread?.topic ?? input.topics[0] ?? null;
   if (portalTopic !== null && chosen.length >= 1) {
     const chosenIds = new Set(chosen.map(u => u.id));
+    // Lane 4: when the pool carries a place+angle's woven
+    // twin, the twin is the portal-climax candidate — the
+    // presence original stands down (same story, told ABOUT
+    // the place instead of AT it).
+    const climaxPool = [...portalAll, ...(opts.climaxOnlyUnits ?? [])];
+    const climaxTwins = wovenTwinsByBase(climaxPool);
     const best =
-      [...portalAll, ...(opts.climaxOnlyUnits ?? [])]
+      climaxPool
         .filter(
           u =>
+            !shadowedByTwin(u, climaxTwins) &&
             !chosenIds.has(u.id) &&
             !opts.heardKeys.has(u.id) &&
             u.angle.startsWith('landmark') &&
@@ -2195,7 +2273,12 @@ export function composeRoutePlan(
       topic: string;
     }
     const scored: PortalScore[] = [];
+    // Lane 4: a presence original whose woven twin is in the
+    // pool is not scored — the twin is scored in its place
+    // (its topics are inherited, its duration its own).
+    const hopTwins = wovenTwinsByBase(portalAll);
     for (const cand of portalAll) {
+      if (shadowedByTwin(cand, hopTwins)) continue;
       // The portal climax is never ALSO a hop: it already holds
       // the tail slot (consolidation §4).
       if (climaxUnitId !== null && cand.id === climaxUnitId) continue;
@@ -2264,7 +2347,86 @@ export function composeRoutePlan(
     total += f.durationSec;
   }
 
-  // Interleave elastic plan-time bridges + sparing reactions,
+  // Portal placement safety (field fix lane 2, Nov 5, 2026):
+  // a windowless hop sounds in sequence, so its bulk is spent
+  // against every window behind it. The field episode seated
+  // a 266 s hop fourth, ahead of geo stories whose windows it
+  // helped burn. Repair rule: run the serial sounding model
+  // (estimated tissue, SERIAL_PACE_SAFETY pace) over the
+  // sequence; a windowed story doomed WITH the portals but
+  // safe WITHOUT them is the portals' doing — relocate the
+  // nearest hop to just after the endangered story (never
+  // past the climax) when that saves it, else drop the hop
+  // from the plan. Doom that exists without any portal is the
+  // tiling's own fact, not this pass's to repair. Member
+  // seating (seatWovenMembers) needs no twin of this pass:
+  // members fit ENTIRELY inside silent gaps bounded by the
+  // next story's release, and a window's slack past its
+  // release is its own duration + lead — verified against
+  // planDoomedStoryIds in the harness.
+  {
+    const serialDoom = (seq: SeqEntry[]): Set<string> => {
+      const doomed = new Set<string>();
+      let t = seq.some(e => e.unit.angle !== 'filler_hosted') ? SERIAL_PREVIEW_EST_SEC : 0;
+      let sinceReaction = 0;
+      seq.forEach((e, i) => {
+        if (i > 0 && e.unit.angle !== 'filler_hosted' && seq[i - 1].unit.angle !== 'filler_hosted') {
+          t += SERIAL_BRIDGE_EST_SEC;
+        }
+        const windowless = e.portal === true || e.portalClimax === true || e.unit.angle === 'filler_hosted';
+        if (!windowless) {
+          const anchor =
+            climaxUnitId !== null && e.unit.id === climaxUnitId && climaxSequenced && climaxAnchor !== null
+              ? climaxAnchor
+              : prog(e.unit);
+          const win = storyWindow(anchor, e.unit.durationSec, driveDur);
+          if ((t * SERIAL_PACE_SAFETY) / driveDur > win.expire) doomed.add(e.unit.id);
+          t = Math.max(t, win.release * driveDur) + e.unit.durationSec;
+        } else {
+          t += e.unit.durationSec;
+        }
+        sinceReaction += 1;
+        if (sinceReaction >= 3 && i < seq.length - 1) {
+          t += SERIAL_REACTION_EST_SEC;
+          sinceReaction = 0;
+        }
+      });
+      return doomed;
+    };
+    const baselineDoom = serialDoom(sequence.filter(e => e.portal !== true && e.portalClimax !== true));
+    for (let guard = 0; guard < 32; guard++) {
+      const victimId = [...serialDoom(sequence)].find(id => !baselineDoom.has(id));
+      if (victimId === undefined) break;
+      const victimIdx = sequence.findIndex(e => e.unit.id === victimId);
+      const portalIdxs: number[] = [];
+      sequence.forEach((e, i) => {
+        if (e.portal === true && i < victimIdx) portalIdxs.push(i);
+      });
+      if (portalIdxs.length === 0) break; // attributable doom with no hop ahead of it: not this pass's shape
+      let moved = false;
+      // Nearest hop first — its bulk is the marginal bulk.
+      for (const pi of [...portalIdxs].reverse()) {
+        const p = sequence[pi];
+        sequence.splice(pi, 1);
+        const insertAt = sequence.findIndex(e => e.unit.id === victimId) + 1;
+        const cIdx = sequence.findIndex(e => climaxUnitId !== null && e.unit.id === climaxUnitId);
+        if (cIdx >= 0 && insertAt > cIdx) {
+          sequence.splice(pi, 0, p); // a hop never lands after the climax
+          continue;
+        }
+        sequence.splice(insertAt, 0, p);
+        if (!serialDoom(sequence).has(victimId)) {
+          moved = true;
+          break;
+        }
+        sequence.splice(sequence.indexOf(p), 1);
+        sequence.splice(pi, 0, p);
+      }
+      if (!moved) sequence.splice(portalIdxs[portalIdxs.length - 1], 1); // no safe slot: the nearest hop drops out
+    }
+  }
+
+  // Interleave plan-time bridges + sparing reactions,
   // and stamp each story with its release window.
   const items: PlanItem[] = [];
   let storiesSinceReaction = 0;
@@ -2340,6 +2502,12 @@ export function composeRoutePlan(
           previouslySubject: priorHeardSubject !== null,
         }
       : null;
+  // The episode's bridge ledger (field fix lane 1b): one
+  // ledger threaded through every bridge this compose authors,
+  // in plan order — openings rotate, the thread callout fires
+  // once, and no connective-bank line can repeat (lane 1: bank
+  // lines no longer author into bridges at all).
+  const bridgeLedger = newBridgeEpisodeState();
   sequence.forEach((entry, i) => {
     const u = entry.unit;
     // Bridges join story → story only: a filler spackle gets no
@@ -2377,6 +2545,7 @@ export function composeRoutePlan(
         targetSec: target,
         portalTopic: entry.portal ? entry.sharedTopic : undefined,
         context,
+        episode: bridgeLedger,
       });
       items.push({
         kind: 'bridge',
@@ -2421,7 +2590,7 @@ export function composeRoutePlan(
     });
     storiesSinceReaction += 1;
     if (storiesSinceReaction >= 3 && i < sequence.length - 1) {
-      const reaction = REACTION_BANK[(Math.floor(i / 3)) % REACTION_BANK.length];
+      const reaction = spokenFormText(REACTION_BANK[Math.floor(i / 3) % REACTION_BANK.length]);
       items.push({
         kind: 'reaction',
         id: `reaction:${i}`,
@@ -2627,6 +2796,39 @@ function geoCoverageOfItems(items: PlanItem[], driveSec: number): number {
 /** A settled plan's geo-anchored coverage fraction (see geoCoverageOfItems). */
 export function geoCoverageFraction(plan: RoutePlan): number {
   return geoCoverageOfItems(plan.items, plan.driveSec ?? plan.budgetSec);
+}
+
+/**
+ * The serial sounding check over a BUILT plan (field fix lane
+ * 2): walk the items in plan order, accumulating real
+ * durations; a windowed story is DOOMED when the stage would
+ * only free for it after its window has closed at the safety
+ * pace — the runner's gate would drop it stale even on a
+ * drive that merely outruns the map modestly. Windowless
+ * items (portals, members, fillers) and tissue simply consume
+ * sequence time. The composer's portal repair runs the same
+ * walk over the pre-build sequence with estimated tissue;
+ * this items-level form is the verification surface (the
+ * harness asserts composed and member-seated plans carry no
+ * doomed geo story).
+ */
+export function planDoomedStoryIds(
+  items: PlanItem[],
+  driveSec: number,
+  paceFactor: number = SERIAL_PACE_SAFETY,
+): string[] {
+  if (!(driveSec > 0)) return [];
+  const doomed: string[] = [];
+  let t = 0;
+  for (const it of items) {
+    if (it.kind === 'story' && it.releaseProgress !== undefined && it.expireProgress !== undefined) {
+      if ((t * paceFactor) / driveSec > it.expireProgress) doomed.push(it.id);
+      t = Math.max(t, it.releaseProgress * driveSec) + it.durationSec;
+    } else {
+      t += it.durationSec;
+    }
+  }
+  return doomed;
 }
 
 /**
@@ -2896,6 +3098,14 @@ export function seatWovenMembers(
   if (candidates.length === 0 && !(carried && alreadySeated.length > 0)) return plan;
 
   let items: PlanItem[] = [...plan.items];
+  // The episode's bridge ledger, continued (field fix lane
+  // 1b): this pass authors INTO a composed episode, so its
+  // bridges inherit what the composed bridges already used —
+  // seeded from their texts, then extended by every bridge
+  // authored here, in order.
+  const bridgeLedger = bridgeEpisodeStateFromTexts(
+    plan.items.filter(i => i.kind === 'bridge' && typeof i.text === 'string').map(i => i.text as string),
+  );
   const seated: LibraryUnit[] = [...alreadySeated];
   // The thread-carried climax designation (this pass only):
   // the strongest member reserved for the final third when
@@ -2975,7 +3185,7 @@ export function seatWovenMembers(
         prev.durationSec,
         memberAnchorSec,
       );
-      const text = bridgeTextFor(prev, cand, { targetSec: target, context });
+      const text = bridgeTextFor(prev, cand, { targetSec: target, context, episode: bridgeLedger });
       insert.push({
         kind: 'bridge',
         id: `bridge:${prev.id}>${cand.id}`,
@@ -3021,7 +3231,7 @@ export function seatWovenMembers(
         cand.durationSec,
         (gap.next.anchorProgress ?? 0) * driveSec,
       );
-      const text = bridgeTextFor(cand, next, { targetSec: target, context });
+      const text = bridgeTextFor(cand, next, { targetSec: target, context, episode: bridgeLedger });
       insert.push({
         kind: 'bridge',
         id: `bridge:${cand.id}>${next.id}`,
