@@ -507,6 +507,38 @@ export async function emitEvent(
   }
 }
 
+// ------------------------------------------------------------ episode capture (Nov 4, 2026)
+
+/**
+ * Insert one route_episodes row (episode capture — see
+ * core/episodeCapture.ts and route-episodes-capture.sql).
+ * Append-only; the table is created by Erik's SQL paste, on
+ * independent timing from the app publish, so a missing table
+ * is an EXPECTED state, not an error: the insert simply does
+ * not land. Returns whether the row landed; never throws —
+ * capture is observation only and must stay inert until the
+ * table exists and harmless forever after.
+ */
+export async function captureRouteEpisode(row: {
+  tourId: string;
+  kind: 'plan' | 'outcome';
+  buildId: string;
+  payload: Record<string, unknown>;
+}): Promise<boolean> {
+  if (!BACKEND_CONFIGURED) return false;
+  try {
+    const { error } = await db.from('route_episodes').insert({
+      tour_id: row.tourId,
+      kind: row.kind,
+      build_id: row.buildId,
+      payload: row.payload,
+    });
+    return !error;
+  } catch {
+    return false;
+  }
+}
+
 // ------------------------------------------------------------ on-device audio cache (contract D)
 
 const IDB_NAME = 'leo_tts_cache';
