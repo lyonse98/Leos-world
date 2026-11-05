@@ -59,6 +59,8 @@ import {
 import { tagsFor } from './data/routeTags';
 import { wovenEligibleFor } from './data/routePresence';
 import {
+  BUILD_ID,
+  captureRouteEpisode,
   deviceKey,
   emitEvent,
   fetchHeardStoryTexts,
@@ -71,6 +73,7 @@ import {
   lsSet,
   recordHeard,
 } from './core/backend';
+import { deliverEpisodeCapture } from './core/episodeCapture';
 import { generateAnswerText, generateStoryText, synthesizeSpeech } from './core/gemini';
 import { LEO_QA_MODEL_ID } from './services/leoPersona';
 
@@ -737,6 +740,10 @@ function MilesApp() {
    * them (owed discharge, the manifest's new-to-you count).
    */
   const buildRoute = async () => {
+    // Episode capture (Nov 4, 2026): the build's clock starts
+    // at the tap — the stage marks below are the boundaries
+    // the plan row files as its latency record.
+    const buildT0 = Date.now();
     const origin = positionRef.current ?? (position ? { lat: position.lat, lng: position.lng } : null);
     if (!origin) {
       setRouteStatus('Miles needs your location first — give it a moment, then try again.');
@@ -777,6 +784,25 @@ function MilesApp() {
     // gate is open for this ride. A driving route runner has no
     // generator dep at all — the Q&A pipeline is unreachable in
     // it, not hidden.
+    // Episode capture (Nov 4, 2026): at most ONE
+    // route_episode_capture_failed telemetry event per build,
+    // however many rows fail to land (a missing table before
+    // Erik's SQL paste is an expected state — the signal must
+    // stay meaningful, not become per-build noise). The latch
+    // is a plain closure: the outcome dep below can fire long
+    // after this function returns, and it shares the latch.
+    let captureFailureFiled = false;
+    const fileCaptureFailure = (kind: 'plan' | 'outcome') => {
+      if (captureFailureFiled) return;
+      captureFailureFiled = true;
+      const pos = positionRef.current;
+      void emitEvent(
+        sessionId,
+        'route_episode_capture_failed',
+        { kind },
+        { lat: pos?.lat ?? null, lng: pos?.lng ?? null, movementMode: tourMode },
+      );
+    };
     const qaAtBuild = qaGateOpen(ROUTE_MODE_ENABLED, tourMode);
     // The narration seam (addendum 5): ONE deps object for
     // every piece of route-mode live narration in this build —
@@ -806,6 +832,24 @@ function MilesApp() {
       },
       onDriveRecord: record => {
         saveDriveRecord(driveRecordStore, { ...record, destinationPlaceKey: destPlaceKey });
+      },
+      // Episode capture (Nov 4, 2026): the runner files the
+      // outcome row's payload at tour close; this wiring only
+      // persists it. Fire-and-forget — deliverEpisodeCapture
+      // never throws, and a failed insert (the table doesn't
+      // exist until Erik pastes the SQL) changes nothing.
+      episodeIds: { tourId: sessionId, buildId: BUILD_ID },
+      onEpisodeOutcome: payload => {
+        void deliverEpisodeCapture({
+          insert: captureRouteEpisode,
+          row: {
+            tourId: sessionId,
+            kind: 'outcome',
+            buildId: BUILD_ID,
+            payload: payload as unknown as Record<string, unknown>,
+          },
+          onFailure: () => fileCaptureFailure('outcome'),
+        });
       },
       onEvent: (type, payload) => {
         const pos = positionRef.current;
@@ -857,7 +901,9 @@ function MilesApp() {
       // retry pass behind it (tap 1 of Erik's first stationary
       // test died on the single-pass merged failure — see
       // routeMode.geocodeDestination).
+      const geocodeStartMs = Date.now();
       const geo = await resolveDestination(input.destinationText, googleKeys, null);
+      const geocodeEndMs = Date.now();
       if (!geo.destination) {
         // The failure SURFACES (Nov 4, 2026): a dedicated
         // failed state with a Try again (routeBuildFailure
@@ -879,6 +925,7 @@ function MilesApp() {
       }
       const geocoded = geo.destination;
       const routed = await computeRoute(origin, geocoded.location, googleKeys);
+      const routeEndMs = Date.now();
       if (!routed.route) {
         // Same surfaced failed state as the geocode exit —
         // one failure surface for every stage of the build.
@@ -1255,6 +1302,7 @@ function MilesApp() {
       // recording phase begins at this exact milestone (the
       // runner's bridges + preview continue it behind the
       // manifest card, under the same stage label).
+      const recordingStartMs = Date.now();
       setRouteBuildStage(s => advanceRouteBuildStage(s, 'recording'));
       setRouteStatus(ROUTE_BUILD_STAGE_LABELS.recording);
       try {
@@ -1316,6 +1364,41 @@ function MilesApp() {
           }),
         );
         await runner.stage(plan);
+      }
+      // Episode capture (Nov 4, 2026): the build has SETTLED
+      // — every live render has succeeded or fallen back and
+      // the runner holds the finished plan (behind the
+      // manifest card, or already running for an empty plan).
+      // File the plan row NOW, tour or no tour: stationary
+      // builds are episodes too, and the analysis needs their
+      // words. Fire-and-forget by construction.
+      const settledAtMs = Date.now();
+      const planCapture = runner.episodePlanCapture({
+        declaredMode: tourMode,
+        destinationText: input.destinationText,
+        tone: input.tone,
+        topics: input.topics,
+        stageTimingsMs: {
+          geocode: geocodeEndMs - geocodeStartMs,
+          routes: routeEndMs - geocodeEndMs,
+          maps: routeEndMs - buildT0,
+          compose: recordingStartMs - routeEndMs,
+          recording: settledAtMs - recordingStartMs,
+          total: settledAtMs - buildT0,
+        },
+        settledAtMs,
+      });
+      if (planCapture) {
+        void deliverEpisodeCapture({
+          insert: captureRouteEpisode,
+          row: {
+            tourId: sessionId,
+            kind: 'plan',
+            buildId: BUILD_ID,
+            payload: planCapture as unknown as Record<string, unknown>,
+          },
+          onFailure: () => fileCaptureFailure('plan'),
+        });
       }
     } catch {
       // Any later-stage failure (compose / fetch / render)
