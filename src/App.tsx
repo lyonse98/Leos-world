@@ -13,7 +13,6 @@ import {
   distanceToPathM,
   estimateDurationSec,
   fetchHeardAwareCandidates,
-  geocodeDestination,
   haversineM,
   heardKeysForStories,
   isRouteModeEnabled,
@@ -21,7 +20,7 @@ import {
   orderFetchCandidates,
   parseRouteInput,
   qaGateOpen,
-  rideEstimateLine,
+  resolveDestination,
   seatWovenMembers,
   selectMemberFetchEntries,
   wovenIndexSupportByTopic,
@@ -31,7 +30,17 @@ import {
   type LibraryUnit,
   type TourMode,
 } from './core/routeMode';
-import { RoutePlanRunner, routeStartButtonState, type RouteRunnerView } from './core/routePlayback';
+import {
+  advanceRouteBuildStage,
+  routeBuildFailure,
+  routeBuildUiState,
+  RoutePlanRunner,
+  routeStartButtonState,
+  ROUTE_BUILD_STAGE_LABELS,
+  type RouteBuildFailure,
+  type RouteBuildStage,
+  type RouteRunnerView,
+} from './core/routePlayback';
 import { finishLiveRenderBlob } from './core/audioFinish';
 import {
   DEFAULT_NARRATION_VOICE,
@@ -471,6 +480,12 @@ function MilesApp() {
   const [routeTopics, setRouteTopics] = useState<string[]>([]);
   const [routeStatus, setRouteStatus] = useState('');
   const [routeBuilding, setRouteBuilding] = useState(false);
+  // Build staging honesty (Nov 4, 2026): the build's current
+  // phase (its label rides the status line) and its filed
+  // failure — a dead build renders a dedicated failed state
+  // with a Try again, never a silent return to the idle form.
+  const [routeBuildStage, setRouteBuildStage] = useState<RouteBuildStage>('route');
+  const [routeFailure, setRouteFailure] = useState<RouteBuildFailure | null>(null);
   const [routeRunner, setRouteRunner] = useState<RoutePlanRunner | null>(null);
   const [routeView, setRouteView] = useState<RouteRunnerView | null>(null);
   // Manifest (differentiator 3): the built plan's episode card,
@@ -732,7 +747,9 @@ function MilesApp() {
       return;
     }
     setRouteBuilding(true);
-    setRouteStatus('Building your route…');
+    setRouteFailure(null);
+    setRouteBuildStage('route');
+    setRouteStatus(ROUTE_BUILD_STAGE_LABELS.route);
     // One session id for the whole build, minted up front so a
     // build-time failure (geocode / route) files its telemetry
     // under the same id the tour itself would have used.
@@ -831,20 +848,26 @@ function MilesApp() {
         import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined,
         import.meta.env.VITE_GEMINI_API_KEY as string | undefined,
       ].filter((k): k is string => typeof k === 'string' && k.length > 0);
-      const geo = await geocodeDestination(input.destinationText, googleKeys);
+      // Destination resolution (Nov 4, 2026): a destination
+      // that arrived WITH coordinates (a Places selection)
+      // would resolve locally inside resolveDestination — no
+      // geocode, immune to key restrictions. The shipped
+      // intake is text-only, so no selection exists today and
+      // free text geocodes, with the key rotation AND the one
+      // retry pass behind it (tap 1 of Erik's first stationary
+      // test died on the single-pass merged failure — see
+      // routeMode.geocodeDestination).
+      const geo = await resolveDestination(input.destinationText, googleKeys, null);
       if (!geo.destination) {
-        // Failure classes speak differently (Nov 3, 2026): a
-        // permission/transport failure is the maps SERVICE being
-        // unreachable — never "couldn't find", which is reserved
-        // for a search that answered and came back empty. The
-        // class files to telemetry either way, so the next
-        // blockage is visible in analytics, not masked as a
-        // bad query.
-        if (geo.failure === 'no_results') {
-          setRouteStatus('Couldn’t find that place — try a fuller name (e.g. “Balboa Park, San Diego”).');
-        } else {
-          setRouteStatus('Miles can’t reach the maps service right now — try again in a bit.');
-        }
+        // The failure SURFACES (Nov 4, 2026): a dedicated
+        // failed state with a Try again (routeBuildFailure
+        // carries the Nov 3 class split as its copy), in place
+        // of the status-line whisper that left tap 1's dead
+        // build looking merely quiet. The class still files
+        // to telemetry, so the blockage stays visible in
+        // analytics rather than masked as a bad query.
+        setRouteStatus('');
+        setRouteFailure(routeBuildFailure('geocode', geo.failure));
         void emitEvent(
           sessionId,
           'route_build_failed',
@@ -857,11 +880,10 @@ function MilesApp() {
       const geocoded = geo.destination;
       const routed = await computeRoute(origin, geocoded.location, googleKeys);
       if (!routed.route) {
-        if (routed.failure === 'no_results') {
-          setRouteStatus('Couldn’t find a driving route there — try a different destination.');
-        } else {
-          setRouteStatus('Miles can’t reach the maps service right now — try again in a bit.');
-        }
+        // Same surfaced failed state as the geocode exit —
+        // one failure surface for every stage of the build.
+        setRouteStatus('');
+        setRouteFailure(routeBuildFailure('route', routed.failure));
         void emitEvent(
           sessionId,
           'route_build_failed',
@@ -872,9 +894,12 @@ function MilesApp() {
         return;
       }
       const route = routed.route;
-      // The ride estimate, in plain words, for the rest of the
-      // build (the composer pass + library fetch that follow).
-      setRouteStatus(rideEstimateLine(route.durationSec));
+      // The route is known — the build enters the compose
+      // phase (library fetch → compose → guarantee → seating),
+      // and the status line names it. The ride estimate itself
+      // rides the manifest card from here (its runtime line).
+      setRouteBuildStage(s => advanceRouteBuildStage(s, 'compose'));
+      setRouteStatus(ROUTE_BUILD_STAGE_LABELS.compose);
       const budget = budgetSecFor(route.durationSec);
       const index = await fetchLibraryIndex();
       const [heardLabelList, heardTextList] = await Promise.all([
@@ -1226,6 +1251,12 @@ function MilesApp() {
       // plan run out; an early end or overrun never uses it.
       // Failure here never fails the build: the plan proceeds
       // without it and arrival falls back to today's closeout.
+      // The wrap-up is the build's first LIVE RENDER — the
+      // recording phase begins at this exact milestone (the
+      // runner's bridges + preview continue it behind the
+      // manifest card, under the same stage label).
+      setRouteBuildStage(s => advanceRouteBuildStage(s, 'recording'));
+      setRouteStatus(ROUTE_BUILD_STAGE_LABELS.recording);
       try {
         const wrapReq = narrationRequest('wrapup', buildWrapUpContext(plan));
         const wrapText = wrapUpTextFor(wrapReq.context);
@@ -1287,8 +1318,29 @@ function MilesApp() {
         await runner.stage(plan);
       }
     } catch {
-      discardRunner();
-      setRouteStatus('Something went wrong building the route — try again.');
+      // Any later-stage failure (compose / fetch / render)
+      // surfaces in the same failed state (Nov 4, 2026). If the
+      // plan had already been handed over when it threw, unwind
+      // the handover first: the failed state lives on the form,
+      // and a half-started route screen must not be left holding
+      // a runner that will never play.
+      if (handedOver) {
+        handedOver = false;
+        if (routeRunnerRef.current === runner) routeRunnerRef.current = null;
+        try {
+          runner.dispose();
+        } catch {
+          /* already gone */
+        }
+        setRouteRunner(null);
+        setRouteActive(false);
+        setRouteManifest(null);
+        setRouteFormOpen(true);
+      } else {
+        discardRunner();
+      }
+      setRouteStatus('');
+      setRouteFailure(routeBuildFailure('build', null));
     } finally {
       setRouteBuilding(false);
     }
@@ -1305,6 +1357,32 @@ function MilesApp() {
     routeRunnerRef.current = null;
     setRouteRunner(null);
   };
+
+  // The route build's failed state (Nov 4, 2026), rendered by
+  // BOTH route forms: a plain-language message and a Try again
+  // that restarts the build cleanly (buildRoute mints a fresh
+  // session id and a fresh primed runner per call — no wedged
+  // state survives into the retry). The derivation is
+  // routeBuildUiState's: the block exists only in the failed
+  // kind — a retry in flight shows its stage label instead.
+  const routeBuildUi = routeBuildUiState({
+    building: routeBuilding,
+    stage: routeBuildStage,
+    failure: routeFailure,
+  });
+  const routeFailureBlock =
+    routeBuildUi.kind === 'failed' ? (
+      <div className="mt-3 rounded-[1.5rem] bg-white/80 p-4 text-center shadow-lg shadow-ink/10">
+        <p className="text-sm font-bold text-ink">{routeBuildUi.failure.message}</p>
+        <button
+          type="button"
+          onClick={() => void buildRoute()}
+          className="mt-3 w-full rounded-full bg-ink px-4 py-3 text-sm font-bold text-cream shadow-lg shadow-ink/20 transition hover:bg-sagedeep active:scale-[0.99]"
+        >
+          Try again
+        </button>
+      </div>
+    ) : null;
 
   const submitQuestion = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1511,7 +1589,10 @@ function MilesApp() {
               <input
                 id="route-dest-step"
                 value={routeDest}
-                onChange={e => setRouteDest(e.target.value)}
+                onChange={e => {
+                  setRouteDest(e.target.value);
+                  setRouteFailure(null);
+                }}
                 placeholder="e.g. Balboa Park"
                 className="mt-2 w-full rounded-full border-2 border-sage/30 bg-white px-5 py-3 text-base text-ink placeholder:text-inksoft/50 focus:border-sagedeep focus:outline-none"
               />
@@ -1558,6 +1639,7 @@ function MilesApp() {
                 {routeBuilding ? 'Building…' : 'Build my route'}
               </button>
               {routeStatus && <p className="mt-2 text-center text-xs leading-relaxed text-inksoft">{routeStatus}</p>}
+              {routeFailureBlock}
               <p className="mt-2 text-center text-[11px] text-inksoft">
                 One route, composed at departure from stories you haven&rsquo;t heard — no re-planning mid-drive.
               </p>
@@ -1695,7 +1777,10 @@ function MilesApp() {
                   <input
                     id="route-dest"
                     value={routeDest}
-                    onChange={e => setRouteDest(e.target.value)}
+                    onChange={e => {
+                      setRouteDest(e.target.value);
+                      setRouteFailure(null);
+                    }}
                     placeholder="e.g. Balboa Park"
                     className="mt-2 w-full rounded-full border-2 border-sage/30 bg-white px-5 py-3 text-base text-ink placeholder:text-inksoft/50 focus:border-sagedeep focus:outline-none"
                   />
@@ -1742,6 +1827,7 @@ function MilesApp() {
                     {routeBuilding ? 'Building…' : 'Build my route'}
                   </button>
                   {routeStatus && <p className="mt-3 text-center text-xs leading-relaxed text-inksoft">{routeStatus}</p>}
+                  {routeFailureBlock}
                   <p className="mt-2 text-center text-[11px] text-inksoft">
                     One route, composed at departure from stories you haven’t heard — no re-planning mid-drive.
                   </p>
@@ -1786,8 +1872,8 @@ function MilesApp() {
   if (routeActive && routeRunner) {
     const rView = routeView;
     // Composer v3 (commit D): the manifest card's primary
-    // button is honest about preparation — disabled
-    // 'Generating tour…' until the runner's narration has
+    // button is honest about preparation — disabled under the
+    // recording-stage label until the runner's narration has
     // fully settled, then enabled 'Start tour'.
     const startBtn = routeStartButtonState(rView ?? { narrationReady: false });
     const routeNeedsResume = Boolean(rView?.userPaused || rView?.guardPaused);
@@ -1817,9 +1903,10 @@ function MilesApp() {
               // Start tour is the play gesture: it begins the
               // staged runner and re-primes its audio on the tap.
               // Until the plan-time narration has settled the
-              // button sits disabled on 'Generating tour…' —
-              // the card is up while preparation finishes, and
-              // says so (composer v3, commit D).
+              // button sits disabled under the recording-stage
+              // label — the card is up while preparation
+              // finishes, and says which phase it's in
+              // (composer v3, commit D; stage labels Nov 4).
               <div className="mb-2 rounded-[2rem] bg-white/80 p-5 shadow-xl shadow-ink/15 backdrop-blur">
                 <p className="text-xs font-bold uppercase tracking-[0.18em] text-sagedeep">Your episode</p>
                 <h2 className="mt-1 text-xl font-black leading-tight">{routeManifest.title}</h2>
