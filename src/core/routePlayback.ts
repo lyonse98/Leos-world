@@ -51,6 +51,7 @@ import {
   progressAlongPath,
   type GeoPoint,
   type LibraryUnit,
+  type MapsFailure,
   type PlanItem,
   type RoutePlan,
 } from './routeMode';
@@ -103,7 +104,12 @@ export interface RouteRunnerView {
  * The manifest card's primary button, derived from the
  * runner view (composer v3, commit D — Erik's copy): honest
  * about the preparation phase, and live only when everything
- * the plan needs has settled.
+ * the plan needs has settled. Nov 4, 2026 (Erik's first
+ * stationary test): the not-ready phase IS the live-renders
+ * phase — bridges and the spoken preview synthesizing — so
+ * the disabled label now names that build stage (see
+ * ROUTE_BUILD_STAGE_LABELS) instead of a generic 'Generating
+ * tour…' that read as no progress at all.
  */
 export function routeStartButtonState(view: { narrationReady: boolean }): {
   label: string;
@@ -111,7 +117,98 @@ export function routeStartButtonState(view: { narrationReady: boolean }): {
 } {
   return view.narrationReady
     ? { label: 'Start tour', disabled: false }
-    : { label: 'Generating tour…', disabled: true };
+    : { label: ROUTE_BUILD_STAGE_LABELS.recording, disabled: true };
+}
+
+// ------------------------------------------------------------ build staging UI (Nov 4, 2026)
+
+/**
+ * The route BUILD's phases, in staging order — the milestones
+ * the App's build actually passes through: the maps calls
+ * (geocode + route), the library fetch / compose / guarantee /
+ * seating, then the live pieces rendering (wrap-up first, then
+ * the runner's bridges + preview behind the manifest card).
+ * Stage labels are tied to these milestones ONLY: the App sets
+ * a stage when the build enters the phase, never on a timer —
+ * there is no fake progress anywhere in the build UI.
+ */
+export type RouteBuildStage = 'route' | 'compose' | 'recording';
+
+export const ROUTE_BUILD_STAGES: readonly RouteBuildStage[] = ['route', 'compose', 'recording'];
+
+export const ROUTE_BUILD_STAGE_LABELS: Record<RouteBuildStage, string> = {
+  route: 'Finding your route…',
+  compose: 'Composing your episode…',
+  recording: 'Miles is recording the introductions…',
+};
+
+/**
+ * Stage movement is monotonic: a build that has entered a
+ * later phase never relabels backwards (a late sub-step event
+ * from an earlier phase can't rewind the label), and a fast
+ * phase may be SKIPPED entirely — skipping is honest, faking
+ * dwell time on a label would not be.
+ */
+export function advanceRouteBuildStage(current: RouteBuildStage, next: RouteBuildStage): RouteBuildStage {
+  return ROUTE_BUILD_STAGES.indexOf(next) > ROUTE_BUILD_STAGES.indexOf(current) ? next : current;
+}
+
+/** The build stages at which a build can die unrecovered. */
+export type RouteBuildFailureStage = 'geocode' | 'route' | 'build';
+
+export interface RouteBuildFailure {
+  stage: RouteBuildFailureStage;
+  /** Plain language, class-aware (a permission block is never "couldn't find"). */
+  message: string;
+  /** The failed state always offers a clean rebuild — a fresh session, a fresh runner. */
+  canRetry: true;
+}
+
+/**
+ * The failed state's copy (Nov 4, 2026): the Nov 3 failure-class
+ * split, promoted from a status-line whisper to the build's
+ * actual failure surface. 'no_results' is a search that answered
+ * empty (speak about the place); every other class is the maps
+ * service being unreachable (speak about the service); a throw
+ * from the compose/fetch/render staging is the build itself.
+ */
+export function routeBuildFailure(stage: RouteBuildFailureStage, failure: MapsFailure | null): RouteBuildFailure {
+  let message: string;
+  if (stage === 'geocode' && failure === 'no_results') {
+    message = 'Couldn’t find that place — try a fuller name (e.g. “Balboa Park, San Diego”).';
+  } else if (stage === 'route' && failure === 'no_results') {
+    message = 'Couldn’t find a driving route there — try a different destination.';
+  } else if (stage === 'build') {
+    message = 'Something went wrong building the route.';
+  } else {
+    message = 'Miles can’t reach the maps service right now.';
+  }
+  return { stage, message, canRetry: true };
+}
+
+export type RouteBuildUiState =
+  | { kind: 'idle' }
+  | { kind: 'building'; stage: RouteBuildStage; label: string }
+  | { kind: 'failed'; failure: RouteBuildFailure };
+
+/**
+ * The build UI's one derivation (the App's render and the
+ * harness read the same rule): an in-flight build shows its
+ * current stage; a filed failure outranks the idle form — the
+ * screen never sits on a building label for a build that is
+ * dead, and a retry in flight shows its stage, not the stale
+ * failure it is replacing.
+ */
+export function routeBuildUiState(input: {
+  building: boolean;
+  stage: RouteBuildStage;
+  failure: RouteBuildFailure | null;
+}): RouteBuildUiState {
+  if (input.building) {
+    return { kind: 'building', stage: input.stage, label: ROUTE_BUILD_STAGE_LABELS[input.stage] };
+  }
+  if (input.failure) return { kind: 'failed', failure: input.failure };
+  return { kind: 'idle' };
 }
 
 /**
