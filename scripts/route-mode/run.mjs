@@ -5190,5 +5190,438 @@ await checkAsync('pipeline: time-to-start anatomy — at Start readiness, later 
   runner.endTour();
 });
 
+// ---- drop coherence (Nov 4, 2026 — adaptive slice, phase 1) ----
+// Suppression: a bridge into a story that cannot start before
+// its window closes (judged from the recent progress rate) is
+// never fed — the story drops stale at the judgment instead of
+// after a dangling lead-in. Re-bridge: either drop path
+// commissions ONE replacement bridge from the last story that
+// SOUNDED into the next viable story, riding the render queue
+// as tissue — sounds if rendered in time, skipped late and
+// discarded if not; the story never waits. All stubbed.
+const latForProgress = p => 32.7 + p * 0.2;
+const decodedOf = url =>
+  url.startsWith('blob:audio/') ? decodeURIComponent(url.slice('blob:audio/'.length)) : url;
+// A fine-grained path for the suppression suites: the
+// runner's progress measure reads the nearest segment's
+// midpoint, so the coarse 21-point densePath quantizes
+// progress to 0.05 steps — a slow creep is invisible on it.
+// Two thousand segments make one step ≈ 0.0005 of the route
+// (≈11 m — a realistic GPS cadence), so a genuine small
+// rate can be sampled. Windows land within ~0.001 of the
+// anchorPlan geometry (B [0.365, 0.435], C [0.815, 0.885]).
+const finePath = Array.from({ length: 2001 }, (_, i) => ({ lat: 32.7 + i * 0.0001, lng: -117.25 }));
+const finePlan = () =>
+  rm.composeRoutePlan(
+    [unit('a|landmark_origin', 32.71), unit('b|landmark_origin', 32.78), unit('c|landmark_origin', 32.87)],
+    finePath,
+    { lat: 32.9, lng: -117.25 },
+    'Dest',
+    { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 2000 },
+  );
+const isRebridgeClip = t =>
+  t.includes('From a|landmark_origin') && t.includes('just ahead is c|landmark_origin');
+const p1Runner = (audio, events, outcomes, extra = {}) =>
+  new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t),
+    onEvent: (t, p) => events.push({ t, p }),
+    ...(outcomes
+      ? {
+          episodeIds: { tourId: 'route-phase1', buildId: 'fresh-test' },
+          onEpisodeOutcome: p => outcomes.push(p),
+        }
+      : {}),
+    ...extra,
+  });
+
+await checkAsync('phase1 (a): fast pace — the doomed lead-in never sounds, B drops + is owed, the re-bridge A→C sounds', async () => {
+  const plan = finePlan();
+  const bridgeAB = plan.items.find(i => i.kind === 'bridge' && i.nextUnitId === 'b|landmark_origin');
+  const bridgeBC = plan.items.find(i => i.kind === 'bridge' && i.nextUnitId === 'c|landmark_origin');
+  const audio = new RealFakeAudio(250);
+  const events = [];
+  const outcomes = [];
+  const runner = p1Runner(audio, events, outcomes);
+  await runner.start(plan);
+  // A sustained, continuous creep: one fine segment (≈0.0005
+  // of the route) every ~200 ms ≈ 0.0025 progress/sec — slow
+  // as rates go, but with story A's ~2 minutes still to play,
+  // B's window (expire ≈0.435) closes long before A ends.
+  // Continuous small steps: a usable speed sample, not a jump.
+  let lat = 32.76; // progress ≈ 0.30
+  runner.onPosition({ lat, lng: -117.25 });
+  for (let i = 0; i < 40 && !events.some(e => e.t === 'story_dropped'); i++) {
+    await new Promise(r => setTimeout(r, 200));
+    lat += 0.0001;
+    runner.onPosition({ lat, lng: -117.25 });
+  }
+  const drops = events.filter(e => e.t === 'story_dropped');
+  assert.equal(drops.length, 1, 'exactly one story dropped');
+  assert.equal(drops[0].p.subject, 'b|landmark_origin');
+  assert.equal(drops[0].p.reason, 'stale-window');
+  const fired = events.filter(e => e.t === 'route_rebridge_fired');
+  assert.equal(fired.length, 1, 'exactly one commission');
+  assert.equal(fired[0].p.via, 'suppression');
+  assert.ok(
+    fired[0].p.predicted_start_progress > fired[0].p.expire_progress,
+    'the fired event carries the prediction that doomed B',
+  );
+  await until(() => events.some(e => e.t === 'route_rebridge_sounded'), 'the re-bridge sounds');
+  const playedTexts = audio.played.map(decodedOf);
+  assert.ok(!playedTexts.includes(bridgeAB.text), 'the composed A→B lead-in never sounded');
+  assert.ok(!audio.played.some(u => u.includes('b%7Clandmark_origin.wav')), 'story B never sounded');
+  const commIdx = playedTexts.findIndex(isRebridgeClip);
+  assert.ok(commIdx >= 0, 'the re-bridge A→C sounded');
+  runner.onPosition({ lat: 32.87, lng: -117.25 }); // progress 0.825 — inside C's window
+  await until(() => audio.played.some(u => u.includes('c%7Clandmark_origin.wav')), 'story C sounds');
+  assert.ok(
+    audio.played.findIndex(u => u.includes('c%7Clandmark_origin.wav')) > commIdx,
+    'C sounds after its re-bridge',
+  );
+  runner.onPosition({ lat: 32.9, lng: -117.25 }); // arrival
+  await until(() => runner.view().closeoutDone, 'arrival closeout');
+  assert.equal(runner.view().endedKind, 'arrival-owed');
+  assert.ok(runner.view().owed && runner.view().owed.includes('b|landmark_origin'), 'the closeout owes B by name');
+  await until(() => outcomes.length === 1, 'outcome filed');
+  const out = outcomes[0];
+  assert.deepEqual(verifier.validateOutcome(out), [], 'the live verifier accepts the phase-1 outcome row');
+  assert.equal(out.commissions.length, 1);
+  const comm = out.commissions[0];
+  assert.equal(comm.via, 'suppression');
+  assert.equal(comm.result, 'sounded');
+  assert.equal(comm.for_story_id, 'b|landmark_origin');
+  assert.equal(comm.prev_story_id, 'a|landmark_origin');
+  assert.equal(comm.next_story_id, 'c|landmark_origin');
+  assert.ok(isRebridgeClip(comm.text) && !comm.text.includes('b|landmark_origin'), 'true facts only — B is never named');
+  assert.equal(out.dropped.find(d => d.id === 'b|landmark_origin')?.reason, 'stale-window');
+  for (const br of [bridgeAB, bridgeBC]) {
+    assert.equal(out.dropped.find(d => d.id === br.id)?.reason, 'parent-dropped', `${br.id} resolved as a dependent of the drop`);
+  }
+  assert.ok(
+    out.render_results.every(rr => plan.items[rr.index]?.id === rr.id),
+    'render verdicts keep PLAN indexes despite the dynamic commission entry',
+  );
+  assert.ok(!out.render_results.some(rr => rr.id === comm.id), 'the commission carries no render verdict of its own');
+  assert.ok(!out.played_item_ids.includes(comm.id), 'the commission is a pseudo-item, never a played plan item');
+  assert.ok(out.played_item_ids.includes('a|landmark_origin') && out.played_item_ids.includes('c|landmark_origin'));
+});
+
+await checkAsync('phase1 (b): the commission renders late — C sounds bridgeless, the commission is discarded', async () => {
+  const plan = finePlan();
+  const audio = new RealFakeAudio(250);
+  const events = [];
+  const outcomes = [];
+  const gate = makeGate();
+  const runner = p1Runner(audio, events, outcomes, {
+    synthUrl: t =>
+      isRebridgeClip(t)
+        ? gate.promise.then(() => 'blob:audio/' + encodeURIComponent(t))
+        : Promise.resolve('blob:audio/' + encodeURIComponent(t)),
+  });
+  await runner.start(plan);
+  let lat = 32.76;
+  runner.onPosition({ lat, lng: -117.25 });
+  for (let i = 0; i < 40 && !events.some(e => e.t === 'route_rebridge_fired'); i++) {
+    await new Promise(r => setTimeout(r, 200));
+    lat += 0.0001;
+    runner.onPosition({ lat, lng: -117.25 });
+  }
+  assert.equal(events.filter(e => e.t === 'route_rebridge_fired').length, 1, 'the commission was authored');
+  // C's window opens while the commission is still rendering.
+  runner.onPosition({ lat: 32.87, lng: -117.25 });
+  await until(() => audio.played.some(u => u.includes('c%7Clandmark_origin.wav')), 'C sounds — bridgeless, never waiting');
+  const late = events.filter(e => e.t === 'route_render_late');
+  assert.equal(late.length, 1, 'exactly one late-skip');
+  assert.equal(late[0].p.item_id, 'rebridge:b|landmark_origin>c|landmark_origin');
+  const skipped = events.filter(e => e.t === 'route_rebridge_skipped');
+  assert.equal(skipped.length, 1);
+  assert.equal(skipped[0].p.reason, 'late');
+  gate.resolve(); // the render lands after its moment: discarded, never fed
+  await new Promise(r => setTimeout(r, 150));
+  assert.ok(!audio.played.map(decodedOf).some(isRebridgeClip), 'the late commission never sounded');
+  runner.endTour();
+  assert.equal(outcomes.length, 1);
+  assert.deepEqual(verifier.validateOutcome(outcomes[0]), []);
+  assert.equal(outcomes[0].commissions.length, 1);
+  assert.equal(outcomes[0].commissions[0].result, 'skipped-late');
+  assert.equal(outcomes[0].commissions[0].via, 'suppression');
+});
+
+await checkAsync('phase1 (c): a gate drop (no prediction) commissions the same repair', async () => {
+  const plan = anchorPlan();
+  const bridgeAB = plan.items.find(i => i.kind === 'bridge' && i.nextUnitId === 'b|landmark_origin');
+  const audio = new RealFakeAudio(250);
+  const events = [];
+  const outcomes = [];
+  const runner = p1Runner(audio, events, outcomes);
+  await runner.start(plan);
+  await until(() => audio.played.some(u => u.includes('a%7Clandmark_origin.wav')), 'story A sounds');
+  // ONE fix, already past B's window: no rate sample exists,
+  // so no suppression — the standing behavior plays out (the
+  // lead-in sounds, B drops at the gate) and the commission
+  // repairs the transition into C.
+  runner.onPosition({ lat: 32.795, lng: -117.25 }); // progress 0.475 > B expire 0.435
+  await until(() => events.some(e => e.t === 'route_rebridge_sounded'), 'the gate-drop commission sounds');
+  const fired = events.filter(e => e.t === 'route_rebridge_fired');
+  assert.equal(fired.length, 1);
+  assert.equal(fired[0].p.via, 'gate');
+  assert.equal(events.filter(e => e.t === 'story_dropped').length, 1);
+  const playedTexts = audio.played.map(decodedOf);
+  const abIdx = playedTexts.indexOf(bridgeAB.text);
+  assert.ok(abIdx >= 0, 'the composed lead-in DID sound — no prediction, standing behavior');
+  const commIdx = playedTexts.findIndex(isRebridgeClip);
+  assert.ok(commIdx > abIdx, 'the re-bridge followed the lead-in it repairs after');
+  runner.onPosition({ lat: 32.87, lng: -117.25 });
+  await until(() => audio.played.some(u => u.includes('c%7Clandmark_origin.wav')), 'story C sounds');
+  assert.ok(audio.played.findIndex(u => u.includes('c%7Clandmark_origin.wav')) > commIdx, 'C after its re-bridge');
+  runner.endTour();
+  assert.equal(outcomes.length, 1);
+  assert.equal(outcomes[0].commissions.length, 1);
+  assert.equal(outcomes[0].commissions[0].via, 'gate');
+  assert.equal(outcomes[0].commissions[0].result, 'sounded');
+});
+
+await checkAsync('phase1 (d): no usable rate (absent, then zero intervals) — no suppression, standing behavior', async () => {
+  const plan = anchorPlan();
+  const bridgeAB = plan.items.find(i => i.kind === 'bridge' && i.nextUnitId === 'b|landmark_origin');
+  const audio = new RealFakeAudio(250);
+  const events = [];
+  const runner = p1Runner(audio, events, null);
+  await runner.start(plan);
+  await until(() => audio.played.some(u => u.includes('a%7Clandmark_origin.wav')), 'story A sounds');
+  // Into B's window (progress 0.375 ∈ [0.365, 0.435]): the
+  // first fix has no predecessor (no sample at all); the
+  // repeats are zero-motion intervals (a stopped driver).
+  // Neither may suppress.
+  for (let i = 0; i < 3; i++) {
+    runner.onPosition({ lat: 32.78, lng: -117.25 });
+    await new Promise(r => setTimeout(r, 70));
+  }
+  await until(() => audio.played.some(u => u.includes('b%7Clandmark_origin.wav')), 'story B sounds');
+  assert.equal(events.filter(e => e.t === 'story_dropped').length, 0, 'nothing dropped');
+  assert.equal(events.filter(e => e.t.startsWith('route_rebridge')).length, 0, 'no commission activity');
+  assert.ok(audio.played.map(decodedOf).includes(bridgeAB.text), 'the lead-in sounded');
+  runner.endTour();
+});
+
+await checkAsync('phase1 (e): a dropped climax earns no fabricated payoff — a plain mid re-bridge, the owed closeout carries it', async () => {
+  const base = anchorPlan();
+  const plan = {
+    ...base,
+    climaxUnitId: 'b|landmark_origin',
+    climaxSubject: 'b|landmark_origin',
+    climaxMode: 'late',
+    items: base.items.map(i =>
+      i.id === 'b|landmark_origin' ? { ...i, climax: true } : i.id === 'c|landmark_origin' ? { ...i, climax: false } : i,
+    ),
+  };
+  const audio = new RealFakeAudio(250);
+  const events = [];
+  const outcomes = [];
+  const runner = p1Runner(audio, events, outcomes);
+  await runner.start(plan);
+  await until(() => audio.played.some(u => u.includes('a%7Clandmark_origin.wav')), 'story A sounds');
+  runner.onPosition({ lat: 32.795, lng: -117.25 }); // past the climax's window — gate drop
+  await until(() => events.some(e => e.t === 'route_rebridge_sounded'), 'the re-bridge past the climax sounds');
+  const commClip = audio.played.map(decodedOf).find(isRebridgeClip);
+  assert.ok(commClip, 'a re-bridge into C sounded');
+  assert.ok(!commClip.includes('here it is'), 'no payoff language for a climax that never sounded');
+  assert.ok(!commClip.includes('pointed at this one'), 'no promise language either');
+  runner.onPosition({ lat: 32.87, lng: -117.25 });
+  await until(() => audio.played.some(u => u.includes('c%7Clandmark_origin.wav')), 'story C sounds');
+  runner.onPosition({ lat: 32.9, lng: -117.25 });
+  await until(() => runner.view().closeoutDone, 'arrival closeout');
+  assert.equal(runner.view().endedKind, 'arrival-owed');
+  assert.ok(runner.view().owed && runner.view().owed.includes('b|landmark_origin'), 'the owed closeout carries the climax');
+  await until(() => outcomes.length === 1, 'outcome filed');
+  assert.equal(outcomes[0].commissions.length, 1);
+  assert.equal(outcomes[0].commissions[0].result, 'sounded');
+  assert.ok(!outcomes[0].commissions[0].text.includes('here it is'), 'the captured text is the plain mid bridge');
+});
+
+await checkAsync('phase1 (e2): a climax dropped last commissions nothing — the owed accounting is the only repair', async () => {
+  const base = anchorPlan();
+  const plan = {
+    ...base,
+    climaxUnitId: 'b|landmark_origin',
+    climaxSubject: 'b|landmark_origin',
+    climaxMode: 'late',
+    items: base.items
+      .filter(i => i.id !== 'c|landmark_origin' && !(i.kind === 'bridge' && i.nextUnitId === 'c|landmark_origin'))
+      .map(i => (i.id === 'b|landmark_origin' ? { ...i, climax: true } : i)),
+  };
+  const audio = new RealFakeAudio(250);
+  const events = [];
+  const outcomes = [];
+  const runner = p1Runner(audio, events, outcomes);
+  await runner.start(plan);
+  await until(() => audio.played.some(u => u.includes('a%7Clandmark_origin.wav')), 'story A sounds');
+  runner.onPosition({ lat: 32.795, lng: -117.25 });
+  await until(() => events.some(e => e.t === 'story_dropped'), 'the climax drops');
+  await new Promise(r => setTimeout(r, 200));
+  assert.equal(events.filter(e => e.t === 'route_rebridge_fired').length, 0, 'no commission — nothing follows the climax');
+  runner.onPosition({ lat: 32.9, lng: -117.25 }); // arrival (or the plan exhausts first — either closeout is honest)
+  await until(() => runner.view().closeoutDone, 'closeout');
+  await until(() => outcomes.length === 1, 'outcome filed');
+  assert.deepEqual(outcomes[0].commissions, [], 'no commission records');
+  assert.equal(outcomes[0].dropped.find(d => d.id === 'b|landmark_origin')?.reason, 'stale-window', 'the climax is owed as a stale drop');
+});
+
+await checkAsync('phase1 (f): normal pace — zero commissions, zero suppressions, playback identical to base', async () => {
+  const plan = anchorPlan();
+  assert.deepEqual(
+    plan.items.map(i => i.kind),
+    ['preview', 'story', 'bridge', 'story', 'bridge', 'story'],
+    'fixture shape',
+  );
+  const bridgeAB = plan.items.find(i => i.kind === 'bridge' && i.nextUnitId === 'b|landmark_origin');
+  const bridgeBC = plan.items.find(i => i.kind === 'bridge' && i.nextUnitId === 'c|landmark_origin');
+  const audio = new RealFakeAudio(250);
+  const events = [];
+  const runner = p1Runner(audio, events, null);
+  await runner.start(plan);
+  await until(() => audio.played.some(u => u.includes('a%7Clandmark_origin.wav')), 'story A sounds');
+  runner.onPosition({ lat: 32.78, lng: -117.25 }); // into B's window
+  await new Promise(r => setTimeout(r, 80));
+  runner.onPosition({ lat: 32.78, lng: -117.25 }); // re-fed identical: a zero interval can never suppress
+  await until(() => audio.played.some(u => u.includes('b%7Clandmark_origin.wav')), 'story B sounds');
+  runner.onPosition({ lat: 32.87, lng: -117.25 }); // into C's window (a jump — discontinuous, never a sample)
+  await new Promise(r => setTimeout(r, 80));
+  runner.onPosition({ lat: 32.87, lng: -117.25 });
+  await until(() => audio.played.some(u => u.includes('c%7Clandmark_origin.wav')), 'story C sounds');
+  await new Promise(r => setTimeout(r, 60));
+  assert.equal(events.filter(e => e.t === 'story_dropped').length, 0);
+  assert.equal(events.filter(e => e.t.startsWith('route_rebridge')).length, 0);
+  assert.equal(events.filter(e => e.t === 'route_render_late').length, 0);
+  const tokens = audio.played.map(u => {
+    if (u.includes('a%7Clandmark_origin.wav')) return 'A';
+    if (u.includes('b%7Clandmark_origin.wav')) return 'B';
+    if (u.includes('c%7Clandmark_origin.wav')) return 'C';
+    const t = decodedOf(u);
+    if (t === plan.items[0].text) return 'preview';
+    if (t === bridgeAB.text) return 'bridgeAB';
+    if (t === bridgeBC.text) return 'bridgeBC';
+    return `?? ${t.slice(0, 40)}`;
+  });
+  assert.deepEqual(tokens, ['preview', 'A', 'bridgeAB', 'B', 'bridgeBC', 'C'], 'the exact base playback order');
+  runner.endTour();
+});
+
+await checkAsync('phase1 (g): the per-tour cap — four commissions sound, the fifth drop is discarded-cap', async () => {
+  const gUnit = (n, anchor) => unit(`s${n}|landmark_origin`, 32.7 + anchor * 0.2);
+  const gStory = (n, anchor) => {
+    const u = gUnit(n, anchor);
+    return {
+      kind: 'story',
+      id: u.id,
+      label: u.placeName,
+      durationSec: 120,
+      unit: u,
+      ready: true,
+      anchorProgress: anchor,
+      releaseProgress: anchor - 0.01,
+      expireProgress: anchor + 0.06,
+    };
+  };
+  const gBridge = (a, b) => ({
+    kind: 'bridge',
+    id: `bridge:s${a}|landmark_origin>s${b}|landmark_origin`,
+    label: `Bridge — s${a} to s${b}`,
+    durationSec: 10,
+    prevUnitId: `s${a}|landmark_origin`,
+    nextUnitId: `s${b}|landmark_origin`,
+    text: `BRIDGE s${a} to s${b}.`,
+    ready: true,
+    targetDurationSec: 10,
+  });
+  const items = [{ kind: 'preview', id: 'preview', label: 'Episode preview', durationSec: 7, text: 'PREVIEW: a hand-built drive.', ready: true }];
+  const anchors = [0.05, 0.2, 0.35, 0.5, 0.65, 0.8, 0.93];
+  anchors.forEach((a, i) => {
+    items.push(gStory(i + 1, a));
+    if (i < anchors.length - 1) items.push(gBridge(i + 1, i + 2));
+  });
+  const plan = { ...anchorPlan(), items, climaxUnitId: null, climaxSubject: null, climaxMode: null, thread: null, wrapUp: null };
+  const audio = new RealFakeAudio(200);
+  const events = [];
+  const outcomes = [];
+  const runner = p1Runner(audio, events, outcomes);
+  await runner.start(plan);
+  await until(() => audio.played.some(u => u.includes('s1%7Clandmark_origin.wav')), 'story s1 sounds');
+  const fix = p => runner.onPosition({ lat: latForProgress(p), lng: -117.25 });
+  const soundedCount = () => events.filter(e => e.t === 'route_rebridge_sounded').length;
+  // Each jump lands just past the next story's window: it
+  // drops at the gate and the commission into the following
+  // story sounds. Jumps are discontinuities — suppression
+  // never enters this suite.
+  fix(0.27);
+  await until(() => soundedCount() === 1, 'commission 1 sounds (s2 dropped)');
+  fix(0.42);
+  await until(() => soundedCount() === 2, 'commission 2 sounds (s3 dropped)');
+  fix(0.57);
+  await until(() => soundedCount() === 3, 'commission 3 sounds (s4 dropped)');
+  fix(0.72);
+  await until(() => soundedCount() === 4, 'commission 4 sounds (s5 dropped)');
+  fix(0.87); // s6 drops — the cap is spent
+  await until(
+    () => events.some(e => e.t === 'route_rebridge_skipped' && e.p.reason === 'cap'),
+    'the fifth drop hits the cap',
+  );
+  fix(0.95);
+  await until(() => audio.played.some(u => u.includes('s7%7Clandmark_origin.wav')), 'story s7 sounds, bridgeless');
+  assert.equal(events.filter(e => e.t === 'story_dropped').length, 5, 'five stale drops');
+  assert.equal(events.filter(e => e.t === 'route_rebridge_fired').length, 4, 'four commissions fired');
+  runner.endTour();
+  assert.equal(outcomes.length, 1);
+  const comms = outcomes[0].commissions;
+  assert.equal(comms.length, 5, 'four commissions + the cap record');
+  assert.deepEqual(
+    comms.map(c => c.result),
+    ['sounded', 'sounded', 'sounded', 'sounded', 'discarded-cap'],
+  );
+  assert.equal(comms[4].text, null, 'a capped commission was never authored');
+  assert.deepEqual(verifier.validateOutcome(outcomes[0]), [], 'the cap outcome validates');
+});
+
+check('phase1 (h): capture shape — commissions ride the outcome verbatim; verifier accepts them and legacy rows', () => {
+  const acc = {
+    endReason: 'arrival-owed',
+    begun: true,
+    planItemIds: ['i0', 'i1', 'i2', 'i3', 'i4', 'i5', 'i6'],
+    playedItemIds: ['i0', 'i2'],
+    settledUnplayed: new Map([['i1', { skipped: true }]]),
+    droppedStaleItemIds: new Set(['i3']),
+    gateSkippedItemIds: new Set(['i4']),
+    unrenderedItemIds: new Set(['i5']),
+    heardUnitIds: ['u0', 'u2'],
+    maxDisplacementM: 40,
+    maxProgressFraction: 0.5,
+    pathLengthM: 10000,
+    endedAtMs: 1762000100000,
+  };
+  const commissions = [
+    {
+      id: 'rebridge:i3>i4',
+      for_story_id: 'i3',
+      prev_story_id: 'i2',
+      next_story_id: 'i4',
+      via: 'suppression',
+      text: 'From x we keep rolling.',
+      result: 'sounded',
+    },
+  ];
+  const out = ec.assembleOutcomeCapture('route-1', 'fresh-test', { ...acc, commissions });
+  assert.deepEqual(out.commissions, commissions, 'commissions carried verbatim');
+  assert.deepEqual(verifier.validateOutcome(out), [], 'the verifier accepts a commission verdict');
+  const legacy = ec.assembleOutcomeCapture('route-1', 'fresh-test', acc);
+  assert.deepEqual(legacy.commissions, [], 'no commissions input → an empty array, never a missing field');
+  assert.deepEqual(verifier.validateOutcome(legacy), [], 'commission-less outcomes still validate');
+  const bogusResult = { ...out, commissions: [{ ...commissions[0], result: 'vanished' }] };
+  assert.ok(verifier.validateOutcome(bogusResult).length > 0, 'a bogus commission result is flagged');
+  const bogusVia = { ...out, commissions: [{ ...commissions[0], via: 'magic' }] };
+  assert.ok(verifier.validateOutcome(bogusVia).length > 0, 'a bogus commission via is flagged');
+});
+
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
