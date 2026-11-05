@@ -5704,7 +5704,7 @@ check("fieldfix lane 1: a bridge is its pair's facts — the elastic target no l
   const at90 = rn.bridgeTextFor(prev, next, { targetSec: 90 });
   assert.equal(at8, at90, 'the target is bookkeeping now — same pair, same bridge');
   assert.ok(!rn.BRIDGE_CONNECTIVE_LINES.some(l => at90.includes(l)), 'no connective-bank line pads it');
-  assert.ok(rn.spokenSecEstimate(at90) <= 30, `honest length (got ${rn.spokenSecEstimate(at90)}s)`);
+  assert.ok(rm.estimateDurationSec(at90) <= 30, `honest length (got ${rm.estimateDurationSec(at90)}s by the composer's estimator)`);
 });
 
 check('fieldfix lane 1: maxChars spends the optional sentence first — the head always survives', () => {
@@ -5779,7 +5779,8 @@ await checkAsync('fieldfix lanes 1/1b (runner): the commission inherits the epis
   await until(() => events.some(e => e.t === 'route_rebridge_sounded'), 'the A→C commission sounds');
   const fired = events.filter(e => e.t === 'route_rebridge_fired');
   assert.equal(fired.length, 1, 'exactly one commission');
-  const text = fired[0].p.text;
+  const text = audio.played.map(decodedOf).find(isRebridgeClip);
+  assert.ok(text, 'the sounded commission text is on the audio record');
   assert.ok(text.length <= rp.REBRIDGE_MAX_CHARS, `commission within the hard cap (${text.length} chars)`);
   assert.ok(!text.includes('two ends of the same story'), 'the spent callout does not repeat in the commission');
   assert.ok(text.includes('runs through c|landmark_origin too'), 'the commission still connects — on the alternate thread line');
@@ -5790,7 +5791,7 @@ check('fieldfix lane 2: the field shape — a long early portal can no longer do
   const geoA = unit('ga|landmark_origin', 32.72, { durationSec: 60, topics: ['Harbor'] });
   const geoB = unit('gb|landmark_origin', 32.79, { durationSec: 60 });
   const geoC = unit('gc|landmark_origin', 32.86, { durationSec: 60 });
-  const portal = unit('pp|landmark_history', 32.75, { lng: -117.05, durationSec: 400, topics: ['Harbor'] });
+  const portal = unit('pp|landmark_history', 32.75, { angle: 'landmark_history', lng: -117.05, durationSec: 400, topics: ['Harbor'] });
   const opts = { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 1000 };
   const input = { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] };
   const control = rm.composeRoutePlan([geoA, geoB, geoC], densePath, denseDest, 'Dest', input, opts);
@@ -5831,8 +5832,8 @@ check('fieldfix lane 4: portal seats prefer the woven twin; a presence-only hop 
     unit('gb|landmark_origin', 32.8),
     unit('gc|landmark_origin', 32.87),
   ];
-  const original = unit('pp|landmark_history', 32.75, { lng: -117.05, topics: ['Harbor'], durationSec: 150 });
-  const twin = unit('pp|landmark_history-woven-v1', 32.75, { lng: -117.05, topics: ['Harbor'], durationSec: 140 });
+  const original = unit('pp|landmark_history', 32.75, { angle: 'landmark_history', lng: -117.05, topics: ['Harbor'], durationSec: 150 });
+  const twin = unit('pp|landmark_history-woven-v1', 32.75, { angle: 'landmark_history-woven-v1', lng: -117.05, topics: ['Harbor'], durationSec: 140 });
   const withTwin = composeDense([...geo, original, twin]);
   const portalItem = withTwin.items.find(i => i.portal);
   assert.equal(portalItem?.id, 'pp|landmark_history-woven-v1', 'the woven twin takes the portal seat');
@@ -5894,6 +5895,7 @@ await checkAsync('fieldfix lane 3: the sound-start stamp gap — suppression fir
 
 await checkAsync('fieldfix lane 3: a near miss is on the record — judged safe on a real margin, then gate-dropped by a jump', async () => {
   const plan = finePlan();
+  const bridgeAB = plan.items.find(i => i.kind === 'bridge' && i.nextUnitId === 'b|landmark_origin');
   const audio = new RealFakeAudio(250);
   const events = [];
   const runner = p1Runner(audio, events, []);
@@ -5901,13 +5903,19 @@ await checkAsync('fieldfix lane 3: a near miss is on the record — judged safe 
   // A slow, usable creep: 0.0002 of the route per 200 ms ≈
   // 0.001 progress/sec. Judged against B's window, that rate
   // predicts a start INSIDE the window — safe, with a real
-  // margin the drop record must carry.
-  runner.onPosition({ lat: 32.75996, lng: -117.25 }); // progress ≈ 0.2998
-  await new Promise(r => setTimeout(r, 200));
-  runner.onPosition({ lat: 32.76, lng: -117.25 }); // ≈ 0.30 — the rate sample lands
-  await new Promise(r => setTimeout(r, 200));
-  runner.onPosition({ lat: 32.76004, lng: -117.25 }); // ≈ 0.3002 — judged by now, one way or the other
-  await new Promise(r => setTimeout(r, 200));
+  // margin — so the lead-in is promised and sounds. The
+  // creep runs until the promise is observable on the audio
+  // record, the same choreography as phase1 (a).
+  let lat = 32.75996; // progress ≈ 0.2998
+  runner.onPosition({ lat, lng: -117.25 });
+  let promised = false;
+  for (let i = 0; i < 40 && !promised && !events.some(e => e.t === 'story_dropped'); i++) {
+    await new Promise(r => setTimeout(r, 200));
+    lat += 0.00004;
+    runner.onPosition({ lat, lng: -117.25 });
+    promised = audio.played.map(decodedOf).includes(bridgeAB.text);
+  }
+  assert.ok(promised, 'the lead-in sounded — it was promised on a judged-safe prediction');
   runner.onPosition({ lat: 32.795, lng: -117.25 }); // the jump: B's window is gone
   await until(() => events.some(e => e.t === 'story_dropped'), 'B gate-drops after the jump');
   const drop = events.find(e => e.t === 'story_dropped');
