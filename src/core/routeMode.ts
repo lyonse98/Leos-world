@@ -1196,16 +1196,22 @@ export interface RoutePlan {
    */
   fetchStats?: FetchReadStats | null;
   /**
-   * The generated wrap-up (addendum 3), authored + synthesized
-   * by the App at preparation (after gap-fill) and held by the
-   * runner as the plan's closing piece: ONE closing narration
-   * for the planned drive played to finish. Played only when
-   * the tour reaches arrival with the plan run out; an early
-   * end or an overrun simply never uses it. Null when its
-   * generation/synthesis failed at preparation — arrival then
-   * falls back to the standing closeout line exactly.
+   * The generated wrap-up (addendum 3): the closing narration
+   * for the planned drive played to finish. Its TEXT is
+   * authored by the App at preparation (after gap-fill) — the
+   * text exists from plan-fix, like every live piece's. Its
+   * AUDIO is a render-ahead queue item in the runner (last in
+   * plan order), synthesized during the tour through the
+   * finished-audio seam; audioUrl stays null until then (a
+   * non-null audioUrl means the plan arrived with the audio
+   * already rendered, and the runner adopts it as-is). Played
+   * only when the tour reaches arrival with the plan run out;
+   * an early end or an overrun simply never uses it. Null when
+   * its text generation failed at preparation, and a failed
+   * queue render falls back to the standing closeout line
+   * exactly.
    */
-  wrapUp?: { text: string; audioUrl: string } | null;
+  wrapUp?: { text: string; audioUrl: string | null } | null;
 }
 
 /** The woven members seated into a plan (see RoutePlan.wovenMembers). */

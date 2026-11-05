@@ -15,6 +15,24 @@
 // synthesis fails is dropped before anything plays (skip-fallback),
 // exactly as routeMode.applyBridgeFallback prescribes.
 //
+// Render-ahead pipeline (Nov 4, 2026 — Erik's latency ruling,
+// amending the Nov 3 settled-before-start doctrine): only the
+// OPENING settles before Start — the spoken preview, the first
+// bridge, and the departure story. Everything else renders
+// through a bounded-concurrency queue (RENDER_CONCURRENCY) in
+// plan order, starting the moment the plan is fixed — it works
+// while the manifest card sits untapped and keeps working
+// during playback, ahead of the listener. Only SYNTHESIS is
+// pipelined: every text (bridge, preview, wrap-up, gap story)
+// already exists at plan-fix, authored at compose time; what
+// moves is when each piece is voiced. Playback never stalls
+// for a late piece: a bridge/reaction whose moment arrives
+// before its render is skipped (route_render_late telemetry +
+// capture accounting) and the story sounds without it — tissue
+// is connective, never load-bearing. A mid-tour render failure
+// degrades the same way, per piece; the build-failure state is
+// pre-start only and this pipeline never produces it.
+//
 // Composer v2 (Nov 3, 2026): POSITION-ANCHORED RELEASE. The
 // runner no longer pours the whole plan into the Player at
 // start. It renders every item at plan time, then FEEDS the
@@ -47,6 +65,7 @@ import {
   assemblePlanCapture,
   assemblePlanItems,
   pathLengthM,
+  type CapturedRenderResult,
   type EpisodeCaptureContext,
   type RouteEpisodeOutcomePayload,
   type RouteEpisodePlanPayload,
@@ -98,14 +117,15 @@ export interface RouteRunnerView {
   /** Answers that actually sounded this route tour. */
   questionsAnswered: number;
   /**
-   * Composer v3 (commit D): the plan-time narration has fully
-   * settled — every preview, bridge, and generated gap-story
-   * render has succeeded OR fallen back (the skip-fallback
-   * design means a failure settles too; readiness can never
-   * hang on one), and the wrap-up was settled by the App
-   * before staging. The manifest card's primary button reads
-   * this flag: disabled 'Generating tour…' until it turns
-   * true, then enabled 'Start tour'.
+   * The OPENING has settled (render-ahead pipeline, Nov 4,
+   * 2026): the spoken preview, the first bridge, and the
+   * departure story have each rendered OR fallen back (the
+   * skip-fallback design means a failure settles too;
+   * readiness can never hang on one). Everything past the
+   * opening keeps rendering ahead of the listener and is NOT
+   * part of this gate. The manifest card's primary button
+   * reads this flag: disabled with the recording stage label
+   * until it turns true, then enabled 'Start tour'.
    */
   narrationReady: boolean;
 }
@@ -113,11 +133,14 @@ export interface RouteRunnerView {
 /**
  * The manifest card's primary button, derived from the
  * runner view (composer v3, commit D — Erik's copy): honest
- * about the preparation phase, and live only when everything
- * the plan needs has settled. Nov 4, 2026 (Erik's first
- * stationary test): the not-ready phase IS the live-renders
- * phase — bridges and the spoken preview synthesizing — so
- * the disabled label now names that build stage (see
+ * about the preparation phase, and live once the OPENING has
+ * settled (render-ahead pipeline, Nov 4, 2026: the rest of
+ * the episode records ahead of the listener — the label
+ * names the recording stage, never a claim that the whole
+ * episode is recorded). Nov 4, 2026 (Erik's first stationary
+ * test): the not-ready phase IS the live-renders phase —
+ * bridges and the spoken preview synthesizing — so the
+ * disabled label now names that build stage (see
  * ROUTE_BUILD_STAGE_LABELS) instead of a generic 'Generating
  * tour…' that read as no progress at all.
  */
@@ -136,11 +159,14 @@ export function routeStartButtonState(view: { narrationReady: boolean }): {
  * The route BUILD's phases, in staging order — the milestones
  * the App's build actually passes through: the maps calls
  * (geocode + route), the library fetch / compose / guarantee /
- * seating, then the live pieces rendering (wrap-up first, then
- * the runner's bridges + preview behind the manifest card).
- * Stage labels are tied to these milestones ONLY: the App sets
- * a stage when the build enters the phase, never on a timer —
- * there is no fake progress anywhere in the build UI.
+ * seating, then the live pieces rendering. Under the
+ * render-ahead pipeline (Nov 4, 2026) the recording stage
+ * completes the OPENING (preview + first bridge + departure
+ * readiness); the remaining pieces keep recording ahead of
+ * the listener during playback. Stage labels are tied to
+ * these milestones ONLY: the App sets a stage when the build
+ * enters the phase, never on a timer — there is no fake
+ * progress anywhere in the build UI.
  */
 export type RouteBuildStage = 'route' | 'compose' | 'recording';
 
@@ -268,10 +294,33 @@ export function routeInterItemGapMs(args: {
   return ROUTE_BREATH_MS;
 }
 
+/**
+ * Render-ahead queue width (Nov 4, 2026). Three in flight:
+ * with plan-order starts, one slow synthesis can head-of-line
+ * block at most the pieces behind it, and two more in flight
+ * keep the queue advancing past it; the queue's consumer (the
+ * feed gate) needs at most one piece per settle, so three is
+ * comfortable headroom without bursting the synthesis API —
+ * the Nov 4 stationary test showed cold-connection transients
+ * are real, and a wider burst invites exactly those. Pieces
+ * still START strictly in plan order; concurrency only
+ * overlaps their waits.
+ */
+export const RENDER_CONCURRENCY = 3;
+
 export interface RouteRunnerDeps {
   audio: AudioPort;
   /** Synthesize text → playable blob URL (App wires gemini.synthesizeSpeech). */
   synthUrl: (text: string) => Promise<string>;
+  /**
+   * The wrap-up's synthesis seam: same synthesis, WITH the
+   * standing audio finish applied (the App wires synthesize →
+   * finishLiveRenderBlob). The wrap-up is the one piece whose
+   * render carried the finish at preparation time before the
+   * pipeline; as a queue item it keeps exactly that treatment.
+   * Absent = the queue falls back to synthUrl for the wrap-up.
+   */
+  synthFinishedUrl?: (text: string) => Promise<string>;
   /**
    * Phase-2 Q&A answer generation — the SAME generation path the
    * freeform engine uses (gemini.generateAnswerText), wired by the
@@ -314,6 +363,13 @@ export interface RouteRunnerDeps {
 
 let runnerSeq = 0;
 
+/** One plan item's render-ahead ledger entry (see RoutePlanRunner.entries). */
+export interface RenderEntry {
+  planItem: PlanItem;
+  audible: AudibleItem | null;
+  state: 'pending' | 'ready' | 'failed' | 'late' | 'dropped';
+}
+
 export class RoutePlanRunner {
   private player: Player;
   private deps: RouteRunnerDeps;
@@ -330,32 +386,64 @@ export class RoutePlanRunner {
   private settledUnplayed = new Map<string, { skipped: boolean }>();
   /** Bridges the feed gate skipped because their parent story was dropped stale. */
   private gateSkippedItemIds = new Set<string>();
+  /** Tissue the feed gate late-skipped: its moment arrived before its render (render-ahead pipeline). */
+  private lateSkippedItemIds = new Set<string>();
+  /** Item id → when its render completed with audio in hand (capture's render verdicts). */
+  private renderDoneAtMs = new Map<string, number>();
   /** Episode capture: filed at most once per runner, like the drive record. */
   private episodeOutcomeWritten = false;
   /** Movement evidence (episode capture's driven/stationary discriminator). */
   private firstFix: GeoPoint | null = null;
   private maxDisplacementM = 0;
   private maxProgress = 0;
-  /** Rendered plan items in plan order (render failures never land here — skip-fallback). */
-  private rendered: { planItem: PlanItem; audible: AudibleItem }[] = [];
-  /** Next rendered entry the feed gate will consider. Entry 0 is begun directly by start(). */
-  private feedIndex = 0;
-  /** Rendered entries resolved: settled after feeding, or dropped stale / bridge-orphaned at the gate. The exhaustion numerator. */
+  /**
+   * Every plan item, in plan order, with its render state —
+   * the render-ahead queue's ledger. 'pending' = not yet
+   * rendered (queued or in flight); 'ready' = audio in hand;
+   * 'failed' = synthesis fell back (skip-fallback: the piece
+   * is dropped, never wedged); 'late' = the feed gate reached
+   * its moment first and skipped it; 'dropped' = the gate
+   * skipped it because its parent story was dropped stale.
+   */
+  private entries: RenderEntry[] = [];
+  /** Next entry the feed gate will consider. The begun entry sits behind it. */
+  private feedCursor = 0;
+  /** Entries resolved: settled after feeding, or render-failed, or dropped/late-skipped at the gate. The exhaustion numerator. */
   private resolvedCount = 0;
   /** Stories dropped at the feed gate for an expired window (their outgoing bridges are skipped too). */
   private droppedStoryIds = new Set<string>();
+  /** Render queue: entries started strictly in plan order, at most RENDER_CONCURRENCY in flight. */
+  private renderNextIndex = 0;
+  private renderInFlight = 0;
+  /** When the plan was fixed (the queue's t=0 — render-late telemetry and capture timings read from it). */
+  private planFixAtMs = 0;
+  /** True once every queue task (all entries + the wrap-up) has settled. */
+  private queueDrained = false;
+  private queueDrainedAtMs: number | null = null;
+  /** The opening settle: preview + first bridge + departure story resolved, one way or the other. */
+  private openingSettledFlag = false;
+  private openingSettledAtMs: number | null = null;
+  private openingPromise: Promise<void> | null = null;
+  private openingResolve: (() => void) | null = null;
+  /** start()'s flow: begin the moment the opening prefix resolves (vs the manifest hold). */
+  private wantsBegin = false;
+  private begunAtMs: number | null = null;
+  private planStartedFiled = false;
   /**
-   * The departure story's rendered entry — the first story to
-   * render (consolidation §2). It keeps the standing item-1
-   * exemption at the feed gate: the preview item holds slot 1
-   * now, but the departure story behind it still begins when
-   * the runner reaches it — never held by its release window,
-   * never dropped stale at the gate — exactly the treatment
-   * slot 1 had when the departure story WAS the first item.
-   * (When there is no preview, the departure story is begun
-   * directly and the gate never evaluates it at all.)
+   * The wrap-up as a queue item (render-ahead pipeline): it
+   * rides LAST in the queue, behind every plan item. 'adopted'
+   * = the plan arrived with audio already rendered (the
+   * standing fixture/pre-rendered shape) — no task, no
+   * telemetry; 'pending' = text only, synthesis queued;
+   * 'ready'/'failed' = the task's verdict (on failure the
+   * standing closeout fallback speaks instead, as always).
    */
-  private departureEntry: { planItem: PlanItem; audible: AudibleItem } | null = null;
+  private wrapUpState: 'none' | 'adopted' | 'pending' | 'ready' | 'failed' = 'none';
+  private wrapUpAudioUrl: string | null = null;
+  private wrapUpDoneAtMs: number | null = null;
+  private wrapTaskStarted = false;
+  private wrapUpPromise: Promise<boolean> | null = null;
+  private wrapUpResolve: ((ok: boolean) => void) | null = null;
   /** Last known path progress (0 until the first GPS feed). */
   private lastProgress = 0;
   /** When lastProgress was sampled, and the recent progress rate (per second) — the breath's stale-risk input. */
@@ -368,7 +456,6 @@ export class RoutePlanRunner {
   private heldStart = false;
   /** Drive record (addendum 2): filed at most once per runner. */
   private driveRecordWritten = false;
-  private renderingDone = false;
   private closing = false;
   private closed = false;
   private arrivedFlag = false;
@@ -439,7 +526,7 @@ export class RoutePlanRunner {
       // head's plan entry (window + departure status), and
       // the recent progress rate.
       interItemGapMs: next => {
-        const entry = next ? this.rendered.find(e => e.audible.id === next.id) : undefined;
+        const entry = next ? this.entries.find(e => e.audible !== null && e.audible.id === next.id) : undefined;
         return routeInterItemGapMs({
           closing: this.closing || this.closed,
           lastSettled: this.lastSettle,
@@ -447,7 +534,7 @@ export class RoutePlanRunner {
             ? {
                 planItem: entry !== undefined,
                 expireProgress: entry?.planItem.expireProgress ?? null,
-                departure: entry !== undefined && entry === this.departureEntry,
+                departure: entry !== undefined && entry === this.firstReadyStoryEntry(),
               }
             : null,
           lastProgress: this.lastProgress,
@@ -501,7 +588,7 @@ export class RoutePlanRunner {
       closeoutDone: this.closeoutDoneFlag,
       qaPhase: this.qaPhase,
       questionsAnswered: this.questionsAnsweredCount,
-      narrationReady: this.plan !== null && this.renderingDone,
+      narrationReady: this.plan !== null && this.openingSettledFlag,
     };
   }
 
@@ -534,45 +621,54 @@ export class RoutePlanRunner {
    */
   dispose(): void {
     this.closed = true;
+    // Never leave a stage()/start() awaiter hanging on a
+    // discarded runner: the opening gate resolves (the runner
+    // is dead; nothing will ever be ready on it).
+    this.settleOpening();
     this.player.teardown();
   }
 
   /**
-   * Plan-time render of every item. The first playable item
-   * begins at once (it is the audio prime carrier, and it must
-   * start as close to the user's tap as possible — the departure
-   * story is exempt from window gating by construction: the
-   * plan starts where the driver is). The rest render into the
-   * held list while it plays; the feed gate (maybeFeed) releases
-   * them under the anchored-release rules. A bridge whose render
-   * fails never lands in the held list (skip-fallback) — it can
-   * never wedge the gate, and playback goes straight into the
-   * next Miles story when its window opens.
+   * Hand a plan over and begin as soon as the opening prefix
+   * resolves (start()'s standing behavior): the first playable
+   * item begins at once (it is the audio prime carrier, and it
+   * must start as close to the user's tap as possible — the
+   * departure story is exempt from window gating by
+   * construction: the plan starts where the driver is). The
+   * returned promise resolves at the OPENING settle — NOT when
+   * every piece has rendered: the render-ahead queue keeps
+   * working through the rest during playback. A bridge whose
+   * render fails is dropped (skip-fallback) — it can never
+   * wedge the gate, and playback goes straight into the next
+   * Miles story when its window opens.
    */
   async start(plan: RoutePlan): Promise<void> {
-    await this.renderPlan(plan, true);
+    await this.fixPlan(plan, true);
   }
 
   /**
-   * Manifest hold (differentiator 3): render the whole plan
-   * exactly as start() does, but BEGIN nothing — the tour
-   * screen is showing the plan's episode card, and the runner
-   * must not consume story windows while the listener reads
-   * it. beginStaged() — the card's Start tour tap — is
-   * what sets the plan in motion.
+   * Manifest hold (differentiator 3): fix the plan exactly as
+   * start() does, but BEGIN nothing — the tour screen is
+   * showing the plan's episode card, and the runner must not
+   * consume story windows while the listener reads it. The
+   * render queue runs during the hold (that is the point of
+   * the pipeline: the manifest minutes are render minutes).
+   * The returned promise resolves at the OPENING settle, which
+   * is what flips the card's button to 'Start tour';
+   * beginStaged() — the tap — is what sets the plan in motion.
    */
   async stage(plan: RoutePlan): Promise<void> {
     this.heldStart = true;
-    const rendering = this.renderPlan(plan, false);
+    const opening = this.fixPlan(plan, false);
     // Surface the hold at once (composer v3, commit D): the
-    // manifest card must be visible WHILE the plan-time
-    // narration renders settle — renderPlan's synchronous
-    // prefix has already taken the plan, so this notify
-    // publishes phase 'ready' with narrationReady still
-    // false, and the card's button sits disabled on
-    // 'Generating tour…' until the settle notify below.
+    // manifest card must be visible WHILE the opening renders
+    // settle — fixPlan's synchronous prefix has already taken
+    // the plan, so this notify publishes phase 'ready' with
+    // narrationReady still false, and the card's button sits
+    // disabled on the recording stage label until the settle
+    // notify below.
     this.notify();
-    await rendering;
+    await opening;
     this.notify();
   }
 
@@ -581,81 +677,299 @@ export class RoutePlanRunner {
    * gesture, so it re-primes first, through the same noteGesture
    * path the awaiting state uses — if the build tap's prime was
    * refused, this tap gives item 1 a fresh carrier inside a live
-   * gesture window. Then item 1 begins and the feed gate takes
-   * over; any window the driver already passed while the card
-   * was up is handled by the dumb guards exactly as if they had
-   * set off early (drop stale, owe it at the closeout).
+   * gesture window. Then the opening prefix begins and the feed
+   * gate takes over; any window the driver already passed while
+   * the card was up is handled by the dumb guards exactly as if
+   * they had set off early (drop stale, owe it at the closeout).
    */
   beginStaged(): void {
     if (!this.heldStart || this.closed || this.endedKind !== null) return;
     this.heldStart = false;
+    this.wantsBegin = true;
     this.player.noteGesture(this.heldFirstItem());
-    if (this.rendered.length === 0) return; // an empty staged plan already ended in renderPlan
-    const first = this.rendered[0];
-    this.player.beginWithItem(first.audible);
-    this.begun = true;
-    this.feedIndex = 1;
-    this.filePlanStarted();
-    this.maybeFeed();
-    this.maybeExhaust();
+    // The opening settled before the button enabled, so the
+    // prefix resolves here; if an early non-opening piece is
+    // somehow still rendering ahead of the first ready entry,
+    // tryBegin waits and the queue's next settle retries it.
+    this.tryBegin();
     this.notify();
   }
 
   /**
-   * Plan-time render of every item. With beginFirst, the first
-   * playable item begins as soon as it renders (start()'s
-   * standing behavior); without it, everything renders into the
-   * held list and nothing sounds (the manifest hold). A bridge
-   * whose render fails never lands in the held list either way.
+   * Fix the plan and start the render-ahead queue. Synchronous
+   * through plan assignment and the first task starts; the
+   * returned promise resolves at the OPENING settle. The queue
+   * starts tasks strictly in plan order (the wrap-up last),
+   * at most RENDER_CONCURRENCY in flight, and keeps working
+   * until every piece is rendered or fallen back — through
+   * the manifest hold and through playback alike.
    */
-  private async renderPlan(plan: RoutePlan, beginFirst: boolean): Promise<void> {
+  private fixPlan(plan: RoutePlan, beginFirst: boolean): Promise<void> {
     if (this.startStamp === null) this.startStamp = Date.now();
     this.plan = plan;
-    for (const it of plan.items) {
-      if (this.closed) break; // a closeout landed mid-render: stop building a dead plan
-      const item = await this.toAudibleItem(it);
-      // Preview telemetry (consolidation §2): the preview item
-      // rendered, or it didn't — a failed preview never wedges
-      // the plan; the departure story simply becomes item 1.
-      if (it.kind === 'preview') {
-        this.deps.onEvent?.('route_preview', { preview: item ? 'generated' : 'failed' });
+    this.planFixAtMs = Date.now();
+    this.entries = plan.items.map(it => ({ planItem: it, audible: null, state: 'pending' as RenderEntry['state'] }));
+    this.wantsBegin = beginFirst;
+    if (plan.wrapUp) {
+      if (plan.wrapUp.audioUrl) {
+        // Audio arrived with the plan (the pre-rendered shape):
+        // adopted as-is — no task, no route_wrap_up telemetry,
+        // exactly as the standing closeout always treated it.
+        this.wrapUpState = 'adopted';
+        this.wrapUpAudioUrl = plan.wrapUp.audioUrl;
+      } else if (plan.wrapUp.text) {
+        this.wrapUpState = 'pending';
+        this.wrapUpPromise = new Promise<boolean>(resolve => {
+          this.wrapUpResolve = resolve;
+        });
       }
-      if (!item) continue; // render failure → dropped, never wedged
-      const entry = { planItem: it, audible: item };
-      this.rendered.push(entry);
-      if (it.kind === 'story' && !this.departureEntry) this.departureEntry = entry;
-      if (beginFirst && !this.begun) {
-        this.player.beginWithItem(item);
-        this.begun = true;
-        this.feedIndex = 1;
+    }
+    this.openingPromise = new Promise<void>(resolve => {
+      this.openingResolve = resolve;
+    });
+    this.pumpQueue();
+    // An empty plan (or one whose opening is empty) settles
+    // and drains without any task ever completing.
+    this.afterTaskSettle();
+    return this.openingPromise;
+  }
+
+  /** Start queued tasks while a concurrency slot is free — plan order, wrap-up last. */
+  private pumpQueue(): void {
+    if (this.closed || !this.plan) return;
+    while (this.renderInFlight < RENDER_CONCURRENCY) {
+      if (this.renderNextIndex < this.entries.length) {
+        const entry = this.entries[this.renderNextIndex];
+        this.renderNextIndex += 1;
+        this.renderInFlight += 1;
+        void this.runEntryTask(entry);
+      } else if (this.wrapUpState === 'pending' && !this.wrapTaskStarted) {
+        this.wrapTaskStarted = true;
+        this.renderInFlight += 1;
+        void this.runWrapTask(true);
+      } else {
+        return;
       }
+    }
+  }
+
+  /** One entry's render: the standing toAudibleItem seam (shelf URL or synthesis). Never throws. */
+  private async runEntryTask(entry: RenderEntry): Promise<void> {
+    const it = entry.planItem;
+    const audible = await this.toAudibleItem(it);
+    this.renderInFlight -= 1;
+    // Preview telemetry (consolidation §2): the preview item
+    // rendered, or it didn't — a failed preview never wedges
+    // the plan; the departure story simply becomes item 1.
+    if (it.kind === 'preview') {
+      this.deps.onEvent?.('route_preview', { preview: audible ? 'generated' : 'failed' });
+    }
+    if (entry.state === 'late' || entry.state === 'dropped') {
+      // The feed gate already resolved this piece without its
+      // audio (late skip / orphaned bridge): the finished
+      // render is discarded, never fed late.
+      if (audible && audible.source.kind === 'url' && audible.source.url.startsWith('blob:')) {
+        try {
+          URL.revokeObjectURL(audible.source.url);
+        } catch {
+          /* best effort — a leaked object URL is not a tour failure */
+        }
+      }
+    } else if (audible) {
+      entry.audible = audible;
+      entry.state = 'ready';
+      this.renderDoneAtMs.set(it.id, Date.now());
+    } else {
+      // Render failure → dropped, never wedged (skip-fallback).
+      // It counts as resolved NOW: the gate will step over it
+      // and exhaustion can complete without it.
+      entry.state = 'failed';
+      this.resolvedCount += 1;
+    }
+    this.afterTaskSettle();
+  }
+
+  /**
+   * The wrap-up's render task. Synthesis goes through the
+   * finished-audio seam when the App wired one (the wrap-up
+   * keeps the audio finish it always had). Its verdict fires
+   * route_wrap_up 'generated'/'failed' — the events the App
+   * used to fire at preparation time, now fired when the
+   * render actually completes. An adopted wrap-up never runs
+   * this and fires neither.
+   */
+  private async runWrapTask(countedInFlight: boolean): Promise<void> {
+    const text = this.plan?.wrapUp?.text ?? null;
+    let ok = false;
+    if (text) {
+      try {
+        const synth = this.deps.synthFinishedUrl ?? this.deps.synthUrl;
+        this.wrapUpAudioUrl = await synth(text);
+        ok = true;
+      } catch {
+        ok = false;
+      }
+    }
+    if (countedInFlight) this.renderInFlight -= 1;
+    if (ok) {
+      this.wrapUpState = 'ready';
+      this.wrapUpDoneAtMs = Date.now();
+      this.deps.onEvent?.('route_wrap_up', { wrap_up: 'generated' });
+    } else {
+      this.wrapUpState = 'failed';
+      this.deps.onEvent?.('route_wrap_up', { wrap_up: 'failed' });
+    }
+    this.wrapUpResolve?.(ok);
+    this.afterTaskSettle();
+  }
+
+  /** The wrap-up's audio, waiting for its render if the closeout arrives first. */
+  private async resolveWrapUpUrl(): Promise<string | null> {
+    if (this.wrapUpState === 'adopted' || this.wrapUpState === 'ready') return this.wrapUpAudioUrl;
+    if (this.wrapUpState === 'pending' && this.wrapUpPromise) {
+      // The closeout needs it NOW: if its queue turn hasn't
+      // come, start it out of band (the standing closeout
+      // always synthesized its line inline at close; this is
+      // the same one-off, never a second render — the started
+      // flag keeps the queue from repeating it).
+      if (!this.wrapTaskStarted) {
+        this.wrapTaskStarted = true;
+        void this.runWrapTask(false);
+      }
+      const ok = await this.wrapUpPromise;
+      return ok ? this.wrapUpAudioUrl : null;
+    }
+    return null;
+  }
+
+  /** Every task settle funnels here: advance the queue, the gates, and the feed. */
+  private afterTaskSettle(): void {
+    if (!this.plan) return;
+    this.pumpQueue();
+    this.checkOpeningSettled();
+    if (
+      !this.queueDrained &&
+      this.renderNextIndex >= this.entries.length &&
+      this.renderInFlight === 0 &&
+      this.wrapUpState !== 'pending'
+    ) {
+      this.queueDrained = true;
+      this.queueDrainedAtMs = Date.now();
+      this.settleOpening(); // an empty opening set drains into its settle
+      this.maybeEmptyPlan();
+    }
+    if (this.wantsBegin && !this.heldStart && !this.begun) this.tryBegin();
+    if (this.begun) {
       this.maybeFeed();
+      this.maybeExhaust();
     }
-    this.renderingDone = true;
-    if (this.rendered.length === 0) {
-      // Empty plan (all heard / nothing near the route): the
-      // handoff line is still owed — never dead air, never a
-      // silent screen. The App treats this as an overrun tail.
-      // The accounting finalizes here too (addendum 2): every
-      // plan story is unplayed, hence owed.
-      this.writeDriveRecord(
-        plan.items.filter(it => it.kind === 'story' && it.unit).map(it => it.unit as LibraryUnit),
-      );
-      // Episode capture (Nov 4, 2026): an empty plan ends
-      // here, never reaching close() — its outcome row files
-      // from the same branch.
-      this.fileEpisodeOutcome('overrun');
-      this.heldStart = false;
-      this.freeformTailFlag = true;
-      this.endedKind = 'overrun';
-      this.closeoutDoneFlag = true;
+    this.notify();
+  }
+
+  /** The opening's entry indexes: first preview, first bridge, first story/filler — whichever exist. */
+  private openingIndexes(): number[] {
+    const found: number[] = [];
+    let preview = -1;
+    let bridge = -1;
+    let story = -1;
+    this.entries.forEach((e, i) => {
+      if (preview < 0 && e.planItem.kind === 'preview') preview = i;
+      if (bridge < 0 && e.planItem.kind === 'bridge') bridge = i;
+      if (story < 0 && (e.planItem.kind === 'story' || e.planItem.kind === 'filler')) story = i;
+    });
+    for (const i of [preview, bridge, story]) {
+      if (i >= 0 && !found.includes(i)) found.push(i);
+    }
+    return found;
+  }
+
+  private checkOpeningSettled(): void {
+    if (this.openingSettledFlag || !this.plan) return;
+    const settled = (s: RenderEntry['state']) => s !== 'pending';
+    if (this.openingIndexes().every(i => settled(this.entries[i].state))) this.settleOpening();
+  }
+
+  private settleOpening(): void {
+    if (this.openingSettledFlag) return;
+    this.openingSettledFlag = true;
+    this.openingSettledAtMs = Date.now();
+    this.openingResolve?.();
+  }
+
+  /**
+   * Begin the tour at the first ready entry, in plan order:
+   * failed/late/dropped prefix pieces are stepped over (a
+   * failed preview means the departure story is item 1), and
+   * a still-rendering prefix piece holds the begin — the
+   * prefix IS the opening, and pieces sound in plan order or
+   * not at all. Returns whether the tour began.
+   */
+  private tryBegin(): boolean {
+    if (this.begun || this.closed || this.endedKind !== null || !this.plan) return false;
+    for (let i = 0; i < this.entries.length; i++) {
+      const entry = this.entries[i];
+      if (entry.state === 'failed' || entry.state === 'late' || entry.state === 'dropped') continue;
+      if (entry.state === 'pending') return false; // the opening prefix resolves in order, or not yet
+      this.player.beginWithItem(entry.audible as AudibleItem);
+      this.begun = true;
+      this.begunAtMs = Date.now();
+      this.feedCursor = i + 1;
+      this.filePlanStartedOnce();
+      this.maybeFeed();
+      this.maybeExhaust();
       this.notify();
-      return;
+      return true;
     }
-    if (!beginFirst) return; // staged: route_plan_started files at beginStaged, when the tour actually starts
+    return false;
+  }
+
+  private filePlanStartedOnce(): void {
+    if (this.planStartedFiled) return;
+    this.planStartedFiled = true;
     this.filePlanStarted();
-    this.maybeFeed();
-    this.maybeExhaust();
+  }
+
+  /**
+   * The departure story's entry — the first story with audio
+   * in hand, in plan order (consolidation §2). It keeps the
+   * standing item-1 exemption at the feed gate: the preview
+   * item holds slot 1 now, but the departure story behind it
+   * still begins when the runner reaches it — never held by
+   * its release window, never dropped stale at the gate —
+   * exactly the treatment slot 1 had when the departure story
+   * WAS the first item. Derived, not stored: the gate only
+   * ever evaluates a story after every earlier story has
+   * resolved (a pending earlier story holds the gate), so the
+   * first ready story at evaluation time IS the departure.
+   */
+  private firstReadyStoryEntry(): RenderEntry | null {
+    return this.entries.find(e => e.planItem.kind === 'story' && e.audible !== null) ?? null;
+  }
+
+  /**
+   * A drained queue with NO audio in hand (all heard at plan
+   * time / every render failed): the empty-plan ending, moved
+   * verbatim from the standing render pass — the handoff line
+   * is still owed, never dead air, never a silent screen. The
+   * App treats this as an overrun tail, and the accounting
+   * finalizes here (addendum 2): every plan story is unplayed,
+   * hence owed.
+   */
+  private maybeEmptyPlan(): void {
+    if (!this.plan || this.closed || this.begun || this.endedKind !== null) return;
+    if (this.entries.some(e => e.audible !== null)) return;
+    const plan = this.plan;
+    this.writeDriveRecord(
+      plan.items.filter(it => it.kind === 'story' && it.unit).map(it => it.unit as LibraryUnit),
+    );
+    // Episode capture (Nov 4, 2026): an empty plan ends here,
+    // never reaching close() — its outcome row files from the
+    // same branch.
+    this.fileEpisodeOutcome('overrun');
+    this.heldStart = false;
+    this.freeformTailFlag = true;
+    this.endedKind = 'overrun';
+    this.closeoutDoneFlag = true;
     this.notify();
   }
 
@@ -670,7 +984,14 @@ export class RoutePlanRunner {
     const plan = this.plan as RoutePlan;
     return {
       destination: plan.destinationName,
-      items: this.rendered.length,
+      // The plan's item count (render-ahead pipeline, Nov 4,
+      // 2026): a plan constant, so this payload is identical
+      // whenever it is assembled — at first sound for the
+      // telemetry, at opening settle for the capture row that
+      // embeds it verbatim. How many pieces had audio in hand
+      // at each moment rides the capture rows themselves
+      // (items[].rendered at settle, render_results at close).
+      items: plan.items.length,
       portals: plan.items.filter(i => i.portal).length,
       budget_sec: plan.budgetSec,
       // Fetch accounting (composer v3.1, commit B): reads
@@ -763,19 +1084,24 @@ export class RoutePlanRunner {
 
   /**
    * Episode capture (Nov 4, 2026): the kind='plan' payload,
-   * assembled from the runner's own state at build settle —
+   * assembled from the runner's own state at OPENING settle —
    * the App calls this once stage()/start() resolves and
    * sends it through backend.captureRouteEpisode. The items
    * are the plan's, fully self-contained (full texts as
-   * served); the decisions are planStartedPayload() verbatim.
-   * Null when capture is not wired for this runner
-   * (episodeIds absent) or no plan was ever handed over.
+   * served — every text exists at plan-fix; only synthesis is
+   * pipelined, so nothing textual is missing); an item's
+   * `rendered` marks audio in hand at this moment, and the
+   * outcome row carries each item's final render verdict.
+   * The decisions are planStartedPayload() verbatim. Null
+   * when capture is not wired for this runner (episodeIds
+   * absent) or no plan was ever handed over.
    */
   episodePlanCapture(context: EpisodeCaptureContext): RouteEpisodePlanPayload | null {
     const plan = this.plan;
     const ids = this.deps.episodeIds;
     if (!plan || !ids) return null;
-    const renderedIds = new Set(this.rendered.map(e => e.planItem.id));
+    const renderedIds = new Set(this.entries.filter(e => e.audible !== null).map(e => e.planItem.id));
+    if (this.wrapUpState === 'adopted' || this.wrapUpState === 'ready') renderedIds.add('wrap-up');
     return assemblePlanCapture({
       tourId: ids.tourId,
       buildId: ids.buildId,
@@ -791,7 +1117,7 @@ export class RoutePlanRunner {
    * row, ONCE, from the runner's own accounting — the same
    * lists the drive record and the owed tease are drawn
    * from. Fired from close() (arrival / overrun), from the
-   * empty-plan branch of renderPlan (an overrun that never
+   * empty-plan drain of the render queue (an overrun that never
    * reaches close()), and from endTour() (user end, begun or
    * backed out of the card). A failure inside the dep is
    * swallowed: capture never breaks a tour.
@@ -807,7 +1133,6 @@ export class RoutePlanRunner {
     this.episodeOutcomeWritten = true;
     try {
       const plan = this.plan;
-      const renderedIds = new Set(this.rendered.map(e => e.planItem.id));
       const playedIds = [...this.playedOrderIds];
       for (const id of extraPlayedIds) {
         if (!playedIds.includes(id)) playedIds.push(id);
@@ -825,7 +1150,13 @@ export class RoutePlanRunner {
           settledUnplayed: this.settledUnplayed,
           droppedStaleItemIds: this.droppedStoryIds,
           gateSkippedItemIds: this.gateSkippedItemIds,
-          unrenderedItemIds: new Set(plan.items.filter(it => !renderedIds.has(it.id)).map(it => it.id)),
+          unrenderedItemIds: new Set(
+            this.entries.filter(e => e.state === 'failed').map(e => e.planItem.id),
+          ),
+          lateSkippedItemIds: this.lateSkippedItemIds,
+          renderResults: this.renderResults(),
+          queueDrainedMs:
+            this.queueDrainedAtMs !== null ? this.queueDrainedAtMs - this.planFixAtMs : null,
           heardUnitIds,
           maxDisplacementM: this.maxDisplacementM,
           maxProgressFraction: this.maxProgress,
@@ -839,20 +1170,67 @@ export class RoutePlanRunner {
   }
 
   /**
+   * Episode capture (schema 2): one render verdict per plan
+   * item, in plan order, plus the wrap-up pseudo-item last.
+   * The 'pre-start'/'ahead' split reads render completion
+   * against the tour's begin (or, for a tour that never
+   * began, the opening settle — the moment its Start gate
+   * flipped). A piece still rendering at close is 'pending':
+   * its text is complete in the plan row regardless.
+   */
+  private renderResults(): CapturedRenderResult[] {
+    const mark = this.begunAtMs ?? this.openingSettledAtMs ?? Number.POSITIVE_INFINITY;
+    const out: CapturedRenderResult[] =
+      this.entries.map((e, index) => {
+        let result: CapturedRenderResult['result'];
+        if (e.state === 'failed') result = 'failed';
+        else if (e.state === 'late') result = 'skipped-late';
+        else {
+          const doneAt = this.renderDoneAtMs.get(e.planItem.id);
+          if (doneAt === undefined) result = 'pending';
+          else result = doneAt <= mark ? 'pre-start' : 'ahead';
+        }
+        return { index, id: e.planItem.id, result };
+      });
+    if (this.wrapUpState !== 'none' && this.plan) {
+      let result: CapturedRenderResult['result'];
+      if (this.wrapUpState === 'adopted') result = 'pre-start';
+      else if (this.wrapUpState === 'failed') result = 'failed';
+      else if (this.wrapUpState === 'ready') {
+        result = (this.wrapUpDoneAtMs ?? Number.POSITIVE_INFINITY) <= mark ? 'pre-start' : 'ahead';
+      } else result = 'pending';
+      out.push({ index: this.plan.items.length, id: 'wrap-up', result });
+    }
+    return out;
+  }
+
+  /**
    * The anchored-release feed gate. The Player starts whatever
    * sits in its promised FIFO the moment the current item
    * settles, so anything enqueued is effectively RELEASED: the
    * gate therefore keeps the FIFO empty and considers the head
-   * held entry only —
+   * entry only —
+   *   - an entry already resolved without feeding (render
+   *     failed, late-skipped, gate-dropped) is stepped over;
    *   - a bridge whose parent story was dropped stale is
    *     skipped silently (it names ground never heard);
+   *   - a bridge/reaction still RENDERING whose moment has
+   *     arrived — the stage is empty (the Player holds no
+   *     current item: the previous piece settled and this one
+   *     is due NOW) — is LATE-SKIPPED (route_render_late +
+   *     capture accounting) and the gate moves on: playback
+   *     never stalls for tissue. While anything is still
+   *     sounding, a rendering head simply waits — its moment
+   *     has not come, and the render queue is working on it;
+   *   - a geographic story still rendering HOLDS the gate
+   *     (stories are load-bearing; only tissue late-skips);
    *   - a geographic story past its expire progress is dropped
    *     stale (story_dropped, reason 'stale-window'); a story
    *     before its release progress HOLDS the gate — the Player
    *     idles on bridges/fillers already played, never on the
    *     story sounded early (the departure story is exempt from
    *     both rules: it opens the drive, behind the preview item
-   *     or in slot 1 itself — see departureEntry);
+   *     or in slot 1 itself — see firstReadyStoryEntry);
    *   - everything else (bridges, reactions, fillers, portal
    *     stories, woven members — windowless by design, seated
    *     into silence by plan order) feeds.
@@ -861,21 +1239,53 @@ export class RoutePlanRunner {
    */
   private maybeFeed(): void {
     if (!this.plan || this.closed || this.closing || !this.begun) return;
-    while (this.feedIndex < this.rendered.length) {
+    while (this.feedCursor < this.entries.length) {
       if (this.player.promised.length > 0) return;
-      const entry = this.rendered[this.feedIndex];
+      const entry = this.entries[this.feedCursor];
       const it = entry.planItem;
+      if (entry.state === 'failed' || entry.state === 'late' || entry.state === 'dropped') {
+        this.feedCursor += 1; // resolved in the accounting when it happened
+        continue;
+      }
       if (it.kind === 'bridge' && it.prevUnitId && this.droppedStoryIds.has(it.prevUnitId)) {
-        this.feedIndex += 1;
+        entry.state = 'dropped';
+        this.feedCursor += 1;
         this.resolvedCount += 1;
         this.gateSkippedItemIds.add(it.id); // episode capture: the outcome row names this drop
         continue;
       }
-      if (it.kind === 'story' && !it.portal && !it.woven && entry !== this.departureEntry) {
+      if (entry.state === 'pending') {
+        const isTissue = it.kind === 'bridge' || it.kind === 'reaction' || it.kind === 'preview';
+        if (isTissue && this.player.current === null) {
+          // Its moment arrived before its render: skip it and
+          // let the story behind it sound. The telemetry
+          // carries the queue's state at the skip so the field
+          // can judge whether concurrency/lookahead needs
+          // tuning (how long since plan-fix, how much work was
+          // still ahead of the skipped piece).
+          const index = this.feedCursor;
+          entry.state = 'late';
+          this.feedCursor += 1;
+          this.resolvedCount += 1;
+          this.lateSkippedItemIds.add(it.id);
+          this.deps.onEvent?.('route_render_late', {
+            item_id: it.id,
+            kind: it.kind,
+            index,
+            in_flight: this.renderInFlight,
+            queued: this.entries.length - this.renderNextIndex,
+            ms_since_plan_fix: Date.now() - this.planFixAtMs,
+            mode: 'route',
+          });
+          continue;
+        }
+        return; // still rendering and its moment has not come (or it is a story): wait
+      }
+      if (it.kind === 'story' && !it.portal && !it.woven && entry !== this.firstReadyStoryEntry()) {
         const release = it.releaseProgress ?? 0;
         const expire = it.expireProgress ?? Number.POSITIVE_INFINITY;
         if (this.lastProgress > expire) {
-          this.feedIndex += 1;
+          this.feedCursor += 1;
           this.resolvedCount += 1;
           this.droppedStoryIds.add(it.id);
           this.deps.onEvent?.('story_dropped', {
@@ -887,16 +1297,16 @@ export class RoutePlanRunner {
         }
         if (this.lastProgress < release) return; // window not open yet: wait for the ground
       }
-      this.player.enqueuePromised(entry.audible);
-      this.feedIndex += 1;
+      this.player.enqueuePromised(entry.audible as AudibleItem);
+      this.feedCursor += 1;
     }
     this.maybeExhaust();
   }
 
-  /** Plan exhaustion, evaluated only once rendering is done (items still rendering are not yet countable). */
+  /** Plan exhaustion, evaluated only once the render queue has drained (pieces still rendering are not yet countable). */
   private maybeExhaust(): void {
-    if (!this.renderingDone || this.closed) return;
-    if (this.resolvedCount < this.rendered.length) return;
+    if (!this.queueDrained || this.closed) return;
+    if (this.resolvedCount < this.entries.length) return;
     if (this.arrivedFlag) {
       void this.close('arrival-signoff');
     } else {
@@ -1034,7 +1444,7 @@ export class RoutePlanRunner {
     // Arrival check first: it outranks the corridor guard.
     if (!this.arrivedFlag && hasArrived(pos, this.plan.destination, this.plan.path)) {
       this.arrivedFlag = true;
-      const exhausted = this.renderingDone && this.resolvedCount >= this.rendered.length;
+      const exhausted = this.queueDrained && this.resolvedCount >= this.entries.length;
       void this.close(exhausted ? 'arrival-signoff' : 'arrival-owed');
       return;
     }
@@ -1153,7 +1563,7 @@ export class RoutePlanRunner {
     // The story sounding on the element right now, if any —
     // computed BEFORE the owed set (consolidation §5).
     const currentEntry = this.player.current
-      ? this.rendered.find(e => e.audible.id === this.player.current!.id)
+      ? this.entries.find(e => e.audible !== null && e.audible.id === this.player.current!.id)
       : undefined;
     const soundingStoryId =
       currentEntry && currentEntry.planItem.kind === 'story' ? currentEntry.planItem.id : null;
@@ -1185,8 +1595,8 @@ export class RoutePlanRunner {
     // that drive was cut short, and today's closeout line
     // speaks instead. The overrun handoff never plays it.
     const planRanOut =
-      this.feedIndex >= this.rendered.length && unplayed.every(u => u.id === soundingStoryId);
-    const useWrapUp = kind !== 'overrun' && planRanOut && plan.wrapUp != null;
+      this.feedCursor >= this.entries.length && unplayed.every(u => u.id === soundingStoryId);
+    const wrapGateOpen = kind !== 'overrun' && planRanOut && plan.wrapUp != null;
     // The accounting just finalized — file the drive record
     // (addendum 2) with the closeout's actual owed list.
     this.writeDriveRecord(unplayed);
@@ -1210,21 +1620,26 @@ export class RoutePlanRunner {
       this.owed = owedLine(closeout.teaseLabel);
       try {
         // The wrap-up (addendum 3) replaces the synthesized
-        // sign-off on the completion path only — its audio was
-        // rendered at preparation, so this is no new live call.
-        // Every other close speaks today's line, synthesized
-        // exactly as before.
-        const url = useWrapUp ? plan.wrapUp!.audioUrl : await this.deps.synthUrl(closeout.line);
+        // sign-off on the completion path only. Its audio is a
+        // render-ahead queue item (rendered during the tour,
+        // or adopted pre-rendered with the plan);
+        // resolveWrapUpUrl waits for it if its queue turn
+        // hasn't come, and on its failure today's closeout
+        // line speaks instead, synthesized exactly as before.
+        // Every other close speaks today's line the same way.
+        const wrapUrl = wrapGateOpen ? await this.resolveWrapUpUrl() : null;
+        const usedWrapUp = wrapUrl !== null;
+        const url = usedWrapUp ? wrapUrl : await this.deps.synthUrl(closeout.line);
         this.player.enqueuePromised({
           id: `route-close-${++runnerSeq}`,
           kind: 'greeting',
-          label: useWrapUp ? 'Wrap-up' : closeout.kind === 'overrun' ? 'Handoff' : 'Sign-off',
+          label: usedWrapUp ? 'Wrap-up' : closeout.kind === 'overrun' ? 'Handoff' : 'Sign-off',
           source: { kind: 'url', url },
-          durationSec: useWrapUp ? estimateDurationSec(plan.wrapUp!.text) : 8,
+          durationSec: usedWrapUp ? estimateDurationSec(plan.wrapUp!.text) : 8,
           attempts: 0,
           settled: false,
           onSettle: rec => {
-            if (useWrapUp && rec.sounded) {
+            if (usedWrapUp && rec.sounded) {
               this.deps.onEvent?.('route_wrap_up', { wrap_up: 'played' });
             }
             this.closing = false;
