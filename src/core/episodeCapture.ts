@@ -43,6 +43,16 @@
 //                    plan row was not heard, with dropped[]
 //                    saying why the feed passed it and
 //                    render_results[] saying how its render went.
+//                    Schema 2 outcomes may also carry
+//                    commissions[] (drop coherence, Nov 4,
+//                    2026): the re-bridges the runner authored
+//                    at drive time when a story dropped stale —
+//                    pseudo-items, like the wrap-up, since they
+//                    are not plan items and the plan row (which
+//                    files before any drop can happen) never
+//                    names them. Their full text rides here —
+//                    the outcome row is the only place these
+//                    words exist in the record.
 // No UPDATE anywhere: a row is written once or not at all.
 //
 // Schema 1 rows (written before the render-ahead pipeline)
@@ -371,6 +381,14 @@ export interface EpisodeOutcomeAccounting {
    * Supplied by the runner at close; see CapturedRenderResult.
    */
   renderResults?: CapturedRenderResult[];
+  /**
+   * Re-bridge commissions fired (or cap-blocked) at drive
+   * time when stories dropped stale (drop coherence, Nov 4,
+   * 2026; optional — accountings that predate the mechanism
+   * omit it). Supplied by the runner at close; see
+   * CapturedCommission.
+   */
+  commissions?: CapturedCommission[];
   /** Ms from plan-fix until the render queue drained (null = never drained before close). */
   queueDrainedMs?: number | null;
   /** Heard recording: story unit ids that sounded (the ledger's own list). */
@@ -415,6 +433,43 @@ export interface CapturedRenderResult {
   result: 'pre-start' | 'ahead' | 'skipped-late' | 'failed' | 'pending';
 }
 
+/**
+ * One re-bridge commission (drop coherence, Nov 4, 2026): when
+ * a windowed story dropped stale — judged doomed ahead of its
+ * lead-in bridge (suppression) or dropped at the feed gate —
+ * the runner commissioned ONE replacement bridge from the
+ * last story that actually sounded into the next viable
+ * story, authored at drive time through the narration seam
+ * from true facts only (the dropped story is never named in
+ * it). The commission is a pseudo-item: not a plan item, so
+ * it never appears in played[]/dropped[]/render_results[];
+ * this record is its whole trace, text included.
+ */
+export interface CapturedCommission {
+  /** 'rebridge:<dropped story item id>><next story item id>'; a cap-blocked commission is 'rebridge-cap:<dropped story item id>'. */
+  id: string;
+  /** The dropped story whose transition the commission repairs. */
+  for_story_id: string;
+  /** The story the text speaks FROM (unit id): the last sounded story, or the departure story when none had sounded yet. Null only on a cap-blocked record (never authored). */
+  prev_story_id: string | null;
+  /** The story the commission leads INTO. */
+  next_story_id: string;
+  /** How the drop happened: 'suppression' (judged doomed before its lead-in bridge fed) or 'gate' (dropped at the feed gate). */
+  via: 'suppression' | 'gate';
+  /** The authored text, complete. Null only when the per-tour cap blocked the commission before authoring. */
+  text: string | null;
+  /**
+   * 'sounded' — it played, as the next story's incoming
+   * bridge; 'skipped-late' — still rendering when its moment
+   * arrived, discarded (the story sounded without it);
+   * 'failed' — synthesis errored; 'discarded-cap' — the
+   * per-tour commission cap blocked it before authoring;
+   * 'pending' — no verdict by tour close (rendered but its
+   * moment never came, or still in flight at an early close).
+   */
+  result: 'sounded' | 'skipped-late' | 'failed' | 'discarded-cap' | 'pending';
+}
+
 /** The kind='outcome' row payload. */
 export interface RouteEpisodeOutcomePayload {
   schema: 2;
@@ -428,6 +483,8 @@ export interface RouteEpisodeOutcomePayload {
   dropped: CapturedDrop[];
   /** Per-item render verdicts (schema 2); empty when the accounting predates them. */
   render_results: CapturedRenderResult[];
+  /** Re-bridge commissions (drop coherence); empty when none fired — and on rows that predate the field. */
+  commissions: CapturedCommission[];
   /** Ms from plan-fix until the render queue drained; null if it never did before close. */
   render_queue_drained_ms: number | null;
   heard_unit_ids: string[];
@@ -476,6 +533,7 @@ export function assembleOutcomeCapture(
     played_item_ids: [...acc.playedItemIds],
     dropped,
     render_results: acc.renderResults ? [...acc.renderResults] : [],
+    commissions: acc.commissions ? [...acc.commissions] : [],
     render_queue_drained_ms: acc.queueDrainedMs ?? null,
     heard_unit_ids: [...acc.heardUnitIds],
     max_displacement_m: maxDisplacementM,

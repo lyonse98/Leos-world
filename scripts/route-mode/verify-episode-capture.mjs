@@ -16,6 +16,12 @@
 // fixture checks (importing this file does not run the live
 // read-back).
 //
+// Schema-2 outcomes may also carry commissions[] (drop
+// coherence, Nov 4, 2026): the re-bridges authored at drive
+// time when a story dropped stale — pseudo-items with their
+// full text and a verdict each. The field is optional: rows
+// written before the mechanism shipped simply omit it.
+//
 // Usage: node scripts/route-mode/verify-episode-capture.mjs [rows]
 // Exit 0 = rows read + shape-valid. Exit 2 = the route_episodes
 // table does not exist yet (SQL not pasted). Exit 1 = other
@@ -50,6 +56,8 @@ async function loadAnonKey() {
 }
 
 const RENDER_RESULTS = new Set(['pre-start', 'ahead', 'skipped-late', 'failed', 'pending']);
+const COMMISSION_RESULTS = new Set(['sounded', 'skipped-late', 'failed', 'discarded-cap', 'pending']);
+const COMMISSION_VIAS = new Set(['suppression', 'gate']);
 
 export function validatePlan(p) {
   const problems = [];
@@ -87,6 +95,22 @@ export function validateOutcome(p) {
     }
     if (!(typeof p.render_queue_drained_ms === 'number' || p.render_queue_drained_ms === null)) {
       problems.push('render_queue_drained_ms not number|null (schema 2)');
+    }
+    // Drop-coherence commissions (optional — rows written
+    // before the mechanism shipped omit the field entirely).
+    if (p.commissions !== undefined) {
+      if (!Array.isArray(p.commissions)) problems.push('commissions not an array (schema 2)');
+      else {
+        for (const [i, c] of p.commissions.entries()) {
+          if (typeof c.id !== 'string' || !c.id) problems.push(`commissions[${i}].id missing`);
+          if (typeof c.for_story_id !== 'string' || !c.for_story_id) problems.push(`commissions[${i}].for_story_id missing`);
+          if (!(typeof c.prev_story_id === 'string' || c.prev_story_id === null)) problems.push(`commissions[${i}].prev_story_id not string|null`);
+          if (typeof c.next_story_id !== 'string' || !c.next_story_id) problems.push(`commissions[${i}].next_story_id missing`);
+          if (!COMMISSION_VIAS.has(c.via)) problems.push(`commissions[${i}].via '${c.via}' unknown`);
+          if (!(typeof c.text === 'string' || c.text === null)) problems.push(`commissions[${i}].text not string|null`);
+          if (!COMMISSION_RESULTS.has(c.result)) problems.push(`commissions[${i}].result '${c.result}' unknown`);
+        }
+      }
     }
   }
   return problems;
@@ -145,10 +169,14 @@ for (const row of rows) {
     const renders = Array.isArray(p.render_results)
       ? p.render_results.reduce((acc, r) => ((acc[r.result] = (acc[r.result] ?? 0) + 1), acc), {})
       : null;
+    const commissions = Array.isArray(p.commissions)
+      ? p.commissions.reduce((acc, c) => ((acc[c.result] = (acc[c.result] ?? 0) + 1), acc), {})
+      : null;
     console.log(
       `${row.created_at} OUTCOME tour=${row.tour_id} build=${row.build_id} end=${p.end_reason} begun=${p.begun} ` +
         `played=${(p.played ?? []).length} dropped=${(p.dropped ?? []).length} driven=${p.driven} max_displacement_m=${p.max_displacement_m}` +
         (renders ? ` renders=${JSON.stringify(renders)} queue_drained_ms=${p.render_queue_drained_ms}` : '') +
+        (commissions ? ` commissions=${JSON.stringify(commissions)}` : '') +
         (problems.length ? ` PROBLEMS: ${problems.join('; ')}` : ' shape=ok'),
     );
   }
