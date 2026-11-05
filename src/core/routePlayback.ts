@@ -1725,6 +1725,13 @@ export class RoutePlanRunner {
       predictedStartProgress: number | null,
       ratePerSec: number | null,
     ): void => {
+      // A landed judgment is strictly better evidence than a
+      // later shrug: once a story has been judged NOT doomed
+      // (with its margin), an unjudged pass — the stamp gap
+      // at a settle boundary, say — never overwrites it. The
+      // near-miss record keeps the sharpest thing known.
+      const prior = this.suppressionNotes.get(target.planItem.id);
+      if (reason !== 'judged_not_doomed' && prior?.reason === 'judged_not_doomed') return;
       this.suppressionNotes.set(target.planItem.id, {
         reason,
         predictedStartProgress,

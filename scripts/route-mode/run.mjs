@@ -846,15 +846,22 @@ check('v2 windows: storyWindow math + composer stamps the window on story items'
   assert.ok(item.expireProgress >= 0.57 && item.expireProgress <= 0.62, `expire ${item.expireProgress}`);
 });
 
-check('v2 bridges: elastic target follows the anchor gap', () => {
+check('v2 bridges: the anchor gap still stamps the target — but text is honest length (field fix lane 1)', () => {
   const far = rm.composeRoutePlan(
     [unit('f1|landmark_origin', 32.71, { durationSec: 60 }), unit('f2|landmark_origin', 32.85, { durationSec: 60 })],
     densePath, denseDest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
     { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 2000 },
   );
   const farBridge = far.items.find(i => i.kind === 'bridge');
-  assert.equal(farBridge.targetDurationSec, 90, 'long gap clamps to the bridge ceiling');
-  assert.ok(farBridge.durationSec >= 40, `elastic text composed toward the target (got ${farBridge.durationSec}s)`);
+  assert.equal(farBridge.targetDurationSec, 90, 'long gap clamps to the bridge ceiling (bookkeeping)');
+  // Lane 1 (Nov 5, 2026) deliberately retires the elastic
+  // behavior this suite used to assert: the bridge no longer
+  // composes TOWARD the target with connective-bank padding.
+  assert.ok(farBridge.durationSec < 30, `a bridge is its pair's facts at honest length, not 90 s of padding (got ${farBridge.durationSec}s)`);
+  assert.ok(
+    !rm.BRIDGE_CONNECTIVE_LINES.some(l => farBridge.text.includes(l)),
+    'no connective-bank line pads the bridge',
+  );
   const near = rm.composeRoutePlan(
     [unit('n1|landmark_origin', 32.71, { durationSec: 60 }), unit('n2|landmark_origin', 32.715, { durationSec: 60 })],
     densePath, denseDest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
@@ -862,7 +869,10 @@ check('v2 bridges: elastic target follows the anchor gap', () => {
   );
   const nearBridge = near.items.find(i => i.kind === 'bridge');
   assert.ok(nearBridge.targetDurationSec <= 25, `short gap target ${nearBridge.targetDurationSec}`);
-  assert.ok(nearBridge.durationSec < farBridge.durationSec, 'elastic bridges actually differ in length');
+  assert.ok(
+    Math.abs(nearBridge.durationSec - farBridge.durationSec) <= 6,
+    'near and far bridges are the same honest size — the gap no longer inflates the text',
+  );
 });
 
 // ---- through-line (route differentiator 2, Nov 3, 2026): thread
@@ -1085,7 +1095,7 @@ check('narration seam (addendum 5): route logic never reaches the generation lay
   assert.ok(!read('src/core/routeMode.ts').includes('export function bridgeTextFor'), 'routeMode composes facts; it does not author narration');
   assert.ok(read('src/App.tsx').includes('const narration: NarrationDeps'), 'the App builds ONE narration deps object per route build');
 });
-check('no-thread parity: story order and EVERY bridge are exactly composer v2 — the preview item carries the framing', () => {
+check('no-thread parity: story order holds and EVERY bridge is exactly the seam’s — the preview item carries the framing', () => {
   const units = [
     unit('a|landmark_origin', 32.72),
     unit('b|landmark_origin', 32.76, { topics: ['Coast'] }),
@@ -1099,11 +1109,27 @@ check('no-thread parity: story order and EVERY bridge are exactly composer v2 �
   for (let i = 1; i < anchors.length; i++) assert.ok(anchors[i] >= anchors[i - 1], 'story order is progress order, as in v2');
   const bridges = plan.items.filter(i => i.kind === 'bridge');
   assert.ok(bridges.length >= 2, 'fixture carries several bridges');
+  // Field fix (Nov 5, 2026): the seam's contract grew — a
+  // bridge is now authored from its context AND the episode
+  // ledger, threaded in plan order (lanes 1/1b). Parity is
+  // still exact, against the seam called the way the composer
+  // calls it.
+  const ledger = rm.newBridgeEpisodeState();
+  const storyUnitsInOrder = stories.map(s => s.unit);
   bridges.forEach((b, idx) => {
     const prev = units.find(u => u.id === b.prevUnitId);
     const next = units.find(u => u.id === b.nextUnitId);
-    const baseline = rm.bridgeTextFor(prev, next, { targetSec: b.targetDurationSec });
-    assert.equal(b.text, baseline, `bridge ${idx} is byte-identical to the context-free v2 bridge`);
+    const context = rm.buildBridgeContext({
+      earlier: storyUnitsInOrder.slice(0, storyUnitsInOrder.indexOf(next)),
+      prev,
+      next,
+      thread: null,
+      isClimaxBridge: plan.climaxUnitId !== null && next.id === plan.climaxUnitId,
+      climaxLast: plan.climaxMode !== 'natural',
+      promiseMade: true,
+    });
+    const baseline = rm.bridgeTextFor(prev, next, { targetSec: b.targetDurationSec, context, episode: ledger });
+    assert.equal(b.text, baseline, `bridge ${idx} is byte-identical to the seam's bridge under the episode ledger`);
   });
   const preview = plan.items.find(i => i.kind === 'preview');
   assert.ok(preview, 'the plan still opens with its framing — as an item now');
@@ -1268,7 +1294,22 @@ check('monte carlo: 200 random plans hold the invariants', () => {
     for (const p of portals) {
       const at = plan.items.indexOf(p);
       const prevStory = [...plan.items.slice(0, at)].reverse().find(i => i.kind === 'story');
-      assert.ok(prevStory && prevStory.id === p.portalParentId, 'portal does not directly follow its parent');
+      // Lane 2 (Nov 5, 2026) deliberately widens this v2
+      // invariant: a hop either directly follows its parent
+      // (the standing placement) or directly follows a
+      // WINDOWED story that is not its parent — a placement-
+      // safety relocation, which only ever seats a hop
+      // immediately after the geo story it would otherwise
+      // have doomed, with its parent still ahead of it.
+      const relocated =
+        prevStory &&
+        prevStory.id !== p.portalParentId &&
+        prevStory.releaseProgress !== undefined &&
+        plan.items.slice(0, at).some(i => i.id === p.portalParentId);
+      assert.ok(
+        prevStory && (prevStory.id === p.portalParentId || relocated),
+        'portal neither follows its parent nor sits in a placement-safety relocation',
+      );
     }
     assert.ok(!plan.items.some(i => i.unit && (i.unit.angle === 'neighborhood_intro' || i.unit.angle === 'neighborhood_intro_greet')), 'an intro composed');
   }
@@ -5220,8 +5261,12 @@ const finePlan = () =>
     { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
     { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 2000 },
   );
+// Field fix (Nov 5, 2026): the commission's head now rotates
+// with the episode ledger (lane 1b), so the fingerprint is
+// structural — a text that speaks from A into C and never
+// names the dropped B — instead of one frozen head shape.
 const isRebridgeClip = t =>
-  t.includes('From a|landmark_origin') && t.includes('just ahead is c|landmark_origin');
+  t.includes('a|landmark_origin') && t.includes('c|landmark_origin') && !t.includes('b|landmark_origin');
 const p1Runner = (audio, events, outcomes, extra = {}) =>
   new rp.RoutePlanRunner({
     audio,
@@ -5621,6 +5666,278 @@ check('phase1 (h): capture shape — commissions ride the outcome verbatim; veri
   assert.ok(verifier.validateOutcome(bogusResult).length > 0, 'a bogus commission result is flagged');
   const bogusVia = { ...out, commissions: [{ ...commissions[0], via: 'magic' }] };
   assert.ok(verifier.validateOutcome(bogusVia).length > 0, 'a bogus commission via is flagged');
+});
+
+// ---- field fix stack (Nov 5, 2026) ----
+// Built from the first real route drive (tour
+// route-1793884720337): bridges padded to their targets and
+// repeated each other, a long early portal doomed the geo
+// stories behind it, suppression never fired (every drop was
+// a gate drop), portal hops spoke in presence register, and
+// TTS read raw highway labels. One suite per lane, plus the
+// lane-2 field-shaped regression.
+
+check('fieldfix lane 5: spoken forms — highway labels expand in tissue, false positives untouched', () => {
+  const f = rn.spokenFormText;
+  assert.equal(f('SR-905 West: Brown Field to I-805'), 'State Route 905 West: Brown Field to Interstate 805');
+  assert.equal(f('take US-101 past CA-94 and SR-78'), 'take U.S. 101 past State Route 94 and State Route 78');
+  assert.equal(f('PCF 816 rides at anchor'), 'P C F 816 rides at anchor');
+  // False positives: the pronoun, letter-runs, bare numbers.
+  assert.equal(f('I think I saw it'), 'I think I saw it');
+  assert.equal(f('the ASR-900 report, an SR of the order'), 'the ASR-900 report, an SR of the order');
+  assert.equal(f('exit 805 at mile 12, I- five'), 'exit 805 at mile 12, I- five');
+  // Through the seam: a bridge between raw-labeled places
+  // speaks (and therefore captures) the normalized form.
+  const t = rn.bridgeTextFor(
+    { id: 'x|corridor', placeName: 'SR-905 West: Brown Field to I-805' },
+    { id: 'y|landmark_origin', placeName: 'PCF 816' },
+  );
+  assert.ok(t.includes('State Route 905') && t.includes('Interstate 805'), 'bridge text normalized');
+  assert.ok(t.includes('P C F 816'), 'the designator normalizes in the next-subject slot');
+  assert.ok(!/SR-905|I-805|PCF 816/.test(t), 'no raw label survives in spoken tissue');
+});
+
+check("fieldfix lane 1: a bridge is its pair's facts — the elastic target no longer shapes the text", () => {
+  const prev = { id: 'p|landmark_origin', placeName: 'Prev Place', storyText: 'word '.repeat(50) };
+  const next = { id: 'n|landmark_origin', placeName: 'Next Place', storyText: 'word '.repeat(50) };
+  const at8 = rn.bridgeTextFor(prev, next, { targetSec: 8 });
+  const at90 = rn.bridgeTextFor(prev, next, { targetSec: 90 });
+  assert.equal(at8, at90, 'the target is bookkeeping now — same pair, same bridge');
+  assert.ok(!rn.BRIDGE_CONNECTIVE_LINES.some(l => at90.includes(l)), 'no connective-bank line pads it');
+  assert.ok(rn.spokenSecEstimate(at90) <= 30, `honest length (got ${rn.spokenSecEstimate(at90)}s)`);
+});
+
+check('fieldfix lane 1: maxChars spends the optional sentence first — the head always survives', () => {
+  const prev = { id: 'p|landmark_origin', placeName: 'A Very Long Place Name Indeed' };
+  const next = { id: 'n|landmark_origin', placeName: 'Another Considerably Long Place Name' };
+  const ctx = {
+    threadTopic: 'Navy Century',
+    prevSubject: 'A Very Long Place Name Indeed',
+    prevGist: null,
+    nextSubject: 'Another Considerably Long Place Name',
+    role: 'mid',
+    callbackSubject: 'An Earlier Story With A Long Name',
+  };
+  const full = rn.bridgeTextFor(prev, next, { context: ctx, episode: rn.newBridgeEpisodeState() });
+  assert.ok(full.includes('two ends of the same story'), 'the uncapped bridge carries the callout');
+  assert.ok(full.length > 200, `fixture bridge is long (${full.length} chars)`);
+  const capped = rn.bridgeTextFor(prev, next, { context: ctx, maxChars: 200, episode: rn.newBridgeEpisodeState() });
+  assert.ok(capped.length <= 200, `the cap holds (${capped.length} chars)`);
+  assert.ok(capped.startsWith('From A Very Long Place Name Indeed'), 'the head survives the cap');
+  assert.ok(!capped.includes('two ends of the same story'), 'the callout was the spend');
+});
+
+check('fieldfix lane 1b: one episode, one callout — openings rotate, no bank line repeats', () => {
+  const units = [navy('n1', 32.71), navy('n2', 32.75), navy('n3', 32.79), navy('n4', 32.83), navy('n5', 32.87)];
+  const plan = rm.composeRoutePlan(
+    units, densePath, denseDest, 'Dest',
+    { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 2000 },
+  );
+  assert.equal(plan.thread?.topic, 'Navy Century', 'fixture carries the thread');
+  const bridges = plan.items.filter(i => i.kind === 'bridge');
+  assert.ok(bridges.length >= 3, `fixture carries several bridges (got ${bridges.length})`);
+  const callouts = bridges.filter(b => b.text.includes('two ends of the same story')).length;
+  assert.equal(callouts, 1, 'the thread callout fires exactly once in the episode');
+  for (const b of bridges) {
+    assert.ok(!rn.BRIDGE_CONNECTIVE_LINES.some(l => b.text.includes(l)), 'no bank line in any bridge');
+  }
+  const shapeOf = t =>
+    t.includes('we range off the road') ? 'portal'
+    : t.includes('Next along the road:') ? 'next'
+    : t.includes('the road carries us on to') ? 'carries'
+    : t.includes('just ahead is') ? 'ahead'
+    : /we keep rolling\./.test(t) ? 'rolling' : 'other';
+  const shapes = bridges.map(b => shapeOf(b.text));
+  for (let i = 1; i < shapes.length; i++) assert.notEqual(shapes[i], shapes[i - 1], 'consecutive bridges open differently');
+  assert.ok(new Set(shapes).size >= 2, 'the episode varies its openings');
+});
+
+await checkAsync('fieldfix lanes 1/1b (runner): the commission inherits the episode ledger — callout spent at compose, cap honored', async () => {
+  const plan = rm.composeRoutePlan(
+    [navy('a', 32.71), navy('b', 32.78), navy('c', 32.84), navy('d', 32.88, { durationSec: 300 })],
+    finePath, { lat: 32.9, lng: -117.25 }, 'Dest',
+    { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 2000 },
+  );
+  assert.ok(
+    plan.items.some(i => i.kind === 'bridge' && i.text.includes('two ends of the same story')),
+    'compose spent the callout (fixture sanity)',
+  );
+  const audio = new RealFakeAudio(250);
+  const events = [];
+  const runner = p1Runner(audio, events, []);
+  await runner.start(plan);
+  let lat = 32.76; // progress ≈ 0.30 — the phase1 (a) creep
+  runner.onPosition({ lat, lng: -117.25 });
+  for (let i = 0; i < 40 && !events.some(e => e.t === 'story_dropped'); i++) {
+    await new Promise(r => setTimeout(r, 200));
+    lat += 0.0001;
+    runner.onPosition({ lat, lng: -117.25 });
+  }
+  assert.ok(events.some(e => e.t === 'story_dropped'), 'B dropped under the creep');
+  await until(() => events.some(e => e.t === 'route_rebridge_sounded'), 'the A→C commission sounds');
+  const fired = events.filter(e => e.t === 'route_rebridge_fired');
+  assert.equal(fired.length, 1, 'exactly one commission');
+  const text = fired[0].p.text;
+  assert.ok(text.length <= rp.REBRIDGE_MAX_CHARS, `commission within the hard cap (${text.length} chars)`);
+  assert.ok(!text.includes('two ends of the same story'), 'the spent callout does not repeat in the commission');
+  assert.ok(text.includes('runs through c|landmark_origin too'), 'the commission still connects — on the alternate thread line');
+  runner.endTour();
+});
+
+check('fieldfix lane 2: the field shape — a long early portal can no longer doom the geo stories behind it', () => {
+  const geoA = unit('ga|landmark_origin', 32.72, { durationSec: 60, topics: ['Harbor'] });
+  const geoB = unit('gb|landmark_origin', 32.79, { durationSec: 60 });
+  const geoC = unit('gc|landmark_origin', 32.86, { durationSec: 60 });
+  const portal = unit('pp|landmark_history', 32.75, { lng: -117.05, durationSec: 400, topics: ['Harbor'] });
+  const opts = { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 1000 };
+  const input = { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] };
+  const control = rm.composeRoutePlan([geoA, geoB, geoC], densePath, denseDest, 'Dest', input, opts);
+  assert.deepEqual(
+    storyItems(control).map(s => s.id),
+    ['ga|landmark_origin', 'gb|landmark_origin', 'gc|landmark_origin'],
+    'control: all three geo stories seat',
+  );
+  assert.deepEqual(rm.planDoomedStoryIds(control.items, 1000), [], 'control: the geo plan alone is sound');
+  const plan = rm.composeRoutePlan([geoA, geoB, geoC, portal], densePath, denseDest, 'Dest', input, opts);
+  const storyIds = storyItems(plan).map(s => s.id);
+  for (const id of ['ga|landmark_origin', 'gb|landmark_origin', 'gc|landmark_origin']) {
+    assert.ok(storyIds.includes(id), `${id} survives the portal`);
+  }
+  assert.deepEqual(rm.planDoomedStoryIds(plan.items, 1000), [], 'the repaired plan dooms nothing');
+  const pAt = plan.items.findIndex(i => i.id === 'pp|landmark_history');
+  if (pAt >= 0) {
+    const bAt = plan.items.findIndex(i => i.id === 'gb|landmark_origin');
+    assert.ok(pAt > bAt, 'a kept portal sits after the story it would have doomed');
+  }
+});
+
+check('fieldfix lane 2 (members): woven member seating adds no attributable doom', () => {
+  const units = wFixtureUnits([wCand('wm|corridor-woven-v1', 200)]);
+  const base = wCompose(units, 1800);
+  const seated = rm.seatWovenMembers(base, units, { heardKeys: new Set() });
+  assert.ok(seated.items.some(i => i.id === 'wm|corridor-woven-v1'), 'the member seated (fixture sanity)');
+  assert.deepEqual(
+    rm.planDoomedStoryIds(seated.items, 1800),
+    rm.planDoomedStoryIds(base.items, 1800),
+    'member seating introduces no new doom — members fit inside bounded gaps, so no repair pass is needed there',
+  );
+});
+
+check('fieldfix lane 4: portal seats prefer the woven twin; a presence-only hop is framed across the county', () => {
+  const geo = [
+    unit('ga|landmark_origin', 32.72, { topics: ['Harbor'] }),
+    unit('gb|landmark_origin', 32.8),
+    unit('gc|landmark_origin', 32.87),
+  ];
+  const original = unit('pp|landmark_history', 32.75, { lng: -117.05, topics: ['Harbor'], durationSec: 150 });
+  const twin = unit('pp|landmark_history-woven-v1', 32.75, { lng: -117.05, topics: ['Harbor'], durationSec: 140 });
+  const withTwin = composeDense([...geo, original, twin]);
+  const portalItem = withTwin.items.find(i => i.portal);
+  assert.equal(portalItem?.id, 'pp|landmark_history-woven-v1', 'the woven twin takes the portal seat');
+  const presenceOnly = composeDense([...geo, original]);
+  const p2 = presenceOnly.items.find(i => i.portal);
+  assert.equal(p2?.id, 'pp|landmark_history', 'without a twin the original seats');
+  const br = presenceOnly.items.find(i => i.kind === 'bridge' && i.nextUnitId === p2.id);
+  assert.ok(br, 'the hop has an incoming bridge');
+  assert.ok(br.text.includes('clear across the county'), 'the bridge frames the hop as a story told from across the county');
+  assert.ok(!/just ahead|a little way off/.test(br.text), 'no proximity language for an off-route story');
+});
+
+await checkAsync('fieldfix lane 3: the sound-start stamp gap — suppression fires where the field run could only gate-drop', async () => {
+  // The production gap, reproduced: the audio element
+  // reports sound start only after play() settles (the
+  // Player awaits the play race before stamping), so for the
+  // first stretch of every item the gate cannot know the
+  // current item's remaining time. At 004f867 the gate read
+  // "cannot judge" as "safe" and promised the doomed
+  // bridge — a promise is never re-judged. Here play()
+  // settles 500 ms late while fixes stream in: the fixed
+  // gate HOLDS the bridge until a real judgment exists, and
+  // the judgment is doom.
+  class DelayedStartAudio extends RealFakeAudio {
+    play() {
+      this.played.push(this.src);
+      this.playingSrc = this.src;
+      this.startedAt = Date.now();
+      if (this.timer) clearTimeout(this.timer);
+      this.timer = setTimeout(() => {
+        this.playingSrc = null;
+        if (this.endedCb) this.endedCb();
+      }, this.durMs);
+      return new Promise(res => setTimeout(res, 500));
+    }
+  }
+  const plan = finePlan();
+  const bridgeAB = plan.items.find(i => i.kind === 'bridge' && i.nextUnitId === 'b|landmark_origin');
+  const audio = new DelayedStartAudio(2000);
+  const events = [];
+  const runner = p1Runner(audio, events, []);
+  await runner.start(plan);
+  let lat = 32.76; // progress ≈ 0.30, advancing 0.001 / 100 ms
+  runner.onPosition({ lat, lng: -117.25 });
+  for (let i = 0; i < 60 && !events.some(e => e.t === 'story_dropped'); i++) {
+    await new Promise(r => setTimeout(r, 100));
+    lat += 0.0002;
+    runner.onPosition({ lat, lng: -117.25 });
+  }
+  const drops = events.filter(e => e.t === 'story_dropped');
+  assert.equal(drops.length, 1, 'exactly one story dropped');
+  assert.equal(drops[0].p.suppression?.fired, true, 'the drop record says suppression fired');
+  const fired = events.filter(e => e.t === 'route_rebridge_fired');
+  assert.equal(fired.length, 1, 'exactly one commission');
+  assert.equal(fired[0].p.via, 'suppression', 'the drop came through suppression, not the gate');
+  assert.ok(!audio.played.map(decodedOf).includes(bridgeAB.text), 'the doomed lead-in never sounded');
+  runner.endTour();
+});
+
+await checkAsync('fieldfix lane 3: a near miss is on the record — judged safe on a real margin, then gate-dropped by a jump', async () => {
+  const plan = finePlan();
+  const audio = new RealFakeAudio(250);
+  const events = [];
+  const runner = p1Runner(audio, events, []);
+  await runner.start(plan);
+  // A slow, usable creep: 0.0002 of the route per 200 ms ≈
+  // 0.001 progress/sec. Judged against B's window, that rate
+  // predicts a start INSIDE the window — safe, with a real
+  // margin the drop record must carry.
+  runner.onPosition({ lat: 32.75996, lng: -117.25 }); // progress ≈ 0.2998
+  await new Promise(r => setTimeout(r, 200));
+  runner.onPosition({ lat: 32.76, lng: -117.25 }); // ≈ 0.30 — the rate sample lands
+  await new Promise(r => setTimeout(r, 200));
+  runner.onPosition({ lat: 32.76004, lng: -117.25 }); // ≈ 0.3002 — judged by now, one way or the other
+  await new Promise(r => setTimeout(r, 200));
+  runner.onPosition({ lat: 32.795, lng: -117.25 }); // the jump: B's window is gone
+  await until(() => events.some(e => e.t === 'story_dropped'), 'B gate-drops after the jump');
+  const drop = events.find(e => e.t === 'story_dropped');
+  assert.equal(drop.p.suppression?.fired, false, 'suppression did not fire');
+  assert.equal(drop.p.suppression?.reason_not_fired, 'judged_not_doomed', 'it judged — and stood down on the numbers');
+  assert.ok(drop.p.suppression.margin_progress > 0, `the recorded margin is positive (${drop.p.suppression.margin_progress})`);
+  assert.ok(
+    drop.p.suppression.predicted_start_progress < drop.p.suppression.expire_progress,
+    'the prediction was inside the window when made',
+  );
+  runner.endTour();
+});
+
+await checkAsync('fieldfix lane 3: a drop suppression never got to judge says why', async () => {
+  const plan = finePlan();
+  const audio = new RealFakeAudio(250);
+  const events = [];
+  const runner = p1Runner(audio, events, []);
+  await runner.start(plan);
+  await until(() => audio.played.some(u => u.includes('a%7Clandmark_origin.wav')), 'story A sounds');
+  runner.onPosition({ lat: 32.795, lng: -117.25 }); // one jump fix — no rate ever exists
+  await until(() => events.some(e => e.t === 'story_dropped'), 'B gate-drops');
+  const drop = events.find(e => e.t === 'story_dropped');
+  assert.equal(drop.p.suppression?.fired, false, 'suppression did not fire');
+  assert.ok(
+    ['no_rate', 'no_remaining', 'not_judged'].includes(drop.p.suppression?.reason_not_fired),
+    `the record names the unjudged reason (got ${drop.p.suppression?.reason_not_fired})`,
+  );
+  assert.equal(drop.p.suppression.predicted_start_progress, null, 'no prediction is fabricated for an unjudged drop');
+  runner.endTour();
 });
 
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);
