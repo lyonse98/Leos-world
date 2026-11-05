@@ -444,6 +444,74 @@ await checkAsync('geocode: no keys configured → no_keys, fetch never called', 
   assert.equal(r.failure, 'no_keys');
 });
 
+// ---- maps resilience (Nov 4, 2026: Erik's first stationary test) ----
+// Tap 1's build died at geocode ~5 s in, classed 'permission';
+// tap 2 — the identical call 9 s later — succeeded. The Places
+// key's 403 for SearchText is deterministic, so every build
+// rides on a later key; one transient failure there merged
+// (sticky 'permission') into a fatal class. The retry pass is
+// the fix: a non-definitive first walk earns one more.
+await checkAsync('geocode: transient failure on the working key → the retry pass recovers (tap 1)', async () => {
+  const tried = [];
+  let workingCalls = 0;
+  const stub = async (url, opts) => {
+    const key = keyOf(opts);
+    tried.push(key);
+    if (key === 'places-blocked-key') return blocked;
+    workingCalls += 1;
+    if (workingCalls === 1) throw new Error('cold connection');
+    return okPlaces('Balboa Park');
+  };
+  const g = await rm.geocodeDestination('Balboa Park', ['places-blocked-key', 'working-key'], stub, { sleep: async () => {} });
+  assert.equal(g.failure, null);
+  assert.equal(g.destination.name, 'Balboa Park');
+  assert.deepEqual(
+    tried,
+    ['places-blocked-key', 'working-key', 'places-blocked-key', 'working-key'],
+    'one full second walk, same key order',
+  );
+});
+await checkAsync('geocode: every key fails both passes → permission after exactly two walks', async () => {
+  let calls = 0;
+  const stub = async () => {
+    calls += 1;
+    return blocked;
+  };
+  const g = await rm.geocodeDestination('naval base san diego', ['key-a', 'key-b'], stub, { sleep: async () => {} });
+  assert.equal(g.destination, null);
+  assert.equal(g.failure, 'permission');
+  assert.equal(calls, 4, 'two keys × two passes — then the build may die, surfaced');
+});
+await checkAsync('routes: transient failure on every key → the retry pass recovers', async () => {
+  let calls = 0;
+  const stub = async () => {
+    calls += 1;
+    if (calls <= 2) throw new Error('cold connection');
+    return okRoute;
+  };
+  const r = await rm.computeRoute({ lat: 32.7, lng: -117.25 }, dest, ['key-a', 'key-b'], stub, { sleep: async () => {} });
+  assert.equal(r.failure, null);
+  assert.equal(r.route.durationSec, 900);
+  assert.equal(calls, 3, 'the second pass stops at the first key that answers');
+});
+await checkAsync('resolve: a selected destination resolves locally — zero network, immune to blocked keys', async () => {
+  const stub = async () => {
+    throw new Error('must not be called');
+  };
+  const selected = { name: 'Balboa Park', address: null, location: { lat: 32.734, lng: -117.145 } };
+  const r = await rm.resolveDestination('Balboa Park', ['key-a', 'key-b'], selected, stub);
+  assert.equal(r.failure, null);
+  assert.equal(r.source, 'selection');
+  assert.deepEqual(r.destination, selected);
+});
+await checkAsync('resolve: free text delegates to the geocode walk', async () => {
+  const stub = async () => okPlaces('Balboa Park');
+  const r = await rm.resolveDestination('Balboa Park', ['fake-key'], null, stub);
+  assert.equal(r.failure, null);
+  assert.equal(r.source, 'places');
+  assert.equal(r.destination.name, 'Balboa Park');
+});
+
 // ---- ride-duration budget (Nov 3, 2026: Arrive-by removed) ----
 check('budget: the Routes drive estimate is the sole source', () => {
   assert.equal(rm.budgetSecFor(1440), 1440);
@@ -2763,6 +2831,71 @@ await checkAsync('wart (§5): the exclusion is surgical — a genuinely dropped 
   runner.endTour();
 });
 
+// ---- build staging honesty (Nov 4, 2026: Erik's first stationary test) ----
+// A dead build used to return silently to the idle form — a
+// text-xs status line was the whole failure surface. These
+// suites pin the replacement: stage labels tied to real
+// milestones, and a failed state with a retry that any stage's
+// failure reaches.
+check('build ui: stage labels name the phase the staging is actually in', () => {
+  assert.equal(rp.ROUTE_BUILD_STAGE_LABELS.route, 'Finding your route…');
+  assert.equal(rp.ROUTE_BUILD_STAGE_LABELS.compose, 'Composing your episode…');
+  assert.equal(rp.ROUTE_BUILD_STAGE_LABELS.recording, 'Miles is recording the introductions…');
+});
+check('build ui: stage advance is monotonic — labels never rewind, fast phases may skip', () => {
+  assert.equal(rp.advanceRouteBuildStage('route', 'compose'), 'compose');
+  assert.equal(rp.advanceRouteBuildStage('compose', 'recording'), 'recording');
+  assert.equal(rp.advanceRouteBuildStage('recording', 'compose'), 'recording', 'a late earlier-phase event cannot relabel backwards');
+  assert.equal(rp.advanceRouteBuildStage('route', 'recording'), 'recording', 'a skipped label is honest; a faked dwell would not be');
+});
+check('build ui: failure copy is plain-language and class-aware', () => {
+  assert.match(rp.routeBuildFailure('geocode', 'no_results').message, /Couldn’t find that place/);
+  assert.match(rp.routeBuildFailure('geocode', 'permission').message, /can’t reach the maps service/);
+  assert.match(rp.routeBuildFailure('geocode', 'network').message, /can’t reach the maps service/);
+  assert.match(rp.routeBuildFailure('route', 'no_results').message, /Couldn’t find a driving route/);
+  assert.match(rp.routeBuildFailure('route', 'permission').message, /can’t reach the maps service/);
+  assert.match(rp.routeBuildFailure('build', null).message, /Something went wrong/);
+  assert.equal(rp.routeBuildFailure('geocode', 'permission').canRetry, true);
+});
+check('build ui: a dead build reaches the failed state — never a building label', () => {
+  const failure = rp.routeBuildFailure('geocode', 'permission');
+  const ui = rp.routeBuildUiState({ building: false, stage: 'route', failure });
+  assert.equal(ui.kind, 'failed');
+  assert.equal(ui.failure.canRetry, true);
+  assert.equal(ui.failure.message, failure.message);
+  const building = rp.routeBuildUiState({ building: true, stage: 'compose', failure: null });
+  assert.deepEqual(building, { kind: 'building', stage: 'compose', label: 'Composing your episode…' });
+  assert.deepEqual(rp.routeBuildUiState({ building: false, stage: 'route', failure: null }), { kind: 'idle' });
+});
+check('build ui: failure at each later stage surfaces in the same failed state', () => {
+  for (const [stage, failure] of [['geocode', 'permission'], ['route', 'network'], ['build', null]]) {
+    const ui = rp.routeBuildUiState({ building: false, stage: 'compose', failure: rp.routeBuildFailure(stage, failure) });
+    assert.equal(ui.kind, 'failed', `${stage} failure surfaces`);
+    assert.equal(ui.failure.stage, stage);
+    assert.equal(ui.failure.canRetry, true);
+  }
+});
+check('build ui: retry from the failed state walks the stages in order to a clean settle', () => {
+  // The App's exact sequence, replayed against the helpers:
+  // failure filed → Try again clears it and restarts at the
+  // route stage → milestones advance in staging order (never
+  // ahead of the phase the build is in) → settled, no residue.
+  let failure = rp.routeBuildFailure('geocode', 'permission');
+  assert.equal(rp.routeBuildUiState({ building: false, stage: 'route', failure }).kind, 'failed');
+  failure = null; // buildRoute clears the failure at start
+  let stage = 'route';
+  assert.deepEqual(rp.routeBuildUiState({ building: true, stage, failure }), {
+    kind: 'building',
+    stage: 'route',
+    label: 'Finding your route…',
+  });
+  stage = rp.advanceRouteBuildStage(stage, 'compose');
+  assert.equal(rp.routeBuildUiState({ building: true, stage, failure }).label, 'Composing your episode…');
+  stage = rp.advanceRouteBuildStage(stage, 'recording');
+  assert.equal(rp.routeBuildUiState({ building: true, stage, failure }).label, 'Miles is recording the introductions…');
+  assert.deepEqual(rp.routeBuildUiState({ building: false, stage, failure }), { kind: 'idle' });
+});
+
 // ---- composer v3, commit D: start-button readiness ----
 {
   const dPlan = () =>
@@ -2773,7 +2906,7 @@ await checkAsync('wart (§5): the exclusion is surgical — a genuinely dropped 
       { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 10000 },
     );
   check('readiness: the start button state derives from narrationReady (Erik’s copy)', () => {
-    assert.deepEqual(rp.routeStartButtonState({ narrationReady: false }), { label: 'Generating tour…', disabled: true });
+    assert.deepEqual(rp.routeStartButtonState({ narrationReady: false }), { label: 'Miles is recording the introductions…', disabled: true });
     assert.deepEqual(rp.routeStartButtonState({ narrationReady: true }), { label: 'Start tour', disabled: false });
   });
   await checkAsync('readiness: narrationReady is false while a narration render is unsettled, true after it settles', async () => {
@@ -2791,7 +2924,7 @@ await checkAsync('wart (§5): the exclusion is surgical — a genuinely dropped 
     // the gate — and the button state says so.
     assert.equal(runner.view().phase, 'ready');
     assert.equal(runner.view().narrationReady, false);
-    assert.deepEqual(rp.routeStartButtonState(runner.view()), { label: 'Generating tour…', disabled: true });
+    assert.deepEqual(rp.routeStartButtonState(runner.view()), { label: 'Miles is recording the introductions…', disabled: true });
     release();
     await staging;
     assert.equal(runner.view().narrationReady, true);
