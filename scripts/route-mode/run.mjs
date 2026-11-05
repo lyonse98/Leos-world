@@ -5779,11 +5779,11 @@ await checkAsync('fieldfix lanes 1/1b (runner): the commission inherits the epis
   await until(() => events.some(e => e.t === 'route_rebridge_sounded'), 'the A→C commission sounds');
   const fired = events.filter(e => e.t === 'route_rebridge_fired');
   assert.equal(fired.length, 1, 'exactly one commission');
-  const text = audio.played.map(decodedOf).find(isRebridgeClip);
+  const text = audio.played.map(decodedOf).find(t => t.startsWith('From a') && t.includes('ahead is c'));
   assert.ok(text, 'the sounded commission text is on the audio record');
   assert.ok(text.length <= rp.REBRIDGE_MAX_CHARS, `commission within the hard cap (${text.length} chars)`);
   assert.ok(!text.includes('two ends of the same story'), 'the spent callout does not repeat in the commission');
-  assert.ok(text.includes('runs through c|landmark_origin too'), 'the commission still connects — on the alternate thread line');
+  assert.ok(text.includes('runs through c too'), 'the commission still connects — on the alternate thread line');
   runner.endTour();
 });
 
@@ -5894,24 +5894,29 @@ await checkAsync('fieldfix lane 3: the sound-start stamp gap — suppression fir
 });
 
 await checkAsync('fieldfix lane 3: a near miss is on the record — judged safe on a real margin, then gate-dropped by a jump', async () => {
-  const plan = finePlan();
+  // A custom plan: story A is SHORT (30 s nominal), so at
+  // the phase1 (a) creep — one path segment per fix, a
+  // usable 0.0025 progress/sec — the judgment that lands
+  // while A sounds predicts B starting INSIDE its window:
+  // safe, with a real margin. (With A's usual 120 s the same
+  // rate predicts doom — that is phase1 (a)'s case.)
+  const plan = rm.composeRoutePlan(
+    [unit('a|landmark_origin', 32.71, { durationSec: 30 }), unit('b|landmark_origin', 32.78), unit('c|landmark_origin', 32.87)],
+    finePath, { lat: 32.9, lng: -117.25 }, 'Dest',
+    { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 2000 },
+  );
   const bridgeAB = plan.items.find(i => i.kind === 'bridge' && i.nextUnitId === 'b|landmark_origin');
   const audio = new RealFakeAudio(250);
   const events = [];
   const runner = p1Runner(audio, events, []);
   await runner.start(plan);
-  // A slow, usable creep: 0.0002 of the route per 200 ms ≈
-  // 0.001 progress/sec. Judged against B's window, that rate
-  // predicts a start INSIDE the window — safe, with a real
-  // margin — so the lead-in is promised and sounds. The
-  // creep runs until the promise is observable on the audio
-  // record, the same choreography as phase1 (a).
-  let lat = 32.75996; // progress ≈ 0.2998
+  let lat = 32.76; // progress ≈ 0.30 — the phase1 (a) creep
   runner.onPosition({ lat, lng: -117.25 });
   let promised = false;
   for (let i = 0; i < 40 && !promised && !events.some(e => e.t === 'story_dropped'); i++) {
     await new Promise(r => setTimeout(r, 200));
-    lat += 0.00004;
+    lat += 0.0001;
     runner.onPosition({ lat, lng: -117.25 });
     promised = audio.played.map(decodedOf).includes(bridgeAB.text);
   }
