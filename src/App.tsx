@@ -962,11 +962,16 @@ function MilesApp() {
       // gets a bed in v1. Loops live in the tts-audio bucket
       // beside the story audio; the on/off state is the
       // persisted kill-switch setting (default ON).
+      // v1.2 (Nov 6, 2026): ocean/road/city/street point at the
+      // CC0 field recordings Erik approved (-rec-v1 keys);
+      // canyon wind stays the procedural render. The procedural
+      // originals remain in the bucket as unreferenced fallbacks.
       bed: {
         assets: {
-          ocean: bucketUrl('ambience/ocean-v1.m4a'),
-          road: bucketUrl('ambience/road-v1.m4a'),
-          city: bucketUrl('ambience/city-air-v1.m4a'),
+          ocean: bucketUrl('ambience/ocean-rec-v1.m4a'),
+          road: bucketUrl('ambience/road-rec-v1.m4a'),
+          city: bucketUrl('ambience/city-air-rec-v1.m4a'),
+          street: bucketUrl('ambience/quiet-street-rec-v1.m4a'),
           canyon: bucketUrl('ambience/canyon-wind-v1.m4a'),
         },
         enabled: loadAmbientEnabled(),

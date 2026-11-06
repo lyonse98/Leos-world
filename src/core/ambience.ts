@@ -2,8 +2,9 @@
 //
 // A low, place-aware sound bed under a route tour — the produced
 // podcast's room tone. Pre-rendered ~90 s loops from the tts-audio
-// bucket (ambience/<kind>-v1.m4a; the first bank is our own offline
-// procedural renders — see ~/workspace/leos-world/ambience-bank/).
+// bucket (see ~/workspace/leos-world/ambience-bank/: the first bank
+// was our own offline procedural renders; v1.2 re-sourced four of
+// the five beds from CC0 field recordings).
 //
 // THE ARCHITECTURAL RULE (the scope's non-negotiable): the bed
 // never rejoins the opening choreography. It lives OUTSIDE the
@@ -24,17 +25,26 @@
 // for the inland hill country — beds expand built-in naturally
 // as place-tied signatures earn their place, no per-context
 // settings. A fifth candidate, quiet-street for residential
-// contexts, was rendered the same evening but is HELD UNWIRED
-// (Erik is reconsidering its recipe direction — distant life may
-// want recorded source material, not pure procedural). It lives
-// in the bank as a candidate only; residential stays silent
-// until he confirms the direction.
+// contexts, was rendered the same evening but held unwired while
+// Erik settled its recipe direction (distant life wanted real
+// recordings, not pure procedural).
+//
+// v1.2 (Nov 6, 2026, Erik's ruling): the recorded hunt shipped.
+// Ocean, road, city-air, and quiet-street are now CC0 field
+// recordings (ambience/<kind>-rec-v1.m4a — sources, authors, and
+// license receipts in the bank's README and recorded/CANDIDATES.md;
+// Erik auditioned and approved the recommended winners).
+// Quiet-street is WIRED: residential contexts resolve it (see the
+// resolver). Canyon wind stays procedural — its recorded
+// candidate ran ~6.8 dB under bank level with bird phrases in
+// it. The procedural originals remain in the bucket as
+// unreferenced fallbacks (the accepted orphan pattern).
 
 import { resolveFillerRegion } from '../data/fillerRegions';
 import { FREEWAY_MPS } from './tour';
 import { systemClock, type Clock } from './player';
 
-export type AmbientBedKind = 'ocean' | 'road' | 'city' | 'canyon';
+export type AmbientBedKind = 'ocean' | 'road' | 'city' | 'street' | 'canyon';
 
 /** Full / ducked bed gain (the removed service's proven constants: 0.012 ≈ −19 dB under 0.11). */
 export const AMBIENT_FULL_LEVEL = 0.11;
@@ -132,11 +142,14 @@ export interface AmbientContextInput {
  * — the crest, the desert edge, and the East County canyon-and-
  * granite belt the filler corpus itself tags as one geography)
  * gives canyon wind (v1.1, Erik's Nov 5 ruling: beds expand
- * built-in naturally, no per-context settings). Anything else —
- * the north/south suburbs, non-urban central, walking — is
- * quiet. Residential in particular stays NONE for now: the
- * quiet-street candidate bed is rendered and banked but held
- * unwired while Erik settles its recipe direction.
+ * built-in naturally, no per-context settings). The residential
+ * remainder — the 'north' and 'south' suburban polygons, plus
+ * 'central' when the urban signal is absent (the residential
+ * core: University City, Clairemont, Mira Mesa, Tierrasanta) —
+ * gives quiet-street (v1.2: a recorded residential bed, wired at
+ * Erik's approval; it is the lowest-precedence place bed, and
+ * the urban signal still promotes central to city-air first).
+ * Anything else — outside the county, walking — is quiet.
  */
 export function resolveAmbientBed(input: AmbientContextInput): AmbientBedKind | null {
   if (input.walking) return null;
@@ -145,6 +158,7 @@ export function resolveAmbientBed(input: AmbientContextInput): AmbientBedKind | 
   if (region === 'coast') return 'ocean';
   if (region === 'backcountry' || region === 'east') return 'canyon';
   if (region === 'central' && input.urban) return 'city';
+  if (region === 'central' || region === 'north' || region === 'south') return 'street';
   return null;
 }
 
@@ -266,7 +280,7 @@ class BrowserBedAudioFactory implements BedAudioFactory {
 // ------------------------------------------------------------ controller
 
 export interface AmbientBedDeps {
-  /** Loop URLs by kind (App wires bucketUrl('ambience/<kind>-v1.m4a')). */
+  /** Loop URLs by kind (App wires each kind's shipped bucketUrl). */
   assets: Record<AmbientBedKind, string>;
   /** The persisted kill-switch state at tour start. */
   enabled: boolean;

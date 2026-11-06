@@ -3287,10 +3287,13 @@ export async function runScenarios(Tour, extras) {
       return ch;
     }
   }
-  const BED_ASSETS = { ocean: 'bed://ocean', road: 'bed://road', city: 'bed://city', canyon: 'bed://canyon' };
+  const BED_ASSETS = { ocean: 'bed://ocean', road: 'bed://road', city: 'bed://city', street: 'bed://street', canyon: 'bed://canyon' };
   const MISSION_BAY = { lat: 32.78, lng: -117.235 };
   const DOWNTOWN = { lat: 32.715, lng: -117.16 };
   const UNIVERSITY_CITY = { lat: 32.853, lng: -117.18 };
+  const RANCHO_BERNARDO = { lat: 33.02, lng: -117.08 };
+  const CHULA_VISTA = { lat: 32.64, lng: -117.08 };
+  const OUTSIDE_COUNTY = { lat: 33.6, lng: -117.7 };
   const JULIAN = { lat: 33.078, lng: -116.6 };
   const EL_CAJON = { lat: 32.794, lng: -116.962 };
   const bedCtx = (pos, speedMps, extra = {}) => ({ ...pos, speedMps, walking: false, urban: false, ...extra });
@@ -3306,14 +3309,19 @@ export async function runScenarios(Tour, extras) {
     check('coast band at surface speed -> ocean', R(bedCtx(MISSION_BAY, 8)) === 'ocean');
     check('coast band at freeway speed -> road (precedence)', R(bedCtx(MISSION_BAY, 29)) === 'road');
     check('urban core at surface speed -> city-air', R(bedCtx(DOWNTOWN, 8, { urban: true })) === 'city');
-    check('central without the urban signal -> none (quiet-street held unwired)', R(bedCtx(DOWNTOWN, 8)) === null);
-    check('residential central -> none (quiet-street held unwired)', R(bedCtx(UNIVERSITY_CITY, 8)) === null);
+    check('central without the urban signal -> quiet-street (v1.2 wired)', R(bedCtx(DOWNTOWN, 8)) === 'street');
+    check('residential central -> quiet-street', R(bedCtx(UNIVERSITY_CITY, 8)) === 'street');
+    check('north suburbs -> quiet-street', R(bedCtx(RANCHO_BERNARDO, 8)) === 'street');
+    check('south suburbs -> quiet-street', R(bedCtx(CHULA_VISTA, 8)) === 'street');
     check('backcountry -> canyon wind', R(bedCtx(JULIAN, 8)) === 'canyon');
     check('east county canyon belt -> canyon wind', R(bedCtx(EL_CAJON, 8)) === 'canyon');
     check('walking -> none even on the coast', R(bedCtx(MISSION_BAY, 1.2, { walking: true })) === null);
     check('walking -> none in the backcountry', R(bedCtx(JULIAN, 1.2, { walking: true })) === null);
     check('walking -> none even at the urban core', R(bedCtx(DOWNTOWN, 1.2, { walking: true, urban: true })) === null);
+    check('walking -> none in a residential context', R(bedCtx(UNIVERSITY_CITY, 1.2, { walking: true })) === null);
     check('freeway speed anywhere -> road', R(bedCtx(JULIAN, 29)) === 'road');
+    check('freeway speed outranks quiet-street', R(bedCtx(UNIVERSITY_CITY, 29)) === 'road');
+    check('outside the county -> none', R(bedCtx(OUTSIDE_COUNTY, 8)) === null);
     check('urban names: Gaslamp Quarter matches', ambience.isUrbanAreaName('Gaslamp Quarter') === true);
     check('urban names: Barrio Logan matches', ambience.isUrbanAreaName('Barrio Logan') === true);
     check('urban names: Clairemont does not match', ambience.isUrbanAreaName('Clairemont') === false);
@@ -3506,6 +3514,25 @@ export async function runScenarios(Tour, extras) {
     check('held freeway speed adopts road over canyon', factory.channels.length === 2 && factory.channels[1].src === 'bed://road');
     await clock.advance(6_000);
     check('the canyon channel retired after the crossfade', factory.channels[0].disposed === true && bed.kind === 'road');
+    bed.dispose();
+  }
+
+  suite('AM-9 v1.2 bed: quiet-street gate opens in residential central; the urban signal promotes to city-air');
+  {
+    const clock = new FakeClock();
+    const factory = new FakeBedFactory();
+    const bed = makeBed(clock, factory, []);
+    bed.updateContext(bedCtx(UNIVERSITY_CITY, 8));
+    bed.noteFirstSound();
+    await clock.flush();
+    check('the gate opens the quiet-street bed in residential central', factory.channels.length === 1 && factory.channels[0].src === 'bed://street');
+    await clock.advance(4_000);
+    // Same ground, urban episode geography: city-air outranks quiet-street.
+    bed.updateContext(bedCtx(UNIVERSITY_CITY, 8, { urban: true }));
+    await clock.advance(18_000);
+    check('the urban signal adopts city-air over quiet-street', factory.channels.length === 2 && factory.channels[1].src === 'bed://city');
+    await clock.advance(6_000);
+    check('the quiet-street channel retired after the crossfade', factory.channels[0].disposed === true && bed.kind === 'city');
     bed.dispose();
   }
 }
