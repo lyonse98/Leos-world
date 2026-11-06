@@ -85,6 +85,14 @@ export interface AudibleItem {
   deferrable?: boolean;
   /** Set by the player when it defers this item (see offerStory). */
   deferred?: boolean;
+  /**
+   * Pass-by framing (Nov 5): a converted live WELCOME (the
+   * Tour's measured-exit conversion) — its telling names a
+   * place the driver has already passed, in past tense, so
+   * distance from its anchor no longer falsifies it. Absent
+   * for every ordinary telling.
+   */
+  framing?: 'passby';
   // Story-carried fields (kind === 'story'); ignored otherwise.
   subject?: string;
   angleOf?: string;

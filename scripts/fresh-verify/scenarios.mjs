@@ -2809,6 +2809,358 @@ export async function runScenarios(Tour, extras) {
     tour.endTour();
   }
 
+  // ---------------------------------------------------------- PB: pass-by conversion (Nov 5)
+  // Field evidence (tour 8b65691c, Nov 5): the live Bay Ho
+  // welcome took ~71 s to generate, waited 83 s in queue, and
+  // sounded 2,308 m past its anchor — arrival language for a
+  // ~65 s freeway pass. The fix is measured-exit conversion:
+  // when the area resolves onward at freeway speed before the
+  // telling lands (generation start / text landing / while
+  // waiting), the welcome is re-told as a short past-tense
+  // PASS-BY (20 s class), never as an arrival. Below freeway
+  // speed nothing converts; shelf welcomes never convert.
+  // A3 re-check (recorded per the scope): A3's world never
+  // resolves a SECOND area while its welcome waits — the area
+  // stays Bay Ho for the whole run — so no checkpoint can
+  // fire there and A3 stands UNCHANGED above (discharge, not
+  // conversion, remains its expectation).
+
+  const passbyPromptsFor = (world, name) =>
+    world.genStoryPrompts.filter(p => p.includes('NEIGHBORHOOD PASS-BY') && p.includes(name));
+  const countPacksFor = (world, name) => {
+    let n = 0;
+    const orig = world.seams.buildFactPack;
+    world.seams.buildFactPack = async (candidate, area, nearby) => {
+      if (candidate?.name === name) n += 1;
+      return orig(candidate, area, nearby);
+    };
+    return () => n;
+  };
+  const PB_ARRIVAL =
+    'Bay Ho began as a bayside grid of small lots stepped above Mission Bay. ' +
+    'Its streets were cut for families who wanted the water close and the city closer, and the neighborhood grew up quiet between the freeway and the shore. '.repeat(2);
+  const PB_PASSBY =
+    'That was Bay Ho — the little bayside grid above Mission Bay, gone in about a minute at this speed. ' +
+    'It grew up quiet between the freeway and the shore. The road is already into what comes next.';
+  const pbBehavior = world => prompt => {
+    if (prompt.includes('AREA STORY')) {
+      // The generic area lane stays out of these scenarios:
+      // its generation hangs (never lands an item).
+      return new Promise(res =>
+        world.clock.setTimeout(
+          () => res('A generated area story that lands far too late to matter. '.repeat(3)),
+          600_000,
+        ),
+      );
+    }
+    if (prompt.includes('NEIGHBORHOOD PASS-BY') && prompt.includes('Bay Ho')) {
+      return new Promise(res => world.clock.setTimeout(() => res(PB_PASSBY), 2_000));
+    }
+    if (prompt.includes('NEIGHBORHOOD WELCOME') && prompt.includes('Bay Ho')) {
+      // The field pipeline's shape: ~30 s of text generation.
+      return new Promise(res => world.clock.setTimeout(() => res(PB_ARRIVAL), 30_000));
+    }
+    return 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+  };
+
+  suite('PB-1 Nov 5 replay: exit during the queue converts the waiting welcome; the pass-by sounds and completes');
+  {
+    resetLocalStorage();
+    const LJ = { lat: 32.85, lng: -117.25 };
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: LJ.lat, lng: LJ.lng })],
+      library: [{ name: 'Alpha Park', lat: LJ.lat, lng: LJ.lng }],
+      intros: [],
+    });
+    const packsForBayHo = countPacksFor(world, 'Bay Ho');
+    world.genStoryBehavior = pbBehavior(world);
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 90_000, synth: 12_000 }));
+    const { tour } = await healthyOpening(world, audio, LJ);
+    // Enter Bay Ho at 29.8 m/s with Alpha (90 s) occupying the
+    // channel: the welcome generates (~30 s) into the waiting
+    // slot behind it — the field case's shape.
+    world.area = { neighborhood: 'Bay Ho', city: 'San Diego' };
+    let lat = LJ.lat + 0.01;
+    tour.onPosition({ lat, lng: LJ.lng, speedMps: 29.8, headingDeg: 180 });
+    await world.clock.advance(35_000); // the arrival text has landed; the item waits
+    tour.onPosition({ lat: (lat += 0.004), lng: LJ.lng, speedMps: 29.8, headingDeg: 180 });
+    check('before the exit: one arrival generation, no pass-by generation',
+      welcomePromptsFor(world, 'Bay Ho').length === 1 && passbyPromptsFor(world, 'Bay Ho').length === 0,
+      `arrival=${welcomePromptsFor(world, 'Bay Ho').length} passby=${passbyPromptsFor(world, 'Bay Ho').length}`);
+    // The exit: the area resolves onward while the welcome
+    // waits — checkpoint 3 withdraws it and re-tells it.
+    world.area = { neighborhood: 'University City', city: 'San Diego' };
+    tour.onPosition({ lat: (lat += 0.004), lng: LJ.lng, speedMps: 29.8, headingDeg: 180 });
+    for (let i = 0; i < 16; i++) {
+      await world.clock.advance(10_000);
+      tour.onPosition({ lat: (lat += 0.0027), lng: LJ.lng, speedMps: 29.8, headingDeg: 180 });
+    }
+    check('exactly one pass-by re-roll followed the exit',
+      passbyPromptsFor(world, 'Bay Ho').length === 1,
+      `passby=${passbyPromptsFor(world, 'Bay Ho').length}`);
+    check('the re-roll reused the arrival fact pack (one pack build for Bay Ho)',
+      packsForBayHo() === 1, `packs=${packsForBayHo()}`);
+    const played = welcomePlayed(world, 'welcome:bay ho');
+    check('the welcome committed twice: the arrival item, then the converted one',
+      played.length === 2 && played[0]?.payload.framing === null && played[1]?.payload.framing === 'passby',
+      JSON.stringify(played.map(e => e.payload)));
+    const pbs = playbacksFor(world, 'welcome:bay ho');
+    check('exactly one welcome playback: the pass-by, sounded and completed',
+      pbs.length === 1 && pbs[0]?.payload.sounded === true && pbs[0]?.payload.completed === true &&
+        pbs[0]?.payload.framing === 'passby',
+      JSON.stringify(pbs.map(e => e.payload)));
+    check('no story_dropped filed for the welcome (withdrawal + conversion are silent)',
+      dropsFor(world, 'welcome:bay ho').length === 0,
+      JSON.stringify(dropsFor(world, 'welcome:bay ho').map(e => e.payload)));
+    check('the pass counts as welcomed (the converted telling was heard)',
+      world.heard.includes('Welcome to Bay Ho'), world.heard.join(' | '));
+    tour.endTour();
+  }
+
+  suite('PB-2 exit during generation: checkpoint 2 re-rolls once, from the same pack');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: [] });
+    const packsForBayHo = countPacksFor(world, 'Bay Ho');
+    world.genStoryBehavior = prompt => {
+      if (prompt.includes('AREA STORY')) {
+        return new Promise(res =>
+          world.clock.setTimeout(() => res('A generated area story that lands far too late. '.repeat(3)), 600_000),
+        );
+      }
+      if (prompt.includes('NEIGHBORHOOD PASS-BY') && prompt.includes('Bay Ho')) {
+        return new Promise(res => world.clock.setTimeout(() => res(PB_PASSBY), 2_000));
+      }
+      if (prompt.includes('NEIGHBORHOOD WELCOME') && prompt.includes('Bay Ho')) {
+        return new Promise(res => world.clock.setTimeout(() => res(PB_ARRIVAL), 20_000));
+      }
+      return 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+    };
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Bay Ho', city: 'San Diego' };
+    let lat = UTC.lat + 0.01;
+    tour.onPosition({ lat, lng: UTC.lng, speedMps: 29.8, headingDeg: 180 });
+    await world.clock.advance(8_000); // generation in flight (lands at +20 s)
+    // The exit lands mid-generation.
+    world.area = { neighborhood: 'University City', city: 'San Diego' };
+    tour.onPosition({ lat: (lat += 0.004), lng: UTC.lng, speedMps: 29.8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    check('one arrival generation + exactly one pass-by re-roll',
+      welcomePromptsFor(world, 'Bay Ho').length === 1 && passbyPromptsFor(world, 'Bay Ho').length === 1,
+      `arrival=${welcomePromptsFor(world, 'Bay Ho').length} passby=${passbyPromptsFor(world, 'Bay Ho').length}`);
+    check('the re-roll reused the same fact pack (one pack build for Bay Ho)',
+      packsForBayHo() === 1, `packs=${packsForBayHo()}`);
+    const pbs = playbacksFor(world, 'welcome:bay ho');
+    check('the converted pass-by sounded and completed; no arrival playback exists',
+      pbs.length === 1 && pbs[0]?.payload.sounded === true && pbs[0]?.payload.completed === true &&
+        pbs[0]?.payload.framing === 'passby',
+      JSON.stringify(pbs.map(e => e.payload)));
+    check('the pass counts as welcomed',
+      world.heard.includes('Welcome to Bay Ho'), world.heard.join(' | '));
+    tour.endTour();
+  }
+
+  suite('PB-3 still-inside control: no exit, no conversion, the arrival welcome sounds verbatim');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: [] });
+    world.genStoryBehavior = prompt => {
+      if (prompt.includes('NEIGHBORHOOD WELCOME') && prompt.includes('Bay Ho')) {
+        return new Promise(res => world.clock.setTimeout(() => res(PB_ARRIVAL), 5_000));
+      }
+      return 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+    };
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Bay Ho', city: 'San Diego' };
+    let lat = UTC.lat + 0.01;
+    tour.onPosition({ lat, lng: UTC.lng, speedMps: 29.8, headingDeg: 180 });
+    for (let i = 0; i < 10; i++) {
+      await world.clock.advance(10_000);
+      tour.onPosition({ lat: (lat += 0.0027), lng: UTC.lng, speedMps: 29.8, headingDeg: 180 });
+    }
+    check('zero pass-by generations on the normal path (no spend regression)',
+      passbyPromptsFor(world, 'Bay Ho').length === 0,
+      `passby=${passbyPromptsFor(world, 'Bay Ho').length}`);
+    const pbs = playbacksFor(world, 'welcome:bay ho');
+    check('the arrival welcome sounded and completed, unframed',
+      pbs.length === 1 && pbs[0]?.payload.sounded === true && pbs[0]?.payload.completed === true &&
+        pbs[0]?.payload.framing === null,
+      JSON.stringify(pbs.map(e => e.payload)));
+    tour.endTour();
+  }
+
+  suite('PB-4 walking-speed control: a boundary crossing below freeway speed never converts');
+  {
+    resetLocalStorage();
+    const LJ = { lat: 32.85, lng: -117.25 };
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: LJ.lat, lng: LJ.lng })],
+      library: [{ name: 'Alpha Park', lat: LJ.lat, lng: LJ.lng }],
+      intros: [],
+    });
+    // The arrival text is LONG (~410 s by the speech
+    // estimate): at 1.4 m/s the standing fit gate's reach
+    // (duration × speed ≈ 570 m) must cover the ~390 m of
+    // drift this scenario walks (the ≥300 m an area
+    // re-resolution requires, plus trailing steps) with real
+    // margin, or the gate — not conversion — would own the
+    // outcome and the control would test nothing. The length
+    // is a fixture for the gate's math, nothing more.
+    const PB_ARRIVAL_LONG = PB_ARRIVAL + ' And the telling goes on, street by street, in no hurry at all. '.repeat(76);
+    world.genStoryBehavior = prompt => {
+      if (prompt.includes('AREA STORY')) {
+        return new Promise(res =>
+          world.clock.setTimeout(() => res('A generated area story that lands far too late. '.repeat(3)), 600_000),
+        );
+      }
+      if (prompt.includes('NEIGHBORHOOD WELCOME') && prompt.includes('Bay Ho')) {
+        return new Promise(res => world.clock.setTimeout(() => res(PB_ARRIVAL_LONG), 10_000));
+      }
+      return 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+    };
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 90_000, synth: 12_000 }));
+    const { tour } = await healthyOpening(world, audio, LJ);
+    // Enter Bay Ho at walking pace with Alpha (90 s) occupying
+    // the channel: the welcome generates into the waiting slot.
+    world.area = { neighborhood: 'Bay Ho', city: 'San Diego' };
+    let lat = LJ.lat + 0.01;
+    tour.onPosition({ lat, lng: LJ.lng, speedMps: 1.4, headingDeg: 180 });
+    await world.clock.advance(20_000); // the arrival text has landed; the item waits
+    // The boundary crossing, at walking pace — three small
+    // steps whose cumulative drift crosses the 300 m
+    // re-resolution threshold while the welcome waits: the
+    // speed gate holds and no checkpoint converts.
+    world.area = { neighborhood: 'University City', city: 'San Diego' };
+    for (let i = 0; i < 3; i++) {
+      tour.onPosition({ lat: (lat += 0.001), lng: LJ.lng, speedMps: 1.4, headingDeg: 180 });
+      await world.clock.advance(2_000);
+    }
+    for (let i = 0; i < 12; i++) {
+      await world.clock.advance(10_000);
+      tour.onPosition({ lat: (lat += 0.0001), lng: LJ.lng, speedMps: 1.4, headingDeg: 180 });
+    }
+    check('zero pass-by generations below freeway speed',
+      passbyPromptsFor(world, 'Bay Ho').length === 0,
+      `passby=${passbyPromptsFor(world, 'Bay Ho').length}`);
+    const pbs = playbacksFor(world, 'welcome:bay ho');
+    check('the arrival welcome sounded and completed, unframed',
+      pbs.length === 1 && pbs[0]?.payload.sounded === true && pbs[0]?.payload.completed === true &&
+        pbs[0]?.payload.framing === null,
+      `played=${JSON.stringify(welcomePlayed(world, 'welcome:bay ho').map(e => e.payload))} drops=${JSON.stringify(dropsFor(world, 'welcome:bay ho').map(e => e.payload))} pbs=${JSON.stringify(pbs.map(e => e.payload))}`);
+    tour.endTour();
+  }
+
+  suite('PB-5 re-roll failure: silent discharge, no re-arm — and the exited area survives as fold-in salvage');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: [] });
+    world.genStoryBehavior = prompt => {
+      if (prompt.includes('AREA STORY')) {
+        return new Promise(res =>
+          world.clock.setTimeout(() => res('A generated area story that lands far too late. '.repeat(3)), 600_000),
+        );
+      }
+      if (prompt.includes('NEIGHBORHOOD PASS-BY') && prompt.includes('Bay Ho')) {
+        throw new Error('pass-by generation down');
+      }
+      if (prompt.includes('NEIGHBORHOOD WELCOME') && prompt.includes('Bay Ho')) {
+        return new Promise(res => world.clock.setTimeout(() => res(PB_ARRIVAL), 10_000));
+      }
+      if (prompt.includes('NEIGHBORHOOD WELCOME') && prompt.includes('Rose Canyon')) {
+        return new Promise(res =>
+          world.clock.setTimeout(
+            () => res('Welcome to Rose Canyon, where the canyon cuts green through the middle of the city. '.repeat(3)),
+            5_000,
+          ),
+        );
+      }
+      return 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+    };
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Bay Ho', city: 'San Diego' };
+    let lat = UTC.lat + 0.01;
+    tour.onPosition({ lat, lng: UTC.lng, speedMps: 29.8, headingDeg: 180 });
+    await world.clock.advance(5_000); // generation in flight (lands at +10 s)
+    world.area = { neighborhood: 'University City', city: 'San Diego' };
+    tour.onPosition({ lat: (lat += 0.004), lng: UTC.lng, speedMps: 29.8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    check('one arrival generation + one failed pass-by attempt',
+      welcomePromptsFor(world, 'Bay Ho').length === 1 && passbyPromptsFor(world, 'Bay Ho').length === 1,
+      `arrival=${welcomePromptsFor(world, 'Bay Ho').length} passby=${passbyPromptsFor(world, 'Bay Ho').length}`);
+    check('nothing for Bay Ho was ever offered or sounded',
+      welcomePlayed(world, 'welcome:bay ho').length === 0 && playbacksFor(world, 'welcome:bay ho').length === 0,
+      `played=${welcomePlayed(world, 'welcome:bay ho').length}`);
+    check('the pass counts as spent (welcomed) but NOT heard',
+      tour['welcomed'].has('bay ho') && !world.heard.includes('Welcome to Bay Ho'),
+      `welcomed=${[...tour['welcomed']].join(',')} heard=${world.heard.join(' | ')}`);
+    check('the discharged welcome filed no story_dropped',
+      dropsFor(world, 'welcome:bay ho').length === 0,
+      JSON.stringify(dropsFor(world, 'welcome:bay ho').map(e => e.payload)));
+    // No re-arm loop: keep driving in the new area.
+    for (let i = 0; i < 6; i++) {
+      await world.clock.advance(10_000);
+      tour.onPosition({ lat: (lat += 0.0027), lng: UTC.lng, speedMps: 29.8, headingDeg: 180 });
+    }
+    check('no retry loop after the discharge (prompt counts unchanged)',
+      welcomePromptsFor(world, 'Bay Ho').length === 1 && passbyPromptsFor(world, 'Bay Ho').length === 1,
+      `arrival=${welcomePromptsFor(world, 'Bay Ho').length} passby=${passbyPromptsFor(world, 'Bay Ho').length}`);
+    // Fold-in salvage: the NEXT area's welcome carries Bay
+    // Ho's lead fact as a "just passed" line — the place's
+    // only mention on this drive.
+    world.area = { neighborhood: 'Rose Canyon', city: 'San Diego' };
+    tour.onPosition({ lat: (lat += 0.004), lng: UTC.lng, speedMps: 29.8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    const rcPrompts = world.genStoryPrompts.filter(
+      p => p.includes('NEIGHBORHOOD WELCOME') && p.includes('Rose Canyon'),
+    );
+    check('the next welcome’s prompt carries the banked Bay Ho fact as a just-passed line',
+      rcPrompts.length === 1 && rcPrompts[0].includes('JUST PASSED') && rcPrompts[0].includes('Bay Ho began as a bayside grid'),
+      JSON.stringify(rcPrompts.map(p => p.slice(0, 200))));
+    check('the next welcome sounded',
+      playbacksFor(world, 'welcome:rose canyon').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'welcome:rose canyon').map(e => e.payload)));
+    tour.endTour();
+  }
+
+  suite('PB-6 shelf-area control: a banked intro on the same fast pass never converts');
+  {
+    resetLocalStorage();
+    const LJ = { lat: 32.85, lng: -117.25 };
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: LJ.lat, lng: LJ.lng })],
+      library: [{ name: 'Alpha Park', lat: LJ.lat, lng: LJ.lng }],
+      intros: ['Clairemont'],
+    });
+    world.genStoryBehavior = pbBehavior(world);
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 90_000, synth: 12_000 }));
+    const { tour } = await healthyOpening(world, audio, LJ);
+    world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+    let lat = LJ.lat + 0.01;
+    tour.onPosition({ lat, lng: LJ.lng, speedMps: 29.8, headingDeg: 180 });
+    await world.clock.advance(20_000); // the shelf item waits behind Alpha
+    // The same exit that converts a live welcome in PB-1.
+    world.area = { neighborhood: 'University City', city: 'San Diego' };
+    tour.onPosition({ lat: (lat += 0.004), lng: LJ.lng, speedMps: 29.8, headingDeg: 180 });
+    // The shelf item sounds after Alpha and itself plays at
+    // the library class's 90 s — the loop must outlast both.
+    for (let i = 0; i < 22; i++) {
+      await world.clock.advance(10_000);
+      tour.onPosition({ lat: (lat += 0.0027), lng: LJ.lng, speedMps: 29.8, headingDeg: 180 });
+    }
+    check('zero welcome generation of any kind for the shelf area',
+      welcomePromptsFor(world, 'Clairemont').length === 0 && passbyPromptsFor(world, 'Clairemont').length === 0,
+      `arrival=${welcomePromptsFor(world, 'Clairemont').length} passby=${passbyPromptsFor(world, 'Clairemont').length}`);
+    const pbs = playbacksFor(world, 'welcome:clairemont');
+    check('the shelf welcome sounded unchanged, sourced library, unframed',
+      pbs.length === 1 && pbs[0]?.payload.sounded === true && pbs[0]?.payload.source === 'library' &&
+        pbs[0]?.payload.framing === null,
+      JSON.stringify(pbs.map(e => e.payload)));
+    tour.endTour();
+  }
+
   // ---------------------------------------------------------- WT: woven twins (Nov 4, 2026)
   // The woven tranche's twins ride the shelf as sibling rows
   // (source angle + '-woven-v1') RESERVED for route mode:

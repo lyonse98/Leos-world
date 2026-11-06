@@ -357,6 +357,33 @@ export class Tour {
   private deferredWelcome: { name: string; since: number } | null = null;
   /** An owed WELCOME has been generated and offered; it re-arms only when that item settles. */
   private welcomeOffered = false;
+  /**
+   * The owed WELCOME currently offered to the player (Nov 5):
+   * its area name + item, recorded at offer time so the pass-by
+   * conversion's queue checkpoint can find the waiting item
+   * when the area resolves onward. Cleared when that item
+   * settles — any settle: sounded, dropped, deferred, or
+   * silently withdrawn. (The OPENING welcome never lands here:
+   * it hands over as pendingWelcome, a different mechanism.)
+   */
+  private offeredWelcome: { name: string; item: AudibleItem } | null = null;
+  /**
+   * Fact packs of live owed welcomes, by welcome subject
+   * (Nov 5): a pass-by conversion re-rolls the SAME pack the
+   * arrival text was written from — the same facts, re-framed,
+   * no second fact spend. Written when the owed generation
+   * produces its item; deleted on the item's settle.
+   */
+  private welcomePacks = new Map<string, facts.FactPack>();
+  /**
+   * Fold-in salvage (Nov 5): when a pass-by conversion fails,
+   * the exited area's lead fact banks here and the NEXT
+   * generated welcome carries it as a single "just passed"
+   * line — the place's only mention on that drive, spent on
+   * use (see buildWelcomeItem). One banked pass at a time: the
+   * first unspoken one is the debt.
+   */
+  private passbySalvage: { name: string; fact: string } | null = null;
 
   // Telling ledger (§3)
   private inflight = new Set<string>();
@@ -1076,6 +1103,29 @@ export class Tour {
     at: Position,
     deferrable = false,
   ): Promise<AudibleItem | null> {
+    const built = await this.buildWelcomeItem(name, at, deferrable, 'arrival');
+    return built?.item ?? null;
+  }
+
+  /**
+   * Build a live welcome item, in arrival framing — or, for a
+   * converted pass-by (Nov 5), its short past-tense sibling:
+   * same subject, same label, same reserved/deferrable
+   * identity; only the prompt's framing and the item's
+   * `framing` metadata differ. The fact pack is built unless
+   * the caller hands one in — a conversion re-roll reuses the
+   * arrival text's pack verbatim (no fact rebuild). A banked
+   * fold-in salvage (passbySalvage) rides the prompt as one
+   * "just passed" line and is spent by the telling that
+   * carries it.
+   */
+  private async buildWelcomeItem(
+    name: string,
+    at: Position,
+    deferrable: boolean,
+    framing: 'arrival' | 'passby',
+    packIn?: facts.FactPack,
+  ): Promise<{ item: AudibleItem; pack: facts.FactPack } | null> {
     const pseudo: facts.Candidate = {
       name,
       lat: at.lat,
@@ -1091,17 +1141,36 @@ export class Tour {
       distanceM: 0,
     };
     try {
-      const pack = await this.seams.buildFactPack(pseudo, this.area, []);
+      const pack = packIn ?? (await this.seams.buildFactPack(pseudo, this.area, []));
+      const nowIn =
+        this.area.neighborhood && this.area.neighborhood.toLowerCase() !== name.toLowerCase()
+          ? this.area.neighborhood
+          : null;
+      const framingLine =
+        framing === 'passby'
+          ? `NEIGHBORHOOD PASS-BY — the listener has just driven through ${name}${this.area.city ? `, in ${this.area.city}` : ''} at freeway speed and is already beyond it${nowIn ? `, into ${nowIn}` : ''}: the place went by before its welcome could be told. Do NOT welcome the listener to ${name}, and do not speak as if they are arriving or still there. Name the place as it went by — past tense — give the ONE best fact about it, and hand the listener forward to the road ahead. About 15 to 20 seconds spoken: two or three sentences, no more — the neighborhood-intro length exemption does NOT apply to this telling. Never claim which side of the road the place was on.`
+          : `NEIGHBORHOOD WELCOME — the first real story of this tour. Welcome the listener to ${name}${this.area.city ? `, in ${this.area.city}` : ''}. This is a neighborhood introduction: what this place is, its character, its story — told to the standard of the neighborhood-intro exemption in your length rules.`;
+      const salvage = this.passbySalvage;
+      const salvageLine =
+        salvage && salvage.name.toLowerCase() !== name.toLowerCase()
+          ? `JUST PASSED: on the way here the listener passed ${salvage.name} — ${salvage.fact} Its own welcome could not be told; if it fits naturally, acknowledge it in ONE brief line as a place gone by, and do not dwell on it.`
+          : null;
       const prompt = [
         `MODE: ${this.modeName()}`,
-        `NEIGHBORHOOD WELCOME — the first real story of this tour. Welcome the listener to ${name}${this.area.city ? `, in ${this.area.city}` : ''}. This is a neighborhood introduction: what this place is, its character, its story — told to the standard of the neighborhood-intro exemption in your length rules.`,
+        framingLine,
         `FACT PACK:\n${facts.factPackText(pack)}`,
+        ...(salvageLine ? [salvageLine] : []),
         this.exclusionsLine(),
       ].join('\n\n');
       const fetchStart = this.clock.now();
       const text = await this.seams.generateStory(prompt);
       const fetchMs = this.clock.now() - fetchStart;
       this.sampleLatency(this.fetchSamples, fetchMs);
+      // The salvage is spent by the telling that carried it
+      // (cleared only on a successful generation — a failed
+      // one told nothing). A salvage naming THIS area is moot
+      // the moment the area earns its own welcome.
+      if (salvage) this.passbySalvage = null;
       const subject = `welcome:${name.toLowerCase()}`;
       const item = this.makeItem({
         kind: 'story',
@@ -1119,12 +1188,85 @@ export class Tour {
           text,
           reserved: true,
           deferrable,
+          ...(framing === 'passby' ? { framing } : {}),
         },
       });
-      return item;
+      return { item, pack };
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Pass-by conversion gate (Nov 5): the driver has EXITED the
+   * welcome's area — the resolved neighborhood is now a
+   * different one — at freeway speed, where an arrival telling
+   * would be false by the time it sounds. Below FREEWAY_MPS a
+   * boundary crossing is walking-pace noise and the arrival
+   * welcome stands.
+   */
+  private passbyExitApplies(name: string): boolean {
+    if (!this.position || this.position.speedMps < FREEWAY_MPS) return false;
+    const current = this.area.neighborhood;
+    return !!current && current.toLowerCase() !== name.toLowerCase();
+  }
+
+  /**
+   * Fold-in salvage (Nov 5): bank an exited area's lead fact
+   * from its untold arrival text, so the next generated
+   * welcome can carry the place's one mention as a "just
+   * passed" line (buildWelcomeItem spends it). The first
+   * unspoken pass is the debt; a second failure behind it
+   * does not overwrite it.
+   */
+  private bankPassbySalvage(name: string, fromItem: AudibleItem): void {
+    if (this.passbySalvage) return;
+    const fact = fromItem.text ? leadFactFromText(fromItem.text) : null;
+    if (fact) this.passbySalvage = { name, fact };
+  }
+
+  /**
+   * Generate the owed welcome's live item, holding the pass-by
+   * conversion's first two checkpoints (Nov 5):
+   *  (1) generation start — the area has ALREADY resolved
+   *      onward at freeway speed (the serve was delayed: the
+   *      welcome machinery was busy, or a cooldown matured
+   *      across a boundary): the arrival text is never
+   *      written; the pass-by text is generated directly, at
+   *      no extra call.
+   *  (2) text landing — the area resolved onward WHILE the
+   *      arrival text was being written: the text is re-rolled
+   *      ONCE under the pass-by framing, from the same fact
+   *      pack. A failed re-roll is 'converted-failed': the
+   *      pass discharges silently (the caller spends it) — an
+   *      arrival text for an exited area is the defect itself,
+   *      never a fallback — and the exited area's lead fact
+   *      banks as fold-in salvage.
+   * A plain generation failure is 'failed': the caller's
+   * standing semantics (O15 cooldown / silent discharge of a
+   * failed alternate) decide what happens to the pass.
+   */
+  private async generateOwedWelcome(
+    name: string,
+  ): Promise<
+    { kind: 'item'; item: AudibleItem } | { kind: 'failed' } | { kind: 'converted-failed' }
+  > {
+    if (!this.position) return { kind: 'failed' };
+    const at = this.position;
+    const exited = this.passbyExitApplies(name);
+    const built = await this.buildWelcomeItem(name, at, true, exited ? 'passby' : 'arrival');
+    if (!built) return { kind: 'failed' };
+    if (!exited && this.passbyExitApplies(name)) {
+      const rerolled = await this.buildWelcomeItem(name, at, true, 'passby', built.pack);
+      if (!rerolled) {
+        this.bankPassbySalvage(name, built.item);
+        return { kind: 'converted-failed' };
+      }
+      this.welcomePacks.set(`welcome:${name.toLowerCase()}`, rerolled.pack);
+      return { kind: 'item', item: rerolled.item };
+    }
+    this.welcomePacks.set(`welcome:${name.toLowerCase()}`, built.pack);
+    return { kind: 'item', item: built.item };
   }
 
   /**
@@ -1245,6 +1387,13 @@ export class Tour {
     if (this.deferredWelcome && this.deferredWelcome.name.toLowerCase() !== key) {
       this.deferredWelcome = null;
     }
+    // Pass-by conversion, checkpoint 3 (Nov 5): the area has
+    // resolved onward while an earlier area's live welcome
+    // still waits unsounded — the Nov 5 Bay Ho shape, where
+    // the exit happened during the welcome's long queue wait
+    // behind a playing story. Withdraw and re-tell it as a
+    // pass-by (see maybeConvertWaitingWelcome).
+    this.maybeConvertWaitingWelcome();
     // O14: entering an unwelcomed neighborhood creates an owed WELCOME.
     if (
       this.phase === 'active' &&
@@ -1371,7 +1520,19 @@ export class Tour {
           this.owedWelcome = null;
           return;
         }
-        if (!item) item = await this.generateWelcome(name, this.position, true);
+        if (!item) {
+          const gen = await this.generateOwedWelcome(name);
+          if (gen.kind === 'converted-failed') {
+            // Pass-by conversion (Nov 5): the driver exited
+            // during generation and the one re-roll failed —
+            // the pass discharges silently, exactly like a
+            // failed alternate above (no retry, no owed record).
+            this.welcomed.add(name.toLowerCase());
+            this.owedWelcome = null;
+            return;
+          }
+          if (gen.kind === 'item') item = gen.item;
+        }
         if (this.phase !== 'active') return;
         if (!item) {
           this.welcomed.add(name.toLowerCase());
@@ -1398,7 +1559,21 @@ export class Tour {
           this.owedWelcome = null;
           return;
         }
-        if (!item) item = await this.generateWelcome(name, this.position, true);
+        if (!item) {
+          const gen = await this.generateOwedWelcome(name);
+          if (gen.kind === 'converted-failed') {
+            // Pass-by conversion (Nov 5): the driver exited
+            // during generation and the one re-roll failed —
+            // the pass discharges silently (spent, like the
+            // fit-gate discharge above; NOT the O15 cooldown
+            // below: the text existed and was deliberately
+            // never offered).
+            this.welcomed.add(name.toLowerCase());
+            this.owedWelcome = null;
+            return;
+          }
+          if (gen.kind === 'item') item = gen.item;
+        }
         if (this.phase !== 'active') return;
         if (!item) {
           // O15: an unheard failed WELCOME remains owed, on a cooldown.
@@ -1428,11 +1603,86 @@ export class Tour {
       // settle, the offered item IS the owed welcome in flight —
       // the tick must not mint another one behind it.
       this.welcomeOffered = true;
+      // Recorded before the offer (Nov 5): the pass-by
+      // conversion's queue checkpoint finds the waiting item
+      // through this record, and an offer that settles
+      // synchronously (a torn-down player) must clear it first.
+      this.offeredWelcome = { name, item };
       // Next location story after the current one and promised lines (O14).
       this.player.offerStory(item, true);
     } finally {
       this.welcomeServing = false;
     }
+  }
+
+  /**
+   * Pass-by conversion, checkpoint 3 (Nov 5): the hook
+   * trackNeighborhood fires on every area change. When the
+   * offered owed welcome is a LIVE item, not yet converted,
+   * and the driver has exited its area at freeway speed, the
+   * waiting arrival item withdraws silently — the player's
+   * existing withdrawWaiting, the Q&A discharge's discipline
+   * (never heard, no §8 terminal) — and a pass-by regeneration
+   * takes its place. An item no longer waiting (already
+   * sounding, or settled) does not convert: withdrawWaiting
+   * simply declines, and the sounding telling is never cut.
+   * Shelf welcomes never convert (the library path is not this
+   * fix's surface), and a converted item never re-converts.
+   */
+  private maybeConvertWaitingWelcome(): void {
+    const offered = this.offeredWelcome;
+    if (!offered) return;
+    const { name, item } = offered;
+    if (item.framing) return;
+    if (item.storySource !== 'live') return;
+    if (!this.passbyExitApplies(name)) return;
+    const subject = item.subject ?? `welcome:${name.toLowerCase()}`;
+    // The pack is captured BEFORE the withdrawal: the item's
+    // silent settle deletes its retained pack (onStorySettle),
+    // and the regeneration re-rolls from that very pack.
+    const pack = this.welcomePacks.get(subject);
+    if (!this.player.withdrawWaiting(subject)) return;
+    void this.regeneratePassbyWelcome(name, item, pack);
+  }
+
+  /**
+   * The checkpoint-3 regeneration: rebuild the withdrawn
+   * welcome under the pass-by framing, from its own retained
+   * fact pack when one survives, and re-offer it into the
+   * waiting slot — its synthesis then happens in the normal
+   * waiting-item presynth, never in a serve path (the channel
+   * is occupied by the current story either way). The
+   * obligation bookkeeping carries over untouched: the
+   * converted item IS the owed welcome still in flight
+   * (welcomeOffered never dropped), under the same subject.
+   * A failed regeneration discharges the pass silently — the
+   * area counts as welcomed, its lead fact banks as fold-in
+   * salvage, and the area just entered (whose owed serve stood
+   * down behind welcomeOffered) is released to serve. The
+   * arrival text is never re-offered.
+   */
+  private async regeneratePassbyWelcome(
+    name: string,
+    fromItem: AudibleItem,
+    pack?: facts.FactPack,
+  ): Promise<void> {
+    if (!this.position) return;
+    const built = await this.buildWelcomeItem(name, this.position, true, 'passby', pack);
+    if (this.phase !== 'active') return;
+    if (!built) {
+      this.bankPassbySalvage(name, fromItem);
+      this.welcomed.add(name.toLowerCase());
+      if (this.owedWelcome?.name.toLowerCase() === name.toLowerCase()) {
+        this.owedWelcome = null;
+      }
+      this.welcomeOffered = false;
+      if (this.owedWelcome) void this.serveOwedWelcome();
+      this.notify();
+      return;
+    }
+    const item = built.item;
+    this.offeredWelcome = { name, item };
+    this.player.offerStory(item, true);
   }
 
   // ------------------------------------------------------------ corridors (O16, Q11)
@@ -2068,6 +2318,7 @@ export class Tour {
       topic: item.label,
       source: item.storySource ?? 'live',
       angle: item.angleOf ?? null,
+      framing: item.framing ?? null,
       subject_lat: item.anchor?.lat ?? null,
       subject_lng: item.anchor?.lng ?? null,
       distance_m:
@@ -2086,6 +2337,13 @@ export class Tour {
   private onStorySettle(item: AudibleItem, rec: SettleRecord): void {
     const subject = item.subject ?? '';
     this.inflight.delete(subject);
+    // Pass-by conversion records (Nov 5) die with the item's
+    // settle — any settle, sounded or silent: the offered-
+    // welcome record must never point at an item the player no
+    // longer holds, and a retained fact pack belongs to a
+    // welcome still in flight.
+    if (this.offeredWelcome?.item === item) this.offeredWelcome = null;
+    if (subject.startsWith('welcome:')) this.welcomePacks.delete(subject);
     // Uncommitted items (withdrawn to the prefetch buffer, orphaned
     // at teardown) settle silently: §8's terminal pair binds
     // committed stories only — never both, never neither, and
@@ -2300,6 +2558,7 @@ export class Tour {
       topic: item.label,
       source: item.storySource ?? 'live',
       angle: item.angleOf ?? null,
+      framing: item.framing ?? null,
       subject_lat: item.anchor?.lat ?? null,
       subject_lng: item.anchor?.lng ?? null,
       distance_m:
@@ -2498,7 +2757,17 @@ export class Tour {
     // applies to anchored stories, with the same duration
     // floor). No parallel thresholds. Discharge semantics live
     // in onStorySettle (silent: the pass is spent, no filing).
-    if (item.storySource === 'live' && subject.startsWith('welcome:') && item.anchor) {
+    // Pass-by exemption (Nov 5, mechanism — not recalibration):
+    // a CONVERTED welcome (framing 'passby') is true at any
+    // distance — "you passed this place" does not expire as
+    // the driver continues — so the outrun discharge must not
+    // kill it. The reach formula itself is untouched.
+    if (
+      item.storySource === 'live' &&
+      subject.startsWith('welcome:') &&
+      item.anchor &&
+      item.framing !== 'passby'
+    ) {
       const dist = calculateDistance(
         this.position.lat,
         this.position.lng,
