@@ -3287,11 +3287,12 @@ export async function runScenarios(Tour, extras) {
       return ch;
     }
   }
-  const BED_ASSETS = { ocean: 'bed://ocean', road: 'bed://road', city: 'bed://city' };
+  const BED_ASSETS = { ocean: 'bed://ocean', road: 'bed://road', city: 'bed://city', canyon: 'bed://canyon' };
   const MISSION_BAY = { lat: 32.78, lng: -117.235 };
   const DOWNTOWN = { lat: 32.715, lng: -117.16 };
   const UNIVERSITY_CITY = { lat: 32.853, lng: -117.18 };
   const JULIAN = { lat: 33.078, lng: -116.6 };
+  const EL_CAJON = { lat: 32.794, lng: -116.962 };
   const bedCtx = (pos, speedMps, extra = {}) => ({ ...pos, speedMps, walking: false, urban: false, ...extra });
   function makeBed(clock, factory, diags, enabled = true) {
     return new ambience.AmbientBedController({
@@ -3305,10 +3306,12 @@ export async function runScenarios(Tour, extras) {
     check('coast band at surface speed -> ocean', R(bedCtx(MISSION_BAY, 8)) === 'ocean');
     check('coast band at freeway speed -> road (precedence)', R(bedCtx(MISSION_BAY, 29)) === 'road');
     check('urban core at surface speed -> city-air', R(bedCtx(DOWNTOWN, 8, { urban: true })) === 'city');
-    check('central without the urban signal -> none', R(bedCtx(DOWNTOWN, 8)) === null);
-    check('residential central -> none', R(bedCtx(UNIVERSITY_CITY, 8)) === null);
-    check('backcountry -> none', R(bedCtx(JULIAN, 8)) === null);
+    check('central without the urban signal -> none (quiet-street held unwired)', R(bedCtx(DOWNTOWN, 8)) === null);
+    check('residential central -> none (quiet-street held unwired)', R(bedCtx(UNIVERSITY_CITY, 8)) === null);
+    check('backcountry -> canyon wind', R(bedCtx(JULIAN, 8)) === 'canyon');
+    check('east county canyon belt -> canyon wind', R(bedCtx(EL_CAJON, 8)) === 'canyon');
     check('walking -> none even on the coast', R(bedCtx(MISSION_BAY, 1.2, { walking: true })) === null);
+    check('walking -> none in the backcountry', R(bedCtx(JULIAN, 1.2, { walking: true })) === null);
     check('walking -> none even at the urban core', R(bedCtx(DOWNTOWN, 1.2, { walking: true, urban: true })) === null);
     check('freeway speed anywhere -> road', R(bedCtx(JULIAN, 29)) === 'road');
     check('urban names: Gaslamp Quarter matches', ambience.isUrbanAreaName('Gaslamp Quarter') === true);
@@ -3486,5 +3489,23 @@ export async function runScenarios(Tour, extras) {
     await clock2.advance(10_000);
     check('a walking context never starts a bed', factory2.channels.length === 0);
     bed2.dispose();
+  }
+
+  suite('AM-8 v1.1 bed: canyon gate opens in the backcountry; held freeway speed adopts road');
+  {
+    const clock = new FakeClock();
+    const factory = new FakeBedFactory();
+    const bed = makeBed(clock, factory, []);
+    bed.updateContext(bedCtx(JULIAN, 8));
+    bed.noteFirstSound();
+    await clock.flush();
+    check('the gate opens the canyon bed in the backcountry', factory.channels.length === 1 && factory.channels[0].src === 'bed://canyon');
+    await clock.advance(4_000);
+    bed.updateContext(bedCtx(JULIAN, 29));
+    await clock.advance(18_000);
+    check('held freeway speed adopts road over canyon', factory.channels.length === 2 && factory.channels[1].src === 'bed://road');
+    await clock.advance(6_000);
+    check('the canyon channel retired after the crossfade', factory.channels[0].disposed === true && bed.kind === 'road');
+    bed.dispose();
   }
 }

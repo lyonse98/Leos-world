@@ -19,12 +19,22 @@
 // sequence. This rebuild answers both recorded causes: real
 // rendered loops at levels a car can register, and a fully
 // decoupled layer that the start sequence does not know exists.
+//
+// v1.1 (Nov 5, 2026, Erik's ruling): a fourth bed, canyon wind,
+// for the inland hill country — beds expand built-in naturally
+// as place-tied signatures earn their place, no per-context
+// settings. A fifth candidate, quiet-street for residential
+// contexts, was rendered the same evening but is HELD UNWIRED
+// (Erik is reconsidering its recipe direction — distant life may
+// want recorded source material, not pure procedural). It lives
+// in the bank as a candidate only; residential stays silent
+// until he confirms the direction.
 
 import { resolveFillerRegion } from '../data/fillerRegions';
 import { FREEWAY_MPS } from './tour';
 import { systemClock, type Clock } from './player';
 
-export type AmbientBedKind = 'ocean' | 'road' | 'city';
+export type AmbientBedKind = 'ocean' | 'road' | 'city' | 'canyon';
 
 /** Full / ducked bed gain (the removed service's proven constants: 0.012 ≈ −19 dB under 0.11). */
 export const AMBIENT_FULL_LEVEL = 0.11;
@@ -117,14 +127,23 @@ export interface AmbientContextInput {
  * The bed follows where the driver IS, from signals the app
  * already has (scope §4 — no new API calls, no topic triggers):
  * road at freeway speed beats everything; the coast band gives
- * ocean; the urban core at surface speed gives city-air; anything
- * else (residential, backcountry, walking) is quiet.
+ * ocean; the urban core at surface speed gives city-air; the
+ * inland hill country (the region map's 'backcountry' and 'east'
+ * — the crest, the desert edge, and the East County canyon-and-
+ * granite belt the filler corpus itself tags as one geography)
+ * gives canyon wind (v1.1, Erik's Nov 5 ruling: beds expand
+ * built-in naturally, no per-context settings). Anything else —
+ * the north/south suburbs, non-urban central, walking — is
+ * quiet. Residential in particular stays NONE for now: the
+ * quiet-street candidate bed is rendered and banked but held
+ * unwired while Erik settles its recipe direction.
  */
 export function resolveAmbientBed(input: AmbientContextInput): AmbientBedKind | null {
   if (input.walking) return null;
   if (input.speedMps >= FREEWAY_MPS) return 'road';
   const region = resolveFillerRegion(input.lat, input.lng);
   if (region === 'coast') return 'ocean';
+  if (region === 'backcountry' || region === 'east') return 'canyon';
   if (region === 'central' && input.urban) return 'city';
   return null;
 }

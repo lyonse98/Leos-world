@@ -926,6 +926,7 @@ function MilesApp() {
           ocean: bucketUrl('ambience/ocean-v1.m4a'),
           road: bucketUrl('ambience/road-v1.m4a'),
           city: bucketUrl('ambience/city-air-v1.m4a'),
+          canyon: bucketUrl('ambience/canyon-wind-v1.m4a'),
         },
         enabled: loadAmbientEnabled(),
         declaredMode: tourMode,
