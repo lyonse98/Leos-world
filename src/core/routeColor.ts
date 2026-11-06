@@ -59,10 +59,10 @@
 // same spoken-form normalization as every live piece — the
 // words are the reviewed words; only the road-label
 // abbreviations are expanded for the TTS, exactly as
-// generated tissue is. With the shipped bank EMPTY the
-// branch is inert by construction: zero draws, and the
-// generated stage is the Standard pass over the same slots —
-// the harness pins that parity.
+// generated tissue is. The shipped bank is Erik's reviewed
+// bank (149 lines, landed Nov 6, 2026); the generated stage
+// fills whatever slots the bank leaves untaken, and the
+// harness pins the Standard-parity shape of that hybrid.
 //
 // The pass runs in the App's build staging AFTER member
 // seating (the final plan shape) and before the wrap-up is
@@ -104,9 +104,9 @@ export interface ColorizeDeps {
   timeoutMs?: number;
   /**
    * Unfiltered only: the humor bank to draw from. Defaults
-   * to the shipped HUMOR_BANK — EMPTY until Erik's reviewed
-   * bank replaces it, which is what makes the state inert.
-   * Tests inject fixture banks here; production never does.
+   * to the shipped HUMOR_BANK — Erik's reviewed bank (149
+   * lines, landed Nov 6, 2026). Tests inject fixture banks
+   * here; production never does.
    */
   humorBank?: readonly HumorLine[];
   /**
@@ -299,7 +299,15 @@ export async function colorizeRoutePlan(plan: RoutePlan, deps: ColorizeDeps): Pr
 
 /** The episode facts a bank line's contexts and exclusions are judged against — all read off the real plan. */
 interface HumorEpisodeContext {
-  /** Road labels of the route the driver actually picked (route choice record), e.g. 'I-5 S'. */
+  /**
+   * Road strings of the route the driver actually picked
+   * (route choice record): its routeLabels PLUS its
+   * description. The labels are only ever DEFAULT_ROUTE /
+   * DEFAULT_ROUTE_ALTERNATE — the road NAME ('I-5 S',
+   * 'CA-163 S') rides the description (verified live against
+   * the Routes API Nov 6, 2026), so road matching and the
+   * {road} fills run against both.
+   */
   roads: string[];
   /** Filler regions the cast's coordinates sit in. */
   regions: Set<string>;
@@ -330,7 +338,7 @@ function humorEpisodeContext(plan: RoutePlan): HumorEpisodeContext {
   const choice = plan.routeChoice ?? null;
   const picked = choice ? (choice.offered[choice.pickedIndex ?? 0] ?? null) : null;
   return {
-    roads: picked ? [...picked.routeLabels] : [],
+    roads: picked ? [...picked.routeLabels, ...(picked.description ? [picked.description] : [])] : [],
     regions,
     placeKeys,
     topics,

@@ -7197,6 +7197,25 @@ await checkAsync('unfiltered: contexts, exclusions, fills, expiry — the draw r
   assert.ok(!roadPiece.text.includes('{'), 'no unfilled token airs');
   assert.ok(!(await draws(roadPlan(['I-805 S']), roadLine)), 'road context fails on a different road');
 
+  // The PRODUCTION shape (verified live against the Routes API
+  // Nov 6, 2026): routeLabels carry only DEFAULT_ROUTE /
+  // DEFAULT_ROUTE_ALTERNATE — the road NAME rides the picked
+  // route's description. A road-gated line must draw off the
+  // description, and the {road} fill must bind it.
+  const prodRoadPlan = (description, labels = ['DEFAULT_ROUTE']) =>
+    oneStory({}, {
+      routeChoice: { offered: [{ description, durationSec: 600, distanceMeters: 9000, routeLabels: labels }], pickerShown: true, pickedIndex: 0 },
+    });
+  const prodOut = await rc.colorizeRoutePlan(prodRoadPlan('I-5 S'), { generateColor: genBeat, humorBank: [roadLine] });
+  const prodPiece = humorPiecesOf(prodOut)[0];
+  assert.ok(prodPiece, 'production shape: labels [DEFAULT_ROUTE] + description "I-5 S" — the road-gated line draws off the description');
+  assert.ok(prodPiece.text.includes('Interstate 5'), 'the {road} fill binds the description, spoken-formed for the TTS');
+  assert.ok(!prodPiece.text.includes('{'), 'no unfilled token airs (production shape)');
+  assert.ok(!(await draws(prodRoadPlan('I-805 S', ['DEFAULT_ROUTE_ALTERNATE']), roadLine)), 'production shape: a different road in the description fails the gate');
+  const guardLine = testLine('c-road-i8', { contexts: { roads: ['I-8 '] }, text: 'TEST rolling {road} now.' });
+  assert.ok(!(await draws(prodRoadPlan('I-805 S'), guardLine)), 'the I-8 trailing-space guard holds against an I-805 description');
+  assert.ok(await draws(prodRoadPlan('I-8 E'), guardLine), 'the I-8 gate matches a real I-8 description');
+
   const fillLine = testLine('c-fill', { text: 'TEST bound for {destination} past {place}.' });
   const fillOut = await rc.colorizeRoutePlan(oneStory({ placeName: 'Harbor' }), { generateColor: genBeat, humorBank: [fillLine] });
   assert.equal(humorPiecesOf(fillOut)[0].text, 'TEST bound for Dest past Harbor.', '{destination} and {place} fill from the plan and the target story');
