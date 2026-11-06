@@ -105,6 +105,26 @@ execFileSync(
 );
 const rc = await import(pathToFileURL(rcOut).href);
 
+// The humor bank data module (Unfiltered, Nov 6, 2026):
+// the shipped bank's emptiness IS the inertness contract —
+// its suites pin it, and the draw suites inject fixture
+// banks through the colorize deps, never through here.
+const hbOut = join(mkdtempSync(join(tmpdir(), 'route-humor-')), 'humorBank.mjs');
+execFileSync(
+  join(repoRoot, 'node_modules', '.bin', 'esbuild'),
+  [
+    join(repoRoot, 'src', 'data', 'humorBank.ts'),
+    '--bundle',
+    '--format=esm',
+    '--platform=node',
+    '--define:import.meta.env={}',
+    `--outfile=${hbOut}`,
+    '--log-level=warning',
+  ],
+  { stdio: 'inherit' },
+);
+const hb = await import(pathToFileURL(hbOut).href);
+
 let passed = 0;
 let failed = 0;
 function check(name, fn) {
@@ -6845,6 +6865,509 @@ check('coloring capture: the rating and the color pieces ride the plan payload (
   assert.equal(colorItem.text, 'COLOR TEXT', 'the color text is captured like every tissue text');
   const bankItem = payload.items.find(i => i.id === 'reaction-1');
   assert.equal(bankItem.voice, null, 'Miles-solo pieces carry no voice mark');
+});
+
+// ── Unfiltered humor layer (Nov 6, 2026) ─────────────────
+// The machinery only: the shipped bank is EMPTY and the
+// suites below inject a FIXTURE bank of obviously-test
+// lines through the colorize deps. Production never does.
+// The layer's contract, per the scope + Erik's rulings:
+// bank-primary hybrid under the shared 5-piece color cap,
+// humor capped at 2, memorial kill episode-wide, adjacency
+// suppression on both neighbors, 20-drive cooldown through
+// the drive records, and — with the shipped bank — PROVABLY
+// inert (an Unfiltered build composes and colorizes exactly
+// as Standard, modulo generated color).
+
+const testLine = (id, over = {}) => ({
+  id,
+  text: `TEST LINE ${id}, plain and simple.`,
+  heat: 'warm',
+  slots: ['reaction', 'bridge', 'wrap-up', 'preview'],
+  ...over,
+});
+const litUnit = (id, over = {}) => ({
+  id,
+  placeKey: id.split('|')[0],
+  placeName: id,
+  angle: 'landmark_origin',
+  lat: 32.78,
+  lng: -117.25,
+  durationSec: 120,
+  topics: [],
+  tone: 'warm',
+  toneSecondary: null,
+  protectedRegister: false,
+  audioPath: `x/${id}.wav`,
+  storyText: 'word '.repeat(60),
+  ...over,
+});
+const litStory = (id, unitOver = {}) => ({
+  kind: 'story',
+  id,
+  label: id,
+  durationSec: 120,
+  unit: litUnit(id, unitOver),
+  ready: true,
+});
+const litReaction = id => ({ kind: 'reaction', id, label: 'Reaction', durationSec: 5, text: 'Bank reaction line.', ready: true });
+const litPlan = (items, over = {}) => ({
+  destinationName: 'Dest',
+  destination: dest,
+  path,
+  audience: 'unfiltered',
+  driveSec: 1200,
+  budgetSec: 1200,
+  items,
+  totalSec: items.reduce((s, i) => s + i.durationSec, 0),
+  thread: null,
+  threadSource: 'none',
+  climaxUnitId: null,
+  routeChoice: null,
+  ...over,
+});
+const genBeat = async () => 'Generated color beat.';
+const humorPiecesOf = plan => plan.items.filter(i => i.humor === true);
+const colorPiecesOf = plan => plan.items.filter(i => i.voice === 'color-puck');
+
+check('unfiltered: THE INERTNESS PROOF — the shipped bank is empty and lint-clean', () => {
+  assert.deepEqual(hb.HUMOR_BANK, [], 'the shipped bank ships EMPTY — no line enters without Erik’s review');
+  assert.deepEqual(hb.validateHumorBank(hb.HUMOR_BANK), [], 'the shipped bank passes the lint');
+  assert.equal(hb.HUMOR_MAX_PER_EPISODE, 2, 'the ruled humor cap');
+  assert.equal(hb.HUMOR_COOLDOWN_DRIVES, 20, 'the ruled cooldown window');
+});
+
+check('unfiltered: the bank lint catches the shapes the review workflow must reject', () => {
+  assert.deepEqual(hb.validateHumorBank([testLine('ok-1'), testLine('ok-2')]), [], 'a clean fixture bank passes');
+  assert.ok(hb.validateHumorBank([testLine('dup'), testLine('dup')]).some(p => p.includes('duplicate')), 'duplicate ids caught');
+  assert.ok(hb.validateHumorBank([testLine('long', { text: 'x'.repeat(201) })]).length > 0, 'over-cap text caught');
+  assert.ok(hb.validateHumorBank([testLine('noslot', { slots: [] })]).length > 0, 'empty slots caught');
+  assert.ok(hb.validateHumorBank([testLine('badheat', { heat: 'nuclear' })]).length > 0, 'invalid heat caught');
+  assert.ok(hb.validateHumorBank([testLine('badexp', { expires: 'next spring' })]).length > 0, 'non-ISO expires caught');
+});
+
+await checkAsync('unfiltered: inert with the shipped bank — composition and colorize are Standard-identical', async () => {
+  const units = [32.71, 32.74, 32.77, 32.8, 32.83, 32.86, 32.88].map((lat, i) => unit(`s${i + 1}|landmark_origin`, lat));
+  const composeAs = aud =>
+    rm.composeRoutePlan(units, path, dest, 'Dest',
+      { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [], audience: aud },
+      { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 3000 });
+  const stdPlan = composeAs('standard');
+  const unfPlan = composeAs('unfiltered');
+  assert.deepEqual(
+    unfPlan.items.map(i => [i.kind, i.id]),
+    stdPlan.items.map(i => [i.kind, i.id]),
+    'composition parity: an Unfiltered build composes the identical plan shape as Standard',
+  );
+  let stdCalls = 0;
+  let unfCalls = 0;
+  const stdOut = await rc.colorizeRoutePlan(stdPlan, {
+    generateColor: async () => {
+      stdCalls += 1;
+      return 'Generated color beat.';
+    },
+  });
+  const unfOut = await rc.colorizeRoutePlan(unfPlan, {
+    generateColor: async () => {
+      unfCalls += 1;
+      return 'Generated color beat.';
+    },
+  });
+  const shape = p => p.items.map(i => [i.kind, i.id, i.text ?? null, i.voice ?? null, i.colorForId ?? null]);
+  assert.deepEqual(shape(unfOut), shape(stdOut), 'with the empty bank, Unfiltered colorizes EXACTLY as Standard');
+  assert.equal(unfCalls, stdCalls, 'the generator is called the same number of times');
+  assert.equal(humorPiecesOf(unfOut).length, 0, 'zero humor pieces — the layer is inert');
+});
+
+await checkAsync('unfiltered: bank draw basics — a generic line fills a slot, flagged and verbatim', async () => {
+  const plan = litPlan([litStory('a|landmark_origin'), litReaction('reaction-0')]);
+  const line = testLine('test-basic');
+  const out = await rc.colorizeRoutePlan(plan, { generateColor: genBeat, humorBank: [line] });
+  const pieces = humorPiecesOf(out);
+  assert.equal(pieces.length, 1, 'one humor piece');
+  const p = pieces[0];
+  assert.equal(p.humorBankId, 'test-basic');
+  assert.equal(p.text, line.text, 'the reviewed text, spoken as authored');
+  assert.equal(p.voice, 'color-puck', 'bank pieces ride the color chair');
+  assert.equal(p.colorForId, 'a|landmark_origin', 'the piece names its story — the drop gate covers it like any color piece');
+  assert.equal(p.id, 'reaction-0', 'a reaction slot converts in place');
+  assert.equal(colorPiecesOf(out).length, 1, 'the bank piece IS the slot’s color — no generated piece doubles it');
+});
+
+await checkAsync('unfiltered: hybrid precedence + shared cap — bank fills first, generator fills the rest, cap 5 binds both', async () => {
+  const units = [32.71, 32.74, 32.77, 32.8, 32.83, 32.86, 32.88].map((lat, i) => unit(`s${i + 1}|landmark_origin`, lat));
+  const plan = rm.composeRoutePlan(units, path, dest, 'Dest',
+    { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [], audience: 'unfiltered' },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 3000 });
+  const bank = [testLine('test-hyb-1'), testLine('test-hyb-2'), testLine('test-hyb-3'), testLine('test-hyb-4')];
+  let genCalls = 0;
+  const out = await rc.colorizeRoutePlan(plan, {
+    generateColor: async () => {
+      genCalls += 1;
+      return 'Generated color beat.';
+    },
+    humorBank: bank,
+  });
+  const humor = humorPiecesOf(out);
+  const generated = colorPiecesOf(out).filter(i => i.humor !== true);
+  assert.equal(humor.length, 2, 'humor capped at 2 even with a deep bank');
+  assert.equal(colorPiecesOf(out).length, rn.COLOR_MAX_PER_EPISODE, 'the shared 5-piece cap binds bank + generated together');
+  assert.equal(generated.length, 3, 'the generator fills exactly the slots the bank left');
+  assert.equal(genCalls, 3, 'no wasted generations');
+  assert.ok(generated.every(i => i.humor === undefined && i.humorBankId === undefined), 'generated pieces are NEVER humor-flagged');
+  assert.deepEqual(humor.map(i => i.humorBankId), ['test-hyb-1', 'test-hyb-2'], 'bank order, first eligible lines first');
+});
+
+await checkAsync('unfiltered: adjacency suppression — no humor on a somber story, and none immediately before one', async () => {
+  // The neighbor is somber in its SECONDARY slot: suppression
+  // class (colorSuppressedFor) but NOT memorial class — a
+  // somber-PRIMARY story would trip the episode-wide kill
+  // instead (that case is the memorial suite's, below).
+  const plan = litPlan([
+    litStory('a|landmark_origin'),
+    litReaction('reaction-0'),
+    litStory('b|landmark_origin', { toneSecondary: 'somber' }),
+    litReaction('reaction-1'),
+    litStory('c|landmark_origin'),
+    litReaction('reaction-2'),
+  ]);
+  const out = await rc.colorizeRoutePlan(plan, { generateColor: genBeat, humorBank: [testLine('test-adj')] });
+  const humor = humorPiecesOf(out);
+  assert.equal(humor.length, 1, 'exactly one slot in the plan is humor-eligible');
+  assert.equal(humor[0].id, 'reaction-2', 'the draw lands after the clean closing story — not before the somber one');
+  const before = out.items.find(i => i.id === 'reaction-0');
+  assert.equal(before.voice, 'color-puck', 'generated color may still precede somber ground (its own rule is target-only)');
+  assert.ok(before.humor !== true, 'but it is not humor');
+  const onSomber = out.items.find(i => i.id === 'reaction-1');
+  assert.equal(onSomber.voice, undefined, 'no piece of any kind rides the somber story');
+});
+
+check('unfiltered: memorialClassFor — the mechanical reading (Protected or somber-primary, nothing wider)', () => {
+  assert.equal(rm.memorialClassFor(litUnit('x|a', { protectedRegister: true })), true, 'Protected register is memorial class');
+  assert.equal(rm.memorialClassFor(litUnit('x|a', { tone: 'somber' })), true, 'somber primary is memorial class (PSA 182’s telling is somber-class)');
+  assert.equal(rm.memorialClassFor(litUnit('x|a', { toneSecondary: 'somber' })), false, 'somber in the secondary slot only suppresses its neighborhood — it does not kill an episode');
+  assert.equal(rm.memorialClassFor(litUnit('x|a', { tone: 'spooky' })), false, 'spooky is suppression class, not memorial class');
+  assert.equal(rm.memorialClassFor(litUnit('x|a', { angle: 'landmark_scandal' })), false, 'scandal is suppression class, not memorial class');
+  assert.equal(rm.memorialClassFor(litUnit('x|a')), false, 'a warm story is neither');
+});
+
+await checkAsync('unfiltered: the memorial kill is episode-wide — and a merely-spooky cast member does not trigger it', async () => {
+  const bank = [testLine('test-kill')];
+  for (const [label, over] of [['Protected', { protectedRegister: true }], ['somber-primary', { tone: 'somber' }]]) {
+    const plan = litPlan([
+      litStory('a|landmark_origin'),
+      litReaction('reaction-0'),
+      litStory('m|landmark_origin', over),
+      litReaction('reaction-1'),
+      litStory('c|landmark_origin'),
+      litReaction('reaction-2'),
+    ]);
+    const out = await rc.colorizeRoutePlan(plan, { generateColor: genBeat, humorBank: bank });
+    assert.equal(humorPiecesOf(out).length, 0, `${label} in the cast: zero humor anywhere in the episode`);
+    assert.ok(colorPiecesOf(out).length >= 1, `${label}: generated color still proceeds, as in Standard`);
+  }
+  const spookyPlan = litPlan([
+    litStory('a|landmark_origin'),
+    litReaction('reaction-0'),
+    litStory('s|landmark_origin', { tone: 'spooky' }),
+    litReaction('reaction-1'),
+    litStory('c|landmark_origin'),
+    litReaction('reaction-2'),
+  ]);
+  const out = await rc.colorizeRoutePlan(spookyPlan, { generateColor: genBeat, humorBank: bank });
+  const humor = humorPiecesOf(out);
+  assert.equal(humor.length, 1, 'a spooky cast member suppresses only its neighborhood — the episode still laughs');
+  assert.equal(humor[0].id, 'reaction-2');
+});
+
+await checkAsync('unfiltered: spacing — humor targets sit a full story apart; the first-story zone holds one', async () => {
+  const plan = litPlan([
+    litStory('a|landmark_origin'),
+    litReaction('reaction-0'),
+    litReaction('reaction-0b'),
+    litStory('b|landmark_origin'),
+    litReaction('reaction-1'),
+    litStory('c|landmark_origin'),
+    litReaction('reaction-2'),
+  ]);
+  const bank = [testLine('test-sp-1'), testLine('test-sp-2'), testLine('test-sp-3')];
+  const out = await rc.colorizeRoutePlan(plan, { generateColor: genBeat, humorBank: bank });
+  const humor = humorPiecesOf(out);
+  assert.deepEqual(humor.map(i => i.id), ['reaction-0', 'reaction-2'], 'one humor piece in the first-story zone, the next a full story later');
+  const second = out.items.find(i => i.id === 'reaction-0b');
+  assert.equal(second.voice, 'color-puck', 'the second first-zone slot still gets color');
+  assert.ok(second.humor !== true, 'generated, not humor — the early zone holds ONE joke');
+  const mid = out.items.find(i => i.id === 'reaction-1');
+  assert.ok(mid.humor !== true, 'no humor adjacent to a humor target');
+});
+
+await checkAsync('unfiltered: heat spacing + the episode ledger — never two roasts, never a repeat', async () => {
+  const plan = litPlan([
+    litStory('a|landmark_origin'),
+    litReaction('reaction-0'),
+    litStory('b|landmark_origin'),
+    litReaction('reaction-1'),
+    litStory('c|landmark_origin'),
+    litReaction('reaction-2'),
+    litStory('d|landmark_origin'),
+    litReaction('reaction-3'),
+    litStory('e|landmark_origin'),
+    litReaction('reaction-4'),
+  ]);
+  const bank = [
+    testLine('test-roast-1', { heat: 'roast' }),
+    testLine('test-roast-2', { heat: 'roast' }),
+    testLine('test-warm-1'),
+  ];
+  const out = await rc.colorizeRoutePlan(plan, { generateColor: genBeat, humorBank: bank });
+  assert.deepEqual(
+    humorPiecesOf(out).map(i => i.humorBankId),
+    ['test-roast-1', 'test-warm-1'],
+    'the second draw skips the second roast and takes the warm line',
+  );
+  const solo = await rc.colorizeRoutePlan(plan, { generateColor: genBeat, humorBank: [testLine('test-solo')] });
+  assert.equal(humorPiecesOf(solo).length, 1, 'a single eligible line is drawn at most once across five slots — the ledger holds');
+});
+
+await checkAsync('unfiltered: slot surfaces — preview lines only at the first slot, wrap-up lines only at the closeout', async () => {
+  const previewLine = testLine('test-preview', { slots: ['preview'] });
+  const clean = litPlan([
+    litStory('a|landmark_origin'),
+    litReaction('reaction-0'),
+    litStory('b|landmark_origin'),
+    litReaction('reaction-1'),
+  ]);
+  const outClean = await rc.colorizeRoutePlan(clean, { generateColor: genBeat, humorBank: [previewLine] });
+  assert.deepEqual(humorPiecesOf(outClean).map(i => i.id), ['reaction-0'], 'a preview line draws at the episode’s first color slot');
+  const blockedFirst = litPlan([
+    litStory('s|landmark_origin', { tone: 'spooky' }),
+    litReaction('reaction-0'),
+    litStory('a|landmark_origin'),
+    litReaction('reaction-1'),
+    litStory('b|landmark_origin'),
+    litReaction('reaction-2'),
+  ]);
+  const outBlocked = await rc.colorizeRoutePlan(blockedFirst, { generateColor: genBeat, humorBank: [previewLine] });
+  assert.equal(humorPiecesOf(outBlocked).length, 0, 'when the first slot is humor-ineligible, a preview line does not migrate later');
+  const wrapLine = testLine('test-wrap', { slots: ['wrap-up'] });
+  const withCloseout = litPlan([litStory('a|landmark_origin'), litReaction('reaction-0'), litStory('b|landmark_origin')]);
+  const outWrap = await rc.colorizeRoutePlan(withCloseout, { generateColor: genBeat, humorBank: [wrapLine] });
+  const wrapPieces = humorPiecesOf(outWrap);
+  assert.equal(wrapPieces.length, 1, 'a wrap-up line draws when a closeout slot exists');
+  assert.equal(wrapPieces[0].id, 'color:closeout');
+  assert.equal(outWrap.items[outWrap.items.length - 1], wrapPieces[0], 'the closeout rides the tail');
+  const noCloseout = litPlan([litStory('a|landmark_origin'), litReaction('reaction-0'), litStory('b|landmark_origin'), litReaction('reaction-1')]);
+  const outNoWrap = await rc.colorizeRoutePlan(noCloseout, { generateColor: genBeat, humorBank: [wrapLine] });
+  assert.equal(humorPiecesOf(outNoWrap).length, 0, 'no closeout slot (the closing story is reaction-covered) → no wrap-up draw');
+});
+
+await checkAsync('unfiltered: contexts, exclusions, fills, expiry — the draw reads the episode’s real facts', async () => {
+  const oneStory = (unitOver = {}, planOver = {}) =>
+    litPlan([litStory('x|landmark_origin', unitOver), litReaction('reaction-0')], planOver);
+  const draws = async (plan, line) =>
+    humorPiecesOf(await rc.colorizeRoutePlan(plan, { generateColor: genBeat, humorBank: [line] })).length === 1;
+
+  assert.ok(await draws(oneStory({ topics: ['Navy Century'] }), testLine('c-topic', { contexts: { topics: ['Navy Century'] } })), 'topic context matches the cast');
+  assert.ok(!(await draws(oneStory({ topics: [] }), testLine('c-topic2', { contexts: { topics: ['Navy Century'] } }))), 'topic context fails without the topic');
+  assert.ok(await draws(oneStory(), testLine('c-region', { contexts: { regions: ['coast'] } })), 'region context matches the cast’s ground (fixture coast)');
+  assert.ok(!(await draws(oneStory(), testLine('c-region2', { contexts: { regions: ['east'] } }))), 'region context fails on other ground');
+  assert.ok(await draws(oneStory({ placeKey: 'harbor' }), testLine('c-place', { contexts: { placeKeys: ['harbor'] } })), 'place_key context matches');
+  assert.ok(!(await draws(oneStory({ placeKey: 'harbor' }), testLine('c-place2', { contexts: { placeKeys: ['airport'] } }))), 'place_key context fails');
+  const threaded = { thread: { topic: 'Navy Century', label: 'Navy Century', anchorKind: 'destination', anchorKey: 'k', memberIds: [], score: 5 } };
+  assert.ok(await draws(oneStory({}, threaded), testLine('c-anchor', { contexts: { anchorKinds: ['destination'] } })), 'anchor-kind context matches the thread');
+  assert.ok(!(await draws(oneStory({}, threaded), testLine('c-anchor2', { contexts: { anchorKinds: ['origin'] } }))), 'anchor-kind context fails');
+
+  const roadPlan = labels =>
+    oneStory({}, {
+      routeChoice: { offered: [{ description: 'via the freeway', durationSec: 600, distanceMeters: 9000, routeLabels: labels }], pickerShown: true, pickedIndex: 0 },
+    });
+  const roadLine = testLine('c-road', { contexts: { roads: ['I-5'] }, text: 'TEST rolling {road} now.' });
+  const roadOut = await rc.colorizeRoutePlan(roadPlan(['I-5 S']), { generateColor: genBeat, humorBank: [roadLine] });
+  const roadPiece = humorPiecesOf(roadOut)[0];
+  assert.ok(roadPiece, 'road context matches the picked route’s labels');
+  assert.ok(roadPiece.text.includes('Interstate 5'), 'the {road} fill landed with the route’s real label (spoken-formed for the TTS)');
+  assert.ok(!roadPiece.text.includes('{'), 'no unfilled token airs');
+  assert.ok(!(await draws(roadPlan(['I-805 S']), roadLine)), 'road context fails on a different road');
+
+  const fillLine = testLine('c-fill', { text: 'TEST bound for {destination} past {place}.' });
+  const fillOut = await rc.colorizeRoutePlan(oneStory({ placeName: 'Harbor' }), { generateColor: genBeat, humorBank: [fillLine] });
+  assert.equal(humorPiecesOf(fillOut)[0].text, 'TEST bound for Dest past Harbor.', '{destination} and {place} fill from the plan and the target story');
+  assert.ok(!(await draws(oneStory(), testLine('c-bogus', { text: 'TEST {bogus} token.' }))), 'an unfillable token never airs');
+
+  assert.ok(!(await draws(oneStory({ topics: ['Fire & Fault'] }), testLine('c-excl', { exclusions: { topics: ['Fire & Fault'] } }))), 'an exclusion vetoes its line for the episode');
+  assert.ok(await draws(oneStory({ topics: [] }), testLine('c-excl2', { exclusions: { topics: ['Fire & Fault'] } })), 'the same line draws when the excluded topic is absent');
+  assert.ok(!(await draws(oneStory(), testLine('c-exp', { expires: '2000-01-01' }))), 'an expired line is dead');
+  assert.ok(await draws(oneStory(), testLine('c-exp2', { expires: '2999-01-01' })), 'an unexpired line lives');
+});
+
+check('unfiltered: the cooldown store — line ids round-trip the drive records, the 20-drive window holds', () => {
+  const store = fakeStore();
+  rh.saveDriveRecord(store, mkRecord({ humorLineIds: ['test-l1', 'test-l2'] }));
+  const loaded = rh.loadDriveRecords(store);
+  assert.deepEqual(loaded[0].humorLineIds, ['test-l1', 'test-l2'], 'drawn line ids survive the record store');
+  assert.deepEqual([...rh.humorCooldownLineIds(loaded)].sort(), ['test-l1', 'test-l2'], 'the cooldown set derives from the records');
+  assert.deepEqual(rh.parseDriveRecords(JSON.stringify([mkRecord({ humorLineIds: 'nope' })])), [], 'a malformed humorLineIds drops the record, like every shape violation');
+  const window = [
+    mkRecord({ humorLineIds: ['new-line'] }),
+    ...Array.from({ length: 19 }, () => mkRecord({})),
+    mkRecord({ humorLineIds: ['old-line'] }),
+  ];
+  const ids = rh.humorCooldownLineIds(window);
+  assert.ok(ids.has('new-line'), 'the newest draw is in the window');
+  assert.ok(!ids.has('old-line'), 'the 21st-newest record is outside the 20-drive window');
+});
+
+await checkAsync('unfiltered: cooldown across drives — drive 1’s draws are drive 2’s exclusions', async () => {
+  const plan = () =>
+    litPlan([
+      litStory('a|landmark_origin'),
+      litReaction('reaction-0'),
+      litStory('b|landmark_origin'),
+      litReaction('reaction-1'),
+      litStory('c|landmark_origin'),
+      litReaction('reaction-2'),
+      litStory('d|landmark_origin'),
+      litReaction('reaction-3'),
+    ]);
+  const bank = [testLine('test-cd-1'), testLine('test-cd-2'), testLine('test-cd-3')];
+  const d1 = await rc.colorizeRoutePlan(plan(), { generateColor: genBeat, humorBank: bank });
+  const drawn1 = humorPiecesOf(d1).map(i => i.humorBankId);
+  assert.deepEqual(drawn1, ['test-cd-1', 'test-cd-2'], 'drive 1 draws the first two lines (slots a and c, spacing between)');
+  const store = fakeStore();
+  rh.saveDriveRecord(store, mkRecord({ humorLineIds: drawn1 }));
+  const d2 = await rc.colorizeRoutePlan(plan(), {
+    generateColor: genBeat,
+    humorBank: bank,
+    humorCooldownIds: rh.humorCooldownLineIds(rh.loadDriveRecords(store)),
+  });
+  assert.deepEqual(humorPiecesOf(d2).map(i => i.humorBankId), ['test-cd-3'], 'drive 2 skips both cooled lines and draws the fresh one');
+  const d3 = await rc.colorizeRoutePlan(plan(), {
+    generateColor: genBeat,
+    humorBank: bank,
+    humorCooldownIds: new Set(['test-cd-1', 'test-cd-3']),
+  });
+  assert.deepEqual(humorPiecesOf(d3).map(i => i.humorBankId), ['test-cd-2'], 'a cooled first line falls back to the next eligible line');
+});
+
+await checkAsync('unfiltered: Family stays a strict no-op even with a bank in hand', async () => {
+  const fam = litPlan([litStory('a|landmark_origin'), litReaction('reaction-0')], { audience: 'family' });
+  let calls = 0;
+  const out = await rc.colorizeRoutePlan(fam, {
+    generateColor: async () => {
+      calls += 1;
+      return 'Generated color beat.';
+    },
+    humorBank: [testLine('test-fam')],
+  });
+  assert.equal(out, fam, 'the family plan passes through untouched (same object)');
+  assert.equal(calls, 0, 'the generator never runs under Family');
+  assert.equal(humorPiecesOf(out).length, 0, 'the bank never draws under Family — there is no sanitized humor');
+});
+
+await checkAsync('unfiltered: the runner files drawn humor ids into the drive record; a humorless plan files none', async () => {
+  const base = finePlan();
+  const storyA = base.items.find(i => i.kind === 'story');
+  const humorPiece = {
+    kind: 'reaction',
+    id: 'humor-injected',
+    label: 'Color commentary',
+    durationSec: 5,
+    text: 'TEST humor beat.',
+    voice: 'color-puck',
+    colorForId: storyA.id,
+    humor: true,
+    humorBankId: 'test-line-9',
+    ready: true,
+  };
+  const items = [];
+  for (const it of base.items) {
+    items.push(it);
+    if (it === storyA) items.push(humorPiece);
+  }
+  const runToRecord = async plan => {
+    const records = [];
+    const heard = [];
+    const runner = new rp.RoutePlanRunner({
+      audio: new RealFakeAudio(300),
+      synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+      onStoryHeard: u => heard.push(u.id),
+      onDriveRecord: r => records.push(r),
+      onEvent: () => {},
+    });
+    await runner.start(plan);
+    await until(() => heard.includes('a|landmark_origin'), 'first story sounded');
+    runner.onPosition(denseDest);
+    await until(() => runner.view().closeoutDone, 'arrival closeout');
+    assert.equal(records.length, 1, 'one drive record filed');
+    return records[0];
+  };
+  const withHumor = await runToRecord({ ...base, items });
+  assert.deepEqual(withHumor.humorLineIds, ['test-line-9'], 'the drawn line id rides the record — the cooldown’s evidence');
+  const without = await runToRecord(finePlan());
+  assert.ok(!('humorLineIds' in without), 'a plan with no draws files no humor field — Standard/Family records keep their exact shape');
+});
+
+check('unfiltered capture: audience, humor flags and bank ids ride the plan payload (schema stays 2)', () => {
+  const storyUnit = unit('s1|landmark_origin', 32.71);
+  const items = [
+    { kind: 'preview', id: 'preview', label: 'Preview', durationSec: 20, text: 'PREVIEW TEXT', ready: true },
+    { kind: 'story', id: storyUnit.id, label: 'S1', durationSec: 100, unit: storyUnit, ready: true, anchorProgress: 0.1, releaseProgress: 0.1, expireProgress: 0.3 },
+    { kind: 'reaction', id: 'reaction-0', label: 'Color commentary', durationSec: 9, text: 'TEST HUMOR TEXT', voice: 'color-puck', colorForId: storyUnit.id, humor: true, humorBankId: 'test-cap-1', ready: true },
+    { kind: 'reaction', id: 'reaction-1', label: 'Color commentary', durationSec: 12, text: 'GENERATED TEXT', voice: 'color-puck', colorForId: storyUnit.id, ready: true },
+  ];
+  const plan = { destinationName: 'Dest', destination: dest, path, driveSec: 1000, budgetSec: 1000, items, wrapUp: null, audience: 'unfiltered' };
+  const payload = ec.assemblePlanCapture({
+    tourId: 'route-1',
+    buildId: 'fresh-test',
+    context: { ...captureCtx, audience: 'unfiltered' },
+    plan,
+    routePlanStarted: null,
+    items: ec.assemblePlanItems(plan, new Set(items.map(i => i.id))),
+  });
+  assert.equal(payload.schema, 2, 'additive fields only — the schema stays 2');
+  assert.equal(payload.audience, 'unfiltered', 'the state value rides the plan row');
+  assert.equal(payload.color_pieces, 2, 'bank and generated pieces both count as color');
+  assert.equal(payload.humor_pieces, 1, 'only the bank draw counts as humor');
+  assert.deepEqual(payload.humor_bank_ids, ['test-cap-1'], 'the drawn line ids ride the plan row in order');
+  const humorItem = payload.items.find(i => i.id === 'reaction-0');
+  assert.equal(humorItem.humor, true);
+  assert.equal(humorItem.humorBankId, 'test-cap-1');
+  const genItem = payload.items.find(i => i.id === 'reaction-1');
+  assert.equal(genItem.humor, false, 'a generated piece is captured as NOT humor');
+  assert.equal(genItem.humorBankId, null);
+});
+
+await checkAsync('unfiltered gapfill: a gap story generated under Unfiltered is stamped standard (the binary stamp)', async () => {
+  const drive = 2000;
+  const plan = mkPlan([storyAtSec('s1|x', 200, 100, drive), storyAtSec('s2|x', 1800, 100, drive)]);
+  plan.driveSec = drive;
+  plan.budgetSec = drive;
+  plan.audience = 'unfiltered'; // compose stamps this in production; mkPlan is a literal
+  const prompts = [];
+  const ingested = [];
+  await gf.fillRouteGaps(
+    plan,
+    { fetchedUnits: plan.items.map(i => i.unit), heardKeys: new Set(), input: { ...noInput, audience: 'unfiltered' }, driveSec: drive },
+    {
+      discoverSubjects: async points => [
+        { name: 'The Old Mill', lat: points[1].lat, lng: points[1].lng, types: ['museum'], rating: 4.6, userRatings: 1200, address: null, facts: [] },
+      ],
+      generateStory: async prompt => {
+        prompts.push(prompt);
+        return cannedStory(subjectFromPrompt(prompt));
+      },
+      synthesize: async () => new Blob(['fake-audio']),
+      ingest: async ({ unit: u }) => {
+        ingested.push(u);
+        return 'library/stub.wav';
+      },
+      onEvent: () => {},
+    },
+  );
+  assert.equal(prompts.length, 1, 'one gap generation under Unfiltered');
+  assert.ok(!prompts[0].includes('AUDIENCE: FAMILY'), 'no Family rules block under Unfiltered — the prompt is Standard’s');
+  assert.equal(ingested.length, 1);
+  assert.equal(ingested[0].generatedRating, 'standard', 'the stamp stays binary: Unfiltered-generated reads standard');
 });
 
 // ── Thread re-anchor + thread menu (Nov 5, 2026) ────────

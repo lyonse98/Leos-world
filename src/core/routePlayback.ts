@@ -2531,6 +2531,13 @@ export class RoutePlanRunner {
     const played = this.plan.items
       .filter(it => it.kind === 'story' && it.unit && this.playedStoryIds.has(it.unit.id))
       .map(it => it.unit as LibraryUnit);
+    const humorLineIds = [
+      ...new Set(
+        this.plan.items
+          .filter(it => it.humor === true && typeof it.humorBankId === 'string')
+          .map(it => it.humorBankId as string),
+      ),
+    ];
     try {
       this.deps.onDriveRecord({
         destinationName: this.plan.destinationName,
@@ -2542,6 +2549,13 @@ export class RoutePlanRunner {
         // anchor key, the cooldown's stable match.
         threadTopic: this.plan.thread ? (this.plan.thread.topic ?? this.plan.thread.label ?? null) : null,
         anchorKey: this.plan.thread ? (this.plan.thread.anchorKey ?? null) : null,
+        // Humor layer (Nov 6, 2026): the bank lines drawn into
+        // this plan, in plan order — the cooldown's evidence.
+        // Drawn = staged in the plan, whether or not the piece
+        // sounded (the scope records every drawn line). The
+        // field is omitted entirely when nothing was drawn,
+        // so Standard/Family records keep their exact shape.
+        ...(humorLineIds.length > 0 ? { humorLineIds } : {}),
         playedSubjects: names(played),
         owedSubjects: names(unplayedUnits),
         endedAt: Date.now(),

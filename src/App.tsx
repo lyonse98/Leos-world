@@ -64,6 +64,7 @@ import { discoverGapSubjects, fillRouteGaps } from './core/routeGapFill';
 import { colorizeRoutePlan } from './core/routeColor';
 import { buildManifest, originAreaName, type RouteManifest } from './core/routeManifest';
 import {
+  humorCooldownLineIds,
   loadDriveRecords,
   normalizePlaceName,
   saveDriveRecord,
@@ -543,11 +544,14 @@ function MilesApp() {
   const [routeTone, setRouteTone] = useState('');
   // Audience coloring (Nov 5, 2026): the rating for THIS
   // build — 'standard' (the full story, Color Puck riding
-  // along) or 'family' (the G-rated telling). Per-build like
-  // tone/topics, never remembered, and deliberately NOT
-  // coupled to the Driving/Passenger mode box: the kids-in-
-  // the-car case is a Driving drive. The control is the only
-  // source — the parse never reads a rating out of prose.
+  // along), 'family' (the G-rated telling), or 'unfiltered'
+  // (Standard's telling plus the curated humor bank drawn
+  // into the color slots; humor layer, Nov 6, 2026).
+  // Per-build like tone/topics, never remembered, and
+  // deliberately NOT coupled to the Driving/Passenger mode
+  // box: the kids-in-the-car case is a Driving drive. The
+  // control is the only source — the parse never reads a
+  // rating out of prose. Default stays Standard.
   const [routeAudience, setRouteAudience] = useState<RouteAudience>('standard');
   const [routeStatus, setRouteStatus] = useState('');
   const [routeBuilding, setRouteBuilding] = useState(false);
@@ -1561,7 +1565,11 @@ function MilesApp() {
               // generating rating (stamped on the unit by
               // the fill pass) becomes the promotion-key
               // marker — the row's durable rating record.
-              rating: unit.generatedRating ?? 'standard',
+              // Binary by design: an Unfiltered-stamped unit
+              // (never written — the fill pass stamps
+              // 'standard' itself) would still read
+              // 'standard' here (humor layer, Nov 6, 2026).
+              rating: unit.generatedRating === 'family' ? 'family' : 'standard',
             }),
           onEvent: event => {
             void emitEvent(
@@ -1622,6 +1630,12 @@ function MilesApp() {
       // plan — color is garnish, never a build failure.
       plan = await colorizeRoutePlan(plan, {
         generateColor: prompt => narration.generateStory(prompt),
+        // Humor layer (Nov 6, 2026): the Unfiltered bank
+        // draw's cooldown — line ids drawn within the last
+        // 20 drives, off the same drive records the thread
+        // cooldown reads. The bank itself defaults to the
+        // shipped (empty) HUMOR_BANK in routeColor.
+        humorCooldownIds: humorCooldownLineIds(driveRecords),
       });
       const plannedIds = new Set(plan.items.map(it => it.id));
       plan.shelfTease =
@@ -2223,6 +2237,7 @@ function MilesApp() {
               >
                 <option value="standard">Standard — the full story</option>
                 <option value="family">Family — the G-rated telling</option>
+                <option value="unfiltered">Unfiltered — the unfiltered telling</option>
               </select>
               {/* Thread menu (Nov 5, 2026): the blind topic
                   chips are gone from this form — the theme of
@@ -2422,6 +2437,7 @@ function MilesApp() {
                   >
                     <option value="standard">Standard — the full story</option>
                     <option value="family">Family — the G-rated telling</option>
+                    <option value="unfiltered">Unfiltered — the unfiltered telling</option>
                   </select>
                   {/* Thread menu (Nov 5, 2026): the blind
                       topic chips are gone from this form too —

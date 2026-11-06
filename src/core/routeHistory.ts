@@ -15,6 +15,8 @@
 // error the build can trip on. All logic here is pure given a
 // store seam, so the harness proves it offline.
 
+import { HUMOR_COOLDOWN_DRIVES } from '../data/humorBank';
+
 export interface RouteDriveRecord {
   destinationName: string;
   /** The destination's library place_key when the build could derive one, else null. */
@@ -29,6 +31,16 @@ export interface RouteDriveRecord {
    * it, and the cooldown still matches those on threadTopic.
    */
   anchorKey?: string | null;
+  /**
+   * Humor-bank line ids drawn into this drive's plan
+   * (Unfiltered, Nov 6, 2026) — the humor cooldown's
+   * evidence, filed by the runner from the plan it ran
+   * (drawn = staged, whether or not the piece sounded:
+   * the scope records every drawn line). Optional: only
+   * Unfiltered builds with a non-empty bank ever carry
+   * it, and records written before the layer don't.
+   */
+  humorLineIds?: string[];
   /** Place names that actually sounded, in plan order. */
   playedSubjects: string[];
   /** Place names the closeout left owed (unplayed plan stories), in plan order. */
@@ -65,6 +77,10 @@ function isRecord(v: unknown): v is RouteDriveRecord {
     // anchorKey is optional (pre-re-anchor records lack it);
     // when present it must be a string or null.
     (r.anchorKey === undefined || typeof r.anchorKey === 'string' || r.anchorKey === null) &&
+    // humorLineIds is optional (pre-layer records lack it);
+    // when present it must be a string array.
+    (r.humorLineIds === undefined ||
+      (Array.isArray(r.humorLineIds) && r.humorLineIds.every(s => typeof s === 'string'))) &&
     Array.isArray(r.playedSubjects) &&
     r.playedSubjects.every(s => typeof s === 'string') &&
     Array.isArray(r.owedSubjects) &&
@@ -105,6 +121,25 @@ export function saveDriveRecord(store: DriveRecordStore, record: RouteDriveRecor
   } catch {
     /* storage unavailable — the record is a nicety, never a failure */
   }
+}
+
+/**
+ * The humor cooldown set (Unfiltered, Nov 6, 2026): every
+ * bank line id drawn within the last `drives` records —
+ * records are newest-first, so the window is a prefix. A
+ * line in this set is ineligible for tonight's draw; at
+ * HUMOR_COOLDOWN_DRIVES it re-enters the pool, at which
+ * distance a repeat reads as a callback, not a glitch.
+ */
+export function humorCooldownLineIds(
+  records: RouteDriveRecord[],
+  drives: number = HUMOR_COOLDOWN_DRIVES,
+): Set<string> {
+  const out = new Set<string>();
+  for (const r of records.slice(0, Math.max(0, drives))) {
+    for (const id of r.humorLineIds ?? []) out.add(id);
+  }
+  return out;
 }
 
 /**

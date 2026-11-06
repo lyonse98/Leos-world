@@ -146,6 +146,15 @@ export interface CapturedItem {
    */
   voice: string | null;
   /**
+   * Humor pieces only (Unfiltered, Nov 6, 2026; additive —
+   * schema stays 2): this color piece was drawn from the
+   * reviewed humor bank, and humorBankId names the line.
+   * False/null on everything else — generated Color Puck
+   * pieces are never humor, by the ruling.
+   */
+  humor: boolean;
+  humorBankId: string | null;
+  /**
    * Audio in hand when the plan row was filed (at opening
    * settle). False no longer means dropped: under the
    * render-ahead pipeline the piece may still render ahead of
@@ -274,6 +283,8 @@ export function assemblePlanItems(plan: RoutePlan, renderedItemIds: ReadonlySet<
       portal: it.portal === true || it.portalClimax === true,
       climax: it.climax === true,
       voice: it.voice ?? null,
+      humor: it.humor === true,
+      humorBankId: it.humorBankId ?? null,
       rendered: renderedItemIds.has(it.id),
       fromSubject: it.prevUnitId ? (subjectByUnitId.get(it.prevUnitId) ?? null) : null,
       toSubject: it.nextUnitId ? (subjectByUnitId.get(it.nextUnitId) ?? null) : null,
@@ -300,6 +311,8 @@ export function assemblePlanItems(plan: RoutePlan, renderedItemIds: ReadonlySet<
       portal: false,
       climax: false,
       voice: null,
+      humor: false,
+      humorBankId: null,
       rendered: renderedItemIds.has('wrap-up'),
       fromSubject: null,
       toSubject: null,
@@ -347,6 +360,16 @@ export interface RouteEpisodePlanPayload {
    */
   audience: string;
   color_pieces: number;
+  /**
+   * Humor layer (Nov 6, 2026; additive — schema stays 2):
+   * how many of the plan's color pieces were bank draws, and
+   * their line ids in plan order — the draw's audit trail
+   * (draw discipline is judged from these fields, not from
+   * the items alone). Zero/empty in every build until the
+   * reviewed bank lands, and in every Standard/Family build.
+   */
+  humor_pieces: number;
+  humor_bank_ids: string[];
   budget_sec: number;
   route_duration_sec: number | null;
   route_distance_m: number;
@@ -407,6 +430,8 @@ export function assemblePlanCapture(args: {
     topics: context.topics,
     audience: context.audience,
     color_pieces: args.items.filter(i => i.voice === 'color-puck').length,
+    humor_pieces: args.items.filter(i => i.humor).length,
+    humor_bank_ids: args.items.filter(i => i.humor && i.humorBankId).map(i => i.humorBankId as string),
     budget_sec: plan.budgetSec,
     route_duration_sec: plan.driveSec,
     route_distance_m: Math.round(pathLengthM(plan.path)),

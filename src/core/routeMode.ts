@@ -136,12 +136,19 @@ export interface GeoPoint {
  * 'standard' is the full telling — today's composition, plus
  * the Color Puck persona's adult-licensed tissue (routeColor).
  * 'family' is the G-rated telling: selection is steered by the
- * family classes below and the color prompt never runs. The
- * axis is a boundary around selection, never a license over
- * doctrine — D4 stays excluded at every setting, memorial
- * material keeps its register at every setting.
+ * family classes below and the color prompt never runs.
+ * 'unfiltered' (humor layer, Nov 6, 2026) is the third state:
+ * Standard's selection, exactly — every Family lane keys on
+ * 'family', so the state falls through to Standard semantics
+ * everywhere — plus the curated humor bank drawn into the
+ * color slots (routeColor's Unfiltered branch). Opt-in per
+ * build, never the default; Standard stays clean for the
+ * institutional future. The axis is a boundary around
+ * selection, never a license over doctrine — D4 stays
+ * excluded at every setting, memorial material keeps its
+ * register at every setting.
  */
-export type RouteAudience = 'standard' | 'family';
+export type RouteAudience = 'standard' | 'family' | 'unfiltered';
 
 export interface RouteInput {
   /** Raw plain-language destination text from the intake form. */
@@ -540,6 +547,25 @@ export function colorSuppressedFor(u: LibraryUnit): boolean {
   if (u.protectedRegister === true) return true;
   if (u.angle === 'landmark_scandal') return true;
   return u.tone === 'somber' || u.tone === 'spooky' || u.toneSecondary === 'somber' || u.toneSecondary === 'spooky';
+}
+
+/**
+ * Memorial class (humor layer, Nov 6, 2026): the narrower
+ * cut inside the color-suppression class that kills the
+ * humor layer for a WHOLE episode, not just a slot's
+ * neighborhood (Erik's ruling: the episode-wide memorial
+ * kill is YES). The mechanical reading from the shelf's
+ * signals: the Protected register (the shelf's own most
+ * sensitive register — its memorials and grief ground), or
+ * a SOMBER PRIMARY tone (grief is the telling's headline
+ * register — PSA 182's telling is somber-class). A spooky
+ * or scandal story, or somber in the secondary slot only,
+ * suppresses its own neighborhood via colorSuppressedFor
+ * but does not silence an episode it merely passes through.
+ */
+export function memorialClassFor(u: LibraryUnit): boolean {
+  if (u.protectedRegister === true) return true;
+  return u.tone === 'somber';
 }
 
 /** The audio-key marker a Family-generated gap story is promoted under (backend.ingestRouteGapStory). */
@@ -1231,6 +1257,16 @@ export interface PlanItem {
    * color). Absent on every non-color item.
    */
   colorForId?: string;
+  /**
+   * Humor pieces only (Unfiltered, Nov 6, 2026): this color
+   * piece was DRAWN FROM THE BANK, not generated — the one
+   * distinction the capture, the cooldown, and the audit
+   * trail all key on. Generated Color Puck pieces never
+   * carry it: humor comes only from reviewed text.
+   */
+  humor?: boolean;
+  /** Humor pieces only: the bank line's stable id (data/humorBank) this piece speaks. */
+  humorBankId?: string;
   /** False when its plan-time render failed → skip-fallback drops it. */
   ready: boolean;
   /** Stories: the unit's progress along the path (its anchor). */
