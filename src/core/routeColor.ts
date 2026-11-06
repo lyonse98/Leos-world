@@ -115,6 +115,16 @@ export interface ColorizeDeps {
    * the drive records). Default: no cooldown.
    */
   humorCooldownIds?: ReadonlySet<string>;
+  /**
+   * Settle-path split (Nov 6, 2026 — field fix, lane B): slot
+   * keys an earlier stage already took (the App stages the
+   * humor bank's draws before handover and runs the generated
+   * stage behind the opening; the generated stage skips these
+   * slots). Slot identity across separate calls comes from
+   * colorSlotKey — allocation is deterministic on the same
+   * plan, so the split stages agree on the slot sequence.
+   */
+  skipSlotKeys?: ReadonlySet<string>;
 }
 
 const DEFAULT_COLOR_TIMEOUT_MS = 15_000;
@@ -230,6 +240,21 @@ function pieceIdFor(slot: ColorSlot): string {
 }
 
 /**
+ * A slot's stable identity across separate pass invocations
+ * (the settle-path split stages the bank and generated halves
+ * in different calls): reaction slots key on the bank reaction
+ * item they convert, asides on the story they follow, the
+ * closeout is unique by construction.
+ */
+function colorSlotKey(slot: ColorSlot): string {
+  return slot.surface === 'reaction' && slot.reactionItem
+    ? `reaction:${slot.reactionItem.id}`
+    : slot.surface === 'closeout'
+      ? 'closeout'
+      : `aside:${slot.storyItem.id}`;
+}
+
+/**
  * One generation under the standing discipline: the color
  * prompt for the context, raced against the timeout; a
  * failure, an empty return, or an over-cap return yields
@@ -265,6 +290,7 @@ export async function colorizeRoutePlan(plan: RoutePlan, deps: ColorizeDeps): Pr
   let moveIdx = 0;
   for (const slot of slots) {
     if (pieces.size >= COLOR_MAX_PER_EPISODE) break;
+    if (deps.skipSlotKeys?.has(colorSlotKey(slot))) continue;
     const unit = slot.storyItem.unit as LibraryUnit;
     // Memorial/somber discipline: no color on or after this
     // class of story. The slot is skipped, not reassigned —
@@ -293,6 +319,113 @@ export async function colorizeRoutePlan(plan: RoutePlan, deps: ColorizeDeps): Pr
   }
   if (pieces.size === 0) return plan;
   return applyColorPieces(plan, pieces);
+}
+
+// ── The settle-path split (Nov 6, 2026 — field fix, lane B) ──
+//
+// Erik's Nov 6 build sat ~4.5 minutes in compose while the
+// color pass walked slot after slot, each attempt racing a
+// 15 s timeout against a generation API the parking-garage
+// connection had slowed past it: the pass's cap binds pieces
+// LANDED, not attempts, so a sick network converts directly
+// into start latency. The Nov 4 doctrine is that extras
+// degrade and the opening never waits — so the pass is split
+// at its natural seam:
+//
+//   - the humor BANK stage is local (draws from Erik's
+//     reviewed bank — no live call exists in it), so it stays
+//     in the settle path: stageHumorBankDraws;
+//   - the GENERATED stage (the only live work in the pass)
+//     moves behind the opening: generateColorPiecesOnly runs
+//     after handover, and the runner adopts what it returns
+//     for stories the feed gate hasn't passed yet. A piece
+//     whose moment went by dies unborn — the standing
+//     degrade, now applied to the pass itself.
+//
+// colorizeRoutePlan above is unchanged and remains the
+// single-pass composition the harness pins; the split calls
+// compose it, so a healthy build's pieces are the same set
+// the single pass would have produced (allocation is
+// deterministic on the same plan, the draw is deterministic,
+// and the generated stage's shared-budget cap counts the
+// bank pieces the internal pass redraws).
+
+export interface HumorBankStaging {
+  /** The plan with the bank pieces applied (the input plan, untouched, when nothing drew). */
+  plan: RoutePlan;
+  /** Slot keys the bank stage took — the generated stage must not spend on them again. */
+  takenSlotKeys: Set<string>;
+  /** How many bank pieces were staged (they count against the shared episode budget). */
+  pieceCount: number;
+}
+
+/** The slot key a landed piece took, from the piece's own id scheme (pieceIdFor). */
+function slotKeyForPiece(piece: PlanItem): string {
+  if (piece.id === 'color:closeout') return 'closeout';
+  if (piece.id.startsWith('color:aside:')) return `aside:${piece.id.slice('color:aside:'.length)}`;
+  return `reaction:${piece.id}`;
+}
+
+/**
+ * Stage ONLY the humor bank's draws into the plan, with no
+ * live call: the Unfiltered pass run with a generator that
+ * always yields nothing, so the bank stage executes exactly
+ * as it does in the full pass (same allocation, same draw)
+ * and the generated stage lands nothing. The bank stage
+ * itself contains no live call, so the returned promise
+ * resolves on microtasks alone — the settle path waits for
+ * nothing. Non-Unfiltered plans have no bank stage and pass
+ * through untouched.
+ */
+export async function stageHumorBankDraws(
+  plan: RoutePlan,
+  deps: ColorizeDeps,
+): Promise<HumorBankStaging> {
+  const none: HumorBankStaging = { plan, takenSlotKeys: new Set(), pieceCount: 0 };
+  if (plan.audience !== 'unfiltered') return none;
+  const staged = await colorizeUnfiltered(plan, { ...deps, generateColor: async () => null });
+  if (staged === plan) return none;
+  const stagedPieces = staged.items.filter(it => it.voice === 'color-puck' && it.humor === true);
+  return {
+    plan: staged,
+    takenSlotKeys: new Set(stagedPieces.map(slotKeyForPiece)),
+    pieceCount: stagedPieces.length,
+  };
+}
+
+/**
+ * The generated stage as a standalone, behind-the-opening
+ * call: runs the full pass on the (pre-bank) plan and returns
+ * only the GENERATED pieces it produced — bank draws the
+ * internal pass redrew deterministically are filtered out
+ * (generated pieces are never humor-flagged; bank pieces
+ * always are), and the caller passes the bank stage's taken
+ * slot keys so no slot is spent on twice. The returned plan
+ * is the fully colored plan, kept for parity checks; the App
+ * adopts `pieces` into the running runner and discards the
+ * plan itself.
+ */
+export async function generateColorPiecesOnly(
+  plan: RoutePlan,
+  deps: ColorizeDeps,
+): Promise<{ plan: RoutePlan; pieces: PlanItem[] }> {
+  const colored = await colorizeRoutePlan(plan, deps);
+  if (colored === plan) return { plan, pieces: [] };
+  const before = new Set(plan.items.map(it => it.id));
+  const pieces = colored.items.filter(
+    it => it.voice === 'color-puck' && it.humor !== true && !before.has(it.id),
+  );
+  // Reaction conversions keep the bank reaction's id (the id
+  // predates the pass), so the id-novelty filter above misses
+  // them: a generated reaction piece is a color-puck item
+  // whose id the input plan carried as a NON-color item.
+  const beforeById = new Map(plan.items.map(it => [it.id, it]));
+  for (const it of colored.items) {
+    if (it.voice !== 'color-puck' || it.humor === true) continue;
+    const prev = beforeById.get(it.id);
+    if (prev && prev.voice !== 'color-puck' && !pieces.includes(it)) pieces.push(it);
+  }
+  return { plan: colored, pieces };
 }
 
 // ── The Unfiltered bank draw ─────────────────────────────
@@ -545,6 +678,7 @@ async function colorizeUnfiltered(plan: RoutePlan, deps: ColorizeDeps): Promise<
   for (const slot of slots) {
     if (pieces.size >= COLOR_MAX_PER_EPISODE) break;
     if (pieces.has(slot)) continue;
+    if (deps.skipSlotKeys?.has(colorSlotKey(slot))) continue;
     const unit = slot.storyItem.unit as LibraryUnit;
     if (colorSuppressedFor(unit)) continue;
     if (!unit.storyText) continue;

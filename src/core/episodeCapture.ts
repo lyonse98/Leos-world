@@ -100,7 +100,30 @@ export interface EpisodeCaptureContext {
     compose: number;
     recording: number;
     total: number;
+    /**
+     * Settle sub-stages (Nov 6, 2026 — field fix, lane B;
+     * additive, optional: pre-split assemblies omit them).
+     * The Nov 6 slow build's plan row could only say
+     * "compose: 271 s" — these split the settle-path compose
+     * window so the next slow build is attributable from the
+     * capture alone: fetch = the library/heard read phase
+     * inside compose; fill = the Coverage Guarantee's shelf
+     * pass inside compose. The live extras that used to hide
+     * inside compose (gap generation, generated color) no
+     * longer run there at all — see extrasDeferred and the
+     * route_extras telemetry event for their timings.
+     */
+    fetch?: number | null;
+    fill?: number | null;
   };
+  /**
+   * Settle-path split (Nov 6, 2026; additive): true when the
+   * build deferred its live extras (gap-story generation,
+   * generated Color Puck) behind the opening — their timings
+   * and outcomes ride the route_extras telemetry event, not
+   * this row, because they complete after it files.
+   */
+  extrasDeferred?: boolean;
   /** When the build settled (epoch ms). */
   settledAtMs: number;
 }
@@ -406,6 +429,15 @@ export interface RouteEpisodePlanPayload {
   route_plan_started: Record<string, unknown>;
   items: CapturedItem[];
   stage_timings_ms: EpisodeCaptureContext['stageTimingsMs'];
+  /**
+   * Settle-path split (Nov 6, 2026; additive — schema stays
+   * 2): the build deferred its live extras behind the
+   * opening (see the context's extrasDeferred). Color pieces
+   * adopted late are not in items[] — they were not plan
+   * items when this row filed; route_extras telemetry is
+   * their record.
+   */
+  extras_deferred: boolean;
   settled_at_ms: number;
 }
 
@@ -462,6 +494,7 @@ export function assemblePlanCapture(args: {
     route_plan_started: args.routePlanStarted,
     items: args.items,
     stage_timings_ms: context.stageTimingsMs,
+    extras_deferred: context.extrasDeferred ?? false,
     settled_at_ms: context.settledAtMs,
   };
 }

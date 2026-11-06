@@ -308,6 +308,20 @@ export class Tour {
 
   phase: 'idle' | 'active' | 'ended' = 'idle';
   private sessionId = '';
+  /**
+   * Emit seal (Nov 6, 2026 — field fix, lane A): once the
+   * tour's session_end has filed, the tour is mute forever.
+   * In-flight generation/serve work may still resolve after
+   * endTour (a slow welcome generation was caught filing a
+   * generation_attempt 33 s after its tour's session_end on
+   * Erik's Nov 6 drive), but nothing it does may file another
+   * event under the dead session. The seal is the choke-point
+   * invariant: emit() itself refuses, so every present and
+   * future emit path — including the Gemini telemetry sink,
+   * which routes through this emit — is covered. A fresh
+   * start() on the instance unseals for the new session.
+   */
+  private emitSealed = false;
   private userKey = '';
   private tourStartAt = 0;
   private resumeStart = false;
@@ -659,7 +673,7 @@ export class Tour {
   }
 
   private emit(type: string, payload: Record<string, unknown>): void {
-    if (!this.sessionId) return;
+    if (!this.sessionId || this.emitSealed) return;
     void this.seams.emitEvent(this.sessionId, type, payload, {
       lat: this.position?.lat ?? null,
       lng: this.position?.lng ?? null,
@@ -700,6 +714,7 @@ export class Tour {
   start(resume: boolean): void {
     if (this.phase === 'active') return;
     this.phase = 'active';
+    this.emitSealed = false; // a new session on this instance speaks again
     this.resumeStart = resume;
     this.tourStartAt = this.clock.now();
     this.sessionId =
@@ -3976,6 +3991,16 @@ export class Tour {
     }
     this.player.teardown();
     backend.lsDel('activeSession');
+    // Seal the emit path now that the end's own teardown
+    // settles have filed (the QA-lock release and the player
+    // teardown settles above are part of the ending, by
+    // design). From here on, no event from this tour may
+    // land after its session_end, however long its in-flight
+    // async work outlives it — the zombie seal (Nov 6, 2026):
+    // the ended tour 585db03c filed a generation_attempt
+    // 33 s past its own end because its generation loop's
+    // telemetry sink stayed open.
+    this.emitSealed = true;
     this.notify();
   }
 

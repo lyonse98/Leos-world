@@ -577,6 +577,19 @@ export class RoutePlanRunner {
    */
   private commissions = new Map<string, CommissionRecord>();
   private commissionList: CommissionRecord[] = [];
+  /**
+   * Late-adopted color pieces (Nov 6, 2026 — field fix,
+   * lane B): Color Puck pieces the generated color stage
+   * produced BEHIND the opening and the App handed to
+   * adoptLateColorPieces. They ride this.entries as ordinary
+   * tissue (the feed gate's color dependency governs them
+   * exactly like plan-born pieces), but they are not plan
+   * items: the capture's played list names plan items only
+   * (the commission precedent), so their settles skip the
+   * played list and their render verdicts skip the plan-row
+   * accounting — their trace is the route_extras telemetry.
+   */
+  private lateAdoptedIds = new Set<string>();
   /** The most recent story item that SOUNDED (settled sounded) — a re-bridge's prev when nothing is sounding now. */
   private lastSoundedStoryId: string | null = null;
   /** Render queue: entries started strictly in plan order, at most RENDER_CONCURRENCY in flight. */
@@ -2229,6 +2242,110 @@ export class RoutePlanRunner {
     }
   }
 
+  /**
+   * Late color adoption (Nov 6, 2026 — field fix, lane B).
+   * The generated Color Puck stage now runs BEHIND the
+   * opening (its live generations were the Nov 6 build's
+   * multi-minute settle-path sink); when it lands, the App
+   * hands its pieces here. A piece is adopted only while its
+   * moment can still come:
+   *   - a REACTION conversion swaps into the bank reaction's
+   *     own entry, and only while that entry has neither
+   *     rendered nor fed (a rendered plain line is already
+   *     the episode's truth — the color version dies unborn);
+   *   - an ASIDE splices in directly after its story's entry
+   *     on the commission rail (same frontier discipline as a
+   *     re-bridge commission), only while the feed gate hasn't
+   *     passed that ground and the story hasn't died;
+   *   - the CLOSEOUT piece appends at the plan's tail, only
+   *     while the gate hasn't exhausted the plan.
+   * Adopted pieces are ordinary entries from there: the
+   * render queue synthesizes them, the feed gate's color
+   * dependency sounds them after their story or drops them
+   * with it, and the late-skip discipline applies unchanged.
+   * Anything else — a closed/ended runner, an unsettled
+   * opening (adoptions never disturb the opening indexes), a
+   * passed moment — drops the piece, silently: color is
+   * garnish, and garnish degrades.
+   */
+  adoptLateColorPieces(pieces: PlanItem[]): { adopted: number; dropped: number } {
+    if (this.closed || this.endedKind !== null || !this.plan || !this.openingSettledFlag) {
+      return { adopted: 0, dropped: pieces.length };
+    }
+    let adopted = 0;
+    let dropped = 0;
+    for (const piece of pieces) {
+      if (this.adoptOneLateColorPiece(piece)) adopted += 1;
+      else dropped += 1;
+    }
+    if (adopted > 0) this.notify();
+    return { adopted, dropped };
+  }
+
+  private adoptOneLateColorPiece(piece: PlanItem): boolean {
+    const existingIdx = this.entries.findIndex(e => e.planItem.id === piece.id);
+    if (existingIdx >= 0) {
+      // Reaction conversion (or a duplicate of a piece the
+      // plan already carries): swap only into a plain bank
+      // reaction that has neither rendered nor fed.
+      const entry = this.entries[existingIdx];
+      if (
+        entry.planItem.kind === 'reaction' &&
+        entry.planItem.voice !== 'color-puck' &&
+        entry.state === 'pending' &&
+        existingIdx >= this.renderNextIndex &&
+        existingIdx >= this.feedCursor
+      ) {
+        entry.planItem = piece;
+        this.lateAdoptedIds.add(piece.id);
+        return true;
+      }
+      return false;
+    }
+    const isAside = piece.id.startsWith('color:aside:');
+    const isCloseout = piece.id === 'color:closeout';
+    if (!isAside && !isCloseout) return false;
+    let at: number;
+    if (isCloseout) {
+      // The gate already exhausted the plan: the closeout's
+      // moment is the plan's end, and it has passed.
+      if (this.feedCursor >= this.entries.length) return false;
+      at = this.entries.length;
+    } else {
+      if (!piece.colorForId) return false;
+      const storyIdx = this.entries.findIndex(e => e.planItem.id === piece.colorForId);
+      if (storyIdx < 0) return false;
+      const story = this.entries[storyIdx];
+      // The piece dies with its story, unborn: a story the
+      // gate dropped, settled unplayed, or failed to render
+      // never gets its riff.
+      if (
+        story.state === 'failed' ||
+        story.state === 'dropped' ||
+        this.droppedStoryIds.has(piece.colorForId) ||
+        this.settledUnplayed.has(piece.colorForId)
+      ) {
+        return false;
+      }
+      at = storyIdx + 1;
+      // The gate has already passed this ground — the
+      // standing late discipline: the piece's moment is over.
+      if (at < this.feedCursor) return false;
+    }
+    const entry: RenderEntry = { planItem: piece, audible: null, state: 'pending' };
+    const behindFrontier = at < this.renderNextIndex;
+    this.entries.splice(at, 0, entry);
+    this.lateAdoptedIds.add(piece.id);
+    if (behindFrontier) {
+      this.renderNextIndex += 1;
+      this.renderInFlight += 1;
+      void this.runEntryTask(entry);
+    } else {
+      this.pumpQueue();
+    }
+    return true;
+  }
+
   /** Episode capture (schema 2): the commissions' outcome records, in firing order. */
   private commissionsCapture(): CapturedCommission[] {
     return this.commissionList.map(r => ({
@@ -2345,7 +2462,7 @@ export class RoutePlanRunner {
             mode: 'route',
           });
         }
-      } else {
+      } else if (!this.lateAdoptedIds.has(it.id)) {
         this.playedOrderIds.push(it.id);
       }
     } else {

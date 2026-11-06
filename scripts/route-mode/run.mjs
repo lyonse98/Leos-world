@@ -7724,5 +7724,327 @@ await checkAsync('thread anchors battery: 100% anchor rate on fresh drives; zero
   );
 });
 
+
+// ============================================================
+// Session arbitration + settle-path split (Nov 6, 2026 —
+// field fix lanes A/B/C). Erik's live report: a route build
+// that took ~5 minutes landed ON TOP of the freeform tour he
+// had started meanwhile, and the color pass's sequential live
+// generations were the settle path's unbounded sink. The
+// suites below pin the authority mechanics, the handover
+// gate, the gap/color phase splits, late adoption, and the
+// Lane C transport structure — zero live calls throughout.
+// ============================================================
+
+const saOut = join(mkdtempSync(join(tmpdir(), 'session-authority-')), 'sessionAuthority.mjs');
+execFileSync(
+  join(repoRoot, 'node_modules', '.bin', 'esbuild'),
+  [
+    join(repoRoot, 'src', 'core', 'sessionAuthority.ts'),
+    '--bundle',
+    '--format=esm',
+    '--platform=node',
+    '--define:import.meta.env={}',
+    `--outfile=${saOut}`,
+    '--log-level=warning',
+  ],
+  { stdio: 'inherit' },
+);
+const sa = await import(pathToFileURL(saOut).href);
+
+check('authority: newest claim wins; a stale release cannot evict its successor', () => {
+  const auth = new sa.SessionAuthority();
+  const build = auth.claim('route-build', 'route-A');
+  assert.equal(auth.isCurrent(build), true);
+  const free = auth.claim('freeform-tour', 'freeform-1');
+  assert.equal(auth.isCurrent(build), false, 'the freeform claim superseded the build');
+  assert.equal(auth.isCurrent(free), true);
+  auth.release(build);
+  assert.equal(auth.isCurrent(free), true, 'releasing the stale claim left the successor in place');
+  assert.equal(auth.current()?.id, 'freeform-1');
+  auth.release(free);
+  assert.equal(auth.current(), null, 'the current holder can release');
+});
+
+check('authority: build A → build B — A is stale at its gate, B unaffected; a build upgrades to its tour claim', () => {
+  const auth = new sa.SessionAuthority();
+  const a = auth.claim('route-build', 'route-A');
+  const b = auth.claim('route-build', 'route-B');
+  assert.equal(auth.isCurrent(a), false, 'the newer build superseded the older at START, not completion');
+  assert.equal(auth.isCurrent(b), true);
+  const bTour = auth.claim('route-tour', 'route-B');
+  assert.equal(auth.isCurrent(b), false, 'the handover upgrade replaced the build claim');
+  assert.equal(auth.isCurrent(bTour), true);
+  assert.equal(auth.current()?.kind, 'route-tour');
+});
+
+await checkAsync('arbitration gate: build pending → freeform starts → the build\'s handover refuses and its runner never sounds', async () => {
+  const auth = new sa.SessionAuthority();
+  const audio = new RealFakeAudio();
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:x/' + t.length,
+    onEvent: (t, p) => events.push({ t, p }),
+  });
+  const buildClaim = auth.claim('route-build', 'route-A');
+  // The driver gives up on the slow build and starts freeform:
+  // the newest intent, claimed exactly as App's startTour does.
+  auth.claim('freeform-tour', 'freeform-1');
+  // The build finally finishes composing and reaches the gate
+  // App checks before runner.start():
+  let handedOver = false;
+  if (auth.isCurrent(buildClaim)) {
+    await runner.start(qaPlan());
+    handedOver = true;
+  }
+  assert.equal(handedOver, false, 'the superseded build never handed over');
+  runner.dispose();
+  assert.equal(audio.played.length, 0, 'nothing ever sounded from the superseded build');
+  assert.equal(events.filter(e => e.t === 'route_plan_started').length, 0, 'no plan ever started');
+});
+
+await checkAsync('arbitration gate: an uncontested build hands over and starts normally', async () => {
+  const auth = new sa.SessionAuthority();
+  const audio = new RealFakeAudio();
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:x/' + t.length,
+    onEvent: (t, p) => events.push({ t, p }),
+  });
+  const buildClaim = auth.claim('route-build', 'route-A');
+  assert.equal(auth.isCurrent(buildClaim), true);
+  await runner.start(qaPlan());
+  assert.equal(events.filter(e => e.t === 'route_plan_started').length, 1, 'the current build started its plan');
+  runner.endTour();
+});
+
+await checkAsync('gapfill phases: shelf tiles locally and stays silent on a bare gap; generation promotes later', async () => {
+  const drive = 2000;
+  const bare = () => {
+    const p = mkPlan([storyAtSec('s1|x', 200, 100, drive), storyAtSec('s2|x', 1800, 100, drive)]);
+    p.driveSec = drive;
+    p.budgetSec = drive;
+    return p;
+  };
+  // Shelf phase, nothing to tile with: no live calls at all,
+  // and NO event — the bare gap's verdict belongs to the
+  // generation phase that runs behind the opening.
+  let liveCalls = 0;
+  const shelfEvents = [];
+  const shelved = await gf.fillRouteGaps(
+    bare(),
+    { fetchedUnits: [], heardKeys: new Set(), input: noInput, driveSec: drive },
+    {
+      phase: 'shelf',
+      discoverSubjects: async () => { liveCalls += 1; return []; },
+      generateStory: async () => { liveCalls += 1; return cannedStory('Never'); },
+      onEvent: e => shelfEvents.push(e),
+    },
+  );
+  assert.equal(liveCalls, 0, 'the shelf phase made zero live calls');
+  assert.equal(shelfEvents.length, 0, 'a bare gap files no event in the shelf phase');
+  assert.equal(shelved.items.length, 2, 'the plan passed through unfilled');
+  // Shelf phase with an untiled unit: tiles it, event as today.
+  const mid = unit('mid|landmark_origin', 32.776, { topics: [], durationSec: 340 });
+  const tileEvents = [];
+  const tiled = await gf.fillRouteGaps(
+    bare(),
+    { fetchedUnits: [mid], heardKeys: new Set(), input: noInput, driveSec: drive },
+    { phase: 'shelf', onEvent: e => tileEvents.push(e) },
+  );
+  assert.ok(tiled.items.some(i => i.id === 'mid|landmark_origin'), 'the shelf unit tiled in the shelf phase');
+  assert.equal(tileEvents.length, 1);
+  assert.equal(tileEvents[0].result, 'shelf');
+  // Generation phase on the still-bare plan: the live chain
+  // runs, the story promotes into the shelf (ingest), and its
+  // event files — the App discards this phase's returned plan;
+  // promotion is its durable product.
+  const genEvents = [];
+  const ingested = [];
+  const generated = await gf.fillRouteGaps(
+    bare(),
+    { fetchedUnits: [], heardKeys: new Set(), input: noInput, driveSec: drive },
+    {
+      phase: 'generation',
+      discoverSubjects: async () => [
+        { name: 'The Old Mill', lat: 32.8, lng: -117.2, types: ['point_of_interest'], rating: 4.6, userRatings: 900, address: null, facts: [] },
+      ],
+      generateStory: async prompt => cannedStory(subjectFromPrompt(prompt)),
+      synthesize: async () => new Blob(['audio']),
+      ingest: async rec => { ingested.push(rec); return 'shelf-key'; },
+      onEvent: e => genEvents.push(e),
+    },
+  );
+  assert.equal(ingested.length, 1, 'the generated story promoted into the shelf');
+  assert.ok(genEvents.some(e => e.result === 'generated'), 'the generation event filed in its own phase');
+  assert.ok(generated.items.length > 2, 'the generation pass still returns a filled plan (the App discards it by design)');
+});
+
+await checkAsync('color split parity: bank staging + generated-only pieces reproduce the single pass', async () => {
+  const genBySubject = async prompt => {
+    const subject = prompt.match(/Subject: (.+)\n/)[1];
+    return `Color beat for ${subject}.`;
+  };
+  const mkStandard = () =>
+    rm.composeRoutePlan(
+      [32.71, 32.74, 32.77, 32.80, 32.83, 32.86, 32.88].map((lat, i) => unit(`s${i + 1}|landmark_origin`, lat)),
+      path, dest, 'Dest',
+      { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+      { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 3000 },
+    );
+  const singleStd = await rc.colorizeRoutePlan(mkStandard(), { generateColor: genBySubject });
+  const stagedStd = await rc.stageHumorBankDraws(mkStandard(), { generateColor: genBySubject });
+  const genStd = await rc.generateColorPiecesOnly(mkStandard(), {
+    generateColor: genBySubject,
+    skipSlotKeys: stagedStd.takenSlotKeys,
+  });
+  const stdSinglePieces = singleStd.items.filter(i => i.voice === 'color-puck').map(i => `${i.id}|${i.text}`).sort();
+  const stdSplitPieces = genStd.pieces.map(i => `${i.id}|${i.text}`).sort();
+  assert.deepEqual(stdSplitPieces, stdSinglePieces, 'standard: the split lands the identical generated piece set');
+  // Unfiltered: bank draws stage in the settle path; the
+  // generated remainder must match the single pass exactly.
+  const line = testLine('test-split');
+  const mkUnf = () => {
+    const p = mkStandard();
+    return { ...p, audience: 'unfiltered' };
+  };
+  const singleUnf = await rc.colorizeRoutePlan(mkUnf(), { generateColor: genBySubject, humorBank: [line] });
+  const stagedUnf = await rc.stageHumorBankDraws(mkUnf(), { generateColor: genBySubject, humorBank: [line] });
+  const genUnf = await rc.generateColorPiecesOnly(mkUnf(), {
+    generateColor: genBySubject,
+    humorBank: [line],
+    skipSlotKeys: stagedUnf.takenSlotKeys,
+  });
+  const unfSingle = singleUnf.items.filter(i => i.voice === 'color-puck').map(i => `${i.id}|${i.text}`).sort();
+  const unfSplit = [
+    ...stagedUnf.plan.items.filter(i => i.voice === 'color-puck'),
+    ...genUnf.pieces,
+  ].map(i => `${i.id}|${i.text}`).sort();
+  assert.deepEqual(unfSplit, unfSingle, 'unfiltered: bank-staged + generated pieces reproduce the single pass');
+  assert.ok(stagedUnf.takenSlotKeys.size >= 1, 'the bank draw claimed its slot in the settle path');
+});
+
+await checkAsync('color split: a hanging generated stage cannot hold the opening — staging settles, the plan starts, nothing waits', async () => {
+  const plan = rm.composeRoutePlan(
+    [unit('s1|landmark_origin', 32.71), unit('s2|landmark_origin', 32.78), unit('s3|landmark_origin', 32.86)],
+    path, dest, 'Dest',
+    { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000 },
+  );
+  const hang = () => new Promise(() => {});
+  // The settle path's only color work resolves on local work
+  // alone, even with a generator that never answers.
+  const staging = await rc.stageHumorBankDraws(plan, { generateColor: hang });
+  assert.ok(staging.plan, 'bank staging settled despite the hanging generator');
+  let generatedSettled = false;
+  void rc.generateColorPiecesOnly(plan, { generateColor: hang }).then(() => { generatedSettled = true; });
+  const audio = new RealFakeAudio();
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:x/' + t.length,
+    onEvent: (t, p) => events.push({ t, p }),
+  });
+  await runner.start(staging.plan);
+  await until(() => audio.played.length >= 1, 'the opening sounds');
+  assert.equal(events.filter(e => e.t === 'route_plan_started').length, 1, 'the plan started on its opening renders alone');
+  assert.equal(generatedSettled, false, 'the generated stage is still hanging — and nothing waited on it');
+  runner.endTour();
+});
+
+await checkAsync('late adoption: aside splices after its story and sounds; closeout appends; ended/pre-start runners refuse', async () => {
+  const drive = 2000;
+  const mkAdoptPlan = () =>
+    mkPlan([
+      { kind: 'preview', id: 'preview', label: 'Preview', durationSec: 5, text: 'Off we go.', ready: true },
+      { kind: 'bridge', id: 'bridge:go>s1|x', label: 'Bridge', durationSec: 3, text: 'Bridge to one.', ready: true },
+      storyAtSec('s1|x', 100, 60, drive),
+      storyAtSec('s2|x', 1500, 60, drive),
+    ]);
+  const asidePiece = {
+    kind: 'reaction', id: 'color:aside:s1|x', label: 'Color commentary', durationSec: 4,
+    text: 'Color aside for story one.', voice: 'color-puck', colorForId: 's1|x', ready: true,
+  };
+  const closeoutPiece = {
+    kind: 'reaction', id: 'color:closeout', label: 'Color commentary', durationSec: 4,
+    text: 'Color closeout line.', voice: 'color-puck', colorForId: 's2|x', ready: true,
+  };
+  // Pre-start: no plan, no adoption.
+  const cold = new rp.RoutePlanRunner({ audio: new RealFakeAudio(), synthUrl: async t => 'blob:x/' + t.length });
+  assert.deepEqual(cold.adoptLateColorPieces([asidePiece]), { adopted: 0, dropped: 1 }, 'a runner with no plan adopts nothing');
+  cold.dispose();
+  // Live runner: the aside lands behind story one and SOUNDS
+  // (story two is window-held far down the drive, so the feed
+  // reaches the aside next); the closeout appends at the tail.
+  const audio = new RealFakeAudio(250);
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:adopt/' + encodeURIComponent(t.slice(0, 18)),
+    onEvent: () => {},
+  });
+  const plan = mkAdoptPlan();
+  plan.driveSec = drive;
+  plan.budgetSec = drive;
+  await runner.start(plan);
+  runner.onPosition({ lat: 32.71, lng: -117.25 }); // progress ≈ 0.05 — inside story one's window
+  await until(() => audio.played.some(s => s.includes('s1%7Cx')), 'story one sounding or done');
+  const res = runner.adoptLateColorPieces([asidePiece, closeoutPiece]);
+  assert.deepEqual(res, { adopted: 2, dropped: 0 }, 'aside + closeout adopted into the live plan');
+  await until(() => audio.played.some(s => s.includes('Color%20aside')), 'the adopted aside sounds');
+  runner.endTour();
+  // After the end: everything refuses.
+  const late = runner.adoptLateColorPieces([asidePiece]);
+  assert.deepEqual(late, { adopted: 0, dropped: 1 }, 'an ended runner adopts nothing');
+});
+
+await checkAsync('late adoption: a reaction swap lands only while its render is still queued behind stuck tissue', async () => {
+  const drive = 2000;
+  const hangTexts = ['Hang bridge one.', 'Hang bridge two.', 'Hang bridge three.'];
+  const items = [
+    { kind: 'preview', id: 'preview', label: 'Preview', durationSec: 5, text: 'Off we go.', ready: true },
+    { kind: 'bridge', id: 'bridge:go>s1|x', label: 'Bridge', durationSec: 3, text: 'Bridge to one.', ready: true },
+    storyAtSec('s1|x', 100, 60, drive),
+    ...hangTexts.map((text, i) => ({ kind: 'bridge', id: `bridge:hang${i}`, label: 'Bridge', durationSec: 3, text, ready: true })),
+    { kind: 'reaction', id: 'reaction:0', label: 'Reaction', durationSec: 5, text: 'Plain reaction text.', ready: true },
+    storyAtSec('s2|x', 1500, 60, drive),
+  ];
+  const plan = mkPlan(items);
+  plan.driveSec = drive;
+  plan.budgetSec = drive;
+  const audio = new RealFakeAudio(250);
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => {
+      if (hangTexts.includes(t)) return new Promise(() => {});
+      return 'blob:swap/' + encodeURIComponent(t.slice(0, 18));
+    },
+    onEvent: () => {},
+  });
+  await runner.start(plan);
+  // The three hanging bridges occupy every render slot, so the
+  // plain reaction's render has not started: the swap lands.
+  const swap = {
+    kind: 'reaction', id: 'reaction:0', label: 'Color commentary', durationSec: 4,
+    text: 'Color swap text.', voice: 'color-puck', colorForId: 's1|x', ready: true,
+  };
+  const res = runner.adoptLateColorPieces([swap]);
+  assert.deepEqual(res, { adopted: 1, dropped: 0 }, 'the unrendered plain reaction swapped to its color version');
+  // A second helping of the same piece is a duplicate: refused.
+  const dup = runner.adoptLateColorPieces([swap]);
+  assert.deepEqual(dup, { adopted: 0, dropped: 1 }, 'an already-color entry refuses a second swap');
+  runner.endTour();
+});
+
+check('lane C: both in-tour transport bars wrap at phone widths; in-tour labels never wrap mid-word', () => {
+  const appSrc = readFileSync(join(repoRoot, 'src', 'App.tsx'), 'utf8');
+  const bars = appSrc.match(/flex flex-wrap items-center gap-2 rounded-\[1\.75rem\] bg-white\/75/g) ?? [];
+  assert.equal(bars.length, 2, 'route + freeform transport bars both use the wrapping cluster');
+  const nowrap = appSrc.match(/whitespace-nowrap/g) ?? [];
+  assert.ok(nowrap.length >= 7, `every in-tour button carries whitespace-nowrap (found ${nowrap.length})`);
+});
+
+
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

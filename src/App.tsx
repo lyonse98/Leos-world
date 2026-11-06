@@ -60,8 +60,9 @@ import {
   wrapUpTextFor,
   type NarrationDeps,
 } from './core/narration';
-import { discoverGapSubjects, fillRouteGaps } from './core/routeGapFill';
-import { colorizeRoutePlan } from './core/routeColor';
+import { discoverGapSubjects, fillRouteGaps, type GapFillDeps } from './core/routeGapFill';
+import { generateColorPiecesOnly, stageHumorBankDraws } from './core/routeColor';
+import { SessionAuthority, type SessionClaim } from './core/sessionAuthority';
 import { buildManifest, originAreaName, type RouteManifest } from './core/routeManifest';
 import {
   humorCooldownLineIds,
@@ -588,6 +589,42 @@ function MilesApp() {
   const routeRunnerRef = useRef<RoutePlanRunner | null>(null);
   const routeSessionRef = useRef('');
   const positionRef = useRef<{ lat: number; lng: number } | null>(null);
+  // Session arbitration (Nov 6, 2026 — field fix, lane A):
+  // ONE authority over every live session on the device —
+  // route builds, route tours, freeform tours. The newest
+  // user intent claims it; every earlier claim is stale from
+  // that instant and its holder stands down at its next
+  // checkpoint. This is the mechanism that makes two tours
+  // at once, a superseded build playing over a tour, and
+  // rival builds impossible by construction rather than by
+  // care. See core/sessionAuthority.ts.
+  const sessionAuthorityRef = useRef<SessionAuthority | null>(null);
+  if (sessionAuthorityRef.current === null) {
+    sessionAuthorityRef.current = new SessionAuthority();
+  }
+  const sessionAuthority = sessionAuthorityRef.current;
+  const freeformClaimRef = useRef<SessionClaim | null>(null);
+  const routeClaimRef = useRef<SessionClaim | null>(null);
+
+  /**
+   * End the live route tour, if any (the endRoute path,
+   * factored so the arbitration sites share it): the runner
+   * keeps any closeout 'Miles owes you' state it already set;
+   * the session claim is released back to the authority.
+   */
+  const stopRouteTour = () => {
+    if (routeRunnerRef.current?.view().owed) setOwedLine(routeRunnerRef.current.view().owed);
+    routeRunnerRef.current?.endTour();
+    setRouteActive(false);
+    setRouteManifest(null);
+    setLandingStep('mode');
+    routeRunnerRef.current = null;
+    setRouteRunner(null);
+    if (routeClaimRef.current) {
+      sessionAuthority.release(routeClaimRef.current);
+      routeClaimRef.current = null;
+    }
+  };
 
   const { position, error: locationError, granted } = usePosition(pos => {
     engineRef.current?.onPosition(pos);
@@ -613,9 +650,19 @@ function MilesApp() {
     setRouteActive(false);
     setLandingStep('mode');
     routeRunnerRef.current = null;
+    // Session arbitration (lane A): the route session is
+    // over — its claim is released, and the freeform tail,
+    // when there is one, takes a claim of its own before it
+    // starts (it is a new session, not a continuation).
+    if (routeClaimRef.current) {
+      sessionAuthority.release(routeClaimRef.current);
+      routeClaimRef.current = null;
+    }
     if (owed) setOwedLine(owed);
     if (tail) {
       setResumeOffered(false);
+      freeformClaimRef.current = sessionAuthority.claim('freeform-tour', `freeform-tail-${Date.now()}`);
+      engineRef.current?.endTour();
       const fresh = new Tour({ audio: createBrowserAudio(), clipUrls: engineRef.current?.clipUrls });
       engineRef.current = fresh;
       setEngine(fresh);
@@ -763,6 +810,33 @@ function MilesApp() {
               : 'idle';
 
   const startTour = (resume: boolean) => {
+    // Session arbitration (Nov 6, 2026 — lane A): the newest
+    // intent takes the session, from this tap. A pending
+    // route build is retired where it stands — its picker
+    // pauses resolve as a Back, so the stale build wakes,
+    // finds its claim superseded at its next checkpoint, and
+    // discards itself (plan, runner, UI) without ever
+    // staging or sounding over this tour; the build UI resets
+    // here because the build no longer owns it. A route tour
+    // still active (not reachable from the landing today —
+    // the route screen replaces it — but guarded so the
+    // invariant has no UI-shaped hole) ends through its
+    // normal path. The incumbent freeform engine ends before
+    // it is replaced: a replaced-but-never-ended engine used to
+    // keep its timers, serve cycles, and generation loops
+    // running underneath the new tour.
+    freeformClaimRef.current = sessionAuthority.claim('freeform-tour', `freeform-${Date.now()}`);
+    routePickResolveRef.current?.(null);
+    routePickResolveRef.current = null;
+    setRoutePicker(null);
+    threadPickResolveRef.current?.(null);
+    threadPickResolveRef.current = null;
+    setThreadPicker(null);
+    setRouteBuilding(false);
+    setRouteFailure(null);
+    setRouteStatus('');
+    if (routeActive) stopRouteTour();
+    engineRef.current?.endTour();
     setResumeOffered(false);
     // Snapshot the declared mode for this ride (phase-2 Q&A gate).
     setRideMode(tourMode);
@@ -780,6 +854,15 @@ function MilesApp() {
     engineRef.current = fresh;
     setEngine(fresh);
     fresh.start(resume);
+  };
+
+  /** The freeform End Tour tap: end the engine and give the session up. */
+  const endFreeform = () => {
+    engine.endTour();
+    if (freeformClaimRef.current) {
+      sessionAuthority.release(freeformClaimRef.current);
+      freeformClaimRef.current = null;
+    }
   };
 
   /**
@@ -857,6 +940,39 @@ function MilesApp() {
     // under the same id the tour itself would have used.
     const sessionId = `route-${Date.now()}`;
     routeSessionRef.current = sessionId;
+    // Session arbitration (Nov 6, 2026 — lane A): this build
+    // takes the session NOW. Any earlier build is superseded
+    // from this instant — build-vs-build rivalry ends at
+    // start, not at completion. A freeform tour still running
+    // is NOT ended here: it yields at handover, the point of
+    // no return, so a build the driver backs out of never
+    // costs them their tour. This build's own standing is
+    // re-checked after every await via superseded(): when a
+    // newer intent (a freeform start, another build) has
+    // retired it, it discards its plan and runner silently
+    // and leaves the screen to its new owner — it never
+    // stages, never feeds, never sounds over the session
+    // that replaced it. One route_build_superseded files for
+    // the record, however many checkpoints notice.
+    let claim = sessionAuthority.claim('route-build', sessionId);
+    let supersedeFiled = false;
+    const superseded = (): boolean => {
+      if (sessionAuthority.isCurrent(claim)) return false;
+      if (!supersedeFiled) {
+        supersedeFiled = true;
+        const cur = sessionAuthority.current();
+        void emitEvent(
+          sessionId,
+          'route_build_superseded',
+          {
+            superseded_by_kind: cur?.kind ?? 'none',
+            superseded_by_id: cur?.id ?? '',
+          },
+          { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
+        );
+      }
+      return true;
+    };
     // The destination's library place_key (addendum 2), derived
     // once the library rows are in — the runner's drive record
     // is enriched with it at write time via this closure.
@@ -997,6 +1113,10 @@ function MilesApp() {
         nowMs,
         import.meta.env.VITE_GEMINI_API_KEY as string | undefined,
       );
+      if (superseded()) {
+        discardRunner();
+        return;
+      }
       // Erik, Nov 3, 2026: ride duration replaces Arrive-by. The
       // parser still reads a typed "by <time>" clause, but no
       // arrival time is solicited by the UI or used anywhere —
@@ -1044,6 +1164,10 @@ function MilesApp() {
       const geocodeStartMs = Date.now();
       const geo = await resolveDestination(input.destinationText, googleKeys, null);
       const geocodeEndMs = Date.now();
+      if (superseded()) {
+        discardRunner();
+        return;
+      }
       if (!geo.destination) {
         // The failure SURFACES (Nov 4, 2026): a dedicated
         // failed state with a Try again (routeBuildFailure
@@ -1066,6 +1190,10 @@ function MilesApp() {
       const geocoded = geo.destination;
       const routed = await computeRoute(origin, geocoded.location, googleKeys);
       const routeEndMs = Date.now();
+      if (superseded()) {
+        discardRunner();
+        return;
+      }
       if (!routed.route) {
         // Same surfaced failed state as the geocode exit —
         // one failure surface for every stage of the build.
@@ -1136,8 +1264,21 @@ function MilesApp() {
         setRoutePicker(null);
         pickerDwellMs = Date.now() - pickShownAtMs;
         if (!pick) {
+          // A null pick is a Back — or a supersession retiring
+          // the build through the same resolve (a freeform
+          // start / a newer build resolves stale pickers
+          // null). The superseded path files its event and
+          // leaves the screen to its new owner.
+          if (superseded()) {
+            discardRunner();
+            return;
+          }
           discardRunner();
           setRouteStatus('');
+          return;
+        }
+        if (superseded()) {
+          discardRunner();
           return;
         }
         route = pick.option;
@@ -1299,6 +1440,13 @@ function MilesApp() {
         ...r,
         owedSubjects: stillOwedSubjects(r, heardLabels),
       }));
+      // The read phase of compose is complete (capture's
+      // fetch sub-stage mark — Nov 6, 2026, lane B).
+      const fetchDoneMs = Date.now();
+      if (superseded()) {
+        discardRunner();
+        return;
+      }
       // ------------------------------------------------ thread menu (Nov 5, 2026)
       // The re-anchor amendment: with the route chosen (and
       // the fork settled above, when there was one) and the
@@ -1366,10 +1514,22 @@ function MilesApp() {
         if (!pick) {
           // Back from the menu: the build is abandoned
           // quietly, form state preserved — the mirror of the
-          // route picker's Back.
+          // route picker's Back. A supersession resolves the
+          // menu null through the same path: it files its own
+          // event above and must not touch the build UI its
+          // successor owns (the setRouteBuilding below is the
+          // genuine Back's alone).
+          if (superseded()) {
+            discardRunner();
+            return;
+          }
           discardRunner();
           setRouteStatus('');
           setRouteBuilding(false);
+          return;
+        }
+        if (superseded()) {
+          discardRunner();
           return;
         }
         threadChoice = { candidate: pick.candidate, menu: pick.menu };
@@ -1545,43 +1705,58 @@ function MilesApp() {
       // promoted into story_library on success, and every step
       // timeout-guarded: any failure ships the composed plan as
       // it was. One route_gap_fill telemetry event per gap.
-      plan = await fillRouteGaps(
-        plan,
-        { fetchedUnits: units, heardKeys, input, driveSec: route.durationSec },
-        {
-          discoverSubjects: points => discoverGapSubjects(points, googleKeys),
-          generateStory: prompt => narration.generateStory(prompt),
-          synthesize: text => narration.synthesize(text),
-          ingest: ({ unit, audio }) =>
-            ingestRouteGapStory({
-              placeKey: unit.placeKey,
-              placeName: unit.placeName,
-              angle: unit.angle,
-              lat: unit.lat,
-              lng: unit.lng,
-              storyText: unit.storyText ?? '',
-              audio,
-              // Audience coloring (Nov 5, 2026): the
-              // generating rating (stamped on the unit by
-              // the fill pass) becomes the promotion-key
-              // marker — the row's durable rating record.
-              // Binary by design: an Unfiltered-stamped unit
-              // (never written — the fill pass stamps
-              // 'standard' itself) would still read
-              // 'standard' here (humor layer, Nov 6, 2026).
-              rating: unit.generatedRating === 'family' ? 'family' : 'standard',
-            }),
-          onEvent: event => {
-            void emitEvent(
-              sessionId,
-              'route_gap_fill',
-              { ...event },
-              { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
-            );
-          },
-          onGenerateStart: () => setRouteStatus('Filling a quiet stretch…'),
+      //
+      // Settle-path split (Nov 6, 2026 — lane B): only the
+      // SHELF half runs here. It is local and synchronous —
+      // the library-first tiling the guarantee promises this
+      // episode. The generation half (the live chain above)
+      // was the settle path's unbounded sink on a weak
+      // connection, so it runs behind the opening instead —
+      // see the deferred extras chain after the handover,
+      // which reuses gapCtx/gapDeps with phase 'generation':
+      // its stories promote into the shelf for future drives
+      // and file their events marked deferred.
+      const gapCtx = { fetchedUnits: units, heardKeys, input, driveSec: route.durationSec };
+      const gapDeps: GapFillDeps = {
+        discoverSubjects: points => discoverGapSubjects(points, googleKeys),
+        generateStory: prompt => narration.generateStory(prompt),
+        synthesize: text => narration.synthesize(text),
+        ingest: ({ unit, audio }) =>
+          ingestRouteGapStory({
+            placeKey: unit.placeKey,
+            placeName: unit.placeName,
+            angle: unit.angle,
+            lat: unit.lat,
+            lng: unit.lng,
+            storyText: unit.storyText ?? '',
+            audio,
+            // Audience coloring (Nov 5, 2026): the
+            // generating rating (stamped on the unit by
+            // the fill pass) becomes the promotion-key
+            // marker — the row's durable rating record.
+            // Binary by design: an Unfiltered-stamped unit
+            // (never written — the fill pass stamps
+            // 'standard' itself) would still read
+            // 'standard' here (humor layer, Nov 6, 2026).
+            rating: unit.generatedRating === 'family' ? 'family' : 'standard',
+          }),
+        onEvent: event => {
+          void emitEvent(
+            sessionId,
+            'route_gap_fill',
+            { ...event },
+            { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
+          );
         },
-      );
+        onGenerateStart: () => setRouteStatus('Filling a quiet stretch…'),
+      };
+      const fillStartMs = Date.now();
+      plan = await fillRouteGaps(plan, gapCtx, { ...gapDeps, phase: 'shelf' });
+      const fillEndMs = Date.now();
+      if (superseded()) {
+        discardRunner();
+        return;
+      }
       plan.driveSec = route.durationSec;
       plan.budgetSec = budget;
       // Woven seated members (Nov 4, 2026): AFTER the Coverage
@@ -1628,15 +1803,32 @@ function MilesApp() {
       // gate kills any piece whose story drops. A generation
       // failure anywhere in the pass degrades to the composed
       // plan — color is garnish, never a build failure.
-      plan = await colorizeRoutePlan(plan, {
+      // Settle-path split (Nov 6, 2026 — lane B): only the
+      // humor bank's draws stage here. The bank stage is
+      // local — no live call exists in it — so an Unfiltered
+      // episode keeps its bank color in the opening, while
+      // the GENERATED Color Puck stage (the pass's only live
+      // work, and the Nov 6 build's multi-minute sink: the
+      // cap binds pieces landed, not attempts, so a sick
+      // network billed ~15 s per slot walked) runs behind
+      // the opening in the deferred extras chain below and
+      // adopts into the runner. composedPlan is the pre-color
+      // plan the deferred stage allocates against — the same
+      // plan the single pass would have read.
+      const composedPlan = plan;
+      const bankStaging = await stageHumorBankDraws(plan, {
         generateColor: prompt => narration.generateStory(prompt),
         // Humor layer (Nov 6, 2026): the Unfiltered bank
         // draw's cooldown — line ids drawn within the last
         // 20 drives, off the same drive records the thread
-        // cooldown reads. The bank itself defaults to the
-        // shipped (empty) HUMOR_BANK in routeColor.
+        // cooldown reads.
         humorCooldownIds: humorCooldownLineIds(driveRecords),
       });
+      plan = bankStaging.plan;
+      if (superseded()) {
+        discardRunner();
+        return;
+      }
       const plannedIds = new Set(plan.items.map(it => it.id));
       plan.shelfTease =
         units.find(
@@ -1699,6 +1891,24 @@ function MilesApp() {
           { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
         );
       }
+      // THE HANDOVER GATE (Nov 6, 2026 — lane A): the build
+      // may become a tour ONLY while its claim is still the
+      // device's newest intent. A superseded build discards
+      // its plan here — it never stages, never feeds, never
+      // sounds over the session that replaced it (the Nov 6
+      // overlap: a 5-minute build landing on top of the
+      // freeform tour its driver had started meanwhile).
+      if (superseded()) {
+        discardRunner();
+        return;
+      }
+      // The point of no return: a freeform tour still running
+      // yields to the episode now (it was never ended at build
+      // start — a backed-out build costs the driver nothing),
+      // and the build's claim upgrades to the tour's claim.
+      engineRef.current?.endTour();
+      claim = sessionAuthority.claim('route-tour', sessionId);
+      routeClaimRef.current = claim;
       // Hand the plan to the runner primed at the tap (above):
       // same runner, same element, latch already earned inside
       // the gesture window — item 1 now begins as a normal play,
@@ -1762,6 +1972,9 @@ function MilesApp() {
         // beats the plan carries. The outcome row's dropped[]
         // says which pieces died with their stories.
         audience: input.audience,
+        // Settle-path split (Nov 6, 2026 — lane B): the live
+        // extras ran behind the opening for this build.
+        extrasDeferred: true,
         stageTimingsMs: {
           geocode: geocodeEndMs - geocodeStartMs,
           routes: routeEndMs - geocodeEndMs,
@@ -1771,6 +1984,13 @@ function MilesApp() {
           // The thread menu's dwell (menu builds only) is
           // excluded the same way.
           compose: recordingStartMs - routeEndMs - pickerDwellMs - threadDwellMs,
+          // Compose sub-stages (lane B): the read phase and
+          // the shelf pass, split out so a slow settle is
+          // attributable from the capture alone. (The live
+          // extras that used to hide inside compose file
+          // their own timings as route_extras telemetry.)
+          fetch: fetchDoneMs - routeEndMs - pickerDwellMs,
+          fill: fillEndMs - fillStartMs,
           recording: settledAtMs - recordingStartMs,
           total: settledAtMs - buildT0,
         },
@@ -1788,7 +2008,100 @@ function MilesApp() {
           onFailure: () => fileCaptureFailure('plan'),
         });
       }
+      // Deferred extras (Nov 6, 2026 — lane B): the build's
+      // remaining live work runs BEHIND the opening, fire-and-
+      // forget. Gap-story generation promotes its stories into
+      // the shelf for future drives (this episode already has
+      // its shape — the shelf half of the guarantee ran in the
+      // settle path); the generated Color Puck stage's pieces
+      // adopt into the runner for stories the feed hasn't
+      // passed, and die unborn for the rest. The chain is
+      // claim-guarded at every step — a superseded or ended
+      // session spends nothing further — and failure-proof: an
+      // extras failure is a telemetry line, never a tour
+      // failure. Its timings file as route_extras when it
+      // settles, which is what makes the NEXT slow build
+      // attributable end to end.
+      void (async () => {
+        const extrasT0 = Date.now();
+        let gapGenerationMs: number | null = null;
+        let colorMs: number | null = null;
+        let generatedPieces = 0;
+        let adoptedPieces = 0;
+        let droppedPieces = 0;
+        let outcome = 'completed';
+        try {
+          if (!sessionAuthority.isCurrent(claim)) {
+            outcome = 'superseded';
+            return;
+          }
+          const gapT0 = Date.now();
+          await fillRouteGaps(composedPlan, gapCtx, {
+            ...gapDeps,
+            phase: 'generation',
+            onGenerateStart: undefined,
+            onEvent: event => {
+              void emitEvent(
+                sessionId,
+                'route_gap_fill',
+                { ...event, deferred: true },
+                { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
+              );
+            },
+          });
+          gapGenerationMs = Date.now() - gapT0;
+          if (!sessionAuthority.isCurrent(claim)) {
+            outcome = 'superseded-after-generation';
+            return;
+          }
+          const colorT0 = Date.now();
+          const generated = await generateColorPiecesOnly(composedPlan, {
+            generateColor: prompt => narration.generateStory(prompt),
+            humorCooldownIds: humorCooldownLineIds(driveRecords),
+            skipSlotKeys: bankStaging.takenSlotKeys,
+          });
+          colorMs = Date.now() - colorT0;
+          generatedPieces = generated.pieces.length;
+          if (generatedPieces > 0) {
+            if (!sessionAuthority.isCurrent(claim)) {
+              outcome = 'superseded-after-color';
+              return;
+            }
+            const res = runner.adoptLateColorPieces(generated.pieces);
+            adoptedPieces = res.adopted;
+            droppedPieces = res.dropped;
+          }
+        } catch {
+          outcome = 'failed';
+        } finally {
+          void emitEvent(
+            sessionId,
+            'route_extras',
+            {
+              outcome,
+              gap_generation_ms: gapGenerationMs,
+              color_ms: colorMs,
+              generated_pieces: generatedPieces,
+              adopted_pieces: adoptedPieces,
+              dropped_pieces: droppedPieces,
+              total_ms: Date.now() - extrasT0,
+            },
+            { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
+          );
+        }
+      })();
     } catch {
+      // A superseded build's failure is not news, and the
+      // screen is no longer its to paint: dispose the runner
+      // quietly (the superseded event files above) and stop.
+      if (superseded()) {
+        try {
+          runner.dispose();
+        } catch {
+          /* already gone */
+        }
+        return;
+      }
       // Any later-stage failure (compose / fetch / render)
       // surfaces in the same failed state (Nov 4, 2026). If the
       // plan had already been handed over when it threw, unwind
@@ -1813,20 +2126,20 @@ function MilesApp() {
       setRouteStatus('');
       setRouteFailure(routeBuildFailure('build', null));
     } finally {
-      setRouteBuilding(false);
+      // The building flag belongs to the NEWEST build: a
+      // superseded build's finally must not switch off its
+      // successor's spinner (the orphaned-build bug's UI
+      // half). Reset only while this build's claim is still
+      // the latest, or nothing is claimed at all.
+      const cur = sessionAuthority.current();
+      if (!cur || cur.token === claim.token) setRouteBuilding(false);
     }
   };
 
   const endRoute = () => {
     // The runner keeps any closeout 'Miles owes you' state it
     // already set; ending from the bar is a plain user end.
-    if (routeRunnerRef.current?.view().owed) setOwedLine(routeRunnerRef.current.view().owed);
-    routeRunnerRef.current?.endTour();
-    setRouteActive(false);
-    setRouteManifest(null);
-    setLandingStep('mode');
-    routeRunnerRef.current = null;
-    setRouteRunner(null);
+    stopRouteTour();
   };
 
   // The route build's failed state (Nov 4, 2026), rendered by
@@ -2608,12 +2921,22 @@ function MilesApp() {
               </div>
             )}
             {rView?.phase !== 'ready' && (
-            <div className="flex items-center gap-2 rounded-full bg-white/75 p-2 shadow-xl shadow-ink/15 backdrop-blur">
+            // Transport cluster (lane C, Nov 6, 2026): the row
+            // WRAPS at phone widths. Four labeled pills
+            // (Pause + Ask + Ambience + End route ≈ 450 px of
+            // intrinsic width) cannot fit a ~300 px bar, and
+            // the old single row overflowed — controls were
+            // cut off mid-tour. Now the cluster takes a second
+            // row instead (Pause grows on row one; the rest
+            // follow in order), labels never break mid-word,
+            // and the radius softens from full pill to match
+            // the two-row shape. Same controls, same actions.
+            <div className="flex flex-wrap items-center gap-2 rounded-[1.75rem] bg-white/75 p-2 shadow-xl shadow-ink/15 backdrop-blur">
               <button
                 type="button"
                 onClick={() => (routeNeedsResume ? routeRunner.resumeByUser() : routeRunner.pauseByUser())}
                 aria-label={routeNeedsResume ? 'Resume route' : 'Pause route'}
-                className="flex flex-1 items-center justify-center gap-2 rounded-full bg-ink px-5 py-3.5 text-base font-bold text-cream shadow-md shadow-ink/20 transition hover:bg-sagedeep active:scale-[0.99]"
+                className="flex min-w-[7rem] flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-full bg-ink px-4 py-3.5 text-base font-bold text-cream shadow-md shadow-ink/20 transition hover:bg-sagedeep active:scale-[0.99]"
               >
                 {routeNeedsResume ? <Play className="h-5 w-5" /> : <Pause className="h-5 w-5" />}
                 {routeNeedsResume ? 'Resume' : 'Pause'}
@@ -2624,7 +2947,7 @@ function MilesApp() {
                   onClick={() => setAskOpen(v => !v)}
                   aria-label="Ask Miles a question"
                   aria-expanded={askOpen}
-                  className="flex items-center justify-center gap-2 rounded-full bg-sage/25 px-5 py-3.5 text-base font-bold text-ink transition hover:bg-sage/40 active:scale-[0.99]"
+                  className="flex items-center justify-center gap-2 whitespace-nowrap rounded-full bg-sage/25 px-4 py-3.5 text-base font-bold text-ink transition hover:bg-sage/40 active:scale-[0.99]"
                 >
                   <MessageCircle className="h-5 w-5" />
                   Ask
@@ -2639,7 +2962,7 @@ function MilesApp() {
                 }}
                 aria-label={rView?.bedOn ? 'Turn ambient sound off' : 'Turn ambient sound on'}
                 aria-pressed={rView?.bedOn ?? false}
-                className={`flex items-center justify-center gap-2 rounded-full px-5 py-3.5 text-base font-bold transition active:scale-[0.99] ${
+                className={`flex items-center justify-center gap-2 whitespace-nowrap rounded-full px-4 py-3.5 text-base font-bold transition active:scale-[0.99] ${
                   rView?.bedOn
                     ? 'bg-sage/25 text-ink hover:bg-sage/40'
                     : 'bg-cream2 text-ink/50 hover:bg-sage/25'
@@ -2652,7 +2975,7 @@ function MilesApp() {
                 type="button"
                 onClick={endRoute}
                 aria-label="End route"
-                className="flex items-center justify-center gap-2 rounded-full bg-cream2 px-5 py-3.5 text-base font-bold text-ink transition hover:bg-sage/25 active:scale-[0.99]"
+                className="flex items-center justify-center gap-2 whitespace-nowrap rounded-full bg-cream2 px-4 py-3.5 text-base font-bold text-ink transition hover:bg-sage/25 active:scale-[0.99]"
               >
                 <Square className="h-4 w-4" />
                 End route
@@ -2717,12 +3040,16 @@ function MilesApp() {
               />
             </div>
           )}
-          <div className="flex items-center gap-2 rounded-full bg-white/75 p-2 shadow-xl shadow-ink/15 backdrop-blur">
+          {/* Same wrapping cluster as the route bar (lane C):
+              the shared pattern wraps instead of overflowing
+              at phone widths, so neither tour's controls are
+              ever cut off. */}
+          <div className="flex flex-wrap items-center gap-2 rounded-[1.75rem] bg-white/75 p-2 shadow-xl shadow-ink/15 backdrop-blur">
             <button
               type="button"
               onClick={onTransportPrimary}
               aria-label={transportNeedsResume ? 'Resume tour' : 'Pause tour'}
-              className="flex flex-1 items-center justify-center gap-2 rounded-full bg-ink px-5 py-3.5 text-base font-bold text-cream shadow-md shadow-ink/20 transition hover:bg-sagedeep active:scale-[0.99]"
+              className="flex min-w-[7rem] flex-1 items-center justify-center gap-2 whitespace-nowrap rounded-full bg-ink px-4 py-3.5 text-base font-bold text-cream shadow-md shadow-ink/20 transition hover:bg-sagedeep active:scale-[0.99]"
             >
               {transportNeedsResume ? <Play className="h-5 w-5" /> : <Pause className="h-5 w-5" />}
               {transportNeedsResume ? 'Resume' : 'Pause'}
@@ -2733,7 +3060,7 @@ function MilesApp() {
                 onClick={() => setAskOpen(v => !v)}
                 aria-label="Ask Miles a question"
                 aria-expanded={askOpen}
-                className="flex items-center justify-center gap-2 rounded-full bg-sage/25 px-5 py-3.5 text-base font-bold text-ink transition hover:bg-sage/40 active:scale-[0.99]"
+                className="flex items-center justify-center gap-2 whitespace-nowrap rounded-full bg-sage/25 px-4 py-3.5 text-base font-bold text-ink transition hover:bg-sage/40 active:scale-[0.99]"
               >
                 <MessageCircle className="h-5 w-5" />
                 Ask
@@ -2741,9 +3068,9 @@ function MilesApp() {
             )}
             <button
               type="button"
-              onClick={() => engine.endTour()}
+              onClick={endFreeform}
               aria-label="End tour"
-              className="flex items-center justify-center gap-2 rounded-full bg-cream2 px-5 py-3.5 text-base font-bold text-ink transition hover:bg-sage/25 active:scale-[0.99]"
+              className="flex items-center justify-center gap-2 whitespace-nowrap rounded-full bg-cream2 px-4 py-3.5 text-base font-bold text-ink transition hover:bg-sage/25 active:scale-[0.99]"
             >
               <Square className="h-4 w-4" />
               End tour

@@ -3535,4 +3535,50 @@ export async function runScenarios(Tour, extras) {
     check('the quiet-street channel retired after the crossfade', factory.channels[0].disposed === true && bed.kind === 'city');
     bed.dispose();
   }
+
+  // ---------------------------------------------------------- S-Z zombie seal
+  // Nov 6, 2026 (lane A): the ended freeform tour 585db03c filed
+  // a generation_attempt 33 s AFTER its own session_end — its
+  // generation loop outlived the tour. The Tour's emit sink is
+  // now sealed at end: no event of any type may file after
+  // session_end, even when an in-flight generation lands later.
+  suite('S-Z ended tour files nothing further (zombie seal)');
+  {
+    resetLocalStorage();
+    let releaseGen = null;
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park')],
+      library: [],
+      genStoryBehavior: () =>
+        new Promise(resolve => {
+          releaseGen = () =>
+            resolve('A generated story about Balboa Park, told at length and with care. '.repeat(6));
+        }),
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    // Drive time forward until a generation is genuinely in
+    // flight (its promise still pending), then end the tour.
+    for (let i = 0; i < 12 && world.genStoryPrompts.length === 0; i += 1) {
+      await world.clock.advance(10_000);
+    }
+    check(
+      'a generation was in flight when the tour ended',
+      world.genStoryPrompts.length >= 1,
+      `prompts=${world.genStoryPrompts.length}`,
+    );
+    tour.endTour();
+    const endIdx = world.events.map(e => e.type).lastIndexOf('session_end');
+    check('session_end filed', endIdx >= 0);
+    const filedAtEnd = world.events.length;
+    // The in-flight generation lands after the end; timers run
+    // on for five more minutes of tour time. Nothing may file.
+    if (releaseGen) releaseGen();
+    await world.clock.advance(300_000);
+    check(
+      'zero events of any type after session_end',
+      world.events.length === filedAtEnd,
+      `extra=${JSON.stringify(world.events.slice(filedAtEnd).map(e => e.type))}`,
+    );
+  }
 }

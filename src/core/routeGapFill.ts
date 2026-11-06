@@ -506,6 +506,26 @@ export interface GapFillDeps {
   maxGenerated?: number;
   /** Gap threshold override (default GAP_THRESHOLD_SEC). */
   thresholdSec?: number;
+  /**
+   * Settle-path split (Nov 6, 2026 — field fix, lane B). The
+   * pass's two halves have opposite latency shapes: the shelf
+   * tiling is local and synchronous (library first, always),
+   * while generation is a chain of live calls (discovery →
+   * generation → TTS → ingest, each step timeout-capped at
+   * 30 s, up to 2 stories + 2 extra attempts) that on a weak
+   * connection can hold a build for minutes. 'full' (the
+   * default) is the historical single pass — per gap, shelf
+   * then generation, one event per gap. The App's build now
+   * runs the halves separately: 'shelf' in the settle path
+   * (it tiles and fires 'shelf' events only for gaps it
+   * actually filled; a gap left bare fires nothing — its
+   * event belongs to the generation phase), then
+   * 'generation' behind the opening, against the handed-over
+   * plan, where its only jobs are the shelf promotion and
+   * its telemetry: a story generated there joins the shelf
+   * for future drives, never the episode already playing.
+   */
+  phase?: 'full' | 'shelf' | 'generation';
 }
 
 /** Race a step against the timeout: null on timeout or rejection (skip-fallback). */
@@ -687,6 +707,12 @@ export async function fillRouteGaps(
   const threshold = deps.thresholdSec ?? GAP_THRESHOLD_SEC;
   const timeoutMs = deps.timeoutMs ?? DEFAULT_STEP_TIMEOUT_MS;
   const maxGenerated = deps.maxGenerated ?? MAX_GENERATED_GAP_STORIES;
+  // Settle-path split (Nov 6, 2026): see the phase dep. 'full'
+  // runs both halves per gap exactly as the pass always has;
+  // 'shelf' runs only the local tiling; 'generation' runs only
+  // the live last resort. The gates below are the whole split —
+  // each half's body is the historical one, untouched.
+  const phase = deps.phase ?? 'full';
   if (!(driveSec > 0)) return plan;
   const gaps = detectStoryGaps(plan, driveSec, threshold);
   if (gaps.length === 0) return plan;
@@ -780,7 +806,9 @@ export async function fillRouteGaps(
     let shelfInserted = false;
     let firstFillSubject: string | undefined;
     // ---- library first: tile untiled fetched units into the gap
-    for (let n = 0; n < MAX_SHELF_INSERTS_PER_GAP; n++) {
+    // (the 'generation' phase skips this half entirely — the
+    // shelf already had its turn in the settle path)
+    for (let n = 0; phase !== 'generation' && n < MAX_SHELF_INSERTS_PER_GAP; n++) {
       const subs = deadStretches(items, driveSec, gap.startSec, gap.endSec, threshold);
       if (subs.length === 0) break;
       let placed = false;
@@ -802,6 +830,7 @@ export async function fillRouteGaps(
     let genSubject: string | undefined;
     const subs = deadStretches(items, driveSec, gap.startSec, gap.endSec, threshold);
     if (
+      phase !== 'shelf' &&
       subs.length > 0 &&
       deps.discoverSubjects &&
       deps.generateStory &&
@@ -892,11 +921,18 @@ export async function fillRouteGaps(
           ? 'failed'
           : 'skipped';
     const eventSubject = genSubject ?? firstFillSubject;
-    deps.onEvent?.({
-      gap_sec: Math.round(gap.gapSec),
-      result,
-      ...(eventSubject ? { subject: eventSubject } : {}),
-    });
+    // In the 'shelf' phase a gap left bare fires NO event: its
+    // verdict belongs to the generation phase that will
+    // consider it behind the opening (in 'full' and
+    // 'generation' phases every gap considered fires, as the
+    // pass has always done).
+    if (!(phase === 'shelf' && !shelfInserted)) {
+      deps.onEvent?.({
+        gap_sec: Math.round(gap.gapSec),
+        result,
+        ...(eventSubject ? { subject: eventSubject } : {}),
+      });
+    }
   }
 
   return { ...plan, items, totalSec: items.reduce((s, i) => s + i.durationSec, 0) };
