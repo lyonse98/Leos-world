@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Play, Pause, Square, Send, MapPin, MessageCircle, Volume2 } from 'lucide-react';
+import { Play, Pause, Square, Send, MapPin, MessageCircle, Volume2, Waves } from 'lucide-react';
 import { Tour, type TourView } from './core/tour';
 import { createBrowserAudio } from './core/player';
 import { isTesterUnlocked, tryTesterUnlock } from './core/accessGate';
@@ -62,8 +62,10 @@ import {
 } from './core/routeHistory';
 import { tagsFor } from './data/routeTags';
 import { wovenEligibleFor } from './data/routePresence';
+import { loadAmbientEnabled, saveAmbientEnabled } from './core/ambience';
 import {
   BUILD_ID,
+  bucketUrl,
   captureRouteEpisode,
   deviceKey,
   emitEvent,
@@ -533,7 +535,7 @@ function MilesApp() {
   const { position, error: locationError, granted } = usePosition(pos => {
     engineRef.current?.onPosition(pos);
     positionRef.current = { lat: pos.lat, lng: pos.lng };
-    routeRunnerRef.current?.onPosition({ lat: pos.lat, lng: pos.lng });
+    routeRunnerRef.current?.onPosition({ lat: pos.lat, lng: pos.lng, speedMps: pos.speedMps });
   });
   useWakeLock(view.phase === 'active' || routeActive);
 
@@ -901,6 +903,20 @@ function MilesApp() {
       onEvent: (type, payload) => {
         const pos = positionRef.current;
         void emitEvent(sessionId, type, payload, { lat: pos?.lat ?? null, lng: pos?.lng ?? null, movementMode: tourMode });
+      },
+      // Ambient bed (Nov 5, 2026): route tours only — this
+      // runner exists only for route mode, so freeform never
+      // gets a bed in v1. Loops live in the tts-audio bucket
+      // beside the story audio; the on/off state is the
+      // persisted kill-switch setting (default ON).
+      bed: {
+        assets: {
+          ocean: bucketUrl('ambience/ocean-v1.m4a'),
+          road: bucketUrl('ambience/road-v1.m4a'),
+          city: bucketUrl('ambience/city-air-v1.m4a'),
+        },
+        enabled: loadAmbientEnabled(),
+        declaredMode: tourMode,
       },
     });
     routeRunnerRef.current = runner;
@@ -2276,6 +2292,24 @@ function MilesApp() {
                   Ask
                 </button>
               )}
+              <button
+                type="button"
+                onClick={() => {
+                  const next = !(rView?.bedOn ?? false);
+                  routeRunner?.setBedEnabled(next);
+                  saveAmbientEnabled(next);
+                }}
+                aria-label={rView?.bedOn ? 'Turn ambient sound off' : 'Turn ambient sound on'}
+                aria-pressed={rView?.bedOn ?? false}
+                className={`flex items-center justify-center gap-2 rounded-full px-5 py-3.5 text-base font-bold transition active:scale-[0.99] ${
+                  rView?.bedOn
+                    ? 'bg-sage/25 text-ink hover:bg-sage/40'
+                    : 'bg-cream2 text-ink/50 hover:bg-sage/25'
+                }`}
+              >
+                <Waves className="h-5 w-5" />
+                Ambience
+              </button>
               <button
                 type="button"
                 onClick={endRoute}

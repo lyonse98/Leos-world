@@ -5,3 +5,10 @@ export { Player, makePrimeUrl } from '../../src/core/player';
 export { CORRIDOR_SEGMENTS, matchCorridor } from '../../src/data/corridors';
 export { resolveFillerRegion } from '../../src/data/fillerRegions';
 export { isTesterUnlocked, tryTesterUnlock, TESTER_ACCESS_CODE } from '../../src/core/accessGate';
+export {
+  AmbientBedController,
+  resolveAmbientBed,
+  isUrbanAreaName,
+  AMBIENT_FULL_LEVEL,
+  AMBIENT_DUCK_LEVEL,
+} from '../../src/core/ambience';

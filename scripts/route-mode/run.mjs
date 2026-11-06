@@ -1678,6 +1678,64 @@ await checkAsync('qa runner: passenger question → answer after current item, p
   runner.endTour();
 });
 
+await checkAsync('ambient bed: a bed whose audio layer cannot even construct self-silences, one diag, tour unharmed', async () => {
+  // Node has no Audio element: the bed's browser factory throws
+  // at channel construction — the extreme case of a broken bed
+  // environment. The scope's rule: the bed can never gate, delay,
+  // or break a story; any fault self-silences + files one diag.
+  const audio = new RealFakeAudio(400);
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onEvent: (t, p) => events.push({ t, p }),
+    bed: {
+      assets: { ocean: 'bed://ocean', road: 'bed://road', city: 'bed://city' },
+      enabled: true,
+      declaredMode: 'driving',
+    },
+  });
+  assert.equal(runner.view().bedOn, true);
+  assert.equal(runner.view().bedKind, null);
+  runner.setBedEnabled(false);
+  assert.equal(runner.view().bedOn, false);
+  runner.setBedEnabled(true);
+  assert.equal(runner.view().bedOn, true);
+  // Stage (manifest hold: nothing has sounded, the gate is
+  // shut), feed the drive's context, then begin — the order a
+  // real drive produces (GPS flows before the Start tap).
+  await runner.stage(qaPlan());
+  // Freeway speed on the path's own start point: the road target.
+  runner.onPosition({ lat: 32.7, lng: -117.25, speedMps: 29 });
+  runner.beginStaged();
+  await until(() => audio.played.some(s => s.includes('s1%7Clandmark_origin.wav')), 'first story sounding (bed gate)');
+  await until(
+    () => events.some(e => e.t === 'pipeline_diag' && e.p.stage === 'ambient_bed'),
+    'bed fault diag',
+  );
+  const diags = events.filter(e => e.t === 'pipeline_diag' && e.p.stage === 'ambient_bed');
+  assert.equal(diags.length, 1);
+  assert.equal(runner.view().bedOn, false); // faulted = off, surfaced honestly
+  assert.equal(runner.view().bedKind, null);
+  // Narration proceeds untouched: arrival closeout still fires.
+  runner.onPosition(dest);
+  await until(() => runner.view().closeoutDone, 'arrival closeout with a faulted bed');
+  assert.equal(events.filter(e => e.t === 'pipeline_diag' && e.p.stage === 'ambient_bed').length, 1);
+  runner.endTour();
+});
+
+await checkAsync('ambient bed: a runner without the bed dep reports no bed', async () => {
+  const audio = new RealFakeAudio(400);
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:x/' + t.length,
+    onEvent: () => undefined,
+  });
+  assert.equal(runner.view().bedOn, false);
+  assert.equal(runner.view().bedKind, null);
+  runner.endTour();
+});
+
 // ---- composer v2 runner: position-anchored release (real timers, dense path) ----
 const anchorPlan = () =>
   rm.composeRoutePlan(

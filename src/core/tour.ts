@@ -270,7 +270,8 @@ const FIT_DURATION_FLOOR_S = 120;
 const QA_FAILSAFE_MS = 150_000;
 const QA_GRACE_MS = 45_000;
 const STORM_BASE_MS = 90_000;
-const FREEWAY_MPS = 15;
+/** Freeway-speed threshold (the pass-by fix's gate; the ambient bed's road context reads the same constant). */
+export const FREEWAY_MPS = 15;
 
 interface BufferedText {
   subject: string;

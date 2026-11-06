@@ -105,7 +105,7 @@ async function healthyOpening(world, audio, pos = UTC, speed = 8) {
 }
 
 export async function runScenarios(Tour, extras) {
-  const { CORRIDOR_SEGMENTS, matchCorridor, resolveFillerRegion, accessGate } = extras;
+  const { CORRIDOR_SEGMENTS, matchCorridor, resolveFillerRegion, accessGate, ambience } = extras;
 
   // ---------------------------------------------------------- S-01 healthy start
   suite('S-01 healthy start / opener order');
@@ -3246,5 +3246,245 @@ export async function runScenarios(Tour, extras) {
       world.eventsOf('story_played').some(e => e.payload.subject === `corridor:${seg.id}`),
       JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
     tour.endTour();
+  }
+
+  // ---------------------------------------------------------- AM ambient bed (Nov 5, 2026 scope)
+  // The bed is a parallel layer beside the Player: resolver
+  // fixtures, the start gate, the duck engine, hysteresis +
+  // adoption, pause/kill follows, fault self-silence, teardown.
+  // Fake bed factory — no DOM, no network, zero live calls.
+  class FakeBedChannel {
+    constructor() {
+      this.src = null; this.level = 0; this.playing = false;
+      this.disposed = false; this.playCalls = 0; this.failWith = null; this.errorCb = null;
+    }
+    load(src) { this.src = src; }
+    play() {
+      this.playCalls++;
+      // A refusal is a property of the attempt (no gesture yet),
+      // not of the element: fail once, then behave.
+      const fail = this.failWith;
+      this.failWith = null;
+      if (fail) return Promise.reject(fail);
+      this.playing = true;
+      return Promise.resolve();
+    }
+    pause() { this.playing = false; }
+    setLevel(v) { this.level = v; }
+    dispose() { this.disposed = true; this.playing = false; }
+    setOnError(cb) { this.errorCb = cb; }
+    fireError() { this.errorCb?.(); }
+  }
+  class FakeBedFactory {
+    constructor() { this.channels = []; this.failNextPlayWith = null; }
+    get mode() { return 'volume'; }
+    async decide() { return 'volume'; }
+    resume() {}
+    createChannel() {
+      const ch = new FakeBedChannel();
+      if (this.failNextPlayWith) { ch.failWith = this.failNextPlayWith; this.failNextPlayWith = null; }
+      this.channels.push(ch);
+      return ch;
+    }
+  }
+  const BED_ASSETS = { ocean: 'bed://ocean', road: 'bed://road', city: 'bed://city' };
+  const MISSION_BAY = { lat: 32.78, lng: -117.235 };
+  const DOWNTOWN = { lat: 32.715, lng: -117.16 };
+  const UNIVERSITY_CITY = { lat: 32.853, lng: -117.18 };
+  const JULIAN = { lat: 33.078, lng: -116.6 };
+  const bedCtx = (pos, speedMps, extra = {}) => ({ ...pos, speedMps, walking: false, urban: false, ...extra });
+  function makeBed(clock, factory, diags, enabled = true) {
+    return new ambience.AmbientBedController({
+      assets: BED_ASSETS, enabled, factory, clock, onDiag: r => diags.push(r),
+    });
+  }
+
+  suite('AM-1 resolver fixtures: context, precedence, walking');
+  {
+    const R = ambience.resolveAmbientBed;
+    check('coast band at surface speed -> ocean', R(bedCtx(MISSION_BAY, 8)) === 'ocean');
+    check('coast band at freeway speed -> road (precedence)', R(bedCtx(MISSION_BAY, 29)) === 'road');
+    check('urban core at surface speed -> city-air', R(bedCtx(DOWNTOWN, 8, { urban: true })) === 'city');
+    check('central without the urban signal -> none', R(bedCtx(DOWNTOWN, 8)) === null);
+    check('residential central -> none', R(bedCtx(UNIVERSITY_CITY, 8)) === null);
+    check('backcountry -> none', R(bedCtx(JULIAN, 8)) === null);
+    check('walking -> none even on the coast', R(bedCtx(MISSION_BAY, 1.2, { walking: true })) === null);
+    check('walking -> none even at the urban core', R(bedCtx(DOWNTOWN, 1.2, { walking: true, urban: true })) === null);
+    check('freeway speed anywhere -> road', R(bedCtx(JULIAN, 29)) === 'road');
+    check('urban names: Gaslamp Quarter matches', ambience.isUrbanAreaName('Gaslamp Quarter') === true);
+    check('urban names: Barrio Logan matches', ambience.isUrbanAreaName('Barrio Logan') === true);
+    check('urban names: Clairemont does not match', ambience.isUrbanAreaName('Clairemont') === false);
+    check('urban names: null does not match', ambience.isUrbanAreaName(null) === false);
+  }
+
+  suite('AM-2 start gate: nothing before the first proven sound');
+  {
+    const clock = new FakeClock();
+    const factory = new FakeBedFactory();
+    const diags = [];
+    const bed = makeBed(clock, factory, diags);
+    bed.updateContext(bedCtx(MISSION_BAY, 8));
+    await clock.advance(30_000);
+    check('no channel exists before the gate', factory.channels.length === 0);
+    bed.noteFirstSound();
+    await clock.flush();
+    check('the gate opens the ocean bed', factory.channels.length === 1 && factory.channels[0].src === 'bed://ocean');
+    await clock.advance(4_000);
+    const ch = factory.channels[0];
+    check('bed faded in to full level', ch.level > ambience.FULL * 0.8, `level=${ch.level}`);
+    check('bed element is playing', ch.playing === true);
+    check('controller reports the ocean kind', bed.kind === 'ocean');
+    bed.dispose();
+  }
+
+  suite('AM-3 duck + release: 0.5 s attack, breath never blooms, 2.5 s release');
+  {
+    const clock = new FakeClock();
+    const factory = new FakeBedFactory();
+    const bed = makeBed(clock, factory, []);
+    bed.updateContext(bedCtx(MISSION_BAY, 8));
+    bed.noteFirstSound();
+    await clock.flush();
+    await clock.advance(4_000);
+    const ch = factory.channels[0];
+    bed.noteSounding(true);
+    await clock.advance(600);
+    check('ducked to ~-19 dB within ~0.5 s of a sound start', ch.level <= ambience.DUCK + 0.01, `level=${ch.level}`);
+    bed.noteSounding(false);
+    await clock.advance(800); // the standing breath
+    check('the 700 ms breath does not bloom the bed', ch.level < ambience.FULL * 0.5, `level=${ch.level}`);
+    await clock.advance(3_000);
+    check('a real gap releases back to full', ch.level >= ambience.FULL - 0.005, `level=${ch.level}`);
+    bed.dispose();
+  }
+
+  suite('AM-4 hysteresis: flip-flop never adopts; a held target adopts at grace or boundary');
+  {
+    const clock = new FakeClock();
+    const factory = new FakeBedFactory();
+    const bed = makeBed(clock, factory, []);
+    bed.updateContext(bedCtx(MISSION_BAY, 8));
+    bed.noteFirstSound();
+    await clock.flush();
+    await clock.advance(4_000);
+    // Polygon-edge / speed flip-flop for 40 s: no adoption.
+    for (let i = 0; i < 10; i++) {
+      bed.updateContext(bedCtx(MISSION_BAY, 29));
+      await clock.advance(2_000);
+      bed.updateContext(bedCtx(MISSION_BAY, 8));
+      await clock.advance(2_000);
+    }
+    check('flip-flop produced no adoption', factory.channels.length === 1 && bed.kind === 'ocean');
+    // A held road target: hysteresis, then the boundary grace expires -> crossfade.
+    bed.updateContext(bedCtx(MISSION_BAY, 29));
+    await clock.advance(15_000);
+    check('hysteresis alone does not adopt mid-story', factory.channels.length === 1);
+    await clock.advance(3_000);
+    check('grace expiry adopts the road bed', factory.channels.length === 2 && factory.channels[1].src === 'bed://road');
+    await clock.advance(6_000);
+    check('the ocean channel retired after the crossfade', factory.channels[0].disposed === true && bed.kind === 'road');
+    // Back to ocean: adoption lands AT a story boundary inside the grace.
+    bed.updateContext(bedCtx(MISSION_BAY, 8));
+    await clock.advance(15_500);
+    bed.noteStoryBoundary();
+    await clock.flush();
+    check('a story boundary inside the grace adopts immediately', factory.channels.length === 3 && factory.channels[2].src === 'bed://ocean');
+    bed.dispose();
+  }
+
+  suite('AM-5 pause follow + kill switch');
+  {
+    const clock = new FakeClock();
+    const factory = new FakeBedFactory();
+    const bed = makeBed(clock, factory, []);
+    bed.updateContext(bedCtx(MISSION_BAY, 8));
+    bed.noteFirstSound();
+    await clock.flush();
+    await clock.advance(4_000);
+    const ch = factory.channels[0];
+    bed.notePaused(true);
+    await clock.advance(1_200);
+    check('pause fades the bed out in ~1 s', ch.level <= 0.001, `level=${ch.level}`);
+    check('pause parks the element', ch.playing === false);
+    bed.notePaused(false);
+    await clock.advance(1_200);
+    check('resume restores the bed', ch.playing === true && ch.level > ambience.FULL * 0.8, `level=${ch.level}`);
+    bed.setEnabled(false);
+    await clock.advance(700);
+    check('kill switch silences the bed', ch.level <= 0.001 && bed.enabled === false, `level=${ch.level}`);
+    bed.setEnabled(true);
+    await clock.advance(1_200);
+    check('re-enable restores the bed', ch.level > ambience.FULL * 0.8 && bed.enabled === true, `level=${ch.level}`);
+    bed.dispose();
+  }
+
+  suite('AM-6 faults self-silence with one diag; NotAllowedError is not a fault');
+  {
+    const clock = new FakeClock();
+    const factory = new FakeBedFactory();
+    const diags = [];
+    factory.failNextPlayWith = Object.assign(new Error('decode'), { name: 'NotSupportedError' });
+    const bed = makeBed(clock, factory, diags);
+    bed.updateContext(bedCtx(MISSION_BAY, 8));
+    bed.noteFirstSound();
+    await clock.flush();
+    await clock.advance(500);
+    check('a play fault files exactly one diag', diags.length === 1, JSON.stringify(diags));
+    check('the faulted bed is silent and channel-less', bed.kind === null && bed.isFaulted === true);
+    bed.updateContext(bedCtx(MISSION_BAY, 29));
+    await clock.advance(60_000);
+    check('a faulted bed never retries', factory.channels.length === 1 && diags.length === 1);
+    bed.dispose();
+
+    const clock2 = new FakeClock();
+    const factory2 = new FakeBedFactory();
+    const diags2 = [];
+    const bed2 = makeBed(clock2, factory2, diags2);
+    bed2.updateContext(bedCtx(MISSION_BAY, 8));
+    bed2.noteFirstSound();
+    await clock2.flush();
+    await clock2.advance(500);
+    factory2.channels[0].fireError();
+    check('an element error self-silences with one diag', diags2.length === 1 && bed2.isFaulted === true);
+    bed2.dispose();
+
+    const clock3 = new FakeClock();
+    const factory3 = new FakeBedFactory();
+    const diags3 = [];
+    factory3.failNextPlayWith = Object.assign(new Error('gesture'), { name: 'NotAllowedError' });
+    const bed3 = makeBed(clock3, factory3, diags3);
+    bed3.updateContext(bedCtx(MISSION_BAY, 8));
+    bed3.noteFirstSound();
+    await clock3.flush();
+    await clock3.advance(500);
+    check('NotAllowedError files no diag', diags3.length === 0 && bed3.isFaulted === false);
+    bed3.noteGesture();
+    await clock3.flush();
+    check('the next gesture retries the play', factory3.channels[0].playCalls >= 2 && factory3.channels[0].playing === true);
+    bed3.dispose();
+  }
+
+  suite('AM-7 teardown: stop fades then disposes; walking never starts a bed');
+  {
+    const clock = new FakeClock();
+    const factory = new FakeBedFactory();
+    const bed = makeBed(clock, factory, []);
+    bed.updateContext(bedCtx(MISSION_BAY, 8));
+    bed.noteFirstSound();
+    await clock.flush();
+    await clock.advance(4_000);
+    bed.stop(1500);
+    await clock.advance(1_700);
+    check('stop(1500) disposes the channel', factory.channels[0].disposed === true && bed.kind === null);
+
+    const clock2 = new FakeClock();
+    const factory2 = new FakeBedFactory();
+    const bed2 = makeBed(clock2, factory2, []);
+    bed2.updateContext(bedCtx(MISSION_BAY, 1.2, { walking: true }));
+    bed2.noteFirstSound();
+    await clock2.flush();
+    await clock2.advance(10_000);
+    check('a walking context never starts a bed', factory2.channels.length === 0);
+    bed2.dispose();
   }
 }

@@ -123,6 +123,11 @@ import {
   type PlanItem,
   type RoutePlan,
 } from './routeMode';
+import {
+  AmbientBedController,
+  isUrbanAreaName,
+  type AmbientBedKind,
+} from './ambience';
 
 export interface RouteRunnerView {
   /**
@@ -143,6 +148,10 @@ export interface RouteRunnerView {
   latch: LatchState;
   userPaused: boolean;
   guardPaused: boolean;
+  /** Ambient bed (Nov 5, 2026): the persisted kill-switch state for the transport pill. */
+  bedOn: boolean;
+  /** The bed context currently sounding (null when quiet / not wired). */
+  bedKind: AmbientBedKind | null;
   /** Post-tour 'Miles owes you' line, once a closeout tease exists. */
   owed: string | null;
   /** How the route ended: arrival-owed | arrival-signoff | overrun | user-ended. */
@@ -473,6 +482,20 @@ export interface RouteRunnerDeps {
   /** Best-effort telemetry (App wires backend.emitEvent). */
   onEvent?: (type: string, payload: Record<string, unknown>) => void;
   /**
+   * Ambient bed (Nov 5, 2026): loop URLs + the persisted
+   * kill-switch state + the declared mode (the walking
+   * derivation). The App wires this for route tours ONLY —
+   * freeform never constructs this runner, and a runner built
+   * without it (every harness) has no bed at all. The bed lives
+   * outside the Player's queue and can never gate a story; see
+   * ambience.ts.
+   */
+  bed?: {
+    assets: Record<AmbientBedKind, string>;
+    enabled: boolean;
+    declaredMode?: 'passenger' | 'driving';
+  };
+  /**
    * Episode capture (Nov 4, 2026): fired ONCE at tour close
    * with the outcome row's payload (played / dropped / end
    * reason / movement). The App persists it to route_episodes
@@ -655,9 +678,29 @@ export class RoutePlanRunner {
   private questionsAnsweredCount = 0;
   /** Tap time (prime) or start() time, whichever came first: the tour's clock for latch telemetry. */
   private startStamp: number | null = null;
+  /** Ambient bed controller (null when the bed dep is absent — every harness, by construction). */
+  private bed: AmbientBedController | null = null;
+  /** The current/last geo story's place name — the city-air context's episode-geography signal. */
+  private bedGeoPlaceName: string | null = null;
+  /** Latest fix + best speed estimate, for bed context evaluation. */
+  private bedLastPos: GeoPoint | null = null;
+  private bedLastSpeedMps = 0;
 
   constructor(deps: RouteRunnerDeps) {
     this.deps = deps;
+    // Ambient bed (Nov 5, 2026): constructed ONLY when the App
+    // wires the dep (route tours). The controller is a parallel
+    // layer beside the Player — it is not consulted by the queue,
+    // the composer, or the opening choreography, and its faults
+    // self-silence into a pipeline_diag.
+    if (deps.bed) {
+      this.bed = new AmbientBedController({
+        assets: deps.bed.assets,
+        enabled: deps.bed.enabled,
+        onDiag: reason =>
+          deps.onEvent?.('pipeline_diag', { stage: 'ambient_bed', reason }),
+      });
+    }
     this.player = new Player(deps.audio, systemClock, {
       resolveUrl: async item => (item.source.kind === 'url' ? item.source.url : ''),
       stallSource: () => null,
@@ -700,6 +743,20 @@ export class RoutePlanRunner {
       onStoryCommitted: () => undefined,
       onSoundStart: item => {
         this.soundStartStamp = { audibleId: item.id, atMs: Date.now() };
+        // Ambient bed tap (Nov 5, 2026): a story is AUDIBLY
+        // sounding — the bed's start gate (latch + first proven
+        // sound) opens here, never earlier. A geo story (not a
+        // portal hop, not a woven member) also refreshes the
+        // city-air context's place signal.
+        if (this.bed) {
+          const entry = this.entries.find(e => e.audible?.id === item.id);
+          const it = entry?.planItem;
+          if (it && it.kind === 'story' && it.unit && !it.portal && !it.portalClimax && !it.woven) {
+            this.bedGeoPlaceName = it.unit.placeName;
+            this.feedBedContext();
+          }
+          this.bed.noteFirstSound();
+        }
         this.notify();
       },
       onWaiting: () => undefined,
@@ -739,7 +796,46 @@ export class RoutePlanRunner {
   }
 
   private notify(): void {
+    this.syncBed();
     for (const cb of [...this.listeners]) cb();
+  }
+
+  /**
+   * Ambient bed follow (Nov 5, 2026): mirror the view's honest
+   * sounding signal + the pause flags into the bed controller.
+   * Runs inside notify(), which every playback state change
+   * already passes through. Ducking keys off sound actually
+   * flowing (the view's own formula); pause keys off the flags.
+   */
+  private syncBed(): void {
+    if (!this.bed) return;
+    const snap = this.player.snapshot();
+    const sounding = snap.latch === 'earned' && this.player.isPlaying() && !snap.userPaused;
+    this.bed.noteSounding(sounding);
+    this.bed.notePaused(this.userPausedFlag || this.guardPausedFlag);
+  }
+
+  /**
+   * Ambient bed context (Nov 5, 2026): re-evaluate the bed's
+   * target from the latest fix. City-air's urban signal in route
+   * v1 is the episode's own geography — trackNeighborhood does
+   * not run in route mode and the bed makes no API calls: the
+   * destination inside its 1,500 m circle under a curated urban
+   * name, or the current geo story's place in the same set.
+   * Walking = passenger-declared at walking pace (freeform's own
+   * modeName threshold), which is always silent.
+   */
+  private feedBedContext(): void {
+    if (!this.bed || !this.bedLastPos) return;
+    const pos = this.bedLastPos;
+    const speedMps = this.bedLastSpeedMps;
+    let urban = isUrbanAreaName(this.bedGeoPlaceName);
+    if (!urban && this.plan && isUrbanAreaName(this.plan.destinationName)) {
+      const d = haversineM(pos, this.plan.destination);
+      if (d <= 1500) urban = true;
+    }
+    const walking = this.deps.bed?.declaredMode === 'passenger' && speedMps < 3.5;
+    this.bed.updateContext({ lat: pos.lat, lng: pos.lng, speedMps, walking, urban });
   }
 
   view(): RouteRunnerView {
@@ -769,6 +865,8 @@ export class RoutePlanRunner {
       latch,
       userPaused: this.userPausedFlag,
       guardPaused: this.guardPausedFlag,
+      bedOn: this.bed ? this.bed.enabled : false,
+      bedKind: this.bed ? this.bed.kind : null,
       owed: this.owed,
       endedKind: this.endedKind,
       freeformTail: this.freeformTailFlag,
@@ -813,6 +911,7 @@ export class RoutePlanRunner {
     // is dead; nothing will ever be ready on it).
     this.settleOpening();
     this.player.teardown();
+    this.bed?.dispose();
   }
 
   /**
@@ -1172,6 +1271,9 @@ export class RoutePlanRunner {
     this.freeformTailFlag = true;
     this.endedKind = 'overrun';
     this.closeoutDoneFlag = true;
+    // Ambient bed: the route tour is over (freeform tail gets
+    // NO bed in v1) — fade out and stop with the closeout.
+    this.bed?.stop(1500);
     this.notify();
   }
 
@@ -2158,6 +2260,10 @@ export class RoutePlanRunner {
 
   private onItemSettle(it: PlanItem, rec: { sounded: boolean; skipped: boolean }): void {
     const sounded = rec.sounded;
+    // Ambient bed tap (Nov 5, 2026): a settle is a story
+    // boundary — a due bed adoption lands here when it can,
+    // rather than mid-story.
+    this.bed?.noteStoryBoundary();
     // Episode capture accounting (Nov 4, 2026): recorded
     // before anything else — including settles the closeout
     // itself causes (queued items abandoned at close count as
@@ -2209,8 +2315,20 @@ export class RoutePlanRunner {
   }
 
   /** GPS feed (App's usePosition already drives this). Dumb guards only. */
-  onPosition(pos: GeoPoint): void {
+  onPosition(pos: GeoPoint & { speedMps?: number }): void {
     if (!this.plan || this.closed) return;
+    // Ambient bed context feed (Nov 5, 2026): store the fix +
+    // the best speed estimate (GPS speed when the App passes it;
+    // route-progress-derived otherwise) and re-evaluate.
+    this.bedLastPos = { lat: pos.lat, lng: pos.lng };
+    const bedPlan = this.plan;
+    const bedRate = this.progressPerSec;
+    if (typeof pos.speedMps === 'number' && Number.isFinite(pos.speedMps)) {
+      this.bedLastSpeedMps = pos.speedMps;
+    } else if (bedRate !== null && bedRate > 0 && bedPlan) {
+      this.bedLastSpeedMps = bedRate * pathLengthM(bedPlan.path);
+    }
+    this.feedBedContext();
     const progress = progressAlongPath(pos, this.plan.path);
     // Recent progress rate — the breath's stale-risk input
     // (commit D): sampled from consecutive position fixes.
@@ -2318,6 +2436,15 @@ export class RoutePlanRunner {
   /** Any in-tour gesture: a re-prime opportunity (P8), routed by the UI / the document net. */
   noteGesture(): void {
     this.player.noteGesture(this.heldFirstItem());
+    // Ambient bed tap: a gesture also retries a bed play the
+    // autoplay policy refused (never a fault — see ambience.ts).
+    this.bed?.noteGesture();
+  }
+
+  /** The transport pill's ambient-bed kill switch (Nov 5, 2026). Persisting is the App's job. */
+  setBedEnabled(on: boolean): void {
+    this.bed?.setEnabled(on);
+    this.notify();
   }
 
   /** The tap-to-hear affordance's tap (P11): a gesture-retry, then a re-drive if nothing is current. */
@@ -2448,15 +2575,21 @@ export class RoutePlanRunner {
             }
             this.closing = false;
             this.closeoutDoneFlag = true;
+            // Ambient bed: ducked under the wrap-up while it
+            // sounded (the sounding sync); now fade to zero
+            // across its end (scope §5).
+            this.bed?.stop(1500);
             this.notify();
           },
         });
       } catch {
         this.closing = false; // spoken line lost; the owed state still stands
         this.closeoutDoneFlag = true;
+        this.bed?.stop(1500);
       }
     } else {
       this.closeoutDoneFlag = true;
+      this.bed?.stop(1500);
     }
     // Episode capture (Nov 4, 2026): the outcome row files
     // after the queued abandons above, so their settles are
@@ -2574,6 +2707,8 @@ export class RoutePlanRunner {
     this.endedKind = this.endedKind ?? 'user-ended';
     this.closed = true;
     this.player.teardown();
+    // Ambient bed: ~1.5 s fade + full stop on End Tour (scope §5).
+    this.bed?.stop(1500);
     this.notify();
   }
 }

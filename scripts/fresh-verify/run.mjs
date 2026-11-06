@@ -40,6 +40,13 @@ const extras = {
     tryTesterUnlock: engine.tryTesterUnlock,
     TESTER_ACCESS_CODE: engine.TESTER_ACCESS_CODE,
   },
+  ambience: {
+    AmbientBedController: engine.AmbientBedController,
+    resolveAmbientBed: engine.resolveAmbientBed,
+    isUrbanAreaName: engine.isUrbanAreaName,
+    FULL: engine.AMBIENT_FULL_LEVEL,
+    DUCK: engine.AMBIENT_DUCK_LEVEL,
+  },
 };
 
 const args = process.argv.slice(2);
