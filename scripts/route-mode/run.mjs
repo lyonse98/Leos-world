@@ -1832,7 +1832,18 @@ check('narration seam: requests stamp kind + the default solo voice; context pas
 });
 check('wrap-up context: plan facts only — destination + thread + climax, and no played data anywhere', () => {
   const threaded = rm.buildWrapUpContext(threadPlan());
-  assert.deepEqual(Object.keys(threaded).sort(), ['climaxMode', 'climaxSubject', 'destinationName', 'threadTopic']);
+  // (Thread re-anchor port, Nov 5, 2026: the context gains
+  // the thread's anchor label + class — still plan facts
+  // only, still no played data; the wrap-up names where an
+  // anchored thread tied off.)
+  assert.deepEqual(Object.keys(threaded).sort(), [
+    'climaxMode',
+    'climaxSubject',
+    'destinationName',
+    'threadAnchorKind',
+    'threadLabel',
+    'threadTopic',
+  ]);
   assert.equal(threaded.destinationName, 'Dest');
   assert.equal(threaded.threadTopic, 'Navy Century');
   assert.equal(threaded.climaxMode, 'late', 'the thread plan\'s climax is its late-corridor final member (addendum 4)');
@@ -2909,7 +2920,22 @@ await checkAsync('ladder (§1): route_plan_started carries the auditable decisio
   await runner.start(threadPlan());
   const started = events.find(e => e.t === 'route_plan_started');
   assert.ok(started, 'the plan-started event filed');
-  assert.deepEqual(started.p.decisions.thread, { topic: 'Navy Century', source: 'detected' });
+  // (Thread re-anchor port, Nov 5, 2026: the decisions thread
+  // record gains the anchor identity — label, class, key —
+  // beside topic + source, and the menu record rides the
+  // decisions. The fixture's thread is a topic thread, so the
+  // anchor fields read the topic itself.)
+  assert.deepEqual(started.p.decisions.thread, {
+    topic: 'Navy Century',
+    source: 'detected',
+    label: 'Navy Century',
+    anchor_kind: 'topic',
+    anchor_key: 'Navy Century',
+  });
+  assert.ok(
+    started.p.decisions.thread_menu && started.p.decisions.thread_menu.source === 'single-qualifier',
+    'the menu record rides the decisions (composer-resolved: this world holds exactly one qualifying thread)',
+  );
   assert.deepEqual(started.p.decisions.climax, { mode: started.p.climax.mode, subject: started.p.climax.subject });
   assert.equal(started.p.decisions.climax.mode, 'late');
   assert.deepEqual(started.p.decisions.preview, { threadPromised: true, previouslyDrive: false, previouslySubject: false });
@@ -2973,7 +2999,17 @@ check('cuts (§3): no fit/pairing fields survive in plan shapes, narration text,
   const plan = composeDense([navy('n1|landmark_origin', 32.72), navy('n2|landmark_origin', 32.78), navy('n3|landmark_origin', 32.84)]);
   for (const k of ['climaxFit', 'bookend', 'bookendTopic']) assert.ok(!(k in plan), `plan.${k} is gone`);
   const ctx = rm.buildWrapUpContext(plan);
-  assert.deepEqual(Object.keys(ctx).sort(), ['climaxMode', 'climaxSubject', 'destinationName', 'threadTopic']);
+  // (Thread re-anchor port, Nov 5, 2026: threadLabel /
+  // threadAnchorKind are thread facts, not fit/pairing
+  // machinery — the key set grows by exactly those two.)
+  assert.deepEqual(Object.keys(ctx).sort(), [
+    'climaxMode',
+    'climaxSubject',
+    'destinationName',
+    'threadAnchorKind',
+    'threadLabel',
+    'threadTopic',
+  ]);
   const read = p => readFileSync(join(repoRoot, p), 'utf8');
   for (const p of ['src/core/routeMode.ts', 'src/core/narration.ts', 'src/core/routePlayback.ts']) {
     const src = read(p);
@@ -4214,20 +4250,31 @@ check('woven seating: the thread gate — no through-line, no members, plan retu
   assert.deepEqual(memberIds(seated), []);
 });
 
-check('woven thread support: eligible off-route stories count toward thread detection', () => {
-  const units = [
+// PORTED (thread re-anchor, Nov 5, 2026): the pre-re-anchor
+// contract — off-route woven support counts toward thread
+// QUALIFICATION — is superseded by the intersection rule
+// (scope Decision 1): a topic qualifies only on ≥3 cast
+// members in the geo pool in hand; woven/portal units never
+// qualify a thread. What survives of the old contract: once
+// a thread qualifies on its geo cast, woven carriers join
+// its memberIds (imports garnish, they never mint).
+check('woven thread support: woven stories garnish a qualified thread but can never qualify one (intersection rule)', () => {
+  const twoGeo = [
     wGeo('ga|landmark_origin', 32.71, 120, 'Geo A'),
     wGeo('gb|landmark_origin', 32.72, 120, 'Geo B'),
     wCand('w1|landmark_history', 300),
     wCand('w2|landmark_history', 300),
     wCand('w3|landmark_history', 300),
   ];
-  const plan = wCompose(units, 1800);
-  // Two geo places score 2 — under the thread bar. The three
-  // eligible off-route places on the same topic are real
-  // support: the union finds the thread.
-  assert.equal(plan.thread?.topic, WT);
-  assert.equal(plan.thread?.score, 5);
+  const thin = wCompose(twoGeo, 1800);
+  assert.equal(thin.thread, null, 'two geo carriers + three woven carriers → NO thread: woven units cannot qualify a topic');
+  const threeGeo = [...twoGeo, wGeo('gc|landmark_origin', 32.73, 120, 'Geo C')];
+  const plan = wCompose(threeGeo, 1800);
+  assert.equal(plan.thread?.topic, WT, 'three geo carriers qualify the topic thread');
+  assert.equal(plan.thread?.anchorKind, 'topic');
+  for (const id of ['w1|landmark_history', 'w2|landmark_history', 'w3|landmark_history']) {
+    assert.ok(plan.thread.memberIds.includes(id), `the woven carrier ${id} joins the qualified thread's cast`);
+  }
 });
 
 check('woven seating: eligibility exclusion — bound and unflagged stories never seat', () => {
@@ -4592,6 +4639,20 @@ const carriedCands = () =>
   [350, 330, 310, 290, 270, 250, 230, 210, 190].map((d, i) =>
     wCand(`c${i + 1}|landmark_history`, d, { placeName: `Carried ${i + 1}` }),
   );
+// PORTED FIXTURE (thread re-anchor, Nov 5, 2026): under the
+// intersection rule a thread needs ≥3 cast members in the
+// GEO pool — the pre-anchor fixtures threaded story-less
+// plans on woven support alone, which the new contract
+// forbids (imports garnish, they never mint). The carried
+// fixtures now compose on a GEO-THIN spine: three short
+// on-route WT stories (~3 minutes of a 40-minute drive —
+// coverage far below the floor), with the member cast
+// arriving as memberUnits, exactly as the production lever
+// delivers it (member units join woven support; they are
+// never geo pool and never portal pool, so the portal
+// climax cannot pre-crown the strongest candidate either).
+const geoThinCast = () =>
+  [32.71, 32.72, 32.73].map((lat, i) => wGeo(`gt${i + 1}|landmark_origin`, lat, 60, `Geo Thin ${i + 1}`));
 
 check('carried predicate: fires below the floor with a thread; never on a healthy plan or without one', () => {
   const healthy = leverCompose([...healthyGeo(), wCand('w1|landmark_history', 300)], 2400);
@@ -4599,11 +4660,16 @@ check('carried predicate: fires below the floor with a thread; never on a health
   assert.ok(ha.geoCoverageFraction >= rm.THREAD_CARRIED_FLOOR, `healthy fraction ${ha.geoCoverageFraction}`);
   assert.equal(ha.active, false);
   assert.equal(ha.memberCap, rm.WOVEN_MEMBER_CAP, 'the standing cap is the verdict on a healthy plan');
-  // A story-less plan: zero geo coverage, a detected thread.
-  const bare = leverCompose(carriedCands().slice(0, 3), 2400);
+  // A geo-thin plan (ported, thread re-anchor, Nov 5,
+  // 2026): a real thread on a 3-story geo spine whose
+  // sounding windows cover a sliver of the drive.
+  const bare = leverCompose(geoThinCast(), 2400, { memberUnits: carriedCands().slice(0, 3) });
   assert.equal(bare.thread?.topic, WT);
   const ba = rm.assessThreadCarried(bare);
-  assert.equal(ba.geoCoverageFraction, 0);
+  assert.ok(
+    ba.geoCoverageFraction > 0 && ba.geoCoverageFraction < rm.THREAD_CARRIED_FLOOR,
+    `thin fraction ${ba.geoCoverageFraction} is above zero (the spine sounds) and below the floor`,
+  );
   assert.equal(ba.active, true);
   assert.equal(ba.memberCap, rm.WOVEN_MEMBER_CAP_CARRIED, 'the raised cap is the verdict below the floor');
   // Below the floor with NO thread: nothing can carry it.
@@ -4638,7 +4704,11 @@ check('carried need: below the floor the plan provisions for eight; above it, fo
   const five = [300, 280, 260, 240, 220].map((d, i) =>
     wCand(`n${i + 1}|landmark_history`, d, { placeName: `Need ${i + 1}` }),
   );
-  const below = leverCompose(five, 2400, { wovenIndexSupport: support });
+  // (Ported, thread re-anchor, Nov 5, 2026: the below-floor
+  // case composes on the geo-thin spine — the five candidates
+  // alone can no longer mint the thread they provision for.)
+  const below = leverCompose([...geoThinCast(), ...five], 2400, { wovenIndexSupport: support });
+  assert.equal(below.thread?.topic, WT);
   assert.equal(below.wovenMemberNeed, rm.WOVEN_MEMBER_CAP_CARRIED);
   assert.equal(below.wovenMembersSeeking, WT, 'five in hand cannot fill eight seats — the fetch stays open');
   const above = leverCompose([...healthyGeo(), ...five], 2400, { wovenIndexSupport: support });
@@ -4646,16 +4716,34 @@ check('carried need: below the floor the plan provisions for eight; above it, fo
   assert.equal(above.wovenMembersSeeking, null, 'five in hand fills the standing need — no fetch');
 });
 
-check('carried anchoring: a story-less plan composes from the thread — spread, climax position, framing', () => {
+// PORTED (thread re-anchor, Nov 5, 2026): the pre-anchor
+// fixture was a STORY-LESS plan threading on woven support
+// alone — under the intersection rule that plan has no
+// thread at all, so the mode's subject is now the GEO-THIN
+// plan: a real thread whose road is nearly silent. The
+// claims port with it: normal seating still cannot anchor
+// the episode (cap 4, the departure edge closed, no climax
+// designation), while the carried pass spreads the member
+// cast across the timeline, designates the strongest member
+// as the climax the road never crowned, and re-frames the
+// preview honestly.
+check('carried anchoring: a geo-thin plan composes from the thread — spread, climax position, framing', () => {
   const cands = carriedCands();
-  const plan = leverCompose(cands, 2400);
+  const plan = leverCompose(geoThinCast(), 2400, { memberUnits: cands });
   assert.equal(plan.thread?.topic, WT);
-  assert.equal(plan.items.filter(i => i.kind === 'story').length, 0, 'the composed plan has no stories at all');
+  assert.equal(
+    plan.items.filter(i => i.kind === 'story').length,
+    3,
+    'the composed plan’s whole geo spine is the thin cast',
+  );
+  assert.equal(plan.climaxUnitId, null, 'the thin cast crowns nothing — the climax designation is open');
   // The standing rule still holds without the mode: normal
-  // seating cannot anchor — a story-less plan's only gap is
-  // the departure edge, which stays closed.
+  // seating cannot anchor — it stops at the standing cap,
+  // never opens the drive, and designates no climax.
   const normal = rm.seatWovenMembers(plan, cands, { heardKeys: new Set() });
-  assert.equal(memberIds(normal).length, 0);
+  assert.ok(memberIds(normal).length <= 4, 'normal seating stops at the standing cap');
+  assert.ok(normal.items.find(i => i.kind === 'story')?.woven !== true, 'a member never opens the drive in normal mode');
+  assert.equal(normal.climaxUnitId, null, 'normal seating designates no climax');
   const tc = rm.assessThreadCarried(plan);
   assert.equal(tc.active, true);
   const carried = rm.seatWovenMembers(plan, cands, { heardKeys: new Set(), maxMembers: tc.memberCap, threadCarried: true });
@@ -4664,11 +4752,15 @@ check('carried anchoring: a story-less plan composes from the thread — spread,
   assert.equal(carried.wovenMembers?.count, 8);
   const anchors = members.map(i => i.anchorProgress);
   assert.ok(anchors.every((a, j) => j === 0 || a > anchors[j - 1]), 'member anchors increase along the drive');
-  assert.ok(anchors[0] < 0.15, 'a member anchors the opening act');
+  // (Ported: the story-less fixture's first member anchored
+  // the opening act itself; on the geo-thin spine the
+  // opening act is the spine's own — the spread claim is
+  // that members sound from early in the drive to its end.)
+  assert.ok(anchors[0] < 0.35, `the first member sounds early (anchor ${anchors[0]})`);
   const acts = carried.actsSummary;
   assert.ok(
     acts.opening.stories >= 1 && acts.middle.stories >= 1 && acts.climax.stories >= 1,
-    `every act holds members: ${JSON.stringify(acts)}`,
+    `every act holds stories: ${JSON.stringify(acts)}`,
   );
   // The climax position: the strongest member, final third,
   // ending with the drive, marked as the plan's climax.
@@ -4685,27 +4777,36 @@ check('carried anchoring: a story-less plan composes from the thread — spread,
   assert.ok(members.every(i => i.releaseProgress === undefined), 'members stay windowless inserts');
   const bridges = carried.items.filter(i => i.kind === 'bridge');
   assert.ok(bridges.length >= members.length - 1, 'adjacent members are bridged — stitched, not stacked');
-  // Framing: the plan gains a preview, and it tells the truth.
+  // Framing: the rebuild re-authors the preview, and it
+  // tells the truth.
   const preview = carried.items.find(i => i.kind === 'preview');
-  assert.ok(preview, 'a story-less plan gains its preview from the rebuild');
+  assert.ok(preview, 'the carried plan carries its preview from the rebuild');
   assert.ok(preview.text.includes('quiet'), 'the preview names the quiet road');
   assert.ok(preview.text.includes(WT), 'the preview names the thread');
   assert.equal(carried.previewFacts?.threadPromised, true, 'the strongest member is the promised peak');
 });
 
 check('carried caps: normal mode never exceeds four; the carried top-up never exceeds eight total', () => {
+  // (Ported, thread re-anchor, Nov 5, 2026: the geo side
+  // carries THREE WT stories — the intersection rule's cast —
+  // where the pre-anchor fixture needed only one; the
+  // candidates ride the portal pool as before, so the
+  // strongest still takes the open climax slot.)
   const units = [
     wGeo('ga|landmark_origin', 32.71, 120, 'Geo A'),
+    wGeo('gb|landmark_origin', 32.72, 120, 'Geo B'),
+    wGeo('gc|landmark_origin', 32.73, 120, 'Geo C'),
     ...[300, 280, 260, 240, 220, 200, 180, 160, 140, 120].map((d, i) =>
       wCand(`t${i + 1}|landmark_history`, d, { placeName: `Top ${i + 1}` }),
     ),
   ];
   const plan = leverCompose(units, 2400);
+  assert.equal(plan.thread?.topic, WT);
   assert.equal(plan.climaxMode, 'portal', 'the strongest candidate takes the open climax slot');
   const normal = rm.seatWovenMembers(plan, units, { heardKeys: new Set() });
   assert.equal(memberIds(normal).length, 4, 'normal seating stops at the standing cap');
   const tc = rm.assessThreadCarried(normal);
-  assert.equal(tc.active, true, 'one geo story and a portal climax cannot fill half of 2400 s');
+  assert.equal(tc.active, true, 'three short geo stories and a portal climax cannot fill half of 2400 s');
   const topped = rm.seatWovenMembers(normal, units, { heardKeys: new Set(), maxMembers: tc.memberCap, threadCarried: true });
   assert.equal(memberIds(topped).length, 8, 'the top-up fills to the carried cap and no further');
   assert.equal(topped.wovenMembers?.count, 8, 'the record counts the plan total');
@@ -4714,14 +4815,20 @@ check('carried caps: normal mode never exceeds four; the carried top-up never ex
 });
 
 check('carried climax doctrine: an existing geo climax is never displaced, joined, or followed', () => {
+  // (Ported, thread re-anchor, Nov 5, 2026: a third geo WT
+  // story joins the fixture — the intersection rule's cast —
+  // mid-drive, so the destination climax's doctrine is what
+  // is tested, not thread existence.)
   const units = [
     wGeo('ga|landmark_origin', 32.71, 120, 'Geo A'),
+    wGeo('gm|landmark_origin', 32.75, 120, 'Geo M'),
     wGeo('gz|landmark_origin', 32.895, 500, 'Geo Z'),
     ...[300, 280, 260, 240, 220, 200].map((d, i) =>
       wCand(`g${i + 1}|landmark_history`, d, { placeName: `Guard ${i + 1}` }),
     ),
   ];
   const plan = leverCompose(units, 2400);
+  assert.equal(plan.thread?.topic, WT);
   assert.equal(plan.climaxUnitId, 'gz|landmark_origin');
   assert.equal(plan.climaxMode, 'destination');
   const tc = rm.assessThreadCarried(plan);
@@ -4741,8 +4848,11 @@ check('carried climax doctrine: an existing geo climax is never displaced, joine
 
 checkAsync('carried telemetry: route_plan_started decisions carry the thread_carried record', async () => {
   const cands = carriedCands();
-  const plan0 = leverCompose(cands, 2400);
+  // (Ported, thread re-anchor, Nov 5, 2026: the plan composes
+  // on the geo-thin spine with the cast as memberUnits.)
+  const plan0 = leverCompose(geoThinCast(), 2400, { memberUnits: cands });
   const tc = rm.assessThreadCarried(plan0);
+  assert.equal(tc.active, true);
   const runStarted = async threadCarried => {
     const p = {
       ...rm.seatWovenMembers(plan0, cands, { heardKeys: new Set(), maxMembers: tc.memberCap, threadCarried: true }),
@@ -4763,9 +4873,13 @@ checkAsync('carried telemetry: route_plan_started decisions carry the thread_car
   const withMode = await runStarted(tc);
   assert.deepEqual(withMode.p.decisions.thread_carried, {
     active: true,
-    geo_coverage_fraction: 0,
+    // (Ported: the geo-thin spine sounds, so the fraction is
+    // the assessment's own — above zero, below the floor —
+    // filed at the payload's standing 3-decimal rounding.)
+    geo_coverage_fraction: Math.round(tc.geoCoverageFraction * 1000) / 1000,
     member_cap: 8,
   });
+  assert.ok(tc.geoCoverageFraction > 0 && tc.geoCoverageFraction < rm.THREAD_CARRIED_FLOOR);
   const without = await runStarted(null);
   assert.equal(without.p.decisions.thread_carried, null, 'an unassessed plan files null — one telemetry shape');
 });
@@ -4833,7 +4947,9 @@ check('carried framing: the preview text and the manifest card name the quiet ro
   assert.ok(carriedText.includes(WT), 'the carried preview names the thread');
   assert.ok(!rn.previewTextFor(ctx).includes('quiet'), 'the standard thread preview is unchanged without the flag');
   const cands = carriedCands();
-  const plan0 = leverCompose(cands, 2400);
+  // (Ported, thread re-anchor, Nov 5, 2026: the plan composes
+  // on the geo-thin spine with the cast as memberUnits.)
+  const plan0 = leverCompose(geoThinCast(), 2400, { memberUnits: cands });
   const tc = rm.assessThreadCarried(plan0);
   const carried = {
     ...rm.seatWovenMembers(plan0, cands, { heardKeys: new Set(), maxMembers: tc.memberCap, threadCarried: true }),
@@ -6729,6 +6845,333 @@ check('coloring capture: the rating and the color pieces ride the plan payload (
   assert.equal(colorItem.text, 'COLOR TEXT', 'the color text is captured like every tissue text');
   const bankItem = payload.items.find(i => i.id === 'reaction-1');
   assert.equal(bankItem.voice, null, 'Miles-solo pieces carry no voice mark');
+});
+
+// ── Thread re-anchor + thread menu (Nov 5, 2026) ────────
+// The detection redesign: class-ordered geo anchors, the
+// intersection rule for topics, the N=3 cooldown, the
+// Decision-5 climax bar, and the menu contract (contents,
+// sources, pick plumbing). Fixtures ride the module-level
+// meridian world (path 32.70 → dest 32.90).
+
+const anchorCompose = (units, driveSec = 2400, extraOpts = {}) =>
+  leverCompose(units, driveSec, extraOpts);
+const resolutionOf = (units, extra = {}) => {
+  const pools = rm.partitionRoutePools(units, path, dest, { heardKeys: new Set() });
+  return {
+    pools,
+    res: rm.resolveThreadCandidates({
+      geoPool: pools.geoAll,
+      wovenSupport: pools.portalAll.filter(u => u.wovenEligible === true),
+      path,
+      destination: dest,
+      ...extra,
+    }),
+  };
+};
+
+check('re-anchor: a destination anchor qualifies on its own cast and beats a deeper topic', () => {
+  const units = [
+    unit('harbor|landmark_origin', 32.895, { placeName: 'Harbor Gate', topics: ['Food & Drink'] }),
+    unit('harbor|landmark_event', 32.9, { placeName: 'Harbor Gate', topics: ['Food & Drink'] }),
+    unit('harbor|landmark_people', 32.905, { placeName: 'Harbor Gate', topics: [] }),
+    ...[32.74, 32.78, 32.82, 32.86].map((lat, i) => wGeo(`tw${i + 1}|landmark_origin`, lat, 120, `Topic ${i + 1}`)),
+  ];
+  const { res } = resolutionOf(units);
+  assert.deepEqual(
+    res.candidates.map(c => ({ kind: c.kind, key: c.key, label: c.label, count: c.count })),
+    [
+      { kind: 'destination', key: 'harbor', label: 'Harbor Gate', count: 3 },
+      { kind: 'topic', key: WT, label: WT, count: 4 },
+    ],
+    'class order, not score: the destination (3) outranks the deeper topic (4)',
+  );
+  assert.equal(res.defaultIndex, 0);
+  const plan = anchorCompose(units);
+  assert.equal(plan.thread?.anchorKind, 'destination');
+  assert.equal(plan.thread?.anchorKey, 'harbor');
+  assert.equal(plan.thread?.label, 'Harbor Gate');
+  assert.equal(plan.thread?.topic, 'Food & Drink', 'the anchor’s extension topic is its cast’s dominant topic');
+  assert.equal(plan.threadMenu?.source, 'default-detected');
+  assert.equal(plan.threadMenu?.menuShown, false);
+  assert.deepEqual(plan.threadMenu?.offered[0], { kind: 'destination', key: 'harbor', label: 'Harbor Gate', count: 3 });
+  assert.equal(plan.previewContext?.threadLabel, 'Harbor Gate');
+  assert.equal(plan.previewContext?.threadAnchorKind, 'destination');
+  const previewText = rn.previewTextFor(plan.previewContext);
+  assert.ok(previewText.includes('Harbor Gate'), previewText);
+});
+
+check('re-anchor: an on-route place anchors mid-drive — and a topic-less anchor imports nothing', () => {
+  const units = [
+    ...[32.76, 32.765, 32.77].map((lat, i) =>
+      unit(`oldtown|landmark_${['origin', 'event', 'people'][i]}`, lat, { placeName: 'Old Town Square', topics: [] }),
+    ),
+    ...[32.72, 32.8, 32.84].map((lat, i) => wGeo(`ow${i + 1}|landmark_origin`, lat, 120, `Other ${i + 1}`)),
+  ];
+  const plan = anchorCompose(units);
+  assert.equal(plan.thread?.anchorKind, 'onroute');
+  assert.equal(plan.thread?.anchorKey, 'oldtown');
+  assert.equal(plan.thread?.label, 'Old Town Square');
+  assert.equal(plan.thread?.topic, null, 'a cast with no topic anchors with a null extension topic');
+  assert.equal(plan.wovenMembersSeeking, null, 'a topic-less thread seeks no member fetch');
+  const seated = rm.seatWovenMembers(plan, units, { heardKeys: new Set() });
+  assert.equal(seated, plan, 'a topic-less thread seats no members — the same plan object comes back');
+  assert.equal(plan.previewContext?.threadTopic, null);
+  assert.equal(plan.previewContext?.threadLabel, 'Old Town Square');
+  const previewText = rn.previewTextFor(plan.previewContext);
+  assert.ok(previewText.includes('Old Town Square') && previewText.includes('middle'), previewText);
+});
+
+check('re-anchor: the origin anchor is the departure place’s own cast', () => {
+  const units = [
+    ...[32.702, 32.706, 32.71].map((lat, i) =>
+      unit(`campus|landmark_${['origin', 'event', 'people'][i]}`, lat, { placeName: 'Campus Gate', topics: ['Faith'] }),
+    ),
+    ...[32.78, 32.82, 32.86].map((lat, i) => wGeo(`og${i + 1}|landmark_origin`, lat, 120, `Away ${i + 1}`)),
+  ];
+  const { res } = resolutionOf(units);
+  assert.equal(res.candidates[0].kind, 'origin');
+  assert.equal(res.candidates[0].key, 'campus');
+  const plan = anchorCompose(units);
+  assert.equal(plan.thread?.anchorKind, 'origin');
+  assert.equal(plan.thread?.label, 'Campus Gate');
+  assert.equal(plan.thread?.topic, 'Faith');
+});
+
+check('re-anchor: the road itself is a feature — corridor places never pose as on-route places', () => {
+  const units = [
+    unit('i5-a|corridor', 32.75, { angle: 'corridor', placeName: 'Interstate 5: Mission Bay to Old Town', topics: [] }),
+    unit('i5-b|corridor', 32.8, { angle: 'corridor', placeName: 'Interstate 5: Mission Bay to Old Town', topics: [] }),
+    ...[32.72, 32.78, 32.84].map((lat, i) => wGeo(`rd${i + 1}|landmark_origin`, lat, 120, `Roadside ${i + 1}`)),
+  ];
+  const { res } = resolutionOf(units);
+  const feature = res.candidates.find(c => c.kind === 'feature');
+  assert.ok(feature, 'the road qualifies as a feature');
+  assert.equal(feature.key, 'road:Interstate 5');
+  assert.equal(feature.label, 'Interstate 5');
+  assert.equal(feature.count, 2);
+  assert.ok(!res.candidates.some(c => c.kind === 'onroute'), 'corridor-segment places are the road, not places on it');
+  const plan = anchorCompose(units);
+  assert.equal(plan.thread?.anchorKind, 'feature');
+  assert.equal(rm.threadOptionLabel(feature), 'Interstate 5 · the road itself — 2 stories on this drive');
+});
+
+check('re-anchor: a geographic topic is a feature only with presence proof', () => {
+  const geoCoast = [32.74, 32.78, 32.82].map((lat, i) =>
+    unit(`coast${i + 1}|landmark_origin`, lat, { topics: ['Coast'], placeName: `Coast ${i + 1}` }),
+  );
+  const wovenCoast = n =>
+    Array.from({ length: n }, (_, i) =>
+      unit(`wcoast${i + 1}|landmark_history`, 32.0, {
+        lng: -117.05,
+        topics: ['Coast'],
+        placeName: `Woven Coast ${i + 1}`,
+        wovenEligible: true,
+      }),
+    );
+  const proven = resolutionOf([...geoCoast, ...wovenCoast(1)]).res;
+  assert.equal(proven.candidates[0].kind, 'feature', '3 geo of 4 in hand (75%) is presence proof');
+  assert.equal(proven.candidates[0].key, 'geo:Coast');
+  const unproven = resolutionOf([...geoCoast, ...wovenCoast(3)]).res;
+  assert.ok(!unproven.candidates.some(c => c.kind === 'feature'), '3 geo of 6 in hand (50%) is mostly a county topic, not a feature of this road');
+  assert.equal(unproven.candidates[0].kind, 'topic', 'the same cast still qualifies as a topic thread — the intersection is real');
+  assert.equal(unproven.candidates[0].key, 'Coast');
+});
+
+check('re-anchor: the intersection rule — index depth ranks a topic, it can no longer qualify one', () => {
+  const twoGeo = [wGeo('ia|landmark_origin', 32.74, 120, 'Index A'), wGeo('ib|landmark_origin', 32.78, 120, 'Index B')];
+  const support = new Map([[WT, 12]]);
+  const plan = anchorCompose(twoGeo, 2400, { wovenIndexSupport: support });
+  assert.equal(plan.thread, null, 'two geo carriers + a deep index → no thread (the exhausted-corridor mint is closed)');
+  assert.equal(plan.threadMenu?.source, 'none');
+  assert.deepEqual(plan.threadMenu?.offered, []);
+  // The legacy detector keeps its exact contract for its
+  // own callers — the intersection rule lives in the
+  // resolver, not in detectRouteThread.
+  assert.equal(rm.detectRouteThread(twoGeo, [], support)?.topic, WT);
+});
+
+check('re-anchor: menu labels speak the anchor tie and the honest cast count', () => {
+  const mk = (kind, label, count) => ({ kind, key: 'k', label, topic: null, count, score: count, memberIds: [], cooled: false, lastHeadlineIndex: Infinity });
+  assert.equal(rm.threadOptionLabel(mk('destination', 'Harbor Gate', 3)), 'Harbor Gate · your destination — 3 stories on this drive');
+  assert.equal(rm.threadOptionLabel(mk('onroute', 'Old Town Square', 5)), 'Old Town Square · on your road — 5 stories on this drive');
+  assert.equal(rm.threadOptionLabel(mk('origin', 'Campus Gate', 4)), 'Campus Gate · where you start — 4 stories on this drive');
+  assert.equal(rm.threadOptionLabel(mk('feature', 'Interstate 5', 2)), 'Interstate 5 · the road itself — 2 stories on this drive');
+  assert.equal(rm.threadOptionLabel(mk('topic', WT, 6)), `${WT} · on this drive — 6 stories on this drive`);
+});
+
+check('re-anchor: single- and zero-qualifier drives file their sources and never pause', () => {
+  const single = anchorCompose([32.74, 32.78, 32.82].map((lat, i) => wGeo(`sq${i + 1}|landmark_origin`, lat, 120, `Solo ${i + 1}`)));
+  assert.equal(single.thread?.anchorKind, 'topic');
+  assert.equal(single.threadMenu?.source, 'single-qualifier');
+  assert.equal(single.threadMenu?.menuShown, false);
+  const zero = anchorCompose([wGeo('zq1|landmark_origin', 32.74, 120, 'Zero 1')]);
+  assert.equal(zero.thread, null);
+  assert.equal(zero.threadMenu?.source, 'none');
+  assert.equal(zero.threadMenu?.pickedKey, null);
+});
+
+check('re-anchor: the cooldown demotes a repeat headline below every fresh candidate — and never to no-thread', () => {
+  const world = () => [
+    ...[32.74, 32.78, 32.82].map((lat, i) => wGeo(`cw${i + 1}|landmark_origin`, lat, 120, `Navy ${i + 1}`)),
+    ...[32.75, 32.79, 32.83].map((lat, i) =>
+      unit(`cf${i + 1}|landmark_origin`, lat, { topics: ['Food & Drink'], placeName: `Food ${i + 1}` }),
+    ),
+  ];
+  const rec = topic => ({
+    destinationName: 'Dest',
+    destinationPlaceKey: null,
+    threadTopic: topic,
+    anchorKey: topic,
+    playedSubjects: [],
+    owedSubjects: [],
+    endedAt: NOW,
+  });
+  const d1 = anchorCompose(world());
+  assert.equal(d1.thread?.topic, 'Food & Drink', 'drive 1: tied scores break by label — Food & Drink headlines');
+  const d2 = anchorCompose(world(), 2400, { driveRecords: [rec('Food & Drink')] });
+  assert.equal(d2.thread?.topic, WT, 'drive 2: the cooled headline yields to the fresh candidate');
+  const { res } = resolutionOf(world(), { driveRecords: [rec('Food & Drink')] });
+  const cooledRow = res.candidates.find(c => c.key === 'Food & Drink');
+  assert.equal(cooledRow.cooled, true, 'the cooled thread is still a candidate — demoted, never hidden');
+  assert.notEqual(res.defaultIndex, res.candidates.indexOf(cooledRow), 'a cooled thread is never the default');
+  const d3 = anchorCompose(world(), 2400, { driveRecords: [rec(WT), rec('Food & Drink')] });
+  assert.equal(d3.thread?.topic, 'Food & Drink', 'drive 3: all cooled → the least-recently-headlined wins; cooldown never forces no-thread');
+  // A menu pick is exempt: the cooled thread, chosen, is the
+  // episode's thread in full.
+  const pick = anchorCompose(world(), 2400, {
+    driveRecords: [rec('Food & Drink')],
+    threadChoice: {
+      candidate: cooledRow,
+      menu: {
+        offered: res.candidates.map(c => ({ kind: c.kind, key: c.key, label: c.label, count: c.count })),
+        menuShown: true,
+        source: 'menu-pick',
+        pickedKey: 'Food & Drink',
+      },
+    },
+  });
+  assert.equal(pick.thread?.topic, 'Food & Drink', 'the pick composes on the cooled thread — cooldown is detection-only');
+  assert.equal(pick.threadSource, 'user');
+  assert.equal(pick.threadMenu?.source, 'menu-pick');
+});
+
+check('menu: a pick composes exactly like a detection — members seat on it, and "Just the road" composes threadless', () => {
+  const geo = () => [
+    unit('harbor|landmark_origin', 32.895, { placeName: 'Harbor Gate', topics: ['Food & Drink'] }),
+    unit('harbor|landmark_event', 32.9, { placeName: 'Harbor Gate', topics: ['Food & Drink'] }),
+    unit('harbor|landmark_people', 32.905, { placeName: 'Harbor Gate', topics: [] }),
+    ...[32.74, 32.78, 32.82].map((lat, i) => wGeo(`mp${i + 1}|landmark_origin`, lat, 120, `Pick ${i + 1}`)),
+  ];
+  const { res } = resolutionOf(geo());
+  assert.equal(res.candidates.length, 2);
+  const topicRow = res.candidates.find(c => c.kind === 'topic');
+  const offered = res.candidates.map(c => ({ kind: c.kind, key: c.key, label: c.label, count: c.count }));
+  const picked = anchorCompose(geo(), 2400, {
+    threadChoice: { candidate: topicRow, menu: { offered, menuShown: true, source: 'menu-pick', pickedKey: topicRow.key } },
+  });
+  assert.equal(picked.thread?.anchorKind, 'topic', 'the pick, not the destination default, is the thread');
+  assert.equal(picked.thread?.topic, WT);
+  assert.equal(picked.threadSource, 'user');
+  const member = wCand('mpw|landmark_history', 200, { placeName: 'Picked Member' });
+  const seated = rm.seatWovenMembers(picked, [...geo(), member], { heardKeys: new Set() });
+  assert.ok(seated.wovenMembers.count >= 1, 'members seat on a picked thread exactly as on a detected one');
+  // Family: the rating's exclusion lanes bind a picked
+  // thread's members exactly as a detected one's — a
+  // Protected member never seats under Family, and seats
+  // under Standard.
+  const protectedMember = wCand('mpbad|landmark_history', 200, { placeName: 'Protected Member', protectedRegister: true });
+  const famPlan = rm.composeRoutePlan(
+    geo(),
+    path,
+    dest,
+    'Dest',
+    { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [], audience: 'family' },
+    {
+      nowMs: NOW,
+      heardKeys: new Set(),
+      budgetSecOverride: 2400,
+      driveSec: 2400,
+      threadChoice: { candidate: topicRow, menu: { offered, menuShown: true, source: 'menu-pick', pickedKey: topicRow.key } },
+    },
+  );
+  const famSeated = rm.seatWovenMembers(famPlan, [...geo(), member, protectedMember], { heardKeys: new Set() });
+  assert.ok(!famSeated.wovenMembers.unitIds.includes('mpbad|landmark_history'), 'Family: the Protected member is excluded from a picked thread');
+  const stdSeated = rm.seatWovenMembers(picked, [...geo(), member, protectedMember], { heardKeys: new Set() });
+  assert.ok(stdSeated.wovenMembers.unitIds.includes('mpbad|landmark_history'), 'Standard: the same member seats (the lane is the rating’s, not the pick’s)');
+  const noThread = anchorCompose(geo(), 2400, {
+    threadChoice: { candidate: null, menu: { offered, menuShown: true, source: 'menu-pick', pickedKey: null } },
+  });
+  assert.equal(noThread.thread, null, '"Just the road" composes with no thread even though two qualified');
+  assert.equal(noThread.threadSource, null);
+  assert.equal(noThread.threadMenu?.source, 'menu-pick');
+});
+
+check('re-anchor: Decision 5 — a thread member takes the climax reservation only by clearing the portal bar against the destination', () => {
+  const world = memberSec => [
+    wGeo('dm1|landmark_origin', 32.74, 200, 'Member One'),
+    wGeo('dm2|landmark_origin', 32.8, 300, 'Member Two'),
+    wGeo('dm3|landmark_origin', 32.86, memberSec, 'Member Three'),
+    unit('dd1|landmark_origin', 32.895, { placeName: 'Destination Story', topics: ['Food & Drink'], durationSec: 240 }),
+  ];
+  const weak = anchorCompose(world(260));
+  assert.equal(weak.thread?.topic, WT);
+  assert.equal(weak.climaxUnitId, 'dd1|landmark_origin', 'a 260 s member does not clear 1.25× the destination’s 240 s — the destination keeps its ending');
+  assert.equal(weak.climaxMode, 'destination');
+  const strong = anchorCompose(world(320));
+  assert.equal(strong.climaxUnitId, 'dm3|landmark_origin', 'a 320 s member clears the bar — the thread earns the close');
+});
+
+check('menu capture: the offered set, the shown flag, the source and the final thread ride the plan payload (schema stays 2)', () => {
+  const storyUnit = unit('s1|landmark_origin', 32.71);
+  const items = [
+    { kind: 'story', id: storyUnit.id, label: 'S1', durationSec: 100, unit: storyUnit, ready: true, anchorProgress: 0.1, releaseProgress: 0.1, expireProgress: 0.3 },
+  ];
+  const plan = {
+    destinationName: 'Dest',
+    destination: dest,
+    path,
+    driveSec: 1000,
+    budgetSec: 1000,
+    items,
+    wrapUp: null,
+    audience: 'standard',
+    thread: { topic: 'Food & Drink', memberIds: ['harbor|landmark_origin'], score: 3, anchorKind: 'destination', anchorKey: 'harbor', label: 'Harbor Gate' },
+    threadMenu: {
+      offered: [
+        { kind: 'destination', key: 'harbor', label: 'Harbor Gate', count: 3 },
+        { kind: 'topic', key: WT, label: WT, count: 4 },
+      ],
+      menuShown: true,
+      source: 'menu-pick',
+      pickedKey: 'harbor',
+    },
+  };
+  const payload = ec.assemblePlanCapture({
+    tourId: 'route-1',
+    buildId: 'fresh-test',
+    context: captureCtx,
+    plan,
+    routePlanStarted: null,
+    items: ec.assemblePlanItems(plan, new Set()),
+  });
+  assert.equal(payload.schema, 2);
+  assert.deepEqual(payload.thread_alternatives_offered, plan.threadMenu.offered);
+  assert.equal(payload.thread_menu_shown, true);
+  assert.equal(payload.thread_source, 'menu-pick');
+  assert.deepEqual(payload.thread_final, { topic: 'Food & Drink', label: 'Harbor Gate', anchor_kind: 'destination', anchor_key: 'harbor' });
+});
+
+await checkAsync('thread anchors battery: 100% anchor rate on fresh drives; zero cooldown repeats inside the window', async () => {
+  const anchors = await grader.runThreadAnchors({ rm, gf, rh });
+  assert.deepEqual(anchors.fresh.misses, [], 'every fresh default is the resolution’s own');
+  assert.ok(anchors.fresh.anchorQualified >= 1, 'the battery world qualifies anchors (else it proves nothing)');
+  assert.equal(anchors.fresh.anchorRate, 1, 'every drive where an anchor qualified took an anchored thread');
+  assert.deepEqual(anchors.repeat.violations, [], 'no detected default repeats a headline inside the cooldown window while a fresh candidate was offered');
+  console.log(
+    `    [thread anchors] fresh ${anchors.fresh.anchoredTaken}/${anchors.fresh.anchorQualified} anchor-qualified drives anchored; ` +
+      `repeat distribution ${JSON.stringify(anchors.repeat.distribution)}, sources ${JSON.stringify(anchors.repeat.sources)}, threadless ${anchors.repeat.threadless}/40`,
+  );
 });
 
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);

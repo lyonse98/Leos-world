@@ -363,6 +363,22 @@ export interface RouteEpisodePlanPayload {
   route_alternatives_offered: CapturedRouteAlternative[];
   route_picker_shown: boolean;
   route_picked_index: number;
+  /**
+   * Thread menu (Nov 5, 2026; additive — schema stays 2):
+   * the threads this drive could actually carry, in menu
+   * order (class, key, label, honest cast count), whether the
+   * listener was asked (menu shown), how the final thread was
+   * arrived at (thread_source: 'menu-pick' | 'default-
+   * detected' | 'single-qualifier' | 'none'), and the final
+   * thread itself (topic + label + anchor class + key) or
+   * null. Empty offered + 'none' = the plan carries no menu
+   * record (legacy blind-pick assemblies) or no thread
+   * qualified.
+   */
+  thread_alternatives_offered: { kind: string; key: string; label: string; count: number }[];
+  thread_menu_shown: boolean;
+  thread_source: string;
+  thread_final: { topic: string | null; label: string; anchor_kind: string; anchor_key: string } | null;
   /** The route_plan_started event payload, verbatim — decisions and all. */
   route_plan_started: Record<string, unknown>;
   items: CapturedItem[];
@@ -402,6 +418,22 @@ export function assemblePlanCapture(args: {
     })),
     route_picker_shown: plan.routeChoice?.pickerShown ?? false,
     route_picked_index: plan.routeChoice?.pickedIndex ?? 0,
+    thread_alternatives_offered: (plan.threadMenu?.offered ?? []).map(o => ({
+      kind: o.kind,
+      key: o.key,
+      label: o.label,
+      count: o.count,
+    })),
+    thread_menu_shown: plan.threadMenu?.menuShown ?? false,
+    thread_source: plan.threadMenu?.source ?? 'none',
+    thread_final: plan.thread
+      ? {
+          topic: plan.thread.topic,
+          label: plan.thread.label ?? plan.thread.topic ?? '',
+          anchor_kind: plan.thread.anchorKind ?? 'topic',
+          anchor_key: plan.thread.anchorKey ?? plan.thread.topic ?? '',
+        }
+      : null,
     route_plan_started: args.routePlanStarted,
     items: args.items,
     stage_timings_ms: context.stageTimingsMs,

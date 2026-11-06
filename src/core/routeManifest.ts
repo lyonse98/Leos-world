@@ -44,6 +44,20 @@ export function threadTitle(topic: string): string {
   return THREAD_TITLES[topic] ?? topic;
 }
 
+/**
+ * The manifest's display name for a thread (thread
+ * re-anchor, Nov 5, 2026): an anchored thread is named by
+ * its anchor — a place name or road name, spoken as-is —
+ * while a topic thread keeps its human title from the
+ * vocabulary map. (Importing the thread's shape here keeps
+ * the card honest: it never dresses a place up as a topic.)
+ */
+export function threadDisplayName(thread: { topic: string | null; label?: string; anchorKind?: string }): string {
+  if (thread.anchorKind && thread.anchorKind !== 'topic' && thread.label) return thread.label;
+  if (thread.topic) return threadTitle(thread.topic);
+  return thread.label ?? '';
+}
+
 export interface RouteManifest {
   /** "<Thread title>: <Origin> to <Destination>", or "<Origin> to <Destination>" with no thread. */
   title: string;
@@ -81,7 +95,7 @@ export function buildManifest(
   const thread = plan.thread ?? null;
   return {
     title: thread
-      ? `${threadTitle(thread.topic)}: ${opts.originName} to ${plan.destinationName}`
+      ? `${threadDisplayName(thread)}: ${opts.originName} to ${plan.destinationName}`
       : `${opts.originName} to ${plan.destinationName}`,
     runtimeLine: driveTimeLine(plan.driveSec ?? plan.budgetSec),
     storyCount: stories.length,
@@ -95,8 +109,8 @@ export function buildManifest(
     // route.
     threadLine: thread
       ? plan.threadCarried?.active
-        ? `The road's quiet today — this drive follows one thread: ${threadTitle(thread.topic)}`
-        : `One thread all the way — ${threadTitle(thread.topic)}`
+        ? `The road's quiet today — this drive follows one thread: ${threadDisplayName(thread)}`
+        : `One thread all the way — ${threadDisplayName(thread)}`
       : null,
   };
 }

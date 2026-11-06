@@ -20,6 +20,15 @@ export interface RouteDriveRecord {
   /** The destination's library place_key when the build could derive one, else null. */
   destinationPlaceKey: string | null;
   threadTopic: string | null;
+  /**
+   * The thread's anchor identity (thread re-anchor, Nov 5,
+   * 2026): a place_key, a 'road:<name>' / 'geo:<topic>' feature
+   * key, or the topic itself — the cooldown's stable match key
+   * (resolveThreadCandidates reads it ahead of the name match).
+   * Optional: records written before the re-anchor don't carry
+   * it, and the cooldown still matches those on threadTopic.
+   */
+  anchorKey?: string | null;
   /** Place names that actually sounded, in plan order. */
   playedSubjects: string[];
   /** Place names the closeout left owed (unplayed plan stories), in plan order. */
@@ -53,6 +62,9 @@ function isRecord(v: unknown): v is RouteDriveRecord {
     typeof r.destinationName === 'string' &&
     (typeof r.destinationPlaceKey === 'string' || r.destinationPlaceKey === null) &&
     (typeof r.threadTopic === 'string' || r.threadTopic === null) &&
+    // anchorKey is optional (pre-re-anchor records lack it);
+    // when present it must be a string or null.
+    (r.anchorKey === undefined || typeof r.anchorKey === 'string' || r.anchorKey === null) &&
     Array.isArray(r.playedSubjects) &&
     r.playedSubjects.every(s => typeof s === 'string') &&
     Array.isArray(r.owedSubjects) &&

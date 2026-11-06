@@ -1,0 +1,882 @@
+{
+  "generatedBy": "scripts/route-mode/grader.mjs --woven-production",
+  "generatedAt": "2026-11-06T06:48:44.644Z",
+  "label": "0602da1",
+  "world": {
+    "census": 1258,
+    "shape": "current"
+  },
+  "eligibleUnits": 473,
+  "fresh": {
+    "tourist": {
+      "stories": 16,
+      "silenceSec": 304,
+      "silenceShare": 0.169,
+      "threadTopic": "Deep Time",
+      "climaxPresent": true,
+      "members": 0,
+      "memberFetch": {
+        "topic": "Deep Time",
+        "reads": 12,
+        "candidates": 12
+      },
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.831,
+        "memberCap": 4
+      }
+    },
+    "hop": {
+      "stories": 7,
+      "silenceSec": 7,
+      "silenceShare": 0.01,
+      "threadTopic": "Coast",
+      "climaxPresent": true,
+      "members": 0,
+      "memberFetch": {
+        "topic": "Coast",
+        "reads": 12,
+        "candidates": 12
+      },
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.99,
+        "memberCap": 4
+      }
+    },
+    "commute": {
+      "stories": 19,
+      "silenceSec": 550,
+      "silenceShare": 0.229,
+      "threadTopic": "Border / CaliBaja",
+      "climaxPresent": true,
+      "members": 1,
+      "memberFetch": null,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.725,
+        "memberCap": 4
+      }
+    }
+  },
+  "drives": [
+    {
+      "drive": 1,
+      "stories": 19,
+      "silenceShare": 0.229,
+      "threadTopic": "Border / CaliBaja",
+      "climaxPresent": true,
+      "climaxMode": "late",
+      "members": 1,
+      "memberFetch": null,
+      "fetchReads": 150,
+      "ceilingHit": false,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.725,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 2,
+      "stories": 18,
+      "silenceShare": 0.186,
+      "threadTopic": "Highway",
+      "climaxPresent": true,
+      "climaxMode": "late",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 167,
+      "ceilingHit": false,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.814,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 3,
+      "stories": 20,
+      "silenceShare": 0.093,
+      "threadTopic": "Deep Time",
+      "climaxPresent": true,
+      "climaxMode": "portal",
+      "members": 1,
+      "memberFetch": {
+        "topic": "Deep Time",
+        "reads": 12,
+        "candidates": 12
+      },
+      "fetchReads": 185,
+      "ceilingHit": false,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.84,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 4,
+      "stories": 19,
+      "silenceShare": 0.126,
+      "threadTopic": "Navy Century",
+      "climaxPresent": true,
+      "climaxMode": "late",
+      "members": 1,
+      "memberFetch": {
+        "topic": "Navy Century",
+        "reads": 12,
+        "candidates": 12
+      },
+      "fetchReads": 199,
+      "ceilingHit": false,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.83,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 5,
+      "stories": 17,
+      "silenceShare": 0.196,
+      "threadTopic": "County 668",
+      "climaxPresent": true,
+      "climaxMode": "late",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 213,
+      "ceilingHit": false,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.804,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 6,
+      "stories": 18,
+      "silenceShare": 0.096,
+      "threadTopic": "Highway",
+      "climaxPresent": true,
+      "climaxMode": "destination",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 229,
+      "ceilingHit": false,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.904,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 7,
+      "stories": 18,
+      "silenceShare": 0.075,
+      "threadTopic": "Surf",
+      "climaxPresent": true,
+      "climaxMode": "late",
+      "members": 1,
+      "memberFetch": {
+        "topic": "Surf",
+        "reads": 5,
+        "candidates": 5
+      },
+      "fetchReads": 240,
+      "ceilingHit": false,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.862,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 8,
+      "stories": 17,
+      "silenceShare": 0.111,
+      "threadTopic": "folklore",
+      "climaxPresent": true,
+      "climaxMode": "portal",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 254,
+      "ceilingHit": false,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.889,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 9,
+      "stories": 20,
+      "silenceShare": 0.141,
+      "threadTopic": "Coast",
+      "climaxPresent": true,
+      "climaxMode": "portal",
+      "members": 1,
+      "memberFetch": {
+        "topic": "Mission Chain",
+        "reads": 2,
+        "candidates": 2
+      },
+      "fetchReads": 257,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.8,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 10,
+      "stories": 18,
+      "silenceShare": 0.15,
+      "threadTopic": "Rail",
+      "climaxPresent": true,
+      "climaxMode": "destination",
+      "members": 1,
+      "memberFetch": {
+        "topic": "Rail",
+        "reads": 2,
+        "candidates": 2
+      },
+      "fetchReads": 265,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.81,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 11,
+      "stories": 18,
+      "silenceShare": 0.145,
+      "threadTopic": "Mission Chain",
+      "climaxPresent": true,
+      "climaxMode": "late",
+      "members": 1,
+      "memberFetch": {
+        "topic": "Mission Chain",
+        "reads": 2,
+        "candidates": 2
+      },
+      "fetchReads": 269,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.797,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 12,
+      "stories": 20,
+      "silenceShare": 0.116,
+      "threadTopic": "The Cure",
+      "climaxPresent": true,
+      "climaxMode": "portal",
+      "members": 0,
+      "memberFetch": {
+        "topic": "Navy Century",
+        "reads": 12,
+        "candidates": 11
+      },
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.884,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 13,
+      "stories": 15,
+      "silenceShare": 0.266,
+      "threadTopic": null,
+      "climaxPresent": true,
+      "climaxMode": "late",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.734,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 14,
+      "stories": 15,
+      "silenceShare": 0.358,
+      "threadTopic": null,
+      "climaxPresent": true,
+      "climaxMode": "late",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.642,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 15,
+      "stories": 6,
+      "silenceShare": 0.799,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.201,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 16,
+      "stories": 6,
+      "silenceShare": 0.787,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.213,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 17,
+      "stories": 5,
+      "silenceShare": 0.842,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.158,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 18,
+      "stories": 2,
+      "silenceShare": 0.923,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0.078,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 19,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 20,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 21,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 22,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 23,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 24,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 25,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 26,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 27,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 28,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 29,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 30,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 31,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 32,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 33,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 34,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 35,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 36,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 37,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 38,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 39,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    },
+    {
+      "drive": 40,
+      "stories": 0,
+      "silenceShare": 1,
+      "threadTopic": null,
+      "climaxPresent": false,
+      "climaxMode": "natural",
+      "members": 0,
+      "memberFetch": null,
+      "fetchReads": 270,
+      "ceilingHit": true,
+      "threadCarried": {
+        "active": false,
+        "geoCoverageFraction": 0,
+        "memberCap": 4
+      }
+    }
+  ],
+  "summary": {
+    "substantiveThreadEpisodes": 12,
+    "substantiveEpisodes": 14,
+    "substantiveStarvationDrive": null,
+    "threadDrives": 12,
+    "climaxDrives": 14,
+    "meanSilenceShare": 0.691,
+    "meanConsecutiveOverlap": 0.538,
+    "totalMembers": 7,
+    "drivesWithMembers": 7,
+    "minStories": 0,
+    "lastDriveStories": 0,
+    "funnel": {
+      "early": {
+        "drives": 13,
+        "threadDrives": 12,
+        "substantiveThread": 12,
+        "members": 7,
+        "memberFetches": 7,
+        "memberReads": 47,
+        "memberCandidates": 46,
+        "departureReads": 2968,
+        "ceilingHits": 5
+      },
+      "late": {
+        "drives": 27,
+        "threadDrives": 0,
+        "substantiveThread": 0,
+        "members": 0,
+        "memberFetches": 0,
+        "memberReads": 0,
+        "memberCandidates": 0,
+        "departureReads": 7290,
+        "ceilingHits": 27
+      },
+      "all": {
+        "drives": 40,
+        "threadDrives": 12,
+        "substantiveThread": 12,
+        "members": 7,
+        "memberFetches": 7,
+        "memberReads": 47,
+        "memberCandidates": 46,
+        "departureReads": 10258,
+        "ceilingHits": 32
+      }
+    },
+    "carried": {
+      "fires": 0,
+      "climaxes": 0,
+      "bands": {
+        "head": {
+          "drives": 13,
+          "threadDrives": 12,
+          "substantiveThread": 12,
+          "members": 7,
+          "memberFetches": 7,
+          "memberReads": 47,
+          "memberCandidates": 46,
+          "departureReads": 2968,
+          "ceilingHits": 5,
+          "carriedFires": 0,
+          "carriedClimaxes": 0,
+          "meanSilenceShare": 0.148
+        },
+        "shoulder": {
+          "drives": 3,
+          "threadDrives": 0,
+          "substantiveThread": 0,
+          "members": 0,
+          "memberFetches": 0,
+          "memberReads": 0,
+          "memberCandidates": 0,
+          "departureReads": 810,
+          "ceilingHits": 3,
+          "carriedFires": 0,
+          "carriedClimaxes": 0,
+          "meanSilenceShare": 0.648
+        },
+        "arithmetic": {
+          "drives": 5,
+          "threadDrives": 0,
+          "substantiveThread": 0,
+          "members": 0,
+          "memberFetches": 0,
+          "memberReads": 0,
+          "memberCandidates": 0,
+          "departureReads": 1350,
+          "ceilingHits": 5,
+          "carriedFires": 0,
+          "carriedClimaxes": 0,
+          "meanSilenceShare": 0.953
+        },
+        "tail": {
+          "drives": 19,
+          "threadDrives": 0,
+          "substantiveThread": 0,
+          "members": 0,
+          "memberFetches": 0,
+          "memberReads": 0,
+          "memberCandidates": 0,
+          "departureReads": 5130,
+          "ceilingHits": 19,
+          "carriedFires": 0,
+          "carriedClimaxes": 0,
+          "meanSilenceShare": 1
+        }
+      }
+    }
+  }
+}

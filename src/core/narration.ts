@@ -121,9 +121,23 @@ export function spokenFormText(text: string): string {
  * assert a recap of specific stories as heard.
  * buildWrapUpContext (routeMode) assembles this from the plan.
  */
+/**
+ * The thread's anchor class (thread re-anchor, Nov 5, 2026)
+ * — mirrors routeMode's ThreadAnchorKind (declared here so
+ * the narration layer stays import-free of composition).
+ */
+export type ThreadAnchorKindView = 'destination' | 'onroute' | 'origin' | 'feature' | 'topic';
+
 export interface WrapUpContext {
   destinationName: string;
   threadTopic: string | null;
+  /**
+   * The thread's speakable name when anchored (its place or
+   * road name) and its anchor class. The wrap-up names where
+   * an anchored thread tied off instead of naming a bare tag.
+   */
+  threadLabel?: string | null;
+  threadAnchorKind?: ThreadAnchorKindView | null;
   /**
    * How the plan's climax resolved (addendum 4 + consolidation
    * §4): 'destination' lets the arrival beat land on the
@@ -153,9 +167,26 @@ export interface WrapUpContext {
  */
 export function wrapUpTextFor(ctx: WrapUpContext): string {
   const arrival = `And here we are — ${ctx.destinationName}. `;
-  const arc = ctx.threadTopic
-    ? `That was the ${ctx.threadTopic} thread, beginning to end: it ran under every mile of this drive, and it ties off here, where the road delivers us. Every place we passed was one more verse of the same song — the kind of drive that reminds you a commute is never just a commute. `
-    : `That was the drive, beginning to end — a road full of stories, and we rode it the whole way. This county layers its history right along the asphalt; you only have to be listening. `;
+  // Thread re-anchor (Nov 5, 2026): an anchored thread ties
+  // off WHERE it lived — a destination anchor at the arrival
+  // itself, an on-route place back at its ground, the origin
+  // behind us, a road/thread along the drive. The topic
+  // wording is unchanged.
+  const anchoredArc =
+    ctx.threadAnchorKind === 'destination' && ctx.threadLabel
+      ? `And the thread of this drive was ${ctx.threadLabel} itself, waiting at the end of the road the whole way — every mile we covered was a mile closer to it, and it ties off here, at the arrival. `
+      : ctx.threadAnchorKind === 'onroute' && ctx.threadLabel
+        ? `The thread of this drive was ${ctx.threadLabel} — the country we passed through mid-drive, where the stories kept gathering. It ties off back there, at its own ground; the road carried it the rest of the way here. `
+        : ctx.threadAnchorKind === 'origin' && ctx.threadLabel
+          ? `The thread of this drive started back in ${ctx.threadLabel} country — the ground we set out from — and it ran with us the whole way, tying off here, where the road delivers us. `
+          : (ctx.threadAnchorKind === 'feature' || ctx.threadAnchorKind === 'topic') && ctx.threadLabel && ctx.threadLabel !== ctx.threadTopic
+            ? `The thread of this drive was ${ctx.threadLabel} — it ran under every mile of this drive, and it ties off here, where the road delivers us. `
+            : null;
+  const arc =
+    anchoredArc ??
+    (ctx.threadTopic
+      ? `That was the ${ctx.threadTopic} thread, beginning to end: it ran under every mile of this drive, and it ties off here, where the road delivers us. Every place we passed was one more verse of the same song — the kind of drive that reminds you a commute is never just a commute. `
+      : `That was the drive, beginning to end — a road full of stories, and we rode it the whole way. This county layers its history right along the asphalt; you only have to be listening. `);
   const climax =
     (ctx.climaxMode === 'destination' || ctx.climaxMode === 'portal') && ctx.climaxSubject
       ? `${ctx.climaxSubject} was where it all came together. `
@@ -184,6 +215,19 @@ export function wrapUpTextFor(ctx: WrapUpContext): string {
  */
 export interface PreviewContext {
   threadTopic: string | null;
+  /**
+   * The thread's speakable name when anchored (its place or
+   * road name) and its anchor class (thread re-anchor,
+   * Nov 5, 2026). The preview frames an anchored thread by
+   * where the thread lives on this drive: the destination
+   * waits at the end of the road; an on-route place owns the
+   * middle; the origin is the ground we set out from; a
+   * feature is the road's own arc. When the thread is a
+   * plain topic (or the label equals the topic), the topic
+   * wording stands unchanged.
+   */
+  threadLabel?: string | null;
+  threadAnchorKind?: ThreadAnchorKindView | null;
   /** Where the drive ends. */
   destinationName: string;
   /** How many stories the plan carries. */
@@ -235,29 +279,60 @@ export interface PreviewContext {
  */
 export function previewTextFor(ctx: PreviewContext): string {
   const promiseSubject = ctx.climaxSubject ?? ctx.closingSubject;
+  // The thread's spoken name: the anchor label when the
+  // thread is anchored to a place or feature, else its topic.
+  const threadName = ctx.threadTopic ?? ctx.threadLabel;
   let text: string;
-  if (ctx.threadCarried && ctx.threadTopic) {
+  if (ctx.threadCarried && threadName) {
     // Thread-carried framing (Nov 4, 2026): honest about the
     // shape of this episode — the road itself is quiet, the
     // THREAD is the drive. The promise is the member the
     // episode builds to (the designated climax when there is
     // one, else its closing story); the mid hook is a real
     // member of the plan, as everywhere. No sentence places
-    // a member on the route.
+    // a member on the route. (Thread re-anchor, Nov 5, 2026:
+    // an anchored thread keeps this honest shape — the road
+    // is quiet today, so the drive follows the road to the
+    // destination — with the anchor's own name in place of a
+    // bare tag when the thread carries no topic.)
     text =
-      `The road's quiet today — so this drive follows a thread instead: ${ctx.threadTopic}. ` +
-      `It runs under the whole road, all the way to ${ctx.destinationName}.`;
+      ctx.threadTopic
+        ? `The road's quiet today — so this drive follows a thread instead: ${ctx.threadTopic}. ` +
+          `It runs under the whole road, all the way to ${ctx.destinationName}.`
+        : `The road's quiet today — so we're following the road to ${ctx.destinationName}, and the thread is ${threadName} itself.`;
     if (promiseSubject) {
       text += ` Keep an ear out for ${promiseSubject} — that's the one this drive builds to.`;
     }
     if (ctx.midSubject) {
       text += ` And halfway there, ${ctx.midSubject} is waiting${ctx.midGist ? ` — ${ctx.midGist.replace(/\.$/, '')}` : ''}.`;
     }
-  } else if (ctx.threadTopic && promiseSubject) {
+  } else if (threadName && promiseSubject) {
+    // Thread re-anchor (Nov 5, 2026): anchored threads are
+    // framed by where the thread LIVES on this drive. A
+    // destination anchor: the road flows TOWARD the thread,
+    // and the thread ties off at arrival. An on-route place:
+    // the place owns the middle of the drive. An origin
+    // anchor: we are leaving its country. A feature: the
+    // road's own arc — presence-proven, so the "runs under
+    // this whole road" language is earned. A plain topic
+    // thread keeps the standing wording exactly.
+    const anchored =
+      ctx.threadAnchorKind === 'destination' && ctx.threadLabel
+        ? ctx.climaxMode === 'natural'
+          ? `Here's where this drive is headed — not just ${ctx.destinationName}, but ${ctx.threadLabel} itself. The whole road flows toward it, and ${promiseSubject} waits at the end.`
+          : `Here's where this drive is headed — not just ${ctx.destinationName}, but ${ctx.threadLabel} itself, and it ties off at arrival: by the time we reach ${ctx.destinationName}, I'll tell you about ${promiseSubject}, where it all comes together.`
+        : ctx.threadAnchorKind === 'onroute' && ctx.threadLabel
+          ? `The heart of this drive is ${ctx.threadLabel} — it owns the middle of the road, and the stories keep gathering there. ${ctx.climaxMode === 'natural' ? `Keep an ear out for ${promiseSubject} — that's the one this drive builds to.` : `By the time we reach ${ctx.destinationName}, I'll tell you about ${promiseSubject}, where it all comes together.`}`
+          : ctx.threadAnchorKind === 'origin' && ctx.threadLabel
+            ? `We're leaving ${ctx.threadLabel} country — the ground we set out from threads this whole drive, all the way to ${ctx.destinationName}. Keep an ear out for ${promiseSubject} — that's the one this drive builds to.`
+            : null;
     text =
-      ctx.climaxMode === 'natural'
-        ? `Here's the thread to listen for on this drive: ${ctx.threadTopic}. It runs under this whole road, all the way to ${ctx.destinationName}. Keep an ear out for ${promiseSubject} — that's the one this drive builds to.`
-        : `Here's the thread to listen for on this drive: ${ctx.threadTopic}. It runs under this whole road — and by the time we reach ${ctx.destinationName}, I'll tell you about ${promiseSubject}, where it all comes together.`;
+      anchored ??
+      (ctx.threadTopic
+        ? ctx.climaxMode === 'natural'
+          ? `Here's the thread to listen for on this drive: ${ctx.threadTopic}. It runs under this whole road, all the way to ${ctx.destinationName}. Keep an ear out for ${promiseSubject} — that's the one this drive builds to.`
+          : `Here's the thread to listen for on this drive: ${ctx.threadTopic}. It runs under this whole road — and by the time we reach ${ctx.destinationName}, I'll tell you about ${promiseSubject}, where it all comes together.`
+        : `The thread of this drive is ${threadName} — it runs under this whole road, all the way to ${ctx.destinationName}. Keep an ear out for ${promiseSubject} — that's the one this drive builds to.`);
     if (ctx.midSubject) {
       text += ` And halfway there, ${ctx.midSubject} is waiting${ctx.midGist ? ` — ${ctx.midGist.replace(/\.$/, '')}` : ''}.`;
     }
@@ -570,6 +645,15 @@ export function bridgeEpisodeStateFromTexts(texts: string[]): BridgeEpisodeState
  */
 export interface BridgeContext {
   threadTopic: string | null;
+  /**
+   * The thread's speakable name when anchored (its place or
+   * road name) and its anchor class (thread re-anchor,
+   * Nov 5, 2026). When the thread carries no topic, the
+   * payoff/callback lines name the thread by this label
+   * instead of falling silent.
+   */
+  threadLabel?: string | null;
+  threadAnchorKind?: ThreadAnchorKindView | null;
   prevSubject: string;
   prevGist: string | null;
   nextSubject: string;
@@ -712,7 +796,12 @@ export function bridgeTextFor(
       sentences.push(
         ctx.threadTopic
           ? `This next one isn't on our road at all — it's ${ctx.wovenSubject}, clear across the county. But the ${ctx.threadTopic} thread runs straight through it, so we're following the thread for a while.`
-          : `This next one isn't on our road at all — it's ${ctx.wovenSubject}, clear across the county. But it belongs in this drive, so we're ranging off the road for it.`,
+          : ctx.threadLabel
+            ? // Thread re-anchor (Nov 5, 2026): an anchored
+              // thread with no topic names its thread by its
+              // place — the range is framed the same way.
+              `This next one isn't on our road at all — it's ${ctx.wovenSubject}, clear across the county. But it belongs to the ${ctx.threadLabel} thread of this drive, so we're following the thread for a while.`
+            : `This next one isn't on our road at all — it's ${ctx.wovenSubject}, clear across the county. But it belongs in this drive, so we're ranging off the road for it.`,
       );
     }
     if (ctx.role === 'payoff') {
@@ -721,6 +810,14 @@ export function bridgeTextFor(
           ctx.promiseMade
             ? `And here it is — ${ctx.nextSubject}. I pointed at this one when we set out: this drive's ${ctx.threadTopic} thread lands here.`
             : `And here it is — ${ctx.nextSubject}, where this drive's ${ctx.threadTopic} thread comes together.`,
+        );
+      } else if (ctx.threadLabel) {
+        // Thread re-anchor (Nov 5, 2026): an anchored thread
+        // with no topic pays off by its anchor's name.
+        sentences.push(
+          ctx.promiseMade
+            ? `And here it is — ${ctx.nextSubject}. I pointed at this one when we set out: this is where the ${ctx.threadLabel} thread of this drive lands.`
+            : `And here it is — ${ctx.nextSubject}, where the ${ctx.threadLabel} thread of this drive comes together.`,
         );
       }
       // The off-route hop, framed honestly (consolidation §4):
@@ -731,20 +828,25 @@ export function bridgeTextFor(
           `Now — this next one isn't on our road at all. ${ctx.offRouteSubject} is clear across the county from here. But it's the story this whole drive has been about, so we're making the hop.`,
         );
       }
-    } else if (ctx.threadTopic && ctx.role === 'mid' && ctx.callbackSubject) {
+    } else if ((ctx.threadTopic || ctx.threadLabel) && ctx.role === 'mid' && ctx.callbackSubject) {
       // The thread callout fires at most once per episode
       // (lane 1b): the first mid bridge that can name it gets
       // the formula; later ones connect on the callback fact
-      // plainly, in different words.
+      // plainly, in different words. (Thread re-anchor,
+      // Nov 5, 2026: an anchored thread with no topic calls
+      // back by its anchor's name — `threadName` below is the
+      // same name the topic wording has always used when a
+      // topic exists, so topic threads are byte-identical.)
+      const threadName = ctx.threadTopic ?? ctx.threadLabel;
       optionalIdx = sentences.length;
       if (!episode.threadCalloutUsed) {
         sentences.push(
-          `There's that ${ctx.threadTopic} thread again — ${ctx.callbackSubject} and ${ctx.nextSubject} are two ends of the same story.`,
+          `There's that ${threadName} thread again — ${ctx.callbackSubject} and ${ctx.nextSubject} are two ends of the same story.`,
         );
         episode.threadCalloutUsed = true;
       } else {
         sentences.push(
-          `We heard the ${ctx.threadTopic} thread in ${ctx.callbackSubject} — it runs through ${ctx.nextSubject} too.`,
+          `We heard the ${threadName} thread in ${ctx.callbackSubject} — it runs through ${ctx.nextSubject} too.`,
         );
       }
     }

@@ -1330,7 +1330,19 @@ export class RoutePlanRunner {
       // composed around. Climax (addendum 4 + consolidation
       // §4): how it resolved and its subject — a portal climax
       // carries its distance from the route as well.
-      thread: plan.thread ? { topic: plan.thread.topic, members: plan.thread.memberIds } : null,
+      thread: plan.thread
+        ? {
+            topic: plan.thread.topic,
+            members: plan.thread.memberIds,
+            // Thread re-anchor (Nov 5, 2026): the thread's
+            // anchor class, identity and speakable name, so
+            // the capture can read what the episode was
+            // actually threaded on.
+            label: plan.thread.label ?? plan.thread.topic,
+            anchor_kind: plan.thread.anchorKind ?? 'topic',
+            anchor_key: plan.thread.anchorKey ?? plan.thread.topic,
+          }
+        : null,
       climax: {
         mode: plan.climaxMode ?? 'natural',
         subject: plan.climaxSubject ?? null,
@@ -1348,8 +1360,20 @@ export class RoutePlanRunner {
         // outside a build carry the composer's own field.
         audience: plan.audience ?? 'standard',
         thread: plan.thread
-          ? { topic: plan.thread.topic, source: plan.threadSource ?? 'detected' }
+          ? {
+              topic: plan.thread.topic,
+              source: plan.threadSource ?? 'detected',
+              label: plan.thread.label ?? plan.thread.topic,
+              anchor_kind: plan.thread.anchorKind ?? 'topic',
+              anchor_key: plan.thread.anchorKey ?? plan.thread.topic,
+            }
           : null,
+        // Thread menu (Nov 5, 2026): what the drive offered,
+        // whether the listener chose, and how the final
+        // thread was arrived at — the menu record verbatim.
+        // Null on plans composed by the legacy blind-pick
+        // path (no menu record exists there).
+        thread_menu: plan.threadMenu ?? null,
         climax: { mode: plan.climaxMode ?? 'natural', subject: plan.climaxSubject ?? null },
         preview: plan.previewFacts ?? { threadPromised: false, previouslyDrive: false, previouslySubject: false },
         // Composer v3 (commit B): the plan's act structure —
@@ -2511,7 +2535,13 @@ export class RoutePlanRunner {
       this.deps.onDriveRecord({
         destinationName: this.plan.destinationName,
         destinationPlaceKey: null,
-        threadTopic: this.plan.thread?.topic ?? null,
+        // Thread re-anchor (Nov 5, 2026): the record stores
+        // the thread's continuity identity — its topic when it
+        // carries one, else its anchor label (the composer's
+        // own matching reads it the same way) — plus the
+        // anchor key, the cooldown's stable match.
+        threadTopic: this.plan.thread ? (this.plan.thread.topic ?? this.plan.thread.label ?? null) : null,
+        anchorKey: this.plan.thread ? (this.plan.thread.anchorKey ?? null) : null,
         playedSubjects: names(played),
         owedSubjects: names(unplayedUnits),
         endedAt: Date.now(),

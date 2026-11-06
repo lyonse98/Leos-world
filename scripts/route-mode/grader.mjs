@@ -140,7 +140,12 @@ export function planMetrics(plan, { driveSec, climaxPool = null }) {
     stories: stories.length,
     silenceSec: Math.round(silenceSec),
     silenceShare: Math.round((silenceSec / budget) * 1000) / 1000,
-    threadTopic: plan.thread?.topic ?? null,
+    // Thread re-anchor (Nov 5, 2026): "thread-bearing" reads
+    // the thread's continuity identity — its topic, else its
+    // anchor label — so an anchored thread counts as the
+    // thread it is. For topic threads this is exactly the
+    // pre-anchor metric.
+    threadTopic: plan.thread ? (plan.thread.topic ?? plan.thread.label) : null,
     climaxPresent: plan.climaxUnitId != null || winnerItem !== null,
     climaxMode: plan.climaxMode ?? null,
     climaxWinnerClass: winner ? angleClassOf(winner.angle) : null,
@@ -692,7 +697,10 @@ async function gradeAll(mods) {
         {
           destinationName: route.destName,
           destinationPlaceKey: route.destPlaceKey,
-          threadTopic: build.plan.thread?.topic ?? null,
+          // Production record shape (thread re-anchor, Nov 5,
+          // 2026): continuity identity + anchor key.
+          threadTopic: build.plan.thread ? (build.plan.thread.topic ?? build.plan.thread.label) : null,
+          anchorKey: build.plan.thread?.anchorKey ?? null,
           playedSubjects: [...new Set(played.map(i => i.unit.placeName))],
           owedSubjects: [],
           endedAt: nowMs,
@@ -1775,7 +1783,9 @@ export async function runWovenProduction(mods, { drives: driveCount = 40 } = {})
       drive: d + 1,
       stories: metrics.stories,
       silenceShare: metrics.silenceShare,
-      threadTopic: plan.thread?.topic ?? null,
+      // (Thread re-anchor, Nov 5, 2026: the per-drive thread
+      // reads the continuity identity, like planMetrics.)
+      threadTopic: plan.thread ? (plan.thread.topic ?? plan.thread.label) : null,
       climaxPresent: metrics.climaxPresent,
       climaxMode: metrics.climaxMode,
       members,
@@ -1798,7 +1808,12 @@ export async function runWovenProduction(mods, { drives: driveCount = 40 } = {})
       {
         destinationName: route.destName,
         destinationPlaceKey: route.destPlaceKey,
-        threadTopic: plan.thread?.topic ?? null,
+        // Production record shape (thread re-anchor, Nov 5,
+        // 2026 — the runner's writeDriveRecord): the thread's
+        // continuity identity (topic, else anchor label) plus
+        // its anchor key, the cooldown's stable match.
+        threadTopic: plan.thread ? (plan.thread.topic ?? plan.thread.label) : null,
+        anchorKey: plan.thread?.anchorKey ?? null,
         playedSubjects: [...new Set(played.map(i => i.unit.placeName))],
         owedSubjects: [],
         endedAt: nowMs,
@@ -1872,6 +1887,136 @@ export async function runWovenProduction(mods, { drives: driveCount = 40 } = {})
       },
     },
   };
+}
+
+/**
+ * Thread-anchor battery (thread re-anchor, Nov 5, 2026):
+ * the anchor-rate + cooldown acceptance over the marked
+ * world, run through the PRODUCTION build (runBuild).
+ *
+ * FRESH leg (empty ledgers, the 3 route shapes): the
+ * candidate resolution is recomputed from each build's own
+ * fetched pools — index-free, which is exact for everything
+ * this leg asserts: anchor qualification never reads the
+ * index, class order dominates topic ranking, and with no
+ * drive records nothing is cooled, so the default is the
+ * first candidate in class order. Whenever an anchor-class
+ * candidate qualified, the plan's thread must BE an anchored
+ * thread (anchor rate 1.0); whenever the recomputed default
+ * is an anchor, the plan's thread must be that very anchor.
+ *
+ * REPEAT leg (40 commute drives, production record shape):
+ * no drive's detected thread may repeat a headline from the
+ * previous 3 drives while the drive's own offered set held a
+ * fresh candidate (the cooldown's acceptance, read off the
+ * plan's filed menu record). The anchor-class distribution
+ * and the menu-source distribution are reported as data.
+ */
+export async function runThreadAnchors(mods) {
+  const { rm } = mods;
+  const world = buildWorld(1103, 'current');
+  const eligible = wovenEligibleUnits(world, 'commute', { audit: true }, 9200);
+  const eligibleIds = new Set(eligible.map(u => u.id));
+  for (const u of world.unitsById.values()) {
+    if (eligibleIds.has(u.id)) u.wovenEligible = true;
+  }
+
+  const fresh = { drives: 0, anchorQualified: 0, anchoredTaken: 0, misses: [] };
+  for (const routeName of ['tourist', 'hop', 'commute']) {
+    const route = world.routes[routeName];
+    const build = await runBuild(mods, world, route, {
+      heardNames: new Set(),
+      heardTexts: new Set(),
+      driveRecords: [],
+      input: { destinationText: route.destName, arrivalTimeMs: null, tone: null, topics: [] },
+      nowMs: BASE_NOW,
+    });
+    fresh.drives += 1;
+    const pools = rm.partitionRoutePools(build.units, route.path, route.dest, {
+      heardKeys: build.heardKeys,
+    });
+    const res = rm.resolveThreadCandidates({
+      geoPool: pools.geoAll,
+      wovenSupport: pools.portalAll.filter(u => u.wovenEligible === true),
+      path: route.path,
+      destination: route.dest,
+      destinationPlaceKey: route.destPlaceKey,
+      driveRecords: [],
+    });
+    const def = res.defaultIndex >= 0 ? res.candidates[res.defaultIndex] : null;
+    const planThreadKey = build.plan.thread?.anchorKey ?? null;
+    if ((def?.key ?? null) !== planThreadKey && def && def.kind !== 'topic') {
+      fresh.misses.push(`${routeName}: default ${def.kind}:${def.key} but plan threaded ${planThreadKey ?? 'none'}`);
+    }
+    if (!def && build.plan.thread) {
+      fresh.misses.push(`${routeName}: no candidate qualified but the plan threaded ${planThreadKey}`);
+    }
+    if (res.candidates.some(c => c.kind !== 'topic')) {
+      fresh.anchorQualified += 1;
+      if (build.plan.thread && build.plan.thread.anchorKind !== 'topic') fresh.anchoredTaken += 1;
+      else fresh.misses.push(`${routeName}: an anchor qualified but the plan took ${build.plan.thread?.anchorKind ?? 'no thread'}`);
+    }
+  }
+  fresh.anchorRate = fresh.anchorQualified === 0 ? null : fresh.anchoredTaken / fresh.anchorQualified;
+
+  const route = world.routes.commute;
+  const heardNames = new Set();
+  const heardTexts = new Set();
+  let records = [];
+  const repeat = { drives: 0, violations: [], distribution: {}, sources: {}, threadless: 0 };
+  for (let d = 0; d < 40; d++) {
+    const nowMs = BASE_NOW + d * 24 * 60 * 60 * 1000;
+    const build = await runBuild(mods, world, route, {
+      heardNames,
+      heardTexts,
+      driveRecords: records,
+      input: { destinationText: route.destName, arrivalTimeMs: null, tone: null, topics: [] },
+      nowMs,
+    });
+    const plan = build.plan;
+    repeat.drives += 1;
+    const kind = plan.thread?.anchorKind ?? 'none';
+    repeat.distribution[kind] = (repeat.distribution[kind] ?? 0) + 1;
+    if (!plan.thread) repeat.threadless += 1;
+    const source = plan.threadMenu?.source ?? 'legacy';
+    repeat.sources[source] = (repeat.sources[source] ?? 0) + 1;
+    if (plan.thread && plan.threadMenu) {
+      const recentIdentities = new Set();
+      for (const r of records.slice(0, rm.THREAD_COOLDOWN_DRIVES)) {
+        if (r.anchorKey) recentIdentities.add(r.anchorKey);
+        if (r.threadTopic) recentIdentities.add(r.threadTopic);
+      }
+      const key = plan.thread.anchorKey;
+      const repeated =
+        recentIdentities.has(key) ||
+        (plan.thread.topic !== null && recentIdentities.has(plan.thread.topic)) ||
+        recentIdentities.has(plan.thread.label);
+      const freshOffered = plan.threadMenu.offered.some(o => o.key !== key && !recentIdentities.has(o.key));
+      if (repeated && freshOffered) {
+        repeat.violations.push(
+          `drive ${d + 1}: thread ${key} repeated inside the cooldown window while a fresh candidate was offered`,
+        );
+      }
+    }
+    const played = plan.items.filter(i => i.kind === 'story' && i.unit);
+    for (const it of played) {
+      heardNames.add(it.unit.placeName);
+      if (it.unit.storyText) heardTexts.add(it.unit.storyText);
+    }
+    records = [
+      {
+        destinationName: route.destName,
+        destinationPlaceKey: route.destPlaceKey,
+        threadTopic: plan.thread ? (plan.thread.topic ?? plan.thread.label) : null,
+        anchorKey: plan.thread?.anchorKey ?? null,
+        playedSubjects: [...new Set(played.map(i => i.unit.placeName))],
+        owedSubjects: [],
+        endedAt: nowMs,
+      },
+      ...records,
+    ].slice(0, 20);
+  }
+  return { fresh, repeat };
 }
 
 function renderWovenProductionMarkdown(prod, label) {

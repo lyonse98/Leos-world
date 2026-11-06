@@ -1313,6 +1313,17 @@ export interface RoutePlan {
    * the composer found it on the shelf, null with no thread.
    */
   threadSource: 'user' | 'detected' | null;
+  /**
+   * The thread menu's record on this plan (thread re-anchor
+   * amendment, Nov 5, 2026): what was offered, whether the
+   * listener chose, and how the final thread was arrived at.
+   * Filed by the composer from its own resolution, or by the
+   * App's menu staging through ComposeOptions.threadChoice.
+   * Absent on plans composed by the legacy blind-pick path
+   * (input.topics non-empty, no menu) — a blind-pick episode
+   * files no menu record.
+   */
+  threadMenu?: ThreadMenuRecord | null;
   /** The climax unit id, when the plan has one (addendum 4: not destination-geared). */
   climaxUnitId: string | null;
   /**
@@ -1483,22 +1494,58 @@ export interface WovenMembers {
 
 // ------------------------------------------------------------ through-line (differentiator 2)
 
+/**
+ * The anchor class a thread belongs to (thread re-anchor,
+ * Nov 5, 2026): 'destination' | 'onroute' | 'origin' |
+ * 'feature' are properties of THIS drive's geography — a
+ * place or feature the road actually touches; 'topic' is the
+ * gated fallback (an intersecting topic thread). Class order
+ * is the selection order: destination → on-route place →
+ * origin → feature → topic, with no score comparison across
+ * classes.
+ */
+export type ThreadAnchorKind = 'destination' | 'onroute' | 'origin' | 'feature' | 'topic';
+
 export interface RouteThread {
-  /** The shared topic tag (routeTags vocabulary, e.g. 'Navy Century'). */
-  topic: string;
-  /** Unit ids of the selectable units carrying the topic — the thread's cast in hand. */
+  /**
+   * The thread's member-extension topic: for a topic thread,
+   * the topic itself; for an anchored thread, the dominant
+   * topic of the anchor's cast — the key the member fetch,
+   * the seated-members pass and the portal climax import on.
+   * Null when the anchor's cast carries no topic at all (the
+   * anchor still threads on its own cast; it simply imports
+   * nothing). Topic threads (and every pre-re-anchor thread)
+   * always carry their topic here.
+   */
+  topic: string | null;
+  /** Unit ids of the thread's cast in hand — the anchor's geo cast plus its on-path extension carriers. */
   memberIds: string[];
   /**
-   * The thread's support size: the cast in hand plus, when
-   * the caller supplies the county index (ComposeOptions.
-   * wovenIndexSupport, the member-fetch lever, Nov 4, 2026),
-   * the unheard woven-eligible depth the index holds behind
-   * the cast — a thread the road can no longer sustain alone
-   * is still a thread the EPISODE can sustain, because the
-   * member fetch can put that depth in hand. Without index
-   * support this is exactly the cast size (addendum 4).
+   * The thread's support size: for a topic thread, the cast
+   * in hand plus, when the caller supplies the county index
+   * (ComposeOptions.wovenIndexSupport, the member-fetch
+   * lever, Nov 4, 2026), the unheard woven-eligible depth the
+   * index holds behind the cast. For an anchored thread, the
+   * anchor's geo cast size — anchors never count index depth.
    */
   score: number;
+  /** The anchor class this thread was selected under ('topic' for every legacy detection). */
+  anchorKind: ThreadAnchorKind;
+  /**
+   * The thread's stable identity: a place_key for place
+   * anchors, 'road:<name>' / 'geo:<topic>' for feature
+   * anchors, the topic itself for topic threads. The drive
+   * record stores it (anchorKey) and the cooldown matches on
+   * it across drives.
+   */
+  anchorKey: string;
+  /**
+   * The thread's speakable name: the anchor place's name, the
+   * road's name, or the topic. The preview, the wrap-up, the
+   * manifest and the drive record name the thread by this —
+   * a place name for anchors, never a bare tag.
+   */
+  label: string;
 }
 
 /** A thread must be sustainable: at least 3 selectable members along the path. */
@@ -1599,7 +1646,510 @@ export function detectRouteThread(
       b.score - a.score ||
       (a.topic < b.topic ? -1 : a.topic > b.topic ? 1 : 0),
   );
-  return qualifying[0];
+  const winner = qualifying[0];
+  return {
+    topic: winner.topic,
+    memberIds: winner.memberIds,
+    score: winner.score,
+    anchorKind: 'topic',
+    anchorKey: winner.topic,
+    label: winner.topic,
+  };
+}
+
+// ------------------------------------------------------------ thread re-anchor (Nov 5, 2026)
+//
+// A detected thread stops being a county-wide topic label
+// and becomes a property of THIS drive's geography.
+// Candidates are computed in a fixed class order —
+// destination → dominant on-route place → origin → route
+// feature → intersecting topic — from the SELECTABLE GEO
+// POOL ONLY (the composer's partition output): no portal
+// pool, no index counts. A topic qualifies only when ≥
+// THREAD_MIN_SCORE of its cast is in the geo pool (the
+// intersection rule; index depth may rank qualifying topics,
+// never qualify one). Imports garnish an anchored thread
+// under the standing member caps; they never mint an anchor.
+// The thread MENU (Erik's amendment, same evening) offers
+// exactly this candidate set after the cast fetch: the menu
+// is gating delivered as a choice.
+
+/** The composer's candidate partition — the pools every thread rule reads. */
+export interface RoutePools {
+  /** Selectable geo units (in-corridor, heard-filtered, presence-cleared, Family-cleared). */
+  geoAll: LibraryUnit[];
+  /** Selectable off-corridor units (the portal pool). */
+  portalAll: LibraryUnit[];
+  /** Heard story units on this route's own ground (the preview's prior-subject source). */
+  priorHeard: LibraryUnit[];
+  /** How many units the heard filter skipped. */
+  skippedHeard: number;
+  /** Corridor stretches retired by the lifetime telling cap. */
+  retiredStretches: Set<string>;
+}
+
+/**
+ * The ONE partition of a build's fetched units into the
+ * composer's pools — shared verbatim by composeRoutePlan
+ * and by the App's thread-menu computation, so the menu can
+ * only ever offer threads the composer itself could detect
+ * on the same cast. The rules (each settled elsewhere, this
+ * is only their shared home): greet/filler/intro angles are
+ * never route candidacy; heard units are out at story level;
+ * a retired stretch's corridor rows are out of every lane;
+ * under the Family coloring, hard-class units are out of
+ * every lane.
+ */
+export function partitionRoutePools(
+  units: LibraryUnit[],
+  path: GeoPoint[],
+  destination: GeoPoint,
+  opts: {
+    heardKeys: ReadonlySet<string>;
+    corridorTellingCounts?: ReadonlyMap<string, number>;
+    audience?: RouteAudience;
+  },
+): RoutePools {
+  const family = opts.audience === 'family';
+  const inCorridor = (u: LibraryUnit): boolean =>
+    haversineM({ lat: u.lat, lng: u.lng }, destination) <= DESTINATION_RADIUS_M ||
+    distanceToPathM({ lat: u.lat, lng: u.lng }, path) <=
+      (u.angle.startsWith('landmark') ? LANDMARK_PATH_RADIUS_M : CORRIDOR_PATH_RADIUS_M);
+  // Corridor lifetime cap (addendum B): retirement is a fact
+  // about the stretch, computed over the whole candidate set,
+  // heard rows included.
+  const retiredStretches = new Set<string>();
+  if (opts.corridorTellingCounts) {
+    for (const u of units) {
+      if (u.angle !== 'corridor') continue;
+      if ((opts.corridorTellingCounts.get(normalizePlaceName(u.placeName)) ?? 0) >= CORRIDOR_TELLING_CAP) {
+        retiredStretches.add(u.placeKey);
+      }
+    }
+  }
+  let skippedHeard = 0;
+  const geoAll: LibraryUnit[] = [];
+  const portalAll: LibraryUnit[] = [];
+  const priorHeard: LibraryUnit[] = [];
+  for (const u of units) {
+    if (u.angle === 'neighborhood_intro_greet' || u.angle === 'filler' || u.angle === 'filler_hosted') continue;
+    if (opts.heardKeys.has(u.id)) {
+      skippedHeard += 1;
+      if (u.angle !== 'neighborhood_intro' && inCorridor(u)) priorHeard.push(u);
+      continue;
+    }
+    if (u.angle === 'neighborhood_intro') continue;
+    if (u.angle === 'corridor' && retiredStretches.has(u.placeKey)) continue;
+    if (family && familyHardExcluded(u)) continue;
+    if (inCorridor(u)) geoAll.push(u);
+    else portalAll.push(u);
+  }
+  return { geoAll, portalAll, priorHeard, skippedHeard, retiredStretches };
+}
+
+/**
+ * One thread this drive can actually carry, computed under
+ * the anchor classes. `count` is the honest cast size — geo
+ * units only, the number the menu speaks; `score` is the
+ * within-class ranking support (for topics, geo cast plus
+ * index depth; for anchors, the cast itself).
+ */
+export interface ThreadCandidate {
+  kind: ThreadAnchorKind;
+  /** Stable identity (see RouteThread.anchorKey). */
+  key: string;
+  /** Speakable name: place name, road name, or topic. */
+  label: string;
+  /** Member-extension topic (the anchor cast's dominant topic; the topic itself for topic/feature-topic candidates). */
+  topic: string | null;
+  /** Geo cast size — the honest count the menu speaks. */
+  count: number;
+  /** Within-class ranking support. */
+  score: number;
+  /** The thread's cast in hand: the anchor's geo cast plus its on-path extension carriers (topic threads: geo ∪ woven carriers). */
+  memberIds: string[];
+  /** Headlined one of the last THREAD_COOLDOWN_DRIVES drives — demoted at default selection, never hidden. */
+  cooled: boolean;
+  /** Index into the full drive-record list of this identity's most recent headline (Infinity = never). */
+  lastHeadlineIndex: number;
+}
+
+/** The candidate set + the detection default (an index into candidates, -1 when none qualify). */
+export interface ThreadResolution {
+  candidates: ThreadCandidate[];
+  defaultIndex: number;
+}
+
+/** Cooldown window (Decision 2): a thread identity that headlined any of the last N drives is demoted at detection. */
+export const THREAD_COOLDOWN_DRIVES = 3;
+
+/**
+ * The geographic subset of the topic vocabulary (scope §2iv):
+ * topics a path can physically track. A geographic topic
+ * qualifies as a FEATURE only with presence proof — ≥60% of
+ * its cast in hand is geo (on-path).
+ */
+export const GEO_FEATURE_TOPICS: ReadonlySet<string> = new Set([
+  'Coast',
+  'San Diego River',
+  'Mission Chain',
+  'Highway',
+]);
+export const FEATURE_GEO_SHARE = 0.6;
+
+const THREAD_CLASS_ORDER: ThreadAnchorKind[] = ['destination', 'onroute', 'origin', 'feature', 'topic'];
+
+/** The dominant topic of a cast: most carriers, name order on ties. Null when the cast carries no topic at all. */
+function dominantTopicOf(cast: LibraryUnit[]): string | null {
+  const counts = new Map<string, number>();
+  for (const u of cast) for (const t of u.topics) counts.set(t, (counts.get(t) ?? 0) + 1);
+  let best: string | null = null;
+  let bestN = 0;
+  for (const [t, n] of counts) {
+    if (n > bestN || (n === bestN && best !== null && t < best)) {
+      best = t;
+      bestN = n;
+    }
+  }
+  return best;
+}
+
+/** A place group's anchor point (the mean of its units) — the point the mid-drive test reads. */
+function groupAnchorPoint(group: LibraryUnit[]): GeoPoint {
+  let lat = 0;
+  let lng = 0;
+  for (const u of group) {
+    lat += u.lat;
+    lng += u.lng;
+  }
+  return { lat: lat / group.length, lng: lng / group.length };
+}
+
+/**
+ * Resolve every thread candidate this drive can carry, in
+ * menu order (class order; within a class, ranking support
+ * then label), plus the detection default under the cooldown
+ * demotion. Pure and offline: anchors group the geo pool the
+ * build already holds; the cooldown reads the drive records
+ * the build already loaded.
+ *
+ * Qualification is GEO-ONLY for every class: anchors count
+ * the geo pool's selectable units; a topic's cast is its
+ * geo-pool carriers (woven/portal units never qualify it —
+ * they join a qualified topic thread's memberIds as its
+ * importable cast, exactly as detection's cast always did).
+ */
+export function resolveThreadCandidates(args: {
+  geoPool: LibraryUnit[];
+  wovenSupport: LibraryUnit[];
+  path: GeoPoint[];
+  destination: GeoPoint;
+  destinationPlaceKey?: string | null;
+  indexSupport?: ReadonlyMap<string, number>;
+  driveRecords?: RouteDriveRecord[];
+}): ThreadResolution {
+  const { geoPool, wovenSupport, path, destination } = args;
+  const origin = path[0] ?? destination;
+  const geoByTopic = new Map<string, LibraryUnit[]>();
+  const wovenByTopic = new Map<string, LibraryUnit[]>();
+  const indexInto = (map: Map<string, LibraryUnit[]>, u: LibraryUnit) => {
+    for (const t of u.topics) {
+      const list = map.get(t) ?? [];
+      list.push(u);
+      map.set(t, list);
+    }
+  };
+  for (const u of geoPool) indexInto(geoByTopic, u);
+  for (const u of wovenSupport) indexInto(wovenByTopic, u);
+  const extensionIds = (topic: string | null, base: Set<string>): string[] => {
+    const ids = new Set(base);
+    if (topic !== null) {
+      for (const u of geoByTopic.get(topic) ?? []) ids.add(u.id);
+    }
+    return [...ids];
+  };
+
+  const raw: Omit<ThreadCandidate, 'cooled' | 'lastHeadlineIndex'>[] = [];
+
+  // (i) Destination anchor: the selectable cast inside the
+  // destination circle (plus the destination place's own
+  // rows when its key is known), ≥ THREAD_MIN_SCORE with at
+  // least one landmark-class telling — an intro alone is not
+  // a thread. The label is the destination ground's own name:
+  // its place_key group's, when known, else the cast's
+  // dominant place's.
+  {
+    const cast = geoPool.filter(
+      u =>
+        haversineM({ lat: u.lat, lng: u.lng }, destination) <= DESTINATION_AREA_M ||
+        (args.destinationPlaceKey != null && u.placeKey === args.destinationPlaceKey),
+    );
+    if (cast.length >= THREAD_MIN_SCORE && cast.some(u => u.angle.startsWith('landmark'))) {
+      const byPlace = new Map<string, LibraryUnit[]>();
+      for (const u of cast) {
+        const list = byPlace.get(u.placeKey) ?? [];
+        list.push(u);
+        byPlace.set(u.placeKey, list);
+      }
+      const labelKey =
+        args.destinationPlaceKey != null && byPlace.has(args.destinationPlaceKey)
+          ? args.destinationPlaceKey
+          : [...byPlace.entries()].sort(
+              (a, b) => b[1].length - a[1].length || (a[0] < b[0] ? -1 : 1),
+            )[0][0];
+      const topic = dominantTopicOf(cast);
+      raw.push({
+        kind: 'destination',
+        key: labelKey,
+        label: byPlace.get(labelKey)![0].placeName,
+        topic,
+        count: cast.length,
+        score: cast.length,
+        memberIds: extensionIds(topic, new Set(cast.map(u => u.id))),
+      });
+    }
+  }
+
+  // (iii) Dominant on-route places (candidate order places
+  // them above origin; built here with the place groups):
+  // a real place the road passes through — ≥3 selectable
+  // units, not a corridor-segment place (those are the road
+  // itself), its ground strictly mid-drive (in neither the
+  // destination nor the origin circle).
+  const byPlaceAll = new Map<string, LibraryUnit[]>();
+  for (const u of geoPool) {
+    const list = byPlaceAll.get(u.placeKey) ?? [];
+    list.push(u);
+    byPlaceAll.set(u.placeKey, list);
+  }
+  for (const [placeKey, group] of byPlaceAll) {
+    if (group.length < THREAD_MIN_SCORE) continue;
+    if (placeKey === args.destinationPlaceKey) continue;
+    if (group.every(u => u.angle === 'corridor')) continue;
+    const anchor = groupAnchorPoint(group);
+    if (haversineM(anchor, destination) <= DESTINATION_AREA_M) continue;
+    if (haversineM(anchor, origin) <= DESTINATION_AREA_M) continue;
+    const topic = dominantTopicOf(group);
+    raw.push({
+      kind: 'onroute',
+      key: placeKey,
+      label: group[0].placeName,
+      topic,
+      count: group.length,
+      score: group.length,
+      memberIds: extensionIds(topic, new Set(group.map(u => u.id))),
+    });
+  }
+
+  // (ii) Origin anchor: symmetric to the destination — the
+  // departure place's own cast inside the origin circle,
+  // preferring the departure place (the circle's dominant
+  // place_key group).
+  {
+    const circle = geoPool.filter(u => haversineM({ lat: u.lat, lng: u.lng }, origin) <= DESTINATION_AREA_M);
+    const byPlace = new Map<string, LibraryUnit[]>();
+    for (const u of circle) {
+      const list = byPlace.get(u.placeKey) ?? [];
+      list.push(u);
+      byPlace.set(u.placeKey, list);
+    }
+    const best = [...byPlace.entries()]
+      .filter(([, g]) => g.length >= THREAD_MIN_SCORE && g.some(u => u.angle.startsWith('landmark')))
+      .sort((a, b) => b[1].length - a[1].length || (a[0] < b[0] ? -1 : 1))[0];
+    if (best) {
+      const [placeKey, group] = best;
+      const topic = dominantTopicOf(group);
+      raw.push({
+        kind: 'origin',
+        key: placeKey,
+        label: group[0].placeName,
+        topic,
+        count: group.length,
+        score: group.length,
+        memberIds: extensionIds(topic, new Set(group.map(u => u.id))),
+      });
+    }
+  }
+
+  // (iv) Route features: the road itself (≥2 corridor units
+  // of one dominant road), and geographic topics with
+  // presence proof (≥60% of the cast in hand is geo).
+  {
+    const byRoad = new Map<string, LibraryUnit[]>();
+    for (const u of geoPool) {
+      if (u.angle !== 'corridor') continue;
+      const road = u.placeName.split(':')[0].trim();
+      if (!road) continue;
+      const list = byRoad.get(road) ?? [];
+      list.push(u);
+      byRoad.set(road, list);
+    }
+    const best = [...byRoad.entries()]
+      .filter(([, g]) => g.length >= 2)
+      .sort((a, b) => b[1].length - a[1].length || (a[0] < b[0] ? -1 : 1))[0];
+    if (best) {
+      const [road, group] = best;
+      const topic = dominantTopicOf(group);
+      raw.push({
+        kind: 'feature',
+        key: `road:${road}`,
+        label: road,
+        topic,
+        count: group.length,
+        score: group.length,
+        memberIds: extensionIds(topic, new Set(group.map(u => u.id))),
+      });
+    }
+    for (const topic of [...GEO_FEATURE_TOPICS].sort()) {
+      const geoCast = geoByTopic.get(topic) ?? [];
+      if (geoCast.length < THREAD_MIN_SCORE) continue;
+      const wovenCast = wovenByTopic.get(topic) ?? [];
+      if (geoCast.length / (geoCast.length + wovenCast.length) < FEATURE_GEO_SHARE) continue;
+      raw.push({
+        kind: 'feature',
+        key: `geo:${topic}`,
+        label: topic,
+        topic,
+        count: geoCast.length,
+        score: geoCast.length,
+        memberIds: geoCast.map(u => u.id),
+      });
+    }
+  }
+
+  // Topic candidates — the gated fallback: a topic qualifies
+  // only on its geo-pool cast (the intersection rule). Index
+  // depth ranks qualifying topics against each other; it can
+  // no longer qualify one. The memberIds are the full cast in
+  // hand (geo ∪ woven carriers), as detection's always were:
+  // imports garnish a qualified thread, they just can't mint
+  // it any more.
+  for (const [topic, geoCast] of geoByTopic) {
+    if (geoCast.length < THREAD_MIN_SCORE) continue;
+    if (GEO_FEATURE_TOPICS.has(topic)) {
+      // A geographic topic that FAILED its presence proof is
+      // still a topic candidate (the intersection is real);
+      // one that PASSED is the feature above, not both.
+      const wovenCast = wovenByTopic.get(topic) ?? [];
+      if (geoCast.length / (geoCast.length + wovenCast.length) >= FEATURE_GEO_SHARE) continue;
+    }
+    raw.push({
+      kind: 'topic',
+      key: topic,
+      label: topic,
+      topic,
+      count: geoCast.length,
+      score: geoCast.length + (args.indexSupport?.get(topic) ?? 0),
+      memberIds: [...geoCast, ...(wovenByTopic.get(topic) ?? [])].map(u => u.id),
+    });
+  }
+
+  // Cooldown (Decision 2): identity match against the newest
+  // N records — on the record's anchorKey, or on its thread
+  // name against the candidate's topic or label (records
+  // written before anchorKey existed still cool the threads
+  // they named). Detection-only: menu picks never consult
+  // this (the caller applies candidates, not the default,
+  // when the listener chooses).
+  const records = args.driveRecords ?? [];
+  const matches = (c: Omit<ThreadCandidate, 'cooled' | 'lastHeadlineIndex'>, r: RouteDriveRecord): boolean =>
+    (r.anchorKey != null && r.anchorKey === c.key) ||
+    (r.threadTopic !== null && (r.threadTopic === c.topic || r.threadTopic === c.label));
+  const candidates: ThreadCandidate[] = raw.map(c => {
+    let lastHeadlineIndex = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < records.length; i++) {
+      if (matches(c, records[i])) {
+        lastHeadlineIndex = i;
+        break;
+      }
+    }
+    return { ...c, cooled: lastHeadlineIndex < THREAD_COOLDOWN_DRIVES, lastHeadlineIndex };
+  });
+  // Menu order: class order, then ranking support, then label.
+  candidates.sort(
+    (a, b) =>
+      THREAD_CLASS_ORDER.indexOf(a.kind) - THREAD_CLASS_ORDER.indexOf(b.kind) ||
+      b.score - a.score ||
+      (a.label < b.label ? -1 : a.label > b.label ? 1 : 0) ||
+      (a.key < b.key ? -1 : 1),
+  );
+  // The detection default: the first FRESH candidate in
+  // class order (a cooled candidate is demoted below every
+  // fresh one, across classes); when every candidate is
+  // cooled, the least-recently-headlined wins — the cooldown
+  // never forces a no-thread episode by itself.
+  let defaultIndex = candidates.findIndex(c => !c.cooled);
+  if (defaultIndex === -1 && candidates.length > 0) {
+    defaultIndex = 0;
+    for (let i = 1; i < candidates.length; i++) {
+      if (candidates[i].lastHeadlineIndex > candidates[defaultIndex].lastHeadlineIndex) defaultIndex = i;
+    }
+  }
+  return { candidates, defaultIndex };
+}
+
+/** The composed thread a candidate becomes (the composer's own construction of a resolution result). */
+export function threadFromCandidate(c: ThreadCandidate): RouteThread {
+  return {
+    topic: c.topic,
+    memberIds: [...c.memberIds],
+    score: c.count,
+    anchorKind: c.kind,
+    anchorKey: c.key,
+    label: c.label,
+  };
+}
+
+/** Where a plan's final thread came from (the capture taxonomy, amendment). */
+export type ThreadSource = 'menu-pick' | 'default-detected' | 'single-qualifier' | 'none';
+
+/**
+ * The thread menu's record — filed on the plan by the App
+ * (menu builds) or by the composer (its own resolution, menu
+ * never shown), and copied into the episode capture's plan
+ * payload: what was offered, whether the listener was asked,
+ * and how the final thread was arrived at.
+ */
+export interface ThreadMenuRecord {
+  offered: { kind: ThreadAnchorKind; key: string; label: string; count: number }[];
+  menuShown: boolean;
+  source: ThreadSource;
+  /** The final thread's anchorKey (null when the episode runs with no thread). */
+  pickedKey: string | null;
+}
+
+/**
+ * A settled menu outcome handed to the composer (the App's
+ * staging → ComposeOptions.threadChoice): the candidate the
+ * build composes on (null = "Just the road — no thread"),
+ * with the menu record the plan files. A menu pick is a user
+ * pick: exempt from the cooldown, and composition treats it
+ * as the episode's thread in full.
+ */
+export interface ThreadChoice {
+  candidate: ThreadCandidate | null;
+  menu: ThreadMenuRecord;
+}
+
+/** The tie phrase a menu row speaks for its anchor class. */
+export function threadTieLabel(kind: ThreadAnchorKind): string {
+  switch (kind) {
+    case 'destination':
+      return 'your destination';
+    case 'onroute':
+      return 'on your road';
+    case 'origin':
+      return 'where you start';
+    case 'feature':
+      return 'the road itself';
+    case 'topic':
+      return 'on this drive';
+  }
+}
+
+/** One menu row's full label: name, tie, honest cast count ("Navy Century · your destination — 8 stories on this drive"). */
+export function threadOptionLabel(c: ThreadCandidate): string {
+  return `${c.label} · ${threadTieLabel(c.kind)} — ${c.count} ${c.count === 1 ? 'story' : 'stories'} on this drive`;
 }
 
 export interface ComposeOptions {
@@ -1679,6 +2229,18 @@ export interface ComposeOptions {
    * selectPriorDrive) and feeds it to the spoken preview only.
    */
   driveRecords?: RouteDriveRecord[];
+  /**
+   * The thread menu's settled outcome (thread re-anchor
+   * amendment, Nov 5, 2026): present when the build paused
+   * after the cast fetch and the listener was offered the
+   * drive's qualifying threads. The composer composes on the
+   * chosen candidate (re-resolved against each compose's own
+   * pools, so the lever's re-composes see the grown cast),
+   * or on NO thread when the pick was "Just the road".
+   * Absent (every non-menu caller): the composer resolves
+   * the candidates itself and takes the detection default.
+   */
+  threadChoice?: ThreadChoice;
   /** The destination's library place_key when the build could derive one (addendum 2 matching). */
   destinationPlaceKey?: string | null;
   /**
@@ -1897,78 +2459,24 @@ export function composeRoutePlan(
     }
     return p;
   };
-  // Corridor membership (addendum B): the same class-aware
-  // radii the fetch order used — landmarks are geographic out
-  // to LANDMARK_PATH_RADIUS_M of the path, corridor rows and
-  // every other angle stay at CORRIDOR_PATH_RADIUS_M, and the
-  // destination circle is DESTINATION_RADIUS_M for all.
-  const inCorridor = (u: LibraryUnit): boolean =>
-    haversineM({ lat: u.lat, lng: u.lng }, destination) <= DESTINATION_RADIUS_M ||
-    distanceToPathM({ lat: u.lat, lng: u.lng }, path) <=
-      (u.angle.startsWith('landmark') ? LANDMARK_PATH_RADIUS_M : CORRIDOR_PATH_RADIUS_M);
-
-  // Corridor lifetime cap (addendum B): the stretches whose
-  // corridor rows retire from this plan. A stretch's identity
-  // is its place — the corridor place_key names road +
-  // direction + segment endpoints, and every corridor row
-  // carries exactly that one subject — while the COUNT comes
-  // from the ledger's place labels, so all angles of a stretch
-  // (and every re-telling of the same angle) count together.
-  // Computed over the whole candidate set, heard rows
-  // included: retirement is a fact about the stretch, not
-  // about this plan's heard state.
-  const retiredStretches = new Set<string>();
-  if (opts.corridorTellingCounts) {
-    for (const u of units) {
-      if (u.angle !== 'corridor') continue;
-      if ((opts.corridorTellingCounts.get(normalizePlaceName(u.placeName)) ?? 0) >= CORRIDOR_TELLING_CAP) {
-        retiredStretches.add(u.placeKey);
-      }
-    }
-  }
-
-  let skippedHeard = 0;
-  const geoAll: LibraryUnit[] = [];
-  const portalAll: LibraryUnit[] = [];
-  // Heard STORY units on this route's own ground (corridor or
-  // destination area), collected at partition for the opening
-  // preview's "Previously on Miles" nod (Erik, Nov 3, 2026):
-  // real heard-ledger subjects only — a unit lands here solely
-  // because its id is in the caller's heard set.
-  const priorHeard: LibraryUnit[] = [];
-  for (const u of units) {
-    // The route composer's own partition (freeform never reads
-    // this): the greet variant is a welcome, not a chapter head,
-    // and the filler lanes are not stories. Plain intros are
-    // not route candidacy either (welcome demotion, Nov 4,
-    // 2026): the chapter-opener lane retired, so an intro
-    // serves a route only through the Coverage Guarantee's
-    // library-first fill pool, which reads the fetched set
-    // directly — never as composed chapter furniture.
-    if (u.angle === 'neighborhood_intro_greet' || u.angle === 'filler' || u.angle === 'filler_hosted') continue;
-    if (opts.heardKeys.has(u.id)) {
-      skippedHeard += 1;
-      if (u.angle !== 'neighborhood_intro' && inCorridor(u)) priorHeard.push(u);
-      continue;
-    }
-    if (u.angle === 'neighborhood_intro') continue;
-    // A retired stretch's corridor rows are out of every lane
-    // — tiling, thread support, climax pools — exactly like a
-    // heard exclusion, one rung of the partition.
-    if (u.angle === 'corridor' && retiredStretches.has(u.placeKey)) continue;
-    // Family hard-exclusion (Nov 5, 2026): under the Family
-    // coloring, a hard-class unit (Protected register,
-    // spooky-primary, landmark_scandal) is out of EVERY lane
-    // at this same rung — it cannot tile, cannot lend thread
-    // support, cannot hop, and cannot contest either climax,
-    // because every one of those pools draws from geoAll /
-    // portalAll below. (The climax-only fetch pool, which
-    // never passes through this partition, applies the same
-    // predicate at its own filter.)
-    if (family && familyHardExcluded(u)) continue;
-    if (inCorridor(u)) geoAll.push(u);
-    else portalAll.push(u);
-  }
+  // The candidate partition (thread re-anchor, Nov 5, 2026:
+  // extracted verbatim into partitionRoutePools so the App's
+  // thread menu resolves candidates from the SAME pools this
+  // compose will tile — the menu can only offer threads the
+  // composer itself could detect on this cast). The rules
+  // live there: corridor membership at the class-aware radii
+  // (addendum B), the corridor lifetime cap's retired
+  // stretches, the heard filter collecting priorHeard (the
+  // opening preview's "Previously on Miles" subjects), the
+  // welcome-demotion and greet/filler exclusions, and the
+  // Family hard-exclusion rung (Nov 5, 2026: a hard-class
+  // unit is out of EVERY lane, because every pool draws from
+  // geoAll / portalAll).
+  const { geoAll, portalAll, priorHeard, skippedHeard, retiredStretches } = partitionRoutePools(units, path, destination, {
+    heardKeys: opts.heardKeys,
+    corridorTellingCounts: opts.corridorTellingCounts,
+    audience,
+  });
 
   const topicSet = new Set(input.topics);
   const topicMatches = topicSet.size > 0 ? geoAll.filter(u => u.topics.some(t => topicSet.has(t))) : [];
@@ -1997,16 +2505,71 @@ export function composeRoutePlan(
   //
   // Member-fetch lever (Nov 4, 2026): member units the
   // caller already fetched join the support union as real
-  // units, and the caller-supplied index support lets
-  // detection qualify a thread on the county's depth when
-  // the fetched cast runs thin — the exhausted-corridor
-  // case (see detectRouteThread). With neither input,
-  // detection is exactly the pre-lever detection.
+  // units. Under the pre-re-anchor detection (the blind-pick
+  // path below) they also lent the thread their topics, and
+  // the caller-supplied index support could qualify one on
+  // the county's depth when the fetched cast ran thin — the
+  // exhausted-corridor case (see detectRouteThread).
   const wovenSupport = [
     ...portalAll.filter(u => u.wovenEligible === true),
     ...(opts.memberUnits ?? []).filter(u => u.wovenEligible === true),
   ];
-  const thread = detectRouteThread([...pool, ...wovenSupport], input.topics, opts.wovenIndexSupport);
+
+  // Thread determination (thread re-anchor, Nov 5, 2026).
+  // Three paths, in precedence order:
+  //  1. The menu's settled choice (opts.threadChoice): the
+  //     build composes on the picked candidate — re-resolved
+  //     against THIS compose's own pools, so the lever's
+  //     re-composes see the grown cast — or on no thread when
+  //     the pick was "Just the road". A menu pick is a user
+  //     pick: cooldown-exempt by construction (the resolver
+  //     is consulted for membership only, never the default).
+  //  2. The legacy blind-pick path (input.topics non-empty):
+  //     detection over the topic-restricted pool, exactly as
+  //     before the re-anchor — the harness's blind-pick-era
+  //     contracts and any caller's explicit topics keep their
+  //     meaning. The App no longer produces this input (the
+  //     menu replaced the chips); it is not a user surface.
+  //  3. The re-anchored detection: resolve the drive's
+  //     candidates from the full selectable geo pool and take
+  //     the default (class order, cooldown demotion applied).
+  //     The plan files the menu record of what was offered,
+  //     so capture can read the detection's own menu even
+  //     when no listener was ever asked.
+  const resolveArgs = {
+    geoPool: geoAll,
+    wovenSupport,
+    path,
+    destination,
+    destinationPlaceKey: opts.destinationPlaceKey ?? null,
+    indexSupport: opts.wovenIndexSupport,
+    driveRecords: opts.driveRecords,
+  };
+  let thread: RouteThread | null;
+  let threadMenu: ThreadMenuRecord | null;
+  if (opts.threadChoice !== undefined) {
+    const choice = opts.threadChoice;
+    threadMenu = choice.menu;
+    if (choice.candidate) {
+      const live = resolveThreadCandidates(resolveArgs).candidates.find(c => c.key === choice.candidate!.key);
+      thread = threadFromCandidate(live ?? choice.candidate);
+    } else {
+      thread = null;
+    }
+  } else if (input.topics.length > 0) {
+    thread = detectRouteThread([...pool, ...wovenSupport], input.topics, opts.wovenIndexSupport);
+    threadMenu = null;
+  } else {
+    const resolution = resolveThreadCandidates(resolveArgs);
+    const def = resolution.defaultIndex >= 0 ? resolution.candidates[resolution.defaultIndex] : null;
+    thread = def ? threadFromCandidate(def) : null;
+    threadMenu = {
+      offered: resolution.candidates.map(c => ({ kind: c.kind, key: c.key, label: c.label, count: c.count })),
+      menuShown: false,
+      source: !thread ? 'none' : resolution.candidates.length === 1 ? 'single-qualifier' : 'default-detected',
+      pickedKey: thread?.anchorKey ?? null,
+    };
+  }
   const threadMemberIds = new Set(thread?.memberIds ?? []);
 
   // "Previously on Miles", drive level (addendum 2): with the
@@ -2014,11 +2577,17 @@ export function composeRoutePlan(
   // destination first, same thread second — for the opening
   // preview's continuity nod. A record whose thread and owed
   // list are both empty carries nothing the preview can say.
+  // The thread's continuity identity for record matching:
+  // its topic when it carries one, else its anchor label —
+  // the same name the drive record will store (the runner
+  // writes threadTopic exactly this way), so an anchored
+  // thread's drives still find each other across builds.
+  const threadIdentity = thread ? (thread.topic ?? thread.label) : null;
   const priorDriveRecord = opts.driveRecords?.length
     ? selectPriorDrive(opts.driveRecords, {
         destinationPlaceKey: opts.destinationPlaceKey ?? null,
         destinationName,
-        threadTopic: thread?.topic ?? null,
+        threadTopic: threadIdentity,
       })
     : null;
   const priorDrive =
@@ -2046,7 +2615,7 @@ export function composeRoutePlan(
       const byName = recs.filter(r => normalizePlaceName(r.destinationName) === wanted);
       if (byName.length > 0) return byName;
     }
-    const topic = thread?.topic ?? null;
+    const topic = threadIdentity;
     if (topic) return recs.filter(r => r.threadTopic !== null && r.threadTopic === topic);
     return [];
   })();
@@ -2388,6 +2957,26 @@ export function composeRoutePlan(
     })[0];
   }
 
+  // Thread re-anchor, Decision 5 (Nov 5, 2026): when a thread
+  // member holds the final-third reservation and a
+  // destination-area story that is NOT a thread member also
+  // contested it, the member keeps the slot only by clearly
+  // beating the destination candidate — the standing portal
+  // bar (PORTAL_CLIMAX_BAR; the destination wins ties). The
+  // destination is the drive's own ending; a thread may earn
+  // the close, it may not inherit it. A member that IS itself
+  // a destination story needs no contest, and with no
+  // destination-area candidate the reservation stands as won.
+  if (thread && climaxWinner && threadMemberIds.has(climaxWinner.id) && !isDestinationArea(climaxWinner, destination)) {
+    const destBest =
+      climaxCandidates
+        .filter(u => u.id !== climaxWinner!.id && !threadMemberIds.has(u.id) && isDestinationArea(u, destination))
+        .sort((a, b) => b.durationSec - a.durationSec || prog(b) - prog(a))[0] ?? null;
+    if (destBest && !(climaxWinner.durationSec >= destBest.durationSec * PORTAL_CLIMAX_BAR)) {
+      climaxWinner = destBest;
+    }
+  }
+
   // The off-route portal climax (consolidation §4, ladder
   // rung 3): Erik's point — something from across the county
   // that isn't on the route might still be the climax, when
@@ -2402,7 +2991,11 @@ export function composeRoutePlan(
   // telling's length × PORTAL_CLIMAX_BAR); when the road
   // offered no late candidate at all, the strongest unit on
   // the topic takes the open slot outright.
-  const portalTopic = thread?.topic ?? input.topics[0] ?? null;
+  // (Thread re-anchor, Nov 5, 2026: an anchored thread with
+  // no extension topic opens NO portal slot — the input's
+  // first topic is only the fallback when there is no thread
+  // at all, as before.)
+  const portalTopic = thread ? thread.topic : (input.topics[0] ?? null);
   if (portalTopic !== null && chosen.length >= 1) {
     const chosenIds = new Set(chosen.map(u => u.id));
     // Lane 4: when the pool carries a place+angle's woven
@@ -2904,7 +3497,10 @@ export function composeRoutePlan(
   if (thread && geoCoverageOfItems(items, driveDur) < THREAD_CARRIED_FLOOR) {
     wovenMemberNeed = WOVEN_MEMBER_CAP_CARRIED;
   }
-  if (thread && (opts.wovenIndexSupport?.get(thread.topic) ?? 0) > 0) {
+  // (Thread re-anchor, Nov 5, 2026: an anchored thread with
+  // no extension topic seeks nothing — there is no topic for
+  // the member fetch to fetch on.)
+  if (thread && thread.topic !== null && (opts.wovenIndexSupport?.get(thread.topic) ?? 0) > 0) {
     const usedIds = new Set<string>();
     const usedPlaces = new Set<string>();
     for (const it of items) {
@@ -2940,7 +3536,20 @@ export function composeRoutePlan(
     topicsMatched,
     toneMatched,
     thread,
-    threadSource: thread ? (input.topics.includes(thread.topic) ? 'user' : 'detected') : null,
+    // (Thread re-anchor, Nov 5, 2026: a thread the listener
+    // picked off the menu is a user thread — the decisions
+    // record's vocabulary is unchanged; the finer source
+    // story lives in the menu record below.)
+    threadSource: !thread
+      ? null
+      : opts.threadChoice !== undefined
+        ? threadMenu?.source === 'menu-pick'
+          ? 'user'
+          : 'detected'
+        : thread.topic !== null && input.topics.includes(thread.topic)
+          ? 'user'
+          : 'detected',
+    threadMenu,
     climaxUnitId,
     climaxMode,
     climaxSubject,
@@ -3319,6 +3928,12 @@ export function seatWovenMembers(
 ): RoutePlan {
   const thread = plan.thread;
   if (!thread) return plan;
+  // Thread re-anchor (Nov 5, 2026): members are imported ON
+  // the thread's extension topic — an anchored thread whose
+  // cast carries no topic has nothing to import on, so no
+  // member can ever seat (its own cast already tiles in the
+  // episode). Return before candidacy reads the null topic.
+  if (thread.topic === null) return plan;
   const driveSec = plan.driveSec ?? plan.budgetSec;
   if (!(driveSec > 0)) return plan;
   const carried = opts.threadCarried === true;
@@ -3756,6 +4371,12 @@ export function buildBridgeContext(args: {
   const role: BridgeContext['role'] = isClimaxBridge && climaxLast ? 'payoff' : 'mid';
   const ctx: BridgeContext = {
     threadTopic: thread?.topic ?? null,
+    // Thread re-anchor (Nov 5, 2026): the thread's speakable
+    // name + anchor class ride every bridge so the tissue
+    // can name an anchored thread by its place ("the road
+    // to Naval Base San Diego"), not by a bare tag.
+    threadLabel: thread ? (thread.label ?? thread.topic) : null,
+    threadAnchorKind: thread?.anchorKind ?? null,
     prevSubject: prev.placeName,
     prevGist:
       args.audience === 'family' && familyClassOf(prev) === 'gray' ? null : storyGist(prev),
@@ -3777,9 +4398,14 @@ export function buildBridgeContext(args: {
   if (role === 'mid') {
     // Callbacks reference ONLY items actually earlier in this
     // plan (the most recent first), and the connection must be
-    // real: the thread topic, or a topic shared with what's next.
+    // real: the thread topic, the thread's own cast (an
+    // anchored thread's members connect by membership, not
+    // only by tag), or a topic shared with what's next.
     const nextTopics = new Set(next.topics);
-    const shares = (u: LibraryUnit) => u.topics.includes(thread.topic) || u.topics.some(t => nextTopics.has(t));
+    const shares = (u: LibraryUnit) =>
+      (thread.topic !== null && u.topics.includes(thread.topic)) ||
+      thread.memberIds.includes(u.id) ||
+      u.topics.some(t => nextTopics.has(t));
     const cb = [...earlier].reverse().find(u => u.id !== next.id && shares(u));
     if (cb) ctx.callbackSubject = cb.placeName;
   }
@@ -3831,6 +4457,12 @@ export function buildPreviewContext(args: {
   if (!closing) return null;
   const ctx: PreviewContext = {
     threadTopic: thread?.topic ?? null,
+    // Thread re-anchor (Nov 5, 2026): the thread's speakable
+    // name + anchor class, so the preview can frame an
+    // anchored thread by where the thread lives on this
+    // drive, not by a bare tag.
+    threadLabel: thread ? (thread.label ?? thread.topic) : null,
+    threadAnchorKind: thread?.anchorKind ?? null,
     destinationName,
     storyCount,
     closingSubject: closing.placeName,
@@ -3969,6 +4601,10 @@ export function buildWrapUpContext(plan: RoutePlan): WrapUpContext {
   return {
     destinationName: plan.destinationName,
     threadTopic: plan.thread?.topic ?? null,
+    // Thread re-anchor (Nov 5, 2026): the wrap-up names where
+    // an anchored thread tied off — its place, by its label.
+    threadLabel: plan.thread ? (plan.thread.label ?? plan.thread.topic) : null,
+    threadAnchorKind: plan.thread?.anchorKind ?? null,
     climaxMode: plan.climaxMode ?? 'natural',
     climaxSubject: plan.climaxSubject ?? null,
   };

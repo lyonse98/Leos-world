@@ -21,20 +21,25 @@ import {
   memberFetchSizing,
   orderFetchCandidates,
   parseRouteInput,
+  partitionRoutePools,
   qaGateOpen,
   qualifyingForkAlternatives,
   resolveDestination,
+  resolveThreadCandidates,
   routeOptionLabel,
   seatWovenMembers,
   selectMemberFetchEntries,
+  threadOptionLabel,
   wovenIndexSupportByTopic,
   WOVEN_MEMBER_CAP,
   ROUTE_TONES,
-  ROUTE_TOPICS,
   type ComputedRouteOption,
   type LibraryUnit,
   type RouteAudience,
   type RouteChoiceRecord,
+  type ThreadCandidate,
+  type ThreadChoice,
+  type ThreadMenuRecord,
   type TourMode,
 } from './core/routeMode';
 import {
@@ -471,6 +476,33 @@ interface RoutePickerState {
   selected: number;
 }
 
+/**
+ * One settled menu outcome (thread menu, Nov 5, 2026): the
+ * candidate the listener picked (null = "Just the road — no
+ * thread"), plus the menu record the plan files. A candidate
+ * the listener changed away from the pre-selected default is
+ * a menu pick; keeping the default is 'default-detected' —
+ * the record's source taxonomy (routeMode's ThreadSource).
+ */
+interface ThreadPickChoice {
+  candidate: ThreadCandidate | null;
+  menu: ThreadMenuRecord;
+}
+
+interface ThreadPickerState {
+  /** The qualifying candidates, in menu order (class order — the composer's own order). */
+  candidates: ThreadCandidate[];
+  /**
+   * The confirmed row: an index into candidates, or -1 for
+   * "Just the road — no thread". Pre-selected to the
+   * detection default (cooldown applied) — a cooled thread
+   * can be a row, never the pre-selection.
+   */
+  selected: number;
+  /** The detection default's index (the pre-selection) — the confirm reads a kept default as 'default-detected'. */
+  defaultIndex: number;
+}
+
 function MilesApp() {
   // One Tour instance per tour (C2 discipline): an ended engine is
   // never restarted — START constructs a fresh engine, so no
@@ -517,7 +549,6 @@ function MilesApp() {
   // the-car case is a Driving drive. The control is the only
   // source — the parse never reads a rating out of prose.
   const [routeAudience, setRouteAudience] = useState<RouteAudience>('standard');
-  const [routeTopics, setRouteTopics] = useState<string[]>([]);
   const [routeStatus, setRouteStatus] = useState('');
   const [routeBuilding, setRouteBuilding] = useState(false);
   // Build staging honesty (Nov 4, 2026): the build's current
@@ -533,6 +564,16 @@ function MilesApp() {
   // is up; a build with no fork never touches either.
   const [routePicker, setRoutePicker] = useState<RoutePickerState | null>(null);
   const routePickResolveRef = useRef<((pick: RoutePickChoice | null) => void) | null>(null);
+  // Thread menu (Nov 5, 2026 — the re-anchor amendment): the
+  // menu's state while a build pauses after the cast fetch,
+  // and the resolver that resumes it — exactly the route
+  // picker's seam. The menu offers the threads THIS drive can
+  // actually carry (the composer's own candidate set), so the
+  // blind topic chips it replaced are gone from both route
+  // forms. Null whenever no menu is up; a build with fewer
+  // than two qualifying threads never touches either.
+  const [threadPicker, setThreadPicker] = useState<ThreadPickerState | null>(null);
+  const threadPickResolveRef = useRef<((pick: ThreadPickChoice | null) => void) | null>(null);
   const [routeRunner, setRouteRunner] = useState<RoutePlanRunner | null>(null);
   const [routeView, setRouteView] = useState<RouteRunnerView | null>(null);
   // Manifest (differentiator 3): the built plan's episode card,
@@ -956,7 +997,16 @@ function MilesApp() {
         ...parsed,
         arrivalTimeMs: null,
         tone: routeTone || parsed.tone,
-        topics: routeTopics.length > 0 ? routeTopics : parsed.topics,
+        // Thread menu (Nov 5, 2026 — the re-anchor amendment):
+        // topics travel EMPTY from the intake. The blind picks
+        // the chips provided are gone — the only place a theme
+        // is chosen for a route build is the menu after the
+        // cast fetch, which offers the threads this drive can
+        // actually carry (the parser's own topic read of the
+        // prose is no longer a pick either; the menu supersedes
+        // it, exactly as the audience control superseded any
+        // prose reading of the rating).
+        topics: [] as string[],
         // Audience coloring (Nov 5, 2026): the rating is the
         // control's value, period — the parse never produces
         // one, and there is no prose that can talk a Standard
@@ -1050,6 +1100,10 @@ function MilesApp() {
       // work (the end-to-end total keeps it — the listener
       // did live through it).
       let pickerDwellMs = 0;
+      // Thread menu dwell (Nov 5, 2026): the same exclusion
+      // as the fork picker's — human choice time is neither
+      // maps nor compose work in the stage timings.
+      let threadDwellMs = 0;
       if (pickerShown) {
         // The build pauses, pre-departure — the driver's own
         // seconds, the same character as the manifest card's
@@ -1236,6 +1290,90 @@ function MilesApp() {
         ...r,
         owedSubjects: stillOwedSubjects(r, heardLabels),
       }));
+      // ------------------------------------------------ thread menu (Nov 5, 2026)
+      // The re-anchor amendment: with the route chosen (and
+      // the fork settled above, when there was one) and the
+      // cast fetched, pause at the SAME staging seam the
+      // route picker uses and offer the threads this drive can
+      // actually carry — the composer's own candidate set,
+      // resolved from the SAME partition the composer will
+      // tile (partitionRoutePools is shared verbatim), the
+      // same woven support, the same index support, the same
+      // drive records (the cooldown's evidence). The menu
+      // shows ONLY when at least two candidates qualify:
+      // exactly one → that thread, no pause (the composer
+      // resolves it itself); zero → no thread. A pick settles
+      // threadChoice, which EVERY compose below composes on —
+      // climax and member re-composes included — and a menu
+      // pick is a user pick: cooldown-exempt, the episode's
+      // thread in full. Back abandons the build quietly with
+      // the form untouched, exactly like the route picker's
+      // Back. The dwell is excluded from compose-stage timing
+      // (the route-choice convention).
+      let threadChoice: ThreadChoice | undefined;
+      const menuPools = partitionRoutePools(units, route.path, geocoded.location, {
+        heardKeys,
+        corridorTellingCounts,
+        audience: input.audience,
+      });
+      const threadResolution = resolveThreadCandidates({
+        geoPool: menuPools.geoAll,
+        wovenSupport: menuPools.portalAll.filter(u => u.wovenEligible === true),
+        path: route.path,
+        destination: geocoded.location,
+        destinationPlaceKey: destPlaceKey,
+        indexSupport: wovenSupportNow(),
+        driveRecords,
+      });
+      void emitEvent(
+        sessionId,
+        'route_thread_offered',
+        {
+          offered: threadResolution.candidates.map(c => ({
+            kind: c.kind,
+            key: c.key,
+            label: c.label,
+            count: c.count,
+            cooled: c.cooled,
+          })),
+          shown: threadResolution.candidates.length >= 2,
+        },
+        { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
+      );
+      if (threadResolution.candidates.length >= 2) {
+        const defaultIndex = Math.max(0, threadResolution.defaultIndex);
+        setRouteStatus('Choose the thread of this drive');
+        const menuShownAtMs = Date.now();
+        const pick = await new Promise<ThreadPickChoice | null>(resolve => {
+          threadPickResolveRef.current = resolve;
+          setThreadPicker({
+            candidates: threadResolution.candidates,
+            selected: defaultIndex,
+            defaultIndex,
+          });
+        });
+        threadDwellMs += Date.now() - menuShownAtMs;
+        setThreadPicker(null);
+        if (!pick) {
+          // Back from the menu: the build is abandoned
+          // quietly, form state preserved — the mirror of the
+          // route picker's Back.
+          discardRunner();
+          setRouteStatus('');
+          setRouteBuilding(false);
+          return;
+        }
+        threadChoice = { candidate: pick.candidate, menu: pick.menu };
+        void emitEvent(
+          sessionId,
+          'route_thread_picked',
+          {
+            key: pick.menu.pickedKey,
+            source: pick.menu.source,
+          },
+          { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
+        );
+      }
       const composeOpts = {
         nowMs,
         heardKeys,
@@ -1246,6 +1384,7 @@ function MilesApp() {
         destinationPlaceKey: destPlaceKey,
         corridorTellingCounts,
         wovenIndexSupport: wovenSupportNow(),
+        ...(threadChoice ? { threadChoice } : {}),
       };
       let plan = composeRoutePlan(units, route.path, geocoded.location, geocoded.name, input, composeOpts);
       // The off-route portal climax (consolidation §4): when the
@@ -1610,7 +1749,9 @@ function MilesApp() {
           maps: routeEndMs - buildT0,
           // The fork picker's human dwell (fork builds only)
           // is excluded — it is neither maps nor compose work.
-          compose: recordingStartMs - routeEndMs - pickerDwellMs,
+          // The thread menu's dwell (menu builds only) is
+          // excluded the same way.
+          compose: recordingStartMs - routeEndMs - pickerDwellMs - threadDwellMs,
           recording: settledAtMs - recordingStartMs,
           total: settledAtMs - buildT0,
         },
@@ -1714,6 +1855,88 @@ function MilesApp() {
     routePickResolveRef.current = null;
     resolve?.(null);
   };
+
+  // Thread menu (Nov 5, 2026): the menu's taps — the mirror
+  // of the fork picker's. The confirm (the build button,
+  // which reads 'Build with this thread' while the menu is
+  // up) settles the paused build's promise with the selected
+  // row: a candidate (a menu pick when it differs from the
+  // pre-selected default, 'default-detected' when it is the
+  // default) or the "Just the road" row (candidate null — a
+  // deliberate no-thread pick, still a menu pick). Back
+  // settles null, which abandons the build quietly with the
+  // form preserved, exactly like the route picker's Back.
+  const confirmThreadPick = () => {
+    const resolve = threadPickResolveRef.current;
+    const picker = threadPicker;
+    threadPickResolveRef.current = null;
+    if (!resolve || !picker) return;
+    const candidate = picker.selected >= 0 ? (picker.candidates[picker.selected] ?? null) : null;
+    const isDefault = candidate !== null && picker.selected === picker.defaultIndex;
+    resolve({
+      candidate,
+      menu: {
+        offered: picker.candidates.map(c => ({ kind: c.kind, key: c.key, label: c.label, count: c.count })),
+        menuShown: true,
+        source: candidate && isDefault ? 'default-detected' : 'menu-pick',
+        pickedKey: candidate?.key ?? null,
+      },
+    });
+  };
+  const cancelThreadPick = () => {
+    const resolve = threadPickResolveRef.current;
+    threadPickResolveRef.current = null;
+    resolve?.(null);
+  };
+
+  // The thread menu (Nov 5, 2026), rendered by BOTH route
+  // forms in the same status slot the fork picker uses — zero
+  // added height beyond its rows. Rows are the drive's
+  // qualifying threads in class order, each labeled with its
+  // anchor tie and honest cast count, plus "Just the road —
+  // no thread". The detection default (cooldown applied) is
+  // pre-selected; tapping a row only moves the selection.
+  const threadPickerBlock = threadPicker ? (
+    <div className="mt-3 rounded-[1.5rem] bg-white/80 p-4 shadow-lg shadow-ink/10">
+      <p className="text-center text-sm font-bold text-ink">This drive can carry a thread</p>
+      <div className="mt-3 flex flex-col gap-2">
+        {threadPicker.candidates.map((candidate, i) => (
+          <button
+            key={candidate.key}
+            type="button"
+            aria-pressed={threadPicker.selected === i}
+            onClick={() => setThreadPicker(p => (p ? { ...p, selected: i } : p))}
+            className={`w-full rounded-full px-4 py-3 text-sm font-bold transition ${
+              threadPicker.selected === i
+                ? 'bg-ink text-cream shadow-lg shadow-ink/20'
+                : 'bg-cream2 text-ink hover:bg-sage/25'
+            }`}
+          >
+            {threadOptionLabel(candidate)}
+          </button>
+        ))}
+        <button
+          type="button"
+          aria-pressed={threadPicker.selected === -1}
+          onClick={() => setThreadPicker(p => (p ? { ...p, selected: -1 } : p))}
+          className={`w-full rounded-full px-4 py-3 text-sm font-bold transition ${
+            threadPicker.selected === -1
+              ? 'bg-ink text-cream shadow-lg shadow-ink/20'
+              : 'bg-cream2 text-ink hover:bg-sage/25'
+          }`}
+        >
+          Just the road — no thread
+        </button>
+      </div>
+      <button
+        type="button"
+        onClick={cancelThreadPick}
+        className="mt-3 w-full rounded-full px-4 py-2 text-xs font-bold text-inksoft transition hover:text-ink"
+      >
+        Back
+      </button>
+    </div>
+  ) : null;
 
   // The fork picker (Nov 5, 2026), rendered by BOTH route
   // forms in the slot the build status/failure block occupies
@@ -1996,34 +2219,29 @@ function MilesApp() {
                 <option value="standard">Standard — the full story</option>
                 <option value="family">Family — the G-rated telling</option>
               </select>
-              <p className="mt-3 text-sm font-bold text-ink">Topics (optional)</p>
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {ROUTE_TOPICS.map(t => (
-                  <button
-                    key={t}
-                    type="button"
-                    aria-pressed={routeTopics.includes(t)}
-                    onClick={() =>
-                      setRouteTopics(prev => (prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t]))
-                    }
-                    className={`rounded-full px-2.5 py-1 text-[11px] font-bold transition ${
-                      routeTopics.includes(t) ? 'bg-ink text-cream' : 'bg-cream2 text-ink hover:bg-sage/25'
-                    }`}
-                  >
-                    {t}
-                  </button>
-                ))}
-              </div>
+              {/* Thread menu (Nov 5, 2026): the blind topic
+                  chips are gone from this form — the theme of
+                  a drive is chosen from the menu that appears
+                  after the cast is fetched, never blind. */}
               <button
                 type="button"
-                onClick={() => (routePicker ? confirmRoutePick() : void buildRoute())}
-                disabled={routeBuilding && !routePicker}
+                onClick={() =>
+                  routePicker ? confirmRoutePick() : threadPicker ? confirmThreadPick() : void buildRoute()
+                }
+                disabled={routeBuilding && !routePicker && !threadPicker}
                 className="mt-4 w-full rounded-full bg-ink px-4 py-3.5 text-sm font-bold text-cream shadow-lg shadow-ink/20 transition hover:bg-sagedeep disabled:opacity-50"
               >
-                {routePicker ? 'Build on this road' : routeBuilding ? 'Building…' : 'Build my route'}
+                {routePicker
+                  ? 'Build on this road'
+                  : threadPicker
+                    ? 'Build with this thread'
+                    : routeBuilding
+                      ? 'Building…'
+                      : 'Build my route'}
               </button>
               {routeStatus && <p className="mt-2 text-center text-xs leading-relaxed text-inksoft">{routeStatus}</p>}
               {routePickerBlock}
+              {threadPickerBlock}
               {routeFailureBlock}
               <p className="mt-2 text-center text-[11px] text-inksoft">
                 One route, composed at departure from stories you haven&rsquo;t heard — no re-planning mid-drive.
@@ -2200,34 +2418,29 @@ function MilesApp() {
                     <option value="standard">Standard — the full story</option>
                     <option value="family">Family — the G-rated telling</option>
                   </select>
-                  <p className="mt-4 text-sm font-bold text-ink">Topics (optional)</p>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {ROUTE_TOPICS.map(t => (
-                      <button
-                        key={t}
-                        type="button"
-                        aria-pressed={routeTopics.includes(t)}
-                        onClick={() =>
-                          setRouteTopics(prev => (prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t]))
-                        }
-                        className={`rounded-full px-3 py-1.5 text-xs font-bold transition ${
-                          routeTopics.includes(t) ? 'bg-ink text-cream' : 'bg-cream2 text-ink hover:bg-sage/25'
-                        }`}
-                      >
-                        {t}
-                      </button>
-                    ))}
-                  </div>
+                  {/* Thread menu (Nov 5, 2026): the blind
+                      topic chips are gone from this form too —
+                      the theme is chosen from the menu after
+                      the cast is fetched, never blind. */}
                   <button
                     type="button"
-                    onClick={() => (routePicker ? confirmRoutePick() : void buildRoute())}
-                    disabled={routeBuilding && !routePicker}
+                    onClick={() =>
+                      routePicker ? confirmRoutePick() : threadPicker ? confirmThreadPick() : void buildRoute()
+                    }
+                    disabled={routeBuilding && !routePicker && !threadPicker}
                     className="mt-5 w-full rounded-full bg-ink px-4 py-3.5 text-sm font-bold text-cream shadow-lg shadow-ink/20 transition hover:bg-sagedeep disabled:opacity-50"
                   >
-                    {routePicker ? 'Build on this road' : routeBuilding ? 'Building…' : 'Build my route'}
+                    {routePicker
+                      ? 'Build on this road'
+                      : threadPicker
+                        ? 'Build with this thread'
+                        : routeBuilding
+                          ? 'Building…'
+                          : 'Build my route'}
                   </button>
                   {routeStatus && <p className="mt-3 text-center text-xs leading-relaxed text-inksoft">{routeStatus}</p>}
                   {routePickerBlock}
+                  {threadPickerBlock}
                   {routeFailureBlock}
                   <p className="mt-2 text-center text-[11px] text-inksoft">
                     One route, composed at departure from stories you haven’t heard — no re-planning mid-drive.
