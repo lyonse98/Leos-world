@@ -3710,7 +3710,7 @@ check('woven data regen: deterministic, and the committed routePresence.ts is in
 const TWIN_SUFFIX = '-woven-v1';
 const twinKeysOf = map => Object.keys(map).filter(k => k.split('|')[1]?.endsWith(TWIN_SUFFIX));
 check('woven twins (data): the tag map carries all 30 twins with topics inherited from their sources', () => {
-  assert.equal(Object.keys(rtg.ROUTE_TAGS).length, 1294, 'one tag row per shelf story');
+  assert.equal(Object.keys(rtg.ROUTE_TAGS).length, 1310, 'one tag row per shelf story (1,294 + 16 Wave C-1)');
   const twins = twinKeysOf(rtg.ROUTE_TAGS);
   assert.equal(twins.length, 30, 'the November tranche twins are index-visible');
   let coast = 0;
