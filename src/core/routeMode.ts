@@ -1267,6 +1267,16 @@ export interface RoutePlan {
    */
   fetchStats?: FetchReadStats | null;
   /**
+   * The route-choice record (Nov 5, 2026), set by the App at
+   * the pick like fetchStats — the roads the Routes call
+   * returned, whether the fork picker showed, and the road
+   * the episode composed on. The runner files it in the
+   * route_plan_started decisions record; episode capture
+   * copies it onto the plan payload. Optional: plans composed
+   * outside a live build (grader worlds) carry none.
+   */
+  routeChoice?: RouteChoiceRecord | null;
+  /**
    * The generated wrap-up (addendum 3): the closing narration
    * for the planned drive played to finish. Its TEXT is
    * authored by the App at preparation (after gap-fill) — the
@@ -3733,6 +3743,15 @@ export interface RouteOutcome {
   route: ComputedRoute | null;
   /** Null on success; otherwise the failure class above. */
   failure: MapsFailure | null;
+  /**
+   * Route choice (Nov 5, 2026): every route the Routes call
+   * returned, parsed, in response order — options[0] is the
+   * default route (`route` itself, meta attached) and the
+   * rest are the alternatives the build could have composed
+   * on. Empty whenever route is null. A single-route response
+   * yields exactly one option: the fallback is today.
+   */
+  options: ComputedRouteOption[];
 }
 
 /**
@@ -3918,6 +3937,78 @@ export interface ComputedRoute {
 }
 
 /**
+ * One route the Routes call returned, meta attached (route
+ * choice, Nov 5, 2026): the ComputedRoute plus the API's own
+ * road summary and its DEFAULT_ROUTE / DEFAULT_ROUTE_ALTERNATE
+ * labels, when it returned them. The description is a LABEL
+ * source only — the picker never depends on it (ordinal
+ * fallback labels exist), because its real-world tidiness for
+ * ordinary routes is unproven until the first live builds.
+ */
+export interface ComputedRouteOption extends ComputedRoute {
+  description: string | null;
+  routeLabels: string[];
+}
+
+/** One road the Routes call returned, as the route-choice record files it. */
+export interface RouteChoiceOffered {
+  description: string | null;
+  durationSec: number;
+  distanceMeters: number;
+  routeLabels: string[];
+}
+
+/**
+ * The route-choice record (Nov 5, 2026): every road this build
+ * could have composed on, whether the picker showed, and the
+ * road it composed on (an index into offered; 0 = the default
+ * route). Set by the App at the pick — like fetchStats, the
+ * pure composer never sees the Routes response. The runner
+ * files it in the route_plan_started decisions record and
+ * episode capture copies it onto the plan payload.
+ */
+export interface RouteChoiceRecord {
+  offered: RouteChoiceOffered[];
+  pickerShown: boolean;
+  pickedIndex: number;
+}
+
+/** One route entry of a computeRoutes response, as the API shapes it. */
+interface RawRouteEntry {
+  distanceMeters?: number;
+  duration?: string;
+  description?: string;
+  routeLabels?: string[];
+  polyline?: { encodedPolyline?: string };
+}
+
+/**
+ * Parse one returned route into a ComputedRouteOption. The
+ * DEFAULT route parses with the standing leniency (a missing
+ * duration reads as 0, exactly as the single-route contract
+ * always read it); an ALTERNATIVE must carry a polyline AND a
+ * usable duration to exist at all — one that fails to parse
+ * is dropped silently and can never fail the build (route
+ * choice, Nov 5, 2026).
+ */
+function parseRouteOption(r: RawRouteEntry, requireDuration: boolean): ComputedRouteOption | null {
+  const encoded = r.polyline?.encodedPolyline;
+  if (!encoded) return null;
+  const dur = r.duration ? parseInt(r.duration.replace('s', ''), 10) : NaN;
+  if (requireDuration && !Number.isFinite(dur)) return null;
+  const path = decodePolyline(encoded);
+  if (path.length === 0) return null;
+  return {
+    path,
+    distanceMeters: r.distanceMeters ?? 0,
+    durationSec: Number.isFinite(dur) ? dur : 0,
+    description:
+      typeof r.description === 'string' && r.description.trim().length > 0 ? r.description.trim() : null,
+    routeLabels: Array.isArray(r.routeLabels) ? r.routeLabels.filter(l => typeof l === 'string') : [],
+  };
+}
+
+/**
  * ONE pass of Routes API computeRoutes with traffic
  * (TRAFFIC_AWARE), DRIVE mode, across ALL configured keys (see
  * configuredKeys — Routes was added to one key's restriction
@@ -3925,6 +4016,14 @@ export interface ComputedRoute {
  * 403 tries the next key). A key that answers with no route is
  * definitive ('no_results'). computeRoute decides whether a
  * non-definitive outcome earns a second pass.
+ *
+ * Route choice (Nov 5, 2026): the pass asks for alternatives
+ * in the SAME request (the app never sends intermediate
+ * waypoints — the one case where alternatives are
+ * unavailable) and parses every returned route. routes[0]
+ * remains THE route — the single-route contract is untouched;
+ * the rest ride along on the outcome as alternatives. A
+ * one-route response is byte-for-byte the old behavior.
  */
 async function computeRoutePass(
   origin: GeoPoint,
@@ -3941,14 +4040,15 @@ async function computeRoutePass(
         headers: {
           'Content-Type': 'application/json',
           'X-Goog-Api-Key': apiKey,
-          'X-Goog-FieldMask': 'routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline',
+          'X-Goog-FieldMask':
+            'routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline,routes.description,routes.routeLabels',
         },
         body: JSON.stringify({
           origin: { location: { latLng: { latitude: origin.lat, longitude: origin.lng } } },
           destination: { location: { latLng: { latitude: destination.lat, longitude: destination.lng } } },
           travelMode: 'DRIVE',
           routingPreference: 'TRAFFIC_AWARE',
-          computeAlternativeRoutes: false,
+          computeAlternativeRoutes: true,
         }),
       });
     } catch {
@@ -3966,28 +4066,29 @@ async function computeRoutePass(
       failure = mergeFailure(failure, classifyHttpFailure(res.status, errorStatus));
       continue;
     }
-    let parsed: {
-      routes?: { distanceMeters?: number; duration?: string; polyline?: { encodedPolyline?: string } }[];
-    };
+    let parsed: { routes?: RawRouteEntry[] };
     try {
       parsed = (await res.json()) as typeof parsed;
     } catch {
       failure = mergeFailure(failure, 'http');
       continue;
     }
-    const r = parsed.routes?.[0];
-    if (!r?.polyline?.encodedPolyline) return { route: null, failure: 'no_results' };
-    const dur = r.duration ? parseInt(r.duration.replace('s', ''), 10) : 0;
-    return {
-      route: {
-        path: decodePolyline(r.polyline.encodedPolyline),
-        distanceMeters: r.distanceMeters ?? 0,
-        durationSec: Number.isFinite(dur) ? dur : 0,
-      },
-      failure: null,
-    };
+    const raw = parsed.routes ?? [];
+    // The head of the response decides, as it always has: a
+    // response whose first route carries no polyline is a
+    // definitive no_results, whatever rides behind it.
+    if (!raw[0]?.polyline?.encodedPolyline) return { route: null, failure: 'no_results', options: [] };
+    const options: ComputedRouteOption[] = [];
+    const head = parseRouteOption(raw[0], false);
+    if (head) options.push(head);
+    for (const r of raw.slice(1)) {
+      const opt = parseRouteOption(r, true);
+      if (opt) options.push(opt);
+    }
+    if (options.length === 0) return { route: null, failure: 'no_results', options: [] };
+    return { route: options[0], failure: null, options };
   }
-  return { route: null, failure };
+  return { route: null, failure, options: [] };
 }
 
 /**
@@ -4007,13 +4108,143 @@ export async function computeRoute(
   opts: MapsCallOptions = {},
 ): Promise<RouteOutcome> {
   const keys = configuredKeys(apiKeys);
-  if (keys.length === 0) return { route: null, failure: 'no_keys' };
+  if (keys.length === 0) return { route: null, failure: 'no_keys', options: [] };
   const first = await computeRoutePass(origin, destination, keys, fetchFn);
   if (first.route || first.failure === 'no_results') return first;
   await (opts.sleep ?? mapsSleep)(opts.retryDelayMs ?? MAPS_RETRY_DELAY_MS);
   const second = await computeRoutePass(origin, destination, keys, fetchFn);
   if (second.route || second.failure === 'no_results') return second;
-  return { route: null, failure: mergeFailure(first.failure ?? 'network', second.failure ?? 'network') };
+  return {
+    route: null,
+    failure: mergeFailure(first.failure ?? 'network', second.failure ?? 'network'),
+    options: [],
+  };
+}
+
+// ------------------------------------------------------------ route choice (Nov 5, 2026)
+
+/**
+ * The fork gate (route choice, Nov 5, 2026): the picker
+ * appears only when an alternative is BOTH a plausible choice
+ * (competitiveness) AND a genuinely different road
+ * (divergence). Both tests are pure local geometry on the
+ * decoded polylines — no calls, no cost beyond arithmetic.
+ */
+
+/** Competitiveness floor: an alternative within +5 min of the fastest is a choice, however short the drive. */
+export const ROUTE_FORK_MAX_EXTRA_SEC = 300;
+/** Competitiveness ratio: …or within +20% of the fastest, whichever window is wider (the coast road on a long drive). */
+export const ROUTE_FORK_MAX_EXTRA_RATIO = 0.2;
+/** Divergence: two routes are different roads when their shared length is BELOW this fraction. */
+export const ROUTE_FORK_MAX_SHARED = 0.75;
+/** A resampled point counts as on the other road within this distance — half the playback off-corridor tolerance, so frontage-road parallels count as the same road. */
+export const ROUTE_FORK_SHARED_TOLERANCE_M = 100;
+/** Resampling step for the shared-length computation. */
+export const ROUTE_FORK_SAMPLE_STEP_M = 100;
+/** The picker shows at most this many roads — fastest + the two best qualifying alternatives (the v16.1 no-scroll rule is hard). */
+export const ROUTE_CHOICE_MAX_OPTIONS = 3;
+
+/** The point at arc length s along a path (linear interpolation within its segment; fine at 100 m scale). */
+function pointAtArcM(path: GeoPoint[], segLens: number[], s: number): GeoPoint {
+  let acc = 0;
+  for (let i = 0; i < segLens.length; i++) {
+    if (s <= acc + segLens[i] || i === segLens.length - 1) {
+      const t = segLens[i] === 0 ? 0 : Math.min(1, Math.max(0, (s - acc) / segLens[i]));
+      const a = path[i];
+      const b = path[i + 1];
+      return { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t };
+    }
+    acc += segLens[i];
+  }
+  return path[path.length - 1];
+}
+
+/** Fraction of path A's length lying within tolM of path B (one direction). */
+function sharedFractionOneWay(a: GeoPoint[], b: GeoPoint[], tolM: number, stepM: number): number {
+  if (a.length < 2 || b.length < 2) return 0;
+  const segLens: number[] = [];
+  let total = 0;
+  for (let i = 0; i < a.length - 1; i++) {
+    const l = haversineM(a[i], a[i + 1]);
+    segLens.push(l);
+    total += l;
+  }
+  if (total === 0) return 0;
+  let shared = 0;
+  // One sample per step, taken at the step's midpoint and
+  // weighted by the step's own length (the final step may be
+  // short) — the sample stands for the ground around it.
+  for (let s = 0; s < total; s += stepM) {
+    const w = Math.min(stepM, total - s);
+    if (distanceToPathM(pointAtArcM(a, segLens, s + w / 2), b) <= tolM) shared += w;
+  }
+  return shared / total;
+}
+
+/**
+ * How much of two routes is the SAME road: the one-way shared
+ * fractions in both directions, averaged — symmetric by
+ * construction, so neither route is privileged as "the" road.
+ * 1 = the same drive; 0 = no shared ground at all.
+ */
+export function sharedLengthFraction(a: GeoPoint[], b: GeoPoint[]): number {
+  const ab = sharedFractionOneWay(a, b, ROUTE_FORK_SHARED_TOLERANCE_M, ROUTE_FORK_SAMPLE_STEP_M);
+  const ba = sharedFractionOneWay(b, a, ROUTE_FORK_SHARED_TOLERANCE_M, ROUTE_FORK_SAMPLE_STEP_M);
+  return (ab + ba) / 2;
+}
+
+/**
+ * The alternatives that make a genuine fork with the default
+ * route, best (fastest) first, capped so the whole choice
+ * fits the picker (default + at most ROUTE_CHOICE_MAX_OPTIONS
+ * − 1). An empty list = no fork = no picker = today's build.
+ * The same-road case (identical descriptions, near-total
+ * overlap) never survives the divergence test — a shared
+ * fraction ≥ 0.95 is a fortiori ≥ 0.75 — so it needs no rule
+ * of its own.
+ */
+export function qualifyingForkAlternatives(
+  route: ComputedRoute,
+  alternatives: readonly ComputedRouteOption[],
+): ComputedRouteOption[] {
+  if (alternatives.length === 0) return [];
+  const fastest = Math.min(route.durationSec, ...alternatives.map(a => a.durationSec));
+  const windowSec = Math.max(ROUTE_FORK_MAX_EXTRA_SEC, ROUTE_FORK_MAX_EXTRA_RATIO * fastest);
+  const qualifying = alternatives.filter(
+    a =>
+      a.durationSec - fastest <= windowSec &&
+      sharedLengthFraction(a.path, route.path) < ROUTE_FORK_MAX_SHARED,
+  );
+  qualifying.sort((x, y) => x.durationSec - y.durationSec);
+  return qualifying.slice(0, ROUTE_CHOICE_MAX_OPTIONS - 1);
+}
+
+/** '24 min' / '1 hr' / '1 hr 5 min' — the picker's compact duration. */
+function pickerDurationLabel(durationSec: number): string {
+  const mins = Math.max(1, Math.round(durationSec / 60));
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m === 0 ? `${h} hr` : `${h} hr ${m} min`;
+}
+
+/**
+ * One picker row's label: 'via I-5 · 24 min · 16 mi'. The road
+ * name is the API's description when present and sane (short,
+ * single-line); otherwise the ordinal fallback — 'Fastest
+ * route' for the first row, 'Route N' after it. The label
+ * never renders an empty or raw-API string.
+ */
+export function routeOptionLabel(option: ComputedRouteOption, displayIndex: number): string {
+  const desc = option.description;
+  const road =
+    desc && desc.length <= 48 && !/[\r\n]/.test(desc)
+      ? `via ${desc}`
+      : displayIndex === 0
+        ? 'Fastest route'
+        : `Route ${displayIndex + 1}`;
+  const miles = Math.max(1, Math.round(option.distanceMeters / 1609.344));
+  return `${road} · ${pickerDurationLabel(option.durationSec)} · ${miles} mi`;
 }
 
 /**

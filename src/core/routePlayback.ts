@@ -1275,6 +1275,23 @@ export class RoutePlanRunner {
               member_cap: plan.threadCarried.memberCap,
             }
           : null,
+        // Route choice (Nov 5, 2026): the roads this build
+        // could have composed on, whether the fork picker
+        // showed, and the road it composed on (an index into
+        // offered; 0 = the default). Null when the plan
+        // carries no route-choice record (grader worlds).
+        route_choice: plan.routeChoice
+          ? {
+              offered: plan.routeChoice.offered.map(o => ({
+                description: o.description,
+                duration_sec: o.durationSec,
+                distance_m: o.distanceMeters,
+                route_labels: [...o.routeLabels],
+              })),
+              picker_shown: plan.routeChoice.pickerShown,
+              picked_index: plan.routeChoice.pickedIndex,
+            }
+          : null,
       },
     };
   }

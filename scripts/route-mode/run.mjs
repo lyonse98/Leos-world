@@ -512,6 +512,201 @@ await checkAsync('resolve: free text delegates to the geocode walk', async () =>
   assert.equal(r.destination.name, 'Balboa Park');
 });
 
+// ---- route choice (Nov 5, 2026) ----
+// The Routes call asks for alternatives; the fork gate
+// (competitiveness + shared-length divergence, pure local
+// geometry) decides whether the driver is ever asked which
+// road the episode composes on. Stubbed fetches only;
+// geometry fixtures are synthetic polylines encoded with the
+// standard algorithm.
+function encodePolyline(points) {
+  let out = '';
+  let lastLat = 0;
+  let lastLng = 0;
+  const enc = v => {
+    let s = v < 0 ? ~(v << 1) : v << 1;
+    let str = '';
+    while (s >= 0x20) {
+      str += String.fromCharCode((0x20 | (s & 0x1f)) + 63);
+      s >>= 5;
+    }
+    return str + String.fromCharCode(s + 63);
+  };
+  for (const p of points) {
+    const lat = Math.round(p.lat * 1e5);
+    const lng = Math.round(p.lng * 1e5);
+    out += enc(lat - lastLat) + enc(lng - lastLng);
+    lastLat = lat;
+    lastLng = lng;
+  }
+  return out;
+}
+// Two parallel freeways ~8 km apart, and a trivial variant of
+// the first that shares ~90% of its length (a minor wiggle at
+// the far end — the same road by any driver's account).
+const i5Path = Array.from({ length: 41 }, (_, i) => ({ lat: 32.7 + i * 0.005, lng: -117.25 }));
+const i805Path = i5Path.map(p => ({ ...p, lng: -117.16 }));
+const trivialPath = i5Path.map((p, i) => (i <= 36 ? p : { ...p, lng: -117.245 }));
+const opt = (points, extra = {}) => ({
+  path: points,
+  distanceMeters: 25750,
+  durationSec: 1440,
+  description: null,
+  routeLabels: [],
+  ...extra,
+});
+
+check('choice: shared-length fraction — identical ≈ 1, parallel freeways ≈ 0', () => {
+  assert.ok(rm.sharedLengthFraction(i5Path, i5Path) > 0.99, 'a road shares itself');
+  assert.ok(rm.sharedLengthFraction(i5Path, i805Path) < 0.05, 'parallel freeways share ~nothing');
+  const f = rm.sharedLengthFraction(i5Path, trivialPath);
+  assert.ok(f > 0.8 && f < 0.98, `the trivial variant shares ≈ 0.9, got ${f.toFixed(3)}`);
+  assert.equal(
+    rm.sharedLengthFraction(i5Path, trivialPath),
+    rm.sharedLengthFraction(trivialPath, i5Path),
+    'the fraction is symmetric by construction',
+  );
+});
+
+check('choice: fork shown — a competitive, divergent alternative qualifies (I-5 vs I-805 shape)', () => {
+  const alt = opt(i805Path, { durationSec: 1620, description: 'I-805 N', routeLabels: ['DEFAULT_ROUTE_ALTERNATE'] });
+  const q = rm.qualifyingForkAlternatives(opt(i5Path), [alt]);
+  assert.equal(q.length, 1);
+  assert.equal(q[0], alt);
+});
+
+check('choice: fork hidden — same road (shared ≥ 0.75 is never a fork)', () => {
+  const alt = opt(trivialPath, { durationSec: 1500 });
+  assert.deepEqual(rm.qualifyingForkAlternatives(opt(i5Path), [alt]), []);
+});
+
+check('choice: fork hidden — an uncompetitive alternative never qualifies', () => {
+  const slow = opt(i805Path, { durationSec: Math.round(1440 * 1.4) }); // +40%
+  assert.deepEqual(rm.qualifyingForkAlternatives(opt(i5Path), [slow]), []);
+  // The window is max(+5 min, +20%), inclusive at the edge:
+  // +300 s on a 24-minute drive qualifies…
+  const edge = opt(i805Path, { durationSec: 1740 });
+  assert.equal(rm.qualifyingForkAlternatives(opt(i5Path), [edge]).length, 1);
+  // …and on an hour's drive the 20% arm rules: +600 s is in,
+  // +800 s is out.
+  const long = opt(i5Path, { durationSec: 3600 });
+  assert.equal(rm.qualifyingForkAlternatives(long, [opt(i805Path, { durationSec: 4200 })]).length, 1);
+  assert.deepEqual(rm.qualifyingForkAlternatives(long, [opt(i805Path, { durationSec: 4400 })]), []);
+});
+
+check('choice: the picker’s 3-road cap keeps the fastest qualifying alternatives', () => {
+  const coastPath = i5Path.map(p => ({ ...p, lng: -117.3 }));
+  const midPath = i5Path.map(p => ({ ...p, lng: -117.205 }));
+  const q = rm.qualifyingForkAlternatives(opt(i5Path), [
+    opt(i805Path, { durationSec: 1620 }),
+    opt(coastPath, { durationSec: 1500 }),
+    opt(midPath, { durationSec: 1560 }),
+  ]);
+  assert.deepEqual(q.map(o => o.durationSec), [1500, 1560], 'fastest two qualifying; the third is dropped silently');
+});
+
+check('choice: picker labels — description when sane, ordinals when not', () => {
+  const base = opt(i5Path, { description: 'I-5 S' });
+  assert.equal(rm.routeOptionLabel(base, 0), 'via I-5 S · 24 min · 16 mi');
+  assert.equal(rm.routeOptionLabel(opt(i5Path), 0), 'Fastest route · 24 min · 16 mi');
+  assert.equal(
+    rm.routeOptionLabel(opt(i805Path, { durationSec: 1620, distanceMeters: 27350 }), 1),
+    'Route 2 · 27 min · 17 mi',
+  );
+  assert.equal(
+    rm.routeOptionLabel(opt(i5Path, { description: 'x'.repeat(80) }), 1),
+    'Route 2 · 24 min · 16 mi',
+    'an unusable description falls back to the ordinal — never raw API text',
+  );
+  assert.equal(rm.routeOptionLabel(opt(i5Path, { description: 'I-5 S', durationSec: 3900 }), 0), 'via I-5 S · 1 hr 5 min · 16 mi');
+});
+
+const routesResp = routes => ({ ok: true, status: 200, json: async () => ({ routes }) });
+const rawRoute = (points, extra = {}) => ({
+  distanceMeters: 25750,
+  duration: '1440s',
+  polyline: { encodedPolyline: encodePolyline(points) },
+  ...extra,
+});
+
+await checkAsync('choice: computeRoute asks for alternatives and parses every returned route', async () => {
+  let seenBody = null;
+  let seenMask = '';
+  const stub = async (url, opts) => {
+    seenBody = JSON.parse(opts.body);
+    seenMask = opts.headers['X-Goog-FieldMask'];
+    return routesResp([
+      rawRoute(i5Path, { description: 'I-5 N', routeLabels: ['DEFAULT_ROUTE'] }),
+      rawRoute(i805Path, { distanceMeters: 27350, duration: '1620s', description: 'I-805 N', routeLabels: ['DEFAULT_ROUTE_ALTERNATE'] }),
+    ]);
+  };
+  const r = await rm.computeRoute({ lat: 32.7, lng: -117.25 }, dest, ['fake-key'], stub);
+  assert.equal(r.failure, null);
+  assert.equal(seenBody.computeAlternativeRoutes, true, 'the request asks for alternatives');
+  assert.ok(seenMask.includes('routes.description') && seenMask.includes('routes.routeLabels'), 'the mask carries the label fields');
+  assert.equal(r.options.length, 2);
+  assert.equal(r.route, r.options[0], 'routes[0] remains THE route — the same object');
+  assert.equal(r.route.durationSec, 1440);
+  assert.equal(r.options[1].durationSec, 1620);
+  assert.equal(r.options[1].description, 'I-805 N');
+  assert.deepEqual(r.options[1].routeLabels, ['DEFAULT_ROUTE_ALTERNATE']);
+});
+
+await checkAsync('choice: a broken alternative drops silently — the build proceeds on the default', async () => {
+  const stub = async () =>
+    routesResp([
+      rawRoute(i5Path),
+      { distanceMeters: 1000, duration: '1500s' }, // no polyline
+      { distanceMeters: 1000, polyline: { encodedPolyline: encodePolyline(i805Path) } }, // no duration
+      rawRoute(i805Path, { duration: '1620s' }),
+    ]);
+  const r = await rm.computeRoute({ lat: 32.7, lng: -117.25 }, dest, ['fake-key'], stub);
+  assert.equal(r.failure, null);
+  assert.equal(r.options.length, 2, 'only the well-formed alternative survives');
+  assert.equal(r.options[1].durationSec, 1620);
+});
+
+await checkAsync('choice: a single-route response is exactly the old behavior', async () => {
+  const r = await rm.computeRoute({ lat: 32.7, lng: -117.25 }, dest, ['fake-key'], async () => okRoute);
+  assert.equal(r.failure, null);
+  assert.equal(r.options.length, 1);
+  assert.equal(r.options[0], r.route);
+  assert.equal(r.options[0].description, null, 'no description in the response → null, never a fabricated name');
+});
+
+check('choice: two picks compose two different plans — budgets follow the picked road', () => {
+  const bPath = [
+    { lat: 32.7, lng: -117.25 },
+    { lat: 32.74, lng: -117.205 },
+    { lat: 32.78, lng: -117.168 },
+    { lat: 32.82, lng: -117.168 },
+    { lat: 32.86, lng: -117.205 },
+    { lat: 32.9, lng: -117.25 },
+  ];
+  const units = [
+    unit('a-one|landmark_origin', 32.74),
+    unit('a-two|landmark_origin', 32.78),
+    unit('a-three|landmark_origin', 32.82),
+    unit('a-four|landmark_origin', 32.86),
+    unit('b-one|landmark_origin', 32.74, { lng: -117.2 }),
+    unit('b-two|landmark_origin', 32.78, { lng: -117.165 }),
+    unit('b-three|landmark_origin', 32.82, { lng: -117.165 }),
+    unit('b-four|landmark_origin', 32.86, { lng: -117.2 }),
+  ];
+  const input = { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] };
+  // The budget rides opts.budgetSecOverride — the App's own
+  // seam (budgetSecFor of the picked route's duration).
+  const planA = rm.composeRoutePlan(units, i5Path, dest, 'Dest', input, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: rm.budgetSecFor(1440), driveSec: 1440 });
+  const planB = rm.composeRoutePlan(units, bPath, dest, 'Dest', input, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: rm.budgetSecFor(1620), driveSec: 1620 });
+  const idsA = planA.items.filter(i => i.kind === 'story').map(i => i.id);
+  const idsB = planB.items.filter(i => i.kind === 'story').map(i => i.id);
+  assert.ok(idsA.length >= 3 && idsA.every(id => id.startsWith('a-')), `plan A tells only A-road stories: ${idsA}`);
+  assert.ok(idsB.length >= 3 && idsB.every(id => id.startsWith('b-')), `plan B tells only B-road stories: ${idsB}`);
+  assert.equal(planA.budgetSec, rm.budgetSecFor(1440));
+  assert.equal(planB.budgetSec, rm.budgetSecFor(1620));
+  assert.notEqual(planA.budgetSec, planB.budgetSec, 'the budget derives from the picked road');
+});
+
 // ---- ride-duration budget (Nov 3, 2026: Arrive-by removed) ----
 check('budget: the Routes drive estimate is the sole source', () => {
   assert.equal(rm.budgetSecFor(1440), 1440);
@@ -4498,6 +4693,55 @@ checkAsync('carried telemetry: route_plan_started decisions carry the thread_car
   assert.equal(without.p.decisions.thread_carried, null, 'an unassessed plan files null — one telemetry shape');
 });
 
+checkAsync('choice telemetry: route_plan_started decisions carry the route_choice record (Nov 5, 2026)', async () => {
+  const plan0 = rm.composeRoutePlan(
+    [unit('s1|landmark_origin', 32.71), unit('s2|landmark_origin', 32.78), unit('s3|landmark_origin', 32.86)],
+    path,
+    dest,
+    'Dest',
+    { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000 },
+  );
+  const runStarted = async routeChoice => {
+    const p = { ...plan0, routeChoice, fetchStats: null };
+    const events = [];
+    const runner = new rp.RoutePlanRunner({
+      audio: new RealFakeAudio(250),
+      synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+      onEvent: (t, payload) => events.push({ t, p: payload }),
+      onStoryHeard: () => {},
+    });
+    // The App's lifecycle: prime (Build tap) → stage (the
+    // manifest hold) → beginStaged (Start tap); the
+    // plan-started record files when playback begins.
+    runner.prime();
+    await runner.stage(p);
+    runner.beginStaged();
+    await until(() => events.some(e => e.t === 'route_plan_started'), 'route_plan_started');
+    const started = events.find(e => e.t === 'route_plan_started');
+    runner.endTour();
+    return started;
+  };
+  const picked = await runStarted({
+    offered: [
+      { description: 'I-5 N', durationSec: 1440, distanceMeters: 25750, routeLabels: ['DEFAULT_ROUTE'] },
+      { description: null, durationSec: 1620, distanceMeters: 27350, routeLabels: [] },
+    ],
+    pickerShown: true,
+    pickedIndex: 1,
+  });
+  assert.deepEqual(picked.p.decisions.route_choice, {
+    offered: [
+      { description: 'I-5 N', duration_sec: 1440, distance_m: 25750, route_labels: ['DEFAULT_ROUTE'] },
+      { description: null, duration_sec: 1620, distance_m: 27350, route_labels: [] },
+    ],
+    picker_shown: true,
+    picked_index: 1,
+  });
+  const none = await runStarted(null);
+  assert.equal(none.p.decisions.route_choice, null, 'a plan with no record files null — one telemetry shape');
+});
+
 check('carried framing: the preview text and the manifest card name the quiet road — and only in mode', () => {
   const ctx = {
     threadTopic: WT,
@@ -4670,6 +4914,35 @@ check('capture: plan payload covers every item kind with full texts', () => {
     items: [],
   });
   assert.equal(passenger.mode, 'passenger-walking', 'passenger maps to the spec vocabulary');
+});
+
+check('capture: plan payload — the route-choice record files verbatim, defaults when absent (Nov 5, 2026)', () => {
+  const plan = { destinationName: 'Dest', destination: dest, path, driveSec: 1000, budgetSec: 1000, items: [], wrapUp: null };
+  const base = { tourId: 'route-1', buildId: 'fresh-test', context: captureCtx, routePlanStarted: null, items: [] };
+  const plain = ec.assemblePlanCapture({ ...base, plan });
+  assert.deepEqual(plain.route_alternatives_offered, [], 'no record → no offered roads filed');
+  assert.equal(plain.route_picker_shown, false);
+  assert.equal(plain.route_picked_index, 0);
+  const chosen = ec.assemblePlanCapture({
+    ...base,
+    plan: {
+      ...plan,
+      routeChoice: {
+        offered: [
+          { description: 'I-5 N', durationSec: 1440, distanceMeters: 25750, routeLabels: ['DEFAULT_ROUTE'] },
+          { description: 'I-805 N', durationSec: 1620, distanceMeters: 27350, routeLabels: ['DEFAULT_ROUTE_ALTERNATE'] },
+        ],
+        pickerShown: true,
+        pickedIndex: 1,
+      },
+    },
+  });
+  assert.deepEqual(chosen.route_alternatives_offered, [
+    { description: 'I-5 N', duration_sec: 1440, distance_m: 25750, route_labels: ['DEFAULT_ROUTE'] },
+    { description: 'I-805 N', duration_sec: 1620, distance_m: 27350, route_labels: ['DEFAULT_ROUTE_ALTERNATE'] },
+  ]);
+  assert.equal(chosen.route_picker_shown, true);
+  assert.equal(chosen.route_picked_index, 1, 'the index names the road the episode composed on');
 });
 
 check('capture: outcome assembly — played order, drop reasons, driven discriminator', () => {

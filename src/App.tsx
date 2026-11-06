@@ -20,14 +20,18 @@ import {
   orderFetchCandidates,
   parseRouteInput,
   qaGateOpen,
+  qualifyingForkAlternatives,
   resolveDestination,
+  routeOptionLabel,
   seatWovenMembers,
   selectMemberFetchEntries,
   wovenIndexSupportByTopic,
   WOVEN_MEMBER_CAP,
   ROUTE_TONES,
   ROUTE_TOPICS,
+  type ComputedRouteOption,
   type LibraryUnit,
+  type RouteChoiceRecord,
   type TourMode,
 } from './core/routeMode';
 import {
@@ -442,6 +446,25 @@ export default function App() {
   return <MilesApp />;
 }
 
+/**
+ * Route choice (Nov 5, 2026): one row of the fork picker — a
+ * road the build could compose on, with its index into the
+ * build's full parsed option list (the index capture and the
+ * route_picked event file). Display order is the picker's
+ * own: the default road first, then the qualifying
+ * alternatives fastest-first.
+ */
+interface RoutePickChoice {
+  option: ComputedRouteOption;
+  captureIndex: number;
+}
+
+interface RoutePickerState {
+  choices: RoutePickChoice[];
+  /** Display index of the selected row (the fastest road pre-selected). */
+  selected: number;
+}
+
 function MilesApp() {
   // One Tour instance per tour (C2 discipline): an ended engine is
   // never restarted — START constructs a fresh engine, so no
@@ -489,6 +512,13 @@ function MilesApp() {
   // with a Try again, never a silent return to the idle form.
   const [routeBuildStage, setRouteBuildStage] = useState<RouteBuildStage>('route');
   const [routeFailure, setRouteFailure] = useState<RouteBuildFailure | null>(null);
+  // Route choice (Nov 5, 2026): the fork picker's state while
+  // a build pauses at the route hand-off, and the resolver
+  // that resumes it — the confirm tap (or Back) settles the
+  // promise buildRoute is awaiting. Null whenever no picker
+  // is up; a build with no fork never touches either.
+  const [routePicker, setRoutePicker] = useState<RoutePickerState | null>(null);
+  const routePickResolveRef = useRef<((pick: RoutePickChoice | null) => void) | null>(null);
   const [routeRunner, setRouteRunner] = useState<RoutePlanRunner | null>(null);
   const [routeView, setRouteView] = useState<RouteRunnerView | null>(null);
   // Manifest (differentiator 3): the built plan's episode card,
@@ -753,6 +783,12 @@ function MilesApp() {
       setRouteStatus('Tell Miles where you’re headed.');
       return;
     }
+    // A picker pause left by a superseded build resolves as a
+    // Back — that build abandons quietly (it discards its own
+    // runner on the null pick) rather than hanging forever.
+    routePickResolveRef.current?.(null);
+    routePickResolveRef.current = null;
+    setRoutePicker(null);
     setRouteBuilding(true);
     setRouteFailure(null);
     setRouteBuildStage('route');
@@ -951,7 +987,89 @@ function MilesApp() {
         discardRunner();
         return;
       }
-      const route = routed.route;
+      // Route choice (Nov 5, 2026) — phase A ends at this
+      // hand-off. The Routes call returned every road it
+      // found; the fork gate (competitiveness + divergence,
+      // pure local geometry) decides whether the driver is
+      // asked which road the episode composes on. The offered
+      // facts file to telemetry on EVERY build, fork or not —
+      // the friction audit that decides whether this step
+      // earns its place (picker-show rate, non-fastest pick
+      // rate) reads exactly this event.
+      const offeredOptions = routed.options;
+      const fork = qualifyingForkAlternatives(routed.route, offeredOptions.slice(1));
+      const pickerShown = fork.length > 0;
+      void emitEvent(
+        sessionId,
+        'route_alternatives_offered',
+        {
+          fork: pickerShown,
+          count: offeredOptions.length - 1,
+          durations: offeredOptions.map(o => o.durationSec),
+        },
+        { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
+      );
+      let route: ComputedRouteOption = offeredOptions[0];
+      let pickedIndex = 0;
+      // The picker's human dwell, excluded from the compose
+      // stage timing below: it is neither maps nor compose
+      // work (the end-to-end total keeps it — the listener
+      // did live through it).
+      let pickerDwellMs = 0;
+      if (pickerShown) {
+        // The build pauses, pre-departure — the driver's own
+        // seconds, the same character as the manifest card's
+        // pause after it. The picker renders in the intake
+        // card's status slot; the promise resolves on the
+        // confirm tap, or with null on Back, which abandons
+        // the build quietly: nothing composed, nothing spent.
+        // No fork → this whole block is skipped and the build
+        // proceeds on the default road exactly as before.
+        const choices: RoutePickChoice[] = [
+          { option: offeredOptions[0], captureIndex: 0 },
+          ...fork.map(option => ({ option, captureIndex: offeredOptions.indexOf(option) })),
+        ];
+        setRouteStatus('Two good roads — pick the one you’re driving');
+        const pickShownAtMs = Date.now();
+        const pick = await new Promise<RoutePickChoice | null>(resolve => {
+          routePickResolveRef.current = resolve;
+          setRoutePicker({ choices, selected: 0 });
+        });
+        routePickResolveRef.current = null;
+        setRoutePicker(null);
+        pickerDwellMs = Date.now() - pickShownAtMs;
+        if (!pick) {
+          discardRunner();
+          setRouteStatus('');
+          return;
+        }
+        route = pick.option;
+        pickedIndex = pick.captureIndex;
+        void emitEvent(
+          sessionId,
+          'route_picked',
+          {
+            index: pickedIndex,
+            is_fastest: route.durationSec === Math.min(...offeredOptions.map(o => o.durationSec)),
+          },
+          { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
+        );
+      }
+      // The choice record: every offered road, whether the
+      // picker showed, and the road phase B composes on. Set
+      // on the plan below (beside fetchStats) — the runner
+      // files it in the decisions record, capture copies it
+      // onto the plan payload.
+      const routeChoice: RouteChoiceRecord = {
+        offered: offeredOptions.map(o => ({
+          description: o.description,
+          durationSec: o.durationSec,
+          distanceMeters: o.distanceMeters,
+          routeLabels: [...o.routeLabels],
+        })),
+        pickerShown,
+        pickedIndex,
+      };
       // The route is known — the build enters the compose
       // phase (library fetch → compose → guarantee → seating),
       // and the status line names it. The ride estimate itself
@@ -1298,6 +1416,10 @@ function MilesApp() {
       plan.fetchStats = memberFetchRecord
         ? { ...fetched.stats, memberFetch: memberFetchRecord }
         : fetched.stats;
+      // The route-choice record rides the same way (Nov 5,
+      // 2026): the runner files it in route_plan_started's
+      // decisions and the capture's plan payload reads it.
+      plan.routeChoice = routeChoice;
       // The wrap-up (addendum 3): ONE closing narration for the
       // episode, written for the planned drive played to finish
       // (destination arrival beat + thread payoff as arc
@@ -1398,7 +1520,9 @@ function MilesApp() {
           geocode: geocodeEndMs - geocodeStartMs,
           routes: routeEndMs - geocodeEndMs,
           maps: routeEndMs - buildT0,
-          compose: recordingStartMs - routeEndMs,
+          // The fork picker's human dwell (fork builds only)
+          // is excluded — it is neither maps nor compose work.
+          compose: recordingStartMs - routeEndMs - pickerDwellMs,
           recording: settledAtMs - recordingStartMs,
           total: settledAtMs - buildT0,
         },
@@ -1482,6 +1606,62 @@ function MilesApp() {
         </button>
       </div>
     ) : null;
+
+  // Route choice (Nov 5, 2026): the fork picker's taps. The
+  // confirm settles the paused build's promise with the
+  // selected road (the build button reads 'Build on this
+  // road' while the picker is up — see the forms below); Back
+  // settles it with null, which abandons the build quietly.
+  // The resolver is claimed (nulled) before it fires, so a
+  // double tap settles the build exactly once.
+  const confirmRoutePick = () => {
+    const resolve = routePickResolveRef.current;
+    const picker = routePicker;
+    routePickResolveRef.current = null;
+    if (!resolve || !picker) return;
+    resolve(picker.choices[picker.selected] ?? picker.choices[0]);
+  };
+  const cancelRoutePick = () => {
+    const resolve = routePickResolveRef.current;
+    routePickResolveRef.current = null;
+    resolve?.(null);
+  };
+
+  // The fork picker (Nov 5, 2026), rendered by BOTH route
+  // forms in the slot the build status/failure block occupies
+  // — it replaces the status area of an already-submitted
+  // form, adding no page height beyond its ≤3 rows (the
+  // no-scroll discipline). Tapping a row only moves the
+  // selection; no build starts on a stray tap.
+  const routePickerBlock = routePicker ? (
+    <div className="mt-3 rounded-[1.5rem] bg-white/80 p-4 shadow-lg shadow-ink/10">
+      <p className="text-center text-sm font-bold text-ink">Which road are you taking?</p>
+      <div className="mt-3 flex flex-col gap-2">
+        {routePicker.choices.map((choice, i) => (
+          <button
+            key={choice.captureIndex}
+            type="button"
+            aria-pressed={routePicker.selected === i}
+            onClick={() => setRoutePicker(p => (p ? { ...p, selected: i } : p))}
+            className={`w-full rounded-full px-4 py-3 text-sm font-bold transition ${
+              routePicker.selected === i
+                ? 'bg-ink text-cream shadow-lg shadow-ink/20'
+                : 'bg-cream2 text-ink hover:bg-sage/25'
+            }`}
+          >
+            {routeOptionLabel(choice.option, i)}
+          </button>
+        ))}
+      </div>
+      <button
+        type="button"
+        onClick={cancelRoutePick}
+        className="mt-3 w-full rounded-full px-4 py-2 text-xs font-bold text-inksoft transition hover:text-ink"
+      >
+        Back
+      </button>
+    </div>
+  ) : null;
 
   const submitQuestion = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1731,13 +1911,14 @@ function MilesApp() {
               </div>
               <button
                 type="button"
-                onClick={() => void buildRoute()}
-                disabled={routeBuilding}
+                onClick={() => (routePicker ? confirmRoutePick() : void buildRoute())}
+                disabled={routeBuilding && !routePicker}
                 className="mt-4 w-full rounded-full bg-ink px-4 py-3.5 text-sm font-bold text-cream shadow-lg shadow-ink/20 transition hover:bg-sagedeep disabled:opacity-50"
               >
-                {routeBuilding ? 'Building…' : 'Build my route'}
+                {routePicker ? 'Build on this road' : routeBuilding ? 'Building…' : 'Build my route'}
               </button>
               {routeStatus && <p className="mt-2 text-center text-xs leading-relaxed text-inksoft">{routeStatus}</p>}
+              {routePickerBlock}
               {routeFailureBlock}
               <p className="mt-2 text-center text-[11px] text-inksoft">
                 One route, composed at departure from stories you haven&rsquo;t heard — no re-planning mid-drive.
@@ -1919,13 +2100,14 @@ function MilesApp() {
                   </div>
                   <button
                     type="button"
-                    onClick={() => void buildRoute()}
-                    disabled={routeBuilding}
+                    onClick={() => (routePicker ? confirmRoutePick() : void buildRoute())}
+                    disabled={routeBuilding && !routePicker}
                     className="mt-5 w-full rounded-full bg-ink px-4 py-3.5 text-sm font-bold text-cream shadow-lg shadow-ink/20 transition hover:bg-sagedeep disabled:opacity-50"
                   >
-                    {routeBuilding ? 'Building…' : 'Build my route'}
+                    {routePicker ? 'Build on this road' : routeBuilding ? 'Building…' : 'Build my route'}
                   </button>
                   {routeStatus && <p className="mt-3 text-center text-xs leading-relaxed text-inksoft">{routeStatus}</p>}
+                  {routePickerBlock}
                   {routeFailureBlock}
                   <p className="mt-2 text-center text-[11px] text-inksoft">
                     One route, composed at departure from stories you haven’t heard — no re-planning mid-drive.

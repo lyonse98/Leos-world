@@ -297,6 +297,14 @@ export function assemblePlanItems(plan: RoutePlan, renderedItemIds: ReadonlySet<
   return out;
 }
 
+/** One road the Routes call returned, as the plan payload files it (route choice, Nov 5, 2026). */
+export interface CapturedRouteAlternative {
+  description: string | null;
+  duration_sec: number;
+  distance_m: number;
+  route_labels: string[];
+}
+
 /** The kind='plan' row payload. */
 export interface RouteEpisodePlanPayload {
   schema: 2;
@@ -313,6 +321,19 @@ export interface RouteEpisodePlanPayload {
   budget_sec: number;
   route_duration_sec: number | null;
   route_distance_m: number;
+  /**
+   * Route choice (Nov 5, 2026; additive — schema stays 2):
+   * every road the build could have composed on, in response
+   * order ([0] is the default route). route_picked_index
+   * indexes this array — the road the episode composed on;
+   * route_picker_shown says whether the driver was actually
+   * asked (a genuine fork) or the default simply proceeded.
+   * Empty offered = the plan carries no route-choice record
+   * (grader worlds, pre-choice assemblies).
+   */
+  route_alternatives_offered: CapturedRouteAlternative[];
+  route_picker_shown: boolean;
+  route_picked_index: number;
   /** The route_plan_started event payload, verbatim — decisions and all. */
   route_plan_started: Record<string, unknown>;
   items: CapturedItem[];
@@ -342,6 +363,14 @@ export function assemblePlanCapture(args: {
     budget_sec: plan.budgetSec,
     route_duration_sec: plan.driveSec,
     route_distance_m: Math.round(pathLengthM(plan.path)),
+    route_alternatives_offered: (plan.routeChoice?.offered ?? []).map(o => ({
+      description: o.description,
+      duration_sec: o.durationSec,
+      distance_m: o.distanceMeters,
+      route_labels: [...o.routeLabels],
+    })),
+    route_picker_shown: plan.routeChoice?.pickerShown ?? false,
+    route_picked_index: plan.routeChoice?.pickedIndex ?? 0,
     route_plan_started: args.routePlanStarted,
     items: args.items,
     stage_timings_ms: context.stageTimingsMs,
