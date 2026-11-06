@@ -33,14 +33,18 @@
 // ------------------------------------------------------------
 
 /** The kinds of route-mode live narration. */
-export type NarrationKind = 'bridge' | 'preview' | 'wrapup' | 'gapstory';
+export type NarrationKind = 'bridge' | 'preview' | 'wrapup' | 'gapstory' | 'color';
 
 /**
- * Who is speaking. Miles solo today, by default everywhere;
- * the union widens in the generation layer when a second
- * chair is cast — callers never branch on it.
+ * Who is speaking. Miles solo by default everywhere. The
+ * second chair (audience coloring, Nov 5, 2026) is NOT a
+ * second voice: 'color-puck' is the SAME Puck voice under a
+ * different prompt — Color Puck, the color-commentator
+ * persona whose pieces carry the adult license in a Standard
+ * episode (see the color section below). Callers never
+ * branch on the voice; the text carries the persona.
  */
-export type NarrationVoice = 'miles-solo';
+export type NarrationVoice = 'miles-solo' | 'color-puck';
 
 /** The voice every narration request carries unless overridden. */
 export const DEFAULT_NARRATION_VOICE: NarrationVoice = 'miles-solo';
@@ -319,6 +323,159 @@ export const REACTION_BANK: string[] = [
   'Plenty of road left. Plenty of stories on it, too.',
   'I could drive these roads every day and still find something new.',
 ];
+
+// ------------------------------------------------------------ Color Puck (audience coloring, Nov 5, 2026)
+
+/**
+ * COLOR PUCK — the route-mode color commentator (Erik, Nov 5,
+ * 2026, settling the second-chair identity parked since
+ * Oct 30): NOT a cast voice. Behind the scenes it is the same
+ * Puck voice as Miles, generated under a DIFFERENT PROMPT —
+ * one voice, two prompt-personas. Miles hosts straight in
+ * both ratings; Color Puck is where the adult license lives,
+ * and it exists only in a Standard episode: in Family the
+ * color prompt never runs and Miles hosts alone.
+ *
+ * The persona discipline mirrors the Sanctum narrator
+ * charter: a FIXED character frame (the dry-witted local
+ * co-pilot — the funny tour guide who has driven this county
+ * for thirty years and cannot resist one beat after a story
+ * lands) plus a fixed PERSONA-COLOR BANK of moves below. A
+ * color piece SELECTS a move from the bank and riffs inside
+ * its register; it does not improvise a personality fresh
+ * each episode. And the facts discipline is absolute: a
+ * piece riffs ONLY on the story just told (its text is the
+ * fact pack) — no invented facts, ever, even as jokes; no
+ * color on or after memorial/somber material (the composer-
+ * side class, routeMode.colorSuppressedFor, never offers
+ * those beats); living people stay public-record.
+ */
+
+/** A color piece's hard character cap: a beat, not a monologue (~15–17 s spoken). */
+export const COLOR_MAX_CHARS = 260;
+
+/** Color pieces per episode, at most — reactions, bridge asides, and the closeout line share this one budget. */
+export const COLOR_MAX_PER_EPISODE = 5;
+
+/** One move from the color bank: a named register a piece is authored inside. */
+export interface ColorBankMove {
+  name: string;
+  register: string;
+}
+
+/**
+ * The persona-color bank (fixed, Erik-reviewable): the moves
+ * Color Puck may make, in rotation. Each is a DELIVERY
+ * register over the story's own facts — none of them is a
+ * source of facts.
+ */
+export const COLOR_BANK: ColorBankMove[] = [
+  {
+    name: 'the dry aside',
+    register:
+      'one flat, knowing sentence, deadpan — the joke is that you barely react to how wild the fact is',
+  },
+  {
+    name: "the local's nod",
+    register:
+      'the insider beat: what every local knows about this place that the story just proved, said with a grin',
+  },
+  {
+    name: 'the tour-guide wink',
+    register:
+      'playful direct address to the riders — the guide who loves this stop on the route and is not hiding it',
+  },
+  {
+    name: 'the bar-stool footnote',
+    register:
+      'one colorful detail FROM the story, retold the way it would be told at the end of a bar — same facts, more grin',
+  },
+  {
+    name: 'the straight-faced scale joke',
+    register:
+      'comic emphasis on a true size, date, or number in the story — exaggerate the REACTION, never the figure',
+  },
+];
+
+/** The facts a color piece may speak: the story just told, and nothing else. */
+export interface ColorContext {
+  /** The story's subject (place name). */
+  storySubject: string;
+  /** The story's own text — the fact pack. The piece may claim nothing outside it. */
+  storyText: string;
+  /** The episode's thread topic, when the plan has one (color only — never a fact source). */
+  threadTopic: string | null;
+  /** Where the drive ends. */
+  destinationName: string;
+  /** The surface the piece plays on. */
+  surface: 'reaction' | 'aside' | 'closeout';
+  /** The bank move this piece is authored inside (rotation is the caller's). */
+  move: ColorBankMove;
+}
+
+/**
+ * The color prompt: ridden on the standing story-generation
+ * path (the persona system instruction stays byte-identical —
+ * per-call specifics ride in user prompts by design), this
+ * prompt steps the voice into the color chair for ONE beat.
+ * The adult license is stated as Erik ruled it (Nov 5, 2026):
+ * profanity as seasoning at funny-tour-guide heat, riffing,
+ * ad libs, jokes, direct address — inside the guardrails
+ * that never bend (facts only, no memorial riffing, no
+ * invented facts played for laughs).
+ */
+export function colorPromptFor(ctx: ColorContext): string {
+  const surfaceLine =
+    ctx.surface === 'closeout'
+      ? 'This is the closing beat of the episode — the last word after the final story, before Miles signs off.'
+      : ctx.surface === 'reaction'
+        ? 'This lands in a reaction slot, right after the story, mid-drive.'
+        : 'This is a short aside right after the story, as the drive rolls on.';
+  const parts = [
+    'COLOR COMMENTARY — one short piece, from the second chair.',
+    'You are the same guide, the same voice — but for this one beat you are COLOR PUCK: the color commentator riding along, the funny local co-pilot who has driven this county for thirty years and cannot resist one beat after a story lands. Miles hosts straight; you are the grin after his sentence.',
+    surfaceLine,
+    `THE STORY JUST TOLD — your ONLY facts. Riff on these and nothing else:\nSubject: ${ctx.storySubject}\n${ctx.storyText}`,
+    `YOUR MOVE (from the color bank): ${ctx.move.name} — ${ctx.move.register}.`,
+    [
+      'Rules that never bend:',
+      `- ONE beat: at most ${COLOR_MAX_CHARS} characters, one or two sentences. Land it and stop.`,
+      '- Facts: every claim in your beat must come from the story above. Invent NOTHING — no names, dates, numbers, people, or events that are not in it. A joke built on an invented fact is a lie with a laugh track.',
+      '- Adult register: profanity is seasoning, not the meal — the occasional damn or hell (or one stronger word, once) lands BECAUSE it is occasional. Funny-tour-guide heat, never shock-jock saturation.',
+      '- Jokes punch at situations, history, scale, and the listener\u2019s own drive — never at the dead, the grieving, victims, or living private people.',
+      '- No relative directions (nothing "on your left", nothing "coming up"), no markdown, no stage directions — plain spoken prose, ready to be read aloud exactly as written.',
+    ].join('\n'),
+  ];
+  if (ctx.threadTopic) {
+    parts.push(`The episode's thread is ${ctx.threadTopic}; the drive ends at ${ctx.destinationName}. Context only — not a fact source.`);
+  } else {
+    parts.push(`The drive ends at ${ctx.destinationName}. Context only — not a fact source.`);
+  }
+  return parts.join('\n\n');
+}
+
+// ------------------------------------------------------------ Family rules for generated stories (coloring scope §2)
+
+/**
+ * The Family block for the ONE model-authored story surface
+ * (the generated gap story): appended to the gap-story user
+ * prompt when the build's rating is Family — in the user
+ * prompt, never the persona system instruction, whose
+ * byte-identical prefix is a caching and discipline
+ * invariant. Family is a framing discipline, not a
+ * falsification license: it chooses what to tell and where
+ * the weight sits; it never softens a fact into an untruth.
+ */
+export const FAMILY_GAP_STORY_RULES = [
+  'AUDIENCE: FAMILY — this telling is the G-rated version, and these rules govern it completely:',
+  '- Vocabulary: no profanity, no innuendo, no gallows humor. Humor is gentle and situation-based.',
+  '- Death and tragedy: real deaths may appear only as plain historical fact at civic-history distance ("he died there in 1873") — never a dramatized scene, never method or suffering detail, never the emotional peak of the piece. If this subject\u2019s story IS a death or a haunting, do not soften it — tell the subject\u2019s civic story instead (what was built, who built it, what it was for), or keep to the parts of its record that stand at that distance.',
+  '- Violence: outcomes over acts ("the raid ended the settlement") — never blow-by-blow, never weapon detail as color.',
+  '- Sex and vice: brothels, gambling, saloons, opium are named at category level only, and only where the category is the historical engine that cannot honestly be removed. Never depicted, never played for spice or comedy.',
+  '- Alcohol and Prohibition: civic and economic history — the ban, the smuggling routes, the patrol boats, repeal. Adventure framing; no speakeasy glamour, no drinking detail.',
+  '- Fear: no haunting framing. Legends are told as documented history, or not told.',
+  '- Never falsify: a place where something sad happened does not become a place where nothing happened. Choose what to tell; do not rewrite what happened.',
+].join('\n');
 
 /**
  * The head shapes a bridge can open with (field fix lane 1b).

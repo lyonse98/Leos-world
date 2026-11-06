@@ -351,6 +351,15 @@ export async function putCachedStory(
  * (the caller plays the unit from the bucket; the row insert is
  * best-effort behind it), null on any failure — ingest failure
  * never affects the tour.
+ *
+ * Audience coloring (Nov 5, 2026): the GENERATING RATING is
+ * stamped into the key — a story generated under Family is
+ * promoted under the -route-gap-fam-v1 marker, everything
+ * else under the standing -route-gap-v1. The key is the one
+ * field that survives promotion, so it is where the stamp
+ * lives: future builds read it back off the row's audio_path
+ * (routeMode.generatedRatingForAudioPath), and a Family build
+ * treats a Standard-stamped row as gray-zone fixed audio.
  */
 export async function ingestRouteGapStory(args: {
   /** Writer-dialect place key (normalizePlaceKey) — the row's identity. */
@@ -361,10 +370,13 @@ export async function ingestRouteGapStory(args: {
   lng: number;
   storyText: string;
   audio: Blob;
+  /** The rating the story was generated under (audience coloring); absent = 'standard'. */
+  rating?: 'standard' | 'family';
 }): Promise<string | null> {
   if (!BACKEND_CONFIGURED) return null;
   const discriminator = Math.random().toString(36).slice(2, 8);
-  const audioPath = `library/${args.placeKey}/${args.angle}-${discriminator}-route-gap-v1.wav`;
+  const marker = args.rating === 'family' ? '-route-gap-fam-v1' : '-route-gap-v1';
+  const audioPath = `library/${args.placeKey}/${args.angle}-${discriminator}${marker}.wav`;
   try {
     const { error: uploadError } = await db.storage
       .from(BUCKET)

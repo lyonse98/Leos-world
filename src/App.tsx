@@ -12,7 +12,9 @@ import {
   computeRoute,
   distanceToPathM,
   estimateDurationSec,
+  familyHardExcluded,
   fetchHeardAwareCandidates,
+  generatedRatingForAudioPath,
   haversineM,
   heardKeysForStories,
   isRouteModeEnabled,
@@ -31,6 +33,7 @@ import {
   ROUTE_TOPICS,
   type ComputedRouteOption,
   type LibraryUnit,
+  type RouteAudience,
   type RouteChoiceRecord,
   type TourMode,
 } from './core/routeMode';
@@ -53,6 +56,7 @@ import {
   type NarrationDeps,
 } from './core/narration';
 import { discoverGapSubjects, fillRouteGaps } from './core/routeGapFill';
+import { colorizeRoutePlan } from './core/routeColor';
 import { buildManifest, originAreaName, type RouteManifest } from './core/routeManifest';
 import {
   loadDriveRecords,
@@ -61,7 +65,7 @@ import {
   stillOwedSubjects,
 } from './core/routeHistory';
 import { tagsFor } from './data/routeTags';
-import { wovenEligibleFor } from './data/routePresence';
+import { presenceFor, wovenEligibleFor } from './data/routePresence';
 import { loadAmbientEnabled, saveAmbientEnabled } from './core/ambience';
 import {
   BUILD_ID,
@@ -505,6 +509,14 @@ function MilesApp() {
   const [landingStep, setLandingStep] = useState<'mode' | 'choice' | 'route'>('mode');
   const [routeDest, setRouteDest] = useState('');
   const [routeTone, setRouteTone] = useState('');
+  // Audience coloring (Nov 5, 2026): the rating for THIS
+  // build — 'standard' (the full story, Color Puck riding
+  // along) or 'family' (the G-rated telling). Per-build like
+  // tone/topics, never remembered, and deliberately NOT
+  // coupled to the Driving/Passenger mode box: the kids-in-
+  // the-car case is a Driving drive. The control is the only
+  // source — the parse never reads a rating out of prose.
+  const [routeAudience, setRouteAudience] = useState<RouteAudience>('standard');
   const [routeTopics, setRouteTopics] = useState<string[]>([]);
   const [routeStatus, setRouteStatus] = useState('');
   const [routeBuilding, setRouteBuilding] = useState(false);
@@ -944,6 +956,11 @@ function MilesApp() {
         arrivalTimeMs: null,
         tone: routeTone || parsed.tone,
         topics: routeTopics.length > 0 ? routeTopics : parsed.topics,
+        // Audience coloring (Nov 5, 2026): the rating is the
+        // control's value, period — the parse never produces
+        // one, and there is no prose that can talk a Standard
+        // build Family or a Family build Standard.
+        audience: routeAudience,
       };
       // Every configured Google key, in order (Nov 3, 2026): the
       // bundle's keys carry DIFFERENT API-restriction lists —
@@ -1154,6 +1171,13 @@ function MilesApp() {
           // bundled presence data — the composer consults it
           // for thread support, the seating pass for members.
           wovenEligible: wovenEligibleFor(row.place_key, row.angle),
+          // Audience coloring (Nov 5, 2026): the Protected
+          // register from the same presence data (the
+          // composer/seating/gap code reads it on the unit),
+          // and the generated-rating stamp read off the row's
+          // audio key — Family classifications consult both.
+          protectedRegister: presenceFor(row.place_key, row.angle)?.protected ?? false,
+          generatedRating: generatedRatingForAudioPath(row.audio_path),
         });
       }
       // Story-level heard (composer v3.1): a unit is excluded
@@ -1265,6 +1289,12 @@ function MilesApp() {
             toneSecondary: tags.toneSecondary,
             audioPath: row.audio_path,
             storyText: row.story_text,
+            // Audience coloring (Nov 5, 2026): the portal-
+            // climax pool is one of the lanes the composer's
+            // partition never sees — its Family exclusion
+            // consults these fields on the unit directly.
+            protectedRegister: presenceFor(row.place_key, row.angle)?.protected ?? false,
+            generatedRating: generatedRatingForAudioPath(row.audio_path),
           });
         }
         if (climaxOnlyUnits.length > 0) {
@@ -1336,6 +1366,11 @@ function MilesApp() {
               audioPath: row.audio_path,
               storyText: row.story_text,
               wovenEligible: wovenEligibleFor(row.place_key, row.angle),
+              // Audience coloring (Nov 5, 2026): member
+              // candidacy consults the Protected register and
+              // the rating stamp (wovenMemberCandidates).
+              protectedRegister: presenceFor(row.place_key, row.angle)?.protected ?? false,
+              generatedRating: generatedRatingForAudioPath(row.audio_path),
             });
           }
         }
@@ -1377,6 +1412,11 @@ function MilesApp() {
               lng: unit.lng,
               storyText: unit.storyText ?? '',
               audio,
+              // Audience coloring (Nov 5, 2026): the
+              // generating rating (stamped on the unit by
+              // the fill pass) becomes the promotion-key
+              // marker — the row's durable rating record.
+              rating: unit.generatedRating ?? 'standard',
             }),
           onEvent: event => {
             void emitEvent(
@@ -1423,8 +1463,33 @@ function MilesApp() {
           threadCarried: true,
         });
       }
+      // Color Puck (audience coloring, Nov 5, 2026): the plan
+      // shape is final — author the color pieces into it.
+      // Standard builds gain Color Puck beats on the reaction
+      // slots, as asides after uncovered stories, and as one
+      // closeout line; Family builds pass through untouched
+      // (the color prompt never runs there — Miles hosts
+      // alone). The pieces are plan tissue whose texts exist
+      // at plan-fix like every live piece's; their synthesis
+      // rides the render-ahead queue and the runner's feed
+      // gate kills any piece whose story drops. A generation
+      // failure anywhere in the pass degrades to the composed
+      // plan — color is garnish, never a build failure.
+      plan = await colorizeRoutePlan(plan, {
+        generateColor: prompt => narration.generateStory(prompt),
+      });
       const plannedIds = new Set(plan.items.map(it => it.id));
-      plan.shelfTease = units.find(u => !plannedIds.has(u.id) && !heardKeys.has(u.id)) ?? null;
+      plan.shelfTease =
+        units.find(
+          u =>
+            !plannedIds.has(u.id) &&
+            !heardKeys.has(u.id) &&
+            // The owed story the wrap-up teases must be
+            // seatable under the build's rating: never tease
+            // a story the Family build itself could not tell
+            // (the hard class can never be owed).
+            !(input.audience === 'family' && familyHardExcluded(u)),
+        ) ?? null;
       // The fetch's read accounting rides the plan into the
       // runner's route_plan_started telemetry (v3.1, commit B) —
       // the member fetch's own record rides beside it when
@@ -1532,6 +1597,12 @@ function MilesApp() {
         destinationText: input.destinationText,
         tone: input.tone,
         topics: input.topics,
+        // Audience coloring (Nov 5, 2026): the build's rating
+        // rides the plan row (additive; schema stays 2) —
+        // alongside color_pieces, the count of Color Puck
+        // beats the plan carries. The outcome row's dropped[]
+        // says which pieces died with their stories.
+        audience: input.audience,
         stageTimingsMs: {
           geocode: geocodeEndMs - geocodeStartMs,
           routes: routeEndMs - geocodeEndMs,
@@ -1907,6 +1978,23 @@ function MilesApp() {
                   </option>
                 ))}
               </select>
+              {/* Audience coloring (Nov 5, 2026): the rating
+                  selector sits beside Mood in both route forms
+                  — a per-build choice, defaulting to Standard,
+                  deliberately separate from the Driving /
+                  Passenger mode box. */}
+              <label className="mt-3 block text-sm font-bold text-ink" htmlFor="route-audience-step">
+                Audience (optional)
+              </label>
+              <select
+                id="route-audience-step"
+                value={routeAudience}
+                onChange={e => setRouteAudience(e.target.value as RouteAudience)}
+                className="mt-2 w-full rounded-full border-2 border-sage/30 bg-white px-5 py-3 text-base text-ink focus:border-sagedeep focus:outline-none"
+              >
+                <option value="standard">Standard — the full story</option>
+                <option value="family">Family — the G-rated telling</option>
+              </select>
               <p className="mt-3 text-sm font-bold text-ink">Topics (optional)</p>
               <div className="mt-2 flex flex-wrap gap-1.5">
                 {ROUTE_TOPICS.map(t => (
@@ -2095,6 +2183,21 @@ function MilesApp() {
                         {t}
                       </option>
                     ))}
+                  </select>
+                  {/* Audience coloring (Nov 5, 2026): the same
+                      rating selector as the stepped form —
+                      beside Mood, per-build, default Standard. */}
+                  <label className="mt-4 block text-sm font-bold text-ink" htmlFor="route-audience">
+                    Audience (optional)
+                  </label>
+                  <select
+                    id="route-audience"
+                    value={routeAudience}
+                    onChange={e => setRouteAudience(e.target.value as RouteAudience)}
+                    className="mt-2 w-full rounded-full border-2 border-sage/30 bg-white px-5 py-3 text-base text-ink focus:border-sagedeep focus:outline-none"
+                  >
+                    <option value="standard">Standard — the full story</option>
+                    <option value="family">Family — the G-rated telling</option>
                   </select>
                   <p className="mt-4 text-sm font-bold text-ink">Topics (optional)</p>
                   <div className="mt-2 flex flex-wrap gap-2">

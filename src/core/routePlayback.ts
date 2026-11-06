@@ -1341,6 +1341,12 @@ export class RoutePlanRunner {
       // placement, and what the preview item carries — so any
       // plan can be audited against the ladder after the fact.
       decisions: {
+        // Audience coloring (Nov 5, 2026): the rating the
+        // episode composed under — 'standard' (today's
+        // composition + Color Puck tissue) or 'family' (the
+        // G-rated telling; color never ran). Plans assembled
+        // outside a build carry the composer's own field.
+        audience: plan.audience ?? 'standard',
         thread: plan.thread
           ? { topic: plan.thread.topic, source: plan.threadSource ?? 'detected' }
           : null,
@@ -1609,6 +1615,35 @@ export class RoutePlanRunner {
         this.resolvedCount += 1;
         this.gateSkippedItemIds.add(it.id); // episode capture: the outcome row names this drop
         continue;
+      }
+      if (it.colorForId) {
+        // COLOR DEPENDENCY (audience coloring, Nov 5, 2026):
+        // a Color Puck piece riffs on the story it follows —
+        // if that story dropped stale (either drop path),
+        // settled unplayed (a skip, a failed render), the
+        // piece dies with it, silently, exactly as a doomed
+        // story's lead-in bridge dies. It may sound only
+        // once its story has sounded or is sounding now (the
+        // one-ahead promise behind a live story is the
+        // standing tissue pattern); any other state holds
+        // the gate defensively — in serial plan order the
+        // story's own entry always resolves first.
+        const target = this.entries.find(e => e.planItem.id === it.colorForId);
+        const targetDied =
+          this.droppedStoryIds.has(it.colorForId) ||
+          this.settledUnplayed.has(it.colorForId) ||
+          (target !== undefined && target.state === 'failed');
+        if (targetDied) {
+          entry.state = 'dropped';
+          this.feedCursor += 1;
+          this.resolvedCount += 1;
+          this.gateSkippedItemIds.add(it.id); // episode capture: the outcome row names this drop
+          continue;
+        }
+        const targetSounded = this.playedOrderIds.includes(it.colorForId);
+        const targetSounding =
+          target?.audible != null && this.player.current?.id === target.audible.id;
+        if (!targetSounded && !targetSounding) return; // not yet knowable: hold
       }
       if (entry.state === 'pending') {
         const isTissue = it.kind === 'bridge' || it.kind === 'reaction' || it.kind === 'preview';

@@ -45,7 +45,10 @@ import {
   CORRIDOR_PATH_RADIUS_M,
   DESTINATION_RADIUS_M,
   distanceToPathM,
+  effectiveRouteTone,
   estimateDurationSec,
+  familyHardExcluded,
+  familyRankOf,
   haversineM,
   LANDMARK_PATH_RADIUS_M,
   progressAlongPath,
@@ -56,8 +59,11 @@ import {
   type PlanItem,
   type RoutePlan,
 } from './routeMode';
+import { FAMILY_GAP_STORY_RULES } from './narration';
 import { registryNear } from './facts';
 import { MAJOR_PLACES } from '../content/majorPlaces';
+import { tagsFor } from '../data/routeTags';
+import { presenceFor } from '../data/routePresence';
 
 /** A dead stretch longer than this (seconds of drive time) is a gap worth filling. */
 export const GAP_THRESHOLD_SEC = 180;
@@ -620,7 +626,50 @@ function gapStoryPrompt(
   if (toldLabels.length > 0) {
     parts.push(`Already told this tour (do not retell or re-center these): ${toldLabels.slice(0, 12).join('; ')}.`);
   }
+  // Audience coloring (Nov 5, 2026): under Family, the
+  // Family rules block rides the gap-story prompt — the ONE
+  // model-authored story surface is where prompt-level
+  // coloring bites. It rides in the USER prompt (the parts
+  // here), never the persona system instruction. A Standard
+  // prompt carries none of it, byte for byte.
+  if (plan.audience === 'family') {
+    parts.push(FAMILY_GAP_STORY_RULES);
+  }
   return parts.join('\n\n');
+}
+
+/**
+ * Family subject discipline for generation (Nov 5, 2026): a
+ * discovered subject has no shelf row of its own, but the
+ * story it WOULD be generated as — a landmark_origin telling
+ * on its place key — can be classified from the bundled
+ * tags/presence data exactly as a shelf unit is. Under
+ * Family, a subject whose would-be telling is hard-class
+ * (Protected register, spooky-primary) is excluded at this
+ * discovery step: the gap is commissioned on different
+ * ground, never on a bowdlerized version of the dark one
+ * (the coloring scope's Whaley rule). Non-Family builds
+ * never consult this.
+ */
+function gapSubjectFamilyExcluded(subject: GapSubject): boolean {
+  const placeKey = gapPlaceKey(subject.name);
+  const tags = tagsFor(placeKey, GAP_STORY_ANGLE);
+  const pseudo: LibraryUnit = {
+    id: `${placeKey}|${GAP_STORY_ANGLE}`,
+    placeKey,
+    placeName: subject.name,
+    angle: GAP_STORY_ANGLE,
+    lat: subject.lat,
+    lng: subject.lng,
+    durationSec: 0,
+    topics: tags.topics,
+    tone: tags.tone,
+    toneSecondary: tags.toneSecondary,
+    audioPath: null,
+    storyText: null,
+    protectedRegister: presenceFor(placeKey, GAP_STORY_ANGLE)?.protected ?? false,
+  };
+  return familyHardExcluded(pseudo);
 }
 
 /**
@@ -659,8 +708,18 @@ export async function fillRouteGaps(
     haversineM({ lat: u.lat, lng: u.lng }, plan.destination) <= DESTINATION_RADIUS_M ||
     distanceToPathM({ lat: u.lat, lng: u.lng }, plan.path) <=
       (u.angle.startsWith('landmark') ? LANDMARK_PATH_RADIUS_M : CORRIDOR_PATH_RADIUS_M);
+  // Audience coloring (Nov 5, 2026): the pass ranks by the
+  // EFFECTIVE tone (a Family build's spooky/somber pick has
+  // stood down — routeMode.effectiveRouteTone) and, under
+  // Family, applies the class machinery: hard-class units
+  // never fill, and the family rank term leads the key —
+  // the rating is a boundary, tone steers inside it. In a
+  // Standard build both terms are exactly today's.
+  const family = ctx.input.audience === 'family';
+  const steerTone = effectiveRouteTone(ctx.input);
   const toneRank = (u: LibraryUnit): number =>
-    ctx.input.tone && (u.tone === ctx.input.tone || u.toneSecondary === ctx.input.tone) ? 0 : 1;
+    steerTone && (u.tone === steerTone || u.toneSecondary === steerTone) ? 0 : 1;
+  const famRank = (u: LibraryUnit): number => (family ? familyRankOf(u) : 0);
 
   /**
    * Best untiled shelf unit anchored inside a sub-gap (ranking:
@@ -675,14 +734,20 @@ export async function fillRouteGaps(
    */
   const bestShelfCandidate = (sub: StoryGap): LibraryUnit | null => {
     let best: LibraryUnit | null = null;
-    let bestKey: [number, number, number, number] | null = null;
+    let bestKey: [number, number, number, number, number] | null = null;
     for (const u of ctx.fetchedUnits) {
       if (plannedIds.has(u.id) || ctx.heardKeys.has(u.id)) continue;
       if (u.angle === 'neighborhood_intro_greet' || u.angle === 'filler' || u.angle === 'filler_hosted') continue;
+      // Family hard-exclusion (Nov 5, 2026): the guarantee's
+      // pool reads the fetched set DIRECTLY (intros included),
+      // never the composer's partition — so the predicate
+      // applies here, at this pool's own gate.
+      if (family && familyHardExcluded(u)) continue;
       if (!inCorridor(u)) continue; // geographic only — a fetched portal candidate never becomes a gap fill
       const anchor = progressAlongPath({ lat: u.lat, lng: u.lng }, plan.path);
       if (anchor < sub.startProgress - 1e-9 || anchor > sub.endProgress + 1e-9) continue;
-      const key: [number, number, number, number] = [
+      const key: [number, number, number, number, number] = [
+        famRank(u),
         toneRank(u),
         angleClassRank(u.angle),
         u.angle === 'neighborhood_intro' ? 1 : 0,
@@ -693,7 +758,12 @@ export async function fillRouteGaps(
         key[0] < bestKey[0] ||
         (key[0] === bestKey[0] && key[1] < bestKey[1]) ||
         (key[0] === bestKey[0] && key[1] === bestKey[1] && key[2] < bestKey[2]) ||
-        (key[0] === bestKey[0] && key[1] === bestKey[1] && key[2] === bestKey[2] && key[3] < bestKey[3])
+        (key[0] === bestKey[0] && key[1] === bestKey[1] && key[2] === bestKey[2] && key[3] < bestKey[3]) ||
+        (key[0] === bestKey[0] &&
+          key[1] === bestKey[1] &&
+          key[2] === bestKey[2] &&
+          key[3] === bestKey[3] &&
+          key[4] < bestKey[4])
       ) {
         best = u;
         bestKey = key;
@@ -743,7 +813,14 @@ export async function fillRouteGaps(
         pointAtProgress(plan.path, sub.startProgress + (sub.endProgress - sub.startProgress) * f),
       );
       const subjects = (await withTimeout(deps.discoverSubjects(points), timeoutMs)) ?? [];
-      const subject = subjects.find(s => !coveredPlaceKeys.has(gapPlaceKey(s.name)));
+      const subject = subjects.find(
+        s =>
+          !coveredPlaceKeys.has(gapPlaceKey(s.name)) &&
+          // Family (Nov 5, 2026): a hard-class subject is
+          // excluded at discovery — the next subject on the
+          // ranked list gets the commission instead.
+          !(family && gapSubjectFamilyExcluded(s)),
+      );
       if (subject) {
         genAttempted = true;
         attemptCount += 1;
@@ -772,6 +849,12 @@ export async function fillRouteGaps(
             toneSecondary: null,
             audioPath: null,
             storyText: text,
+            // The generating rating, stamped on the unit so
+            // promotion carries it into the audio key (the
+            // App's ingest reads it) — a future Family build
+            // will read a Standard-stamped row as gray-zone
+            // fixed audio, a Family-stamped one as clean.
+            generatedRating: ctx.input.audience,
           };
           // Shelf promotion: synthesize once for the bucket; the
           // unit then plays from its stored audio (stored first),

@@ -86,6 +86,25 @@ execFileSync(
 );
 const rtg = await import(pathToFileURL(rtOut).href);
 
+// The Color Puck pass (audience coloring, Nov 5, 2026),
+// bundled beside routeMode/narration: its suites drive the
+// pass directly with stubbed generation — zero live calls.
+const rcOut = join(mkdtempSync(join(tmpdir(), 'route-color-')), 'routeColor.mjs');
+execFileSync(
+  join(repoRoot, 'node_modules', '.bin', 'esbuild'),
+  [
+    join(repoRoot, 'src', 'core', 'routeColor.ts'),
+    '--bundle',
+    '--format=esm',
+    '--platform=node',
+    '--define:import.meta.env={}',
+    `--outfile=${rcOut}`,
+    '--log-level=warning',
+  ],
+  { stdio: 'inherit' },
+);
+const rc = await import(pathToFileURL(rcOut).href);
+
 let passed = 0;
 let failed = 0;
 function check(name, fn) {
@@ -6282,6 +6301,434 @@ await checkAsync('fieldfix lane 3: a drop suppression never got to judge says wh
   );
   assert.equal(drop.p.suppression.predicted_start_progress, null, 'no prediction is fabricated for an unjudged drop');
   runner.endTour();
+});
+
+// ── Audience coloring (Nov 5, 2026) ────────────────────────
+// Part A: the rating machinery (Standard / Family). Part B:
+// Color Puck, the adult second-chair persona that exists
+// only in Standard. Zero live calls: color text generation
+// is stubbed everywhere below, and the gap-fill suites ride
+// the standing stubbed deps.
+
+check('coloring: classification — the hard / gray / clean matrix reads the unit\u2019s own signals', () => {
+  const at = extra => unit('x|landmark_origin', 32.7, extra);
+  // Hard: never told under Family, at any lane.
+  assert.equal(rm.familyClassOf(at({ protectedRegister: true })), 'hard', 'Protected register');
+  assert.equal(rm.familyClassOf(at({ tone: 'spooky' })), 'hard', 'spooky primary tone');
+  assert.equal(rm.familyClassOf(at({ angle: 'landmark_scandal' })), 'hard', 'scandal angle at any tone');
+  assert.equal(
+    rm.familyClassOf(at({ angle: 'landmark_scandal', tone: 'warm' })),
+    'hard',
+    'scandal outranks a warm tone',
+  );
+  // Gray: told whole, but de-preferred under Family.
+  assert.equal(rm.familyClassOf(at({ tone: 'somber' })), 'gray', 'somber primary');
+  assert.equal(rm.familyClassOf(at({ toneSecondary: 'spooky' })), 'gray', 'spooky secondary');
+  assert.equal(rm.familyClassOf(at({ toneSecondary: 'somber' })), 'gray', 'somber secondary');
+  assert.equal(rm.familyClassOf(at({ angle: 'landmark_legends' })), 'gray', 'legends angle');
+  assert.equal(rm.familyClassOf(at({ topics: ['folklore'] })), 'gray', 'folklore topic');
+  assert.equal(
+    rm.familyClassOf(at({ generatedRating: rm.generatedRatingForAudioPath('library/x/landmark_origin-ab12cd-route-gap-v1.wav') })),
+    'gray',
+    'a Standard-stamped promoted gap story is gray to a Family build',
+  );
+  // Clean: the warm default, and a Family-stamped promotion.
+  assert.equal(rm.familyClassOf(at({})), 'clean');
+  assert.equal(
+    rm.familyClassOf(at({ generatedRating: rm.generatedRatingForAudioPath('library/x/landmark_origin-ab12cd-route-gap-fam-v1.wav') })),
+    'clean',
+    'a Family-stamped promoted gap story reads clean',
+  );
+  // The stamp reader itself.
+  assert.equal(rm.generatedRatingForAudioPath('library/x/landmark_origin-ab12cd-route-gap-fam-v1.wav'), 'family');
+  assert.equal(rm.generatedRatingForAudioPath('library/x/landmark_origin-ab12cd-route-gap-v1.wav'), 'standard');
+  assert.equal(rm.generatedRatingForAudioPath('x/plain.wav'), null, 'a shelf render carries no stamp');
+  assert.equal(rm.generatedRatingForAudioPath(null), null);
+  // The color-suppression class rides the same signals.
+  assert.equal(rm.colorSuppressedFor(at({ tone: 'somber' })), true, 'no color after somber');
+  assert.equal(rm.colorSuppressedFor(at({ protectedRegister: true })), true, 'no color after Protected');
+  assert.equal(rm.colorSuppressedFor(at({ angle: 'landmark_scandal' })), true, 'no color after scandal');
+  assert.equal(rm.colorSuppressedFor(at({})), false, 'a warm story takes color');
+  // Family outranks a conflicting tone pick: spooky/somber stand down, others steer.
+  assert.equal(rm.effectiveRouteTone({ tone: 'spooky', audience: 'family' }), null);
+  assert.equal(rm.effectiveRouteTone({ tone: 'somber', audience: 'family' }), null);
+  assert.equal(rm.effectiveRouteTone({ tone: 'reflective', audience: 'family' }), 'reflective');
+  assert.equal(rm.effectiveRouteTone({ tone: 'spooky', audience: 'standard' }), 'spooky');
+  assert.equal(rm.effectiveRouteTone({ tone: 'spooky' }), 'spooky', 'a legacy input keeps its pick');
+});
+
+check('coloring: family hard-exclusion across every composer lane (seeded fixture)', () => {
+  const laneUnits = [
+    // The thread cast: three clean History stories on the corridor.
+    unit('h1|landmark_origin', 32.72, { topics: ['History'] }),
+    unit('h2|landmark_origin', 32.76, { topics: ['History'] }),
+    unit('h3|landmark_origin', 32.84, { topics: ['History'] }),
+    // GEO hard lanes: Protected, spooky-primary, scandal — prime corridor ground.
+    unit('prot|landmark_origin', 32.74, { protectedRegister: true }),
+    unit('spook|landmark_origin', 32.80, { tone: 'spooky' }),
+    unit('scand|landmark_scandal', 32.82, { angle: 'landmark_scandal' }),
+    // PORTAL hard lane: ~2.8 km east of the path — portal ground, never corridor.
+    unit('pprot|landmark_origin', 32.85, { lng: -117.22, protectedRegister: true }),
+    // MEMBER hard + clean lanes: county ground, woven-eligible, on the thread.
+    unit('mprot|landmark_origin', 32.60, { lng: -117.02, topics: ['History'], wovenEligible: true, protectedRegister: true }),
+    unit('mclean|landmark_origin', 32.62, { lng: -117.04, topics: ['History'], wovenEligible: true }),
+  ];
+  const climaxOnlyUnits = [
+    unit('cscan|landmark_scandal', 32.60, { angle: 'landmark_scandal', lng: -117.0 }),
+  ];
+  const hardIds = new Set(['prot|landmark_origin', 'spook|landmark_origin', 'scand|landmark_scandal', 'pprot|landmark_origin', 'mprot|landmark_origin', 'cscan|landmark_scandal']);
+  const opts = { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 2000, climaxOnlyUnits };
+  const famInput = { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [], audience: 'family' };
+  const fam = rm.composeRoutePlan(laneUnits, path, dest, 'Dest', famInput, opts);
+  assert.equal(fam.audience, 'family');
+  assert.ok(fam.items.some(i => i.kind === 'story'), 'the family plan still tells stories (non-vacuous)');
+  for (const it of fam.items) {
+    if (it.kind === 'story' && it.unit) {
+      assert.notEqual(rm.familyClassOf(it.unit), 'hard', `hard story seated under Family: ${it.id}`);
+      assert.ok(!hardIds.has(it.id), `hard id in the family plan: ${it.id}`);
+    }
+    if (it.prevUnitId) assert.ok(!hardIds.has(it.prevUnitId), `a bridge leads out of a hard story: ${it.id}`);
+    if (it.nextUnitId) assert.ok(!hardIds.has(it.nextUnitId), `a bridge leads into a hard story: ${it.id}`);
+  }
+  assert.ok(fam.climaxUnitId === null || !hardIds.has(fam.climaxUnitId), 'the family climax is never a hard unit');
+  // The member lane: seating runs on the family plan — the
+  // clean member may seat, the Protected one never does.
+  const seated = rm.seatWovenMembers(fam, laneUnits, { heardKeys: new Set() });
+  for (const it of seated.items) {
+    if (it.kind === 'story' && it.unit) assert.notEqual(rm.familyClassOf(it.unit), 'hard', `hard member seated: ${it.id}`);
+  }
+  // Control: the SAME shelf under Standard seats the geo hard
+  // lanes — the exclusion above is the rating working, not a
+  // fixture that never seats anything dark.
+  const std = rm.composeRoutePlan(laneUnits, path, dest, 'Dest', { ...famInput, audience: 'standard' }, opts);
+  const stdStoryIds = new Set(std.items.filter(i => i.kind === 'story').map(i => i.id));
+  assert.ok(stdStoryIds.has('prot|landmark_origin'), 'standard seats the Protected corridor story');
+  assert.ok(stdStoryIds.has('spook|landmark_origin'), 'standard seats the spooky corridor story');
+  assert.ok(stdStoryIds.has('scand|landmark_scandal'), 'standard seats the scandal corridor story');
+});
+
+check('coloring battery: no hard-class story is ever seated under Family across grader worlds', () => {
+  let standardHardSeated = 0;
+  for (const [seed, shape] of [[1103, 'current'], [2207, '2x']]) {
+    const world = grader.buildWorld(seed, shape);
+    const all = [...world.unitsById.values()];
+    // The synthetic shelf carries no presence data of its
+    // own: stamp the Protected register onto a deterministic
+    // slice (the tone/angle signals are the world's already).
+    for (const u of all) {
+      if (u.placeKey.endsWith('3') || u.placeKey.endsWith('7')) u.protectedRegister = true;
+    }
+    for (const routeName of ['tourist', 'hop', 'commute']) {
+      const route = world.routes[routeName];
+      const base = { destinationText: route.destName, arrivalTimeMs: null, tone: null, topics: [] };
+      const opts = { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: route.driveSec };
+      const fam = rm.composeRoutePlan(all, route.path, route.dest, route.destName, { ...base, audience: 'family' }, opts);
+      for (const it of fam.items) {
+        if (it.kind === 'story' && it.unit) {
+          assert.notEqual(rm.familyClassOf(it.unit), 'hard', `${shape}/${routeName}: hard story seated under Family: ${it.id}`);
+        }
+      }
+      if (fam.climaxUnitId) {
+        const cu = all.find(u => u.id === fam.climaxUnitId);
+        assert.ok(cu && rm.familyClassOf(cu) !== 'hard', `${shape}/${routeName}: the family climax is hard`);
+      }
+      const members = grader
+        .wovenEligibleUnits(world, routeName, { share: 0.5 })
+        .map(u => ({ ...u, wovenEligible: true }));
+      const seated = rm.seatWovenMembers(fam, members, { heardKeys: new Set() });
+      for (const it of seated.items) {
+        if (it.kind === 'story' && it.unit) {
+          assert.notEqual(rm.familyClassOf(it.unit), 'hard', `${shape}/${routeName}: hard member seated under Family: ${it.id}`);
+        }
+      }
+      const std = rm.composeRoutePlan(all, route.path, route.dest, route.destName, { ...base, audience: 'standard' }, opts);
+      standardHardSeated += std.items.filter(i => i.kind === 'story' && i.unit && rm.familyClassOf(i.unit) === 'hard').length;
+    }
+  }
+  assert.ok(standardHardSeated > 0, 'non-vacuous: Standard builds seat hard-class stories in these worlds');
+});
+
+check('coloring: gray de-preference — the family rank term flips a contested slot; gray alone still seats', () => {
+  // Same decile cell, same act, one budget slot (100 s fits
+  // exactly one 120 s story by the fit rule). The gray unit
+  // WINS the standing order — it alone matches the tone pick —
+  // so only the family rank term can flip the seat.
+  const gray = unit('gray|landmark_origin', 32.751, { tone: 'reflective', topics: ['folklore'] });
+  const clean = unit('clean|landmark_origin', 32.754, { tone: 'warm' });
+  const base = { destinationText: 'Dest', arrivalTimeMs: null, tone: 'reflective', topics: [] };
+  const opts = { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100 };
+  const std = rm.composeRoutePlan([gray, clean], path, dest, 'Dest', { ...base, audience: 'standard' }, opts);
+  assert.ok(std.items.some(i => i.id === 'gray|landmark_origin'), 'standard: the tone-matching gray story wins the slot');
+  assert.ok(!std.items.some(i => i.id === 'clean|landmark_origin'), 'standard: the clean story is crowded out');
+  const fam = rm.composeRoutePlan([gray, clean], path, dest, 'Dest', { ...base, audience: 'family' }, opts);
+  assert.ok(fam.items.some(i => i.id === 'clean|landmark_origin'), 'family: the clean story wins the same slot');
+  assert.ok(!fam.items.some(i => i.id === 'gray|landmark_origin'), 'family: the gray story is de-preferred out');
+  // De-preference is not exclusion: a gray-only shelf still tells its story.
+  const grayOnly = rm.composeRoutePlan([gray], path, dest, 'Dest', { ...base, audience: 'family' }, { ...opts, budgetSecOverride: 100000 });
+  assert.ok(grayOnly.items.some(i => i.id === 'gray|landmark_origin'), 'family: a gray story seats when nothing cleaner competes');
+});
+
+check('coloring: gist rule — family tissue names gray stories without quoting them', () => {
+  const gistText = 'The old mill burned down in 1911 and the whole town still talks about it. Then more follows.';
+  const grayMid = unit('graymid|landmark_origin', 32.8, { topics: ['folklore'], storyText: gistText });
+  const cleanMid = unit('cleanmid|landmark_origin', 32.8, { storyText: gistText });
+  const closing = unit('closing|landmark_origin', 32.88);
+  const thread = { topic: 'History' };
+  const stdCtx = rm.buildPreviewContext({
+    thread, destinationName: 'Dest', storyCount: 4, closing, climax: null, mid: grayMid,
+    previouslyHeardSubject: null, priorDrive: null, audience: 'standard',
+  });
+  assert.equal(stdCtx.midSubject, 'graymid|landmark_origin');
+  assert.ok(stdCtx.midGist && stdCtx.midGist.includes('burned down'), 'standard preview quotes the mid gist');
+  const famCtx = rm.buildPreviewContext({
+    thread, destinationName: 'Dest', storyCount: 4, closing, climax: null, mid: grayMid,
+    previouslyHeardSubject: null, priorDrive: null, audience: 'family',
+  });
+  assert.equal(famCtx.midSubject, 'graymid|landmark_origin', 'family preview still NAMES the gray story');
+  assert.equal(famCtx.midGist, undefined, 'family preview never QUOTES a gray story');
+  const famCleanCtx = rm.buildPreviewContext({
+    thread, destinationName: 'Dest', storyCount: 4, closing, climax: null, mid: cleanMid,
+    previouslyHeardSubject: null, priorDrive: null, audience: 'family',
+  });
+  assert.ok(famCleanCtx.midGist && famCleanCtx.midGist.includes('burned down'), 'family preview quotes a CLEAN story freely');
+  // The bridge context carries the same rule for the story behind.
+  const next = unit('next|landmark_origin', 32.85);
+  const famBridge = rm.buildBridgeContext({
+    earlier: [], prev: grayMid, next, thread: null, isClimaxBridge: false, climaxLast: false, promiseMade: false, audience: 'family',
+  });
+  assert.equal(famBridge.prevGist, null, 'family bridge context carries no gray gist');
+  const stdBridge = rm.buildBridgeContext({
+    earlier: [], prev: grayMid, next, thread: null, isClimaxBridge: false, climaxLast: false, promiseMade: false, audience: 'standard',
+  });
+  assert.ok(stdBridge.prevGist && stdBridge.prevGist.includes('burned down'), 'standard bridge context quotes as today');
+});
+
+check('coloring: standard composition parity — audience standard ≡ the legacy input, item for item', () => {
+  const units = [
+    unit('h1|landmark_origin', 32.72, { topics: ['History'] }),
+    unit('h2|landmark_origin', 32.76, { topics: ['History'], tone: 'grand' }),
+    unit('h3|landmark_origin', 32.84, { topics: ['History'] }),
+    unit('prot|landmark_origin', 32.74, { protectedRegister: true }),
+    unit('spook|landmark_origin', 32.80, { tone: 'spooky' }),
+    unit('plain|landmark_origin', 32.78, { topics: ['Food & Drink'] }),
+  ];
+  const base = { destinationText: 'Dest', arrivalTimeMs: null, tone: 'grand', topics: ['History'] };
+  const opts = { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 2000 };
+  const legacy = rm.composeRoutePlan(units, path, dest, 'Dest', base, opts);
+  const standard = rm.composeRoutePlan(units, path, dest, 'Dest', { ...base, audience: 'standard' }, opts);
+  const project = p =>
+    p.items.map(i => [i.kind, i.id, i.text ?? null, i.durationSec, i.prevUnitId ?? null, i.nextUnitId ?? null]);
+  assert.deepEqual(project(standard), project(legacy), 'same items, same order, same texts');
+  assert.equal(standard.budgetSec, legacy.budgetSec, 'same budget');
+  assert.equal(standard.totalSec, legacy.totalSec, 'same total');
+  assert.equal(standard.climaxUnitId, legacy.climaxUnitId, 'same climax');
+  assert.deepEqual(standard.thread, legacy.thread, 'same thread');
+  assert.equal(standard.audience, 'standard');
+  assert.equal(legacy.audience, 'standard', 'a legacy input composes as Standard — the standing default');
+});
+
+await checkAsync('coloring gapfill: family generation is ruled + stamped; a hard subject is never commissioned', async () => {
+  const drive = 2000;
+  const run = async audience => {
+    const plan = mkPlan([storyAtSec('s1|x', 200, 100, drive), storyAtSec('s2|x', 1800, 100, drive)]);
+    plan.driveSec = drive;
+    plan.budgetSec = drive;
+    plan.audience = audience; // compose stamps this in production; mkPlan is a literal
+    const prompts = [];
+    const ingested = [];
+    const filled = await gf.fillRouteGaps(
+      plan,
+      { fetchedUnits: plan.items.map(i => i.unit), heardKeys: new Set(), input: { ...noInput, audience }, driveSec: drive },
+      {
+        discoverSubjects: async points => [
+          // Protected register (bundled presence data): the
+          // story this subject WOULD be generated as is
+          // hard-class — under Family it is excluded at
+          // discovery and the commission moves to clean ground.
+          { name: 'Fort Rosecrans National Cemetery', lat: points[1].lat, lng: points[1].lng, types: ['cemetery'], rating: 4.8, userRatings: 900, address: null, facts: [] },
+          { name: 'The Old Mill', lat: points[1].lat, lng: points[1].lng, types: ['museum'], rating: 4.6, userRatings: 1200, address: null, facts: [] },
+        ],
+        generateStory: async prompt => {
+          prompts.push(prompt);
+          return cannedStory(subjectFromPrompt(prompt));
+        },
+        synthesize: async () => new Blob(['fake-audio']),
+        ingest: async ({ unit: u }) => {
+          ingested.push(u);
+          return 'library/stub.wav';
+        },
+        onEvent: () => {},
+      },
+    );
+    return { filled, prompts, ingested };
+  };
+  const fam = await run('family');
+  assert.equal(fam.prompts.length, 1, 'one generation under Family');
+  assert.ok(fam.prompts[0].includes('Tell the story of The Old Mill.'), 'the commission moved to the clean subject');
+  assert.ok(!fam.prompts[0].includes('Fort Rosecrans'), 'the Protected subject was never commissioned');
+  assert.ok(fam.prompts[0].includes('AUDIENCE: FAMILY'), 'the Family rules block rides the gap prompt');
+  const famGen = fam.filled.items.find(i => i.unit && i.unit.generatedRating);
+  assert.ok(famGen, 'the generated unit is in the filled plan');
+  assert.equal(famGen.unit.generatedRating, 'family', 'the unit carries the generating rating');
+  assert.equal(fam.ingested.length, 1);
+  assert.equal(fam.ingested[0].generatedRating, 'family', 'promotion receives the family stamp');
+  const std = await run('standard');
+  assert.equal(std.prompts.length, 1, 'one generation under Standard');
+  assert.ok(std.prompts[0].includes('Tell the story of Fort Rosecrans National Cemetery.'), 'standard commissions the first subject as today');
+  assert.ok(!std.prompts[0].includes('AUDIENCE: FAMILY'), 'no Family block under Standard');
+  assert.equal(std.ingested[0].generatedRating, 'standard', 'promotion receives the standard stamp');
+});
+
+await checkAsync('color: the color pass is a strict no-op under Family — the prompt never runs', async () => {
+  const fam = rm.composeRoutePlan(
+    [unit('a|landmark_origin', 32.72), unit('b|landmark_origin', 32.78), unit('c|landmark_origin', 32.86)],
+    path, dest, 'Dest',
+    { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [], audience: 'family' },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000 },
+  );
+  let calls = 0;
+  const out = await rc.colorizeRoutePlan(fam, {
+    generateColor: async () => {
+      calls += 1;
+      return 'This must never be generated.';
+    },
+  });
+  assert.equal(calls, 0, 'zero color generations under Family');
+  assert.equal(out, fam, 'the family plan passes through untouched (same object)');
+  assert.ok(!out.items.some(i => i.voice === 'color-puck'), 'no color pieces in a family plan');
+});
+
+await checkAsync('color: standard plan — slots convert in place, caps bind, story order is untouched', async () => {
+  const units = [32.71, 32.74, 32.77, 32.80, 32.83, 32.86, 32.88].map((lat, i) =>
+    unit(`s${i + 1}|landmark_origin`, lat),
+  );
+  const plan = rm.composeRoutePlan(units, path, dest, 'Dest',
+    { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 3000 });
+  const storyIdsBefore = plan.items.filter(i => i.kind === 'story').map(i => i.id);
+  let calls = 0;
+  const out = await rc.colorizeRoutePlan(plan, {
+    generateColor: async prompt => {
+      calls += 1;
+      const subject = prompt.match(/Subject: (.+)\n/)[1];
+      return `Color beat for ${subject}.`;
+    },
+  });
+  const pieces = out.items.filter(i => i.voice === 'color-puck');
+  assert.equal(pieces.length, rn.COLOR_MAX_PER_EPISODE, 'the per-episode cap binds (7 eligible slots, cap 5)');
+  assert.equal(calls, rn.COLOR_MAX_PER_EPISODE, 'generation stops at the cap — no wasted calls');
+  for (const p of pieces) {
+    assert.ok(p.text.length <= rn.COLOR_MAX_CHARS, `piece within the char cap (${p.text.length})`);
+    assert.ok(storyIdsBefore.includes(p.colorForId), 'every piece names the story it riffs on');
+    assert.equal(p.kind, 'reaction', 'color rides the reaction surface');
+  }
+  assert.deepEqual(
+    out.items.filter(i => i.kind === 'story').map(i => i.id),
+    storyIdsBefore,
+    'composition untouched: same stories, same order',
+  );
+  const converted = pieces.filter(p => p.id.startsWith('reaction'));
+  assert.ok(converted.length >= 1, 'reaction slots convert in place (plan ids kept)');
+  const closeout = pieces.find(p => p.id === 'color:closeout');
+  assert.ok(closeout, 'one closeout line is authored');
+  assert.equal(out.items[out.items.length - 1], closeout, 'the closeout is the plan\u2019s last piece');
+  assert.equal(out.totalSec, out.items.reduce((s, i) => s + i.durationSec, 0), 'totalSec recomputed over the final items');
+});
+
+await checkAsync('color: suppressed stories get no piece; over-cap text is discarded whole', async () => {
+  const units = [
+    unit('w1|landmark_origin', 32.72),
+    unit('w2|landmark_origin', 32.76),
+    unit('s3|landmark_origin', 32.80, { tone: 'somber' }),
+    unit('w4|landmark_origin', 32.84),
+  ];
+  const plan = rm.composeRoutePlan(units, path, dest, 'Dest',
+    { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 3000 });
+  const out = await rc.colorizeRoutePlan(plan, {
+    generateColor: async prompt => {
+      const subject = prompt.match(/Subject: (.+)\n/)[1];
+      if (subject === 'w1|landmark_origin') return 'x'.repeat(rn.COLOR_MAX_CHARS + 40); // over the cap
+      return `Color beat for ${subject}.`;
+    },
+  });
+  const pieces = out.items.filter(i => i.voice === 'color-puck');
+  assert.ok(!pieces.some(p => p.colorForId === 's3|landmark_origin'), 'no color on or after the somber story');
+  assert.ok(!pieces.some(p => p.colorForId === 'w1|landmark_origin'), 'the over-cap piece was discarded, not truncated');
+  assert.ok(pieces.some(p => p.colorForId === 'w2|landmark_origin'), 'clean stories still take color');
+  assert.ok(pieces.some(p => p.colorForId === 'w4|landmark_origin'), 'the closeout still lands');
+  for (const p of pieces) assert.ok(p.text.length <= rn.COLOR_MAX_CHARS, 'every surviving piece is within the cap');
+  // The reaction slot that follows the somber story (when
+  // the composer placed one there) keeps its bank line.
+  const s3Idx = out.items.findIndex(i => i.id === 's3|landmark_origin');
+  const after = out.items[s3Idx + 1];
+  if (after && after.kind === 'reaction') {
+    assert.equal(after.voice, undefined, 'the reaction after the somber story stays Miles\u2019 bank line');
+    assert.ok(rn.REACTION_BANK.includes(after.text), 'bank text verbatim');
+  }
+});
+
+await checkAsync('color: a piece dies with its story — the runner never sounds color for a dropped story', async () => {
+  const plan0 = finePlan();
+  const plan = await rc.colorizeRoutePlan(plan0, {
+    generateColor: async prompt => `Color beat for ${prompt.match(/Subject: (.+)\n/)[1]}.`,
+  });
+  const pieceB = plan.items.find(i => i.colorForId === 'b|landmark_origin');
+  const pieceC = plan.items.find(i => i.colorForId === 'c|landmark_origin');
+  assert.ok(pieceB, 'fixture: story B carries a color piece');
+  assert.ok(pieceC, 'fixture: story C carries a color piece');
+  const audio = new RealFakeAudio(250);
+  const events = [];
+  const outcomes = [];
+  const runner = p1Runner(audio, events, outcomes);
+  await runner.start(plan);
+  await until(() => audio.played.some(u => u.includes('a%7Clandmark_origin.wav')), 'story A sounds');
+  runner.onPosition({ lat: 32.795, lng: -117.25 }); // one jump fix past B's window — B gate-drops (the lane-3 shape)
+  await until(
+    () => events.some(e => e.t === 'story_dropped' && e.p.subject === 'b|landmark_origin'),
+    'B drops stale',
+  );
+  runner.onPosition({ lat: 32.87, lng: -117.25 }); // inside C's window
+  await until(() => audio.played.some(u => u.includes('c%7Clandmark_origin.wav')), 'story C sounds');
+  await until(() => audio.played.map(decodedOf).includes(pieceC.text), 'C\u2019s color piece sounds after C');
+  runner.onPosition({ lat: 32.9, lng: -117.25 }); // arrival
+  await until(() => runner.view().closeoutDone, 'arrival closeout');
+  await until(() => outcomes.length === 1, 'outcome filed');
+  const playedTexts = audio.played.map(decodedOf);
+  assert.ok(!playedTexts.includes(pieceB.text), 'B\u2019s color piece never sounded');
+  const out = outcomes[0];
+  assert.deepEqual(verifier.validateOutcome(out), [], 'the live verifier accepts the color outcome row');
+  const droppedColor = out.dropped.find(d => d.id === pieceB.id);
+  assert.ok(droppedColor, 'the outcome names the color piece among the dropped');
+  assert.equal(droppedColor.reason, 'parent-dropped', 'dropped because its story died — the doomed lead-in discipline');
+  runner.endTour();
+});
+
+check('coloring capture: the rating and the color pieces ride the plan payload (schema stays 2)', () => {
+  const storyUnit = unit('s1|landmark_origin', 32.71);
+  const items = [
+    { kind: 'preview', id: 'preview', label: 'Preview', durationSec: 20, text: 'PREVIEW TEXT', ready: true },
+    { kind: 'story', id: storyUnit.id, label: 'S1', durationSec: 100, unit: storyUnit, ready: true, anchorProgress: 0.1, releaseProgress: 0.1, expireProgress: 0.3 },
+    { kind: 'reaction', id: 'reaction-0', label: 'Color commentary', durationSec: 12, text: 'COLOR TEXT', voice: 'color-puck', colorForId: storyUnit.id, ready: true },
+    { kind: 'reaction', id: 'reaction-1', label: 'Reaction', durationSec: 5, text: 'BANK TEXT', ready: true },
+  ];
+  const plan = { destinationName: 'Dest', destination: dest, path, driveSec: 1000, budgetSec: 1000, items, wrapUp: null, audience: 'family' };
+  const payload = ec.assemblePlanCapture({
+    tourId: 'route-1',
+    buildId: 'fresh-test',
+    context: { ...captureCtx, audience: 'family' },
+    plan,
+    routePlanStarted: null,
+    items: ec.assemblePlanItems(plan, new Set(items.map(i => i.id))),
+  });
+  assert.equal(payload.schema, 2, 'additive fields only — the schema stays 2');
+  assert.equal(payload.audience, 'family', 'the rating rides the plan row');
+  assert.equal(payload.color_pieces, 1, 'the color piece count rides the plan row');
+  const colorItem = payload.items.find(i => i.id === 'reaction-0');
+  assert.equal(colorItem.voice, 'color-puck', 'the piece itself is marked in items[]');
+  assert.equal(colorItem.text, 'COLOR TEXT', 'the color text is captured like every tissue text');
+  const bankItem = payload.items.find(i => i.id === 'reaction-1');
+  assert.equal(bankItem.voice, null, 'Miles-solo pieces carry no voice mark');
 });
 
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);

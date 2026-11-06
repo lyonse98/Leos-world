@@ -36,6 +36,7 @@ import {
   REACTION_BANK,
   type BridgeContext,
   type BridgeEpisodeState,
+  type NarrationVoice,
   type PreviewContext,
   type WrapUpContext,
 } from './narration';
@@ -130,6 +131,18 @@ export interface GeoPoint {
   lng: number;
 }
 
+/**
+ * Audience coloring (Nov 5, 2026): the episode's rating axis.
+ * 'standard' is the full telling — today's composition, plus
+ * the Color Puck persona's adult-licensed tissue (routeColor).
+ * 'family' is the G-rated telling: selection is steered by the
+ * family classes below and the color prompt never runs. The
+ * axis is a boundary around selection, never a license over
+ * doctrine — D4 stays excluded at every setting, memorial
+ * material keeps its register at every setting.
+ */
+export type RouteAudience = 'standard' | 'family';
+
 export interface RouteInput {
   /** Raw plain-language destination text from the intake form. */
   destinationText: string;
@@ -139,6 +152,8 @@ export interface RouteInput {
   tone: string | null;
   /** Requested topics (tag vocabulary, e.g. 'Food & Drink'). */
   topics: string[];
+  /** Audience coloring; absent = 'standard'. Set by the intake control only — never parsed from prose in v1. */
+  audience?: RouteAudience;
 }
 
 export interface ParsedRouteInput {
@@ -146,6 +161,8 @@ export interface ParsedRouteInput {
   arrivalTimeMs: number | null;
   tone: string | null;
   topics: string[];
+  /** Audience coloring, resolved: the parse never sets it, so it is 'standard' until the App merges the control's value. */
+  audience: RouteAudience;
 }
 
 export const ROUTE_TONES = ['warm', 'reflective', 'light', 'grand', 'somber', 'reverent', 'spooky'] as const;
@@ -372,7 +389,11 @@ export function parseRouteInputLocal(raw: string, nowMs: number): ParsedRouteInp
   // A trailing comma clause ("Balboa Park, spooky ghost stories")
   // is a mood/topic note, not part of the destination pin.
   const destinationText = rest.split(',')[0].trim() || rest;
-  return { destinationText, arrivalTimeMs, tone, topics };
+  // Audience is control-only in v1 (coloring scope, Decision on
+  // the selector): the parse never reads a rating out of prose,
+  // so every parse resolves to 'standard' and the App merges
+  // the intake control's value over it.
+  return { destinationText, arrivalTimeMs, tone, topics, audience: 'standard' };
 }
 
 // ------------------------------------------------------------ library units + composer
@@ -414,6 +435,133 @@ export interface LibraryUnit {
    * the thread its support.
    */
   wovenEligible?: boolean;
+  /**
+   * Protected register (presence audit, Nov 4, 2026): the
+   * shelf's most sensitive register, baked in by the caller
+   * from the same bundled presence data as wovenEligible.
+   * Geo tiling never reads it in Standard (a Protected story
+   * may still tile on its own ground); the Family coloring
+   * hard-excludes it from every seat, and the color persona
+   * never riffs on it. Absent = not Protected.
+   */
+  protectedRegister?: boolean;
+  /**
+   * Generated-rating stamp (audience coloring, Nov 5, 2026):
+   * for a story the Coverage Guarantee generated and promoted
+   * to the shelf (-route-gap audio keys), the rating it was
+   * generated UNDER — derived by the caller from the audio
+   * key's marker (see generatedRatingForAudioPath), since the
+   * key is the one field that survives promotion. A Family
+   * build treats a 'standard'-stamped row as gray-zone (it is
+   * fixed audio a Family prompt never vetted); a 'family'
+   * stamp is clean anywhere. Absent/null = a shelf original,
+   * never generated.
+   */
+  generatedRating?: RouteAudience | null;
+}
+
+// ------------------------------------------------------------ audience coloring: the family classes
+
+/**
+ * The Family classification of one unit (audience coloring,
+ * Nov 5, 2026), from the signals the shelf actually carries —
+ * topics, tone in either slot, the angle name, the Protected
+ * register, and the generated-rating stamp. Tags describe a
+ * story's mood and subject, not its content; this is a
+ * statistical boundary built on exactly those signals, and
+ * the scope's honest limit stands: a warm-tagged story can
+ * still carry a dark passage, and v1 accepts that knowingly.
+ *
+ *  - 'hard' — never seats in a Family episode, in any lane:
+ *    Protected register, primary tone spooky, or the
+ *    landmark_scandal angle (the shelf's own name for its
+ *    vice/scandal tellings).
+ *  - 'gray' — de-preferred below every clean candidate in
+ *    every Family ranking, and gist-suppressed if seated:
+ *    spooky or somber in either tone slot, the
+ *    landmark_legends angle, the folklore topic, or a
+ *    Standard-stamped promoted gap story.
+ *  - 'clean' — everything else.
+ */
+export type FamilyClass = 'hard' | 'gray' | 'clean';
+
+export function familyClassOf(u: LibraryUnit): FamilyClass {
+  if (u.protectedRegister === true) return 'hard';
+  if (u.tone === 'spooky') return 'hard';
+  if (u.angle === 'landmark_scandal') return 'hard';
+  if (u.tone === 'somber' || u.toneSecondary === 'spooky' || u.toneSecondary === 'somber') return 'gray';
+  if (u.angle === 'landmark_legends') return 'gray';
+  if (u.topics.includes('folklore')) return 'gray';
+  if (u.generatedRating === 'standard') return 'gray';
+  return 'clean';
+}
+
+/** Family hard-exclusion: the unit may not seat in a Family episode, in any lane. */
+export function familyHardExcluded(u: LibraryUnit): boolean {
+  return familyClassOf(u) === 'hard';
+}
+
+/**
+ * The Family rank term: clean (0) below gray (1). Hard units
+ * also read 1 — they never reach a ranking (the partition
+ * removes them first), so the term never has to carry them.
+ * Callers gate this term on the build actually being Family:
+ * in a Standard build it must contribute exactly 0 to every
+ * sort, or composition parity breaks.
+ */
+export function familyRankOf(u: LibraryUnit): number {
+  return familyClassOf(u) === 'clean' ? 0 : 1;
+}
+
+/**
+ * The tone a build actually steers by (coloring scope,
+ * Decision 7): under Family, a spooky or somber tone pick
+ * STANDS DOWN — the rating is a boundary and tone steers
+ * inside it, never toward the gray classes the boundary
+ * de-prefers. Every other combination passes through
+ * untouched, so Standard ranking is exactly today's.
+ */
+export function effectiveRouteTone(input: ParsedRouteInput): string | null {
+  if (input.audience === 'family' && (input.tone === 'spooky' || input.tone === 'somber')) return null;
+  return input.tone;
+}
+
+/**
+ * Color-suppression class (adult license guardrail, Nov 5,
+ * 2026): the color persona NEVER riffs on or immediately
+ * after memorial/somber material. The mechanical reading of
+ * that class from the shelf's signals: somber or spooky in
+ * either tone slot (the memorial register's neighborhood —
+ * PSA 182's telling is somber-class), Protected register, or
+ * the scandal angle. A story in this class simply gets no
+ * color beat; Miles hosts past it straight.
+ */
+export function colorSuppressedFor(u: LibraryUnit): boolean {
+  if (u.protectedRegister === true) return true;
+  if (u.angle === 'landmark_scandal') return true;
+  return u.tone === 'somber' || u.tone === 'spooky' || u.toneSecondary === 'somber' || u.toneSecondary === 'spooky';
+}
+
+/** The audio-key marker a Family-generated gap story is promoted under (backend.ingestRouteGapStory). */
+export const GAP_FAMILY_MARKER = '-route-gap-fam-v1';
+/** The audio-key marker every other generated gap story carries (pre-feature rows included). */
+export const GAP_STANDARD_MARKER = '-route-gap-v1';
+
+/**
+ * The generated-rating stamp a shelf row carries, read off
+ * its audio key — the one field that survives promotion, so
+ * it is where the stamp lives. A generated row with no
+ * family marker reads 'standard': pre-feature promotions
+ * were generated under no rating at all, and the safe
+ * direction for a Family build is to treat unvettable fixed
+ * audio as Standard-stamped (gray), never as Family-clean.
+ * Null = not a generated row.
+ */
+export function generatedRatingForAudioPath(audioPath: string | null): RouteAudience | null {
+  if (!audioPath) return null;
+  if (audioPath.includes(GAP_FAMILY_MARKER)) return 'family';
+  if (audioPath.includes(GAP_STANDARD_MARKER)) return 'standard';
+  return null;
 }
 
 /** Spoken English ≈ 150 wpm; a shelf story's duration estimate. */
@@ -1063,6 +1211,26 @@ export interface PlanItem {
   nextUnitId?: string;
   /** Bridge text (pair-specific, composed at plan time). */
   text?: string;
+  /**
+   * Who speaks this tissue (narration seam): absent =
+   * Miles solo. 'color-puck' marks a Color Puck piece — the
+   * SAME Puck voice under the color prompt (routeColor) —
+   * set by the colorize pass on the reaction-slot, aside,
+   * and closeout pieces it authors. Episode capture files it
+   * per item; nothing in playback branches on it (the text
+   * carries the persona, the voice is one voice).
+   */
+  voice?: NarrationVoice;
+  /**
+   * Color pieces only: the story item this piece riffs on —
+   * the story that JUST sounded before it. The runner's feed
+   * gate reads it as a dependency: if that story dropped
+   * stale, was suppressed, or settled unplayed, the color
+   * piece dies with it, exactly as a doomed story's lead-in
+   * bridge dies (drop coherence's discipline, applied to
+   * color). Absent on every non-color item.
+   */
+  colorForId?: string;
   /** False when its plan-time render failed → skip-fallback drops it. */
   ready: boolean;
   /** Stories: the unit's progress along the path (its anchor). */
@@ -1114,6 +1282,14 @@ export interface RoutePlan {
   destinationName: string;
   destination: GeoPoint;
   path: GeoPoint[];
+  /**
+   * The build's audience coloring (Nov 5, 2026): the rating
+   * the composer composed under, carried on the plan so the
+   * post-compose passes (gap fill, member seating, colorize)
+   * and the capture read ONE source. 'standard' for every
+   * pre-feature caller shape.
+   */
+  audience: RouteAudience;
   /** Drive-time estimate from Routes, seconds (null when unknown). */
   driveSec: number | null;
   /** Tiling budget, seconds (arrival budget, else drive time). */
@@ -1703,6 +1879,15 @@ export function composeRoutePlan(
   opts: ComposeOptions,
 ): RoutePlan {
   const maxStories = opts.maxStories ?? 40;
+  // Audience coloring (Nov 5, 2026): the rating this build
+  // composes under. 'family' engages the class machinery
+  // below (hard-exclusion at partition, the rank term, the
+  // tone stand-down, gist suppression); 'standard' leaves
+  // every one of those terms at exactly zero, so a Standard
+  // plan's composition is byte-identical to the pre-feature
+  // composer on the same inputs.
+  const audience: RouteAudience = input.audience ?? 'standard';
+  const family = audience === 'family';
   const progressCache = new Map<string, number>();
   const prog = (u: LibraryUnit): number => {
     let p = progressCache.get(u.id);
@@ -1771,6 +1956,16 @@ export function composeRoutePlan(
     // — tiling, thread support, climax pools — exactly like a
     // heard exclusion, one rung of the partition.
     if (u.angle === 'corridor' && retiredStretches.has(u.placeKey)) continue;
+    // Family hard-exclusion (Nov 5, 2026): under the Family
+    // coloring, a hard-class unit (Protected register,
+    // spooky-primary, landmark_scandal) is out of EVERY lane
+    // at this same rung — it cannot tile, cannot lend thread
+    // support, cannot hop, and cannot contest either climax,
+    // because every one of those pools draws from geoAll /
+    // portalAll below. (The climax-only fetch pool, which
+    // never passes through this partition, applies the same
+    // predicate at its own filter.)
+    if (family && familyHardExcluded(u)) continue;
     if (inCorridor(u)) geoAll.push(u);
     else portalAll.push(u);
   }
@@ -1879,11 +2074,24 @@ export function composeRoutePlan(
     opts.driveSec ?? (Number.isFinite(budgetSec) ? budgetSec : Math.max(600, pool.reduce((s, u) => s + u.durationSec, 0)));
 
   // Rank within a bucket: tone match (user-chosen) → angle class
-  // → progress.
+  // → progress. Two coloring amendments ride this rank (Nov 5,
+  // 2026): the tone read is the EFFECTIVE tone (under Family a
+  // spooky/somber pick stands down — see effectiveRouteTone),
+  // and the Family rank term LEADS the chain in a Family build
+  // — clean before gray — because the rating is the drive's
+  // content boundary and tone steers inside a class; a term
+  // seated after toneRank could never flip a tone-conflicted
+  // pair, which is precisely the pair the de-preference
+  // exists for. Gated on the build being Family, so in
+  // Standard every added term is identically 0 and the chain
+  // is arithmetically today's.
+  const steerTone = effectiveRouteTone(input);
   const toneRank = (u: LibraryUnit): number =>
-    input.tone && (u.tone === input.tone || u.toneSecondary === input.tone) ? 0 : 1;
+    steerTone && (u.tone === steerTone || u.toneSecondary === steerTone) ? 0 : 1;
+  const familyRank = (u: LibraryUnit): number => (family ? familyRankOf(u) : 0);
   const threadRank = (u: LibraryUnit): number => (threadMemberIds.has(u.id) ? 0 : 1);
   const byRank = (a: LibraryUnit, b: LibraryUnit): number =>
+    familyRank(a) - familyRank(b) ||
     toneRank(a) - toneRank(b) ||
     threadRank(a) - threadRank(b) ||
     angleClassRank(a.angle) - angleClassRank(b.angle) ||
@@ -2162,6 +2370,7 @@ export function composeRoutePlan(
     climaxWinner = [...climaxCandidates].sort((a, b) => {
       const head =
         angleClassRank(a.angle) - angleClassRank(b.angle) ||
+        familyRank(a) - familyRank(b) ||
         toneRank(a) - toneRank(b) ||
         threadRank(a) - threadRank(b);
       if (head !== 0) return head;
@@ -2210,9 +2419,18 @@ export function composeRoutePlan(
             !chosenIds.has(u.id) &&
             !opts.heardKeys.has(u.id) &&
             u.angle.startsWith('landmark') &&
-            u.topics.includes(portalTopic),
+            u.topics.includes(portalTopic) &&
+            // Family (Nov 5, 2026): climax-only candidates
+            // never passed the partition, so the hard
+            // predicate applies here at the pool's own filter.
+            (!family || !familyHardExcluded(u)),
         )
-        .sort((a, b) => b.durationSec - a.durationSec || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0] ?? null;
+        .sort(
+          (a, b) =>
+            familyRank(a) - familyRank(b) ||
+            b.durationSec - a.durationSec ||
+            (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+        )[0] ?? null;
     if (best && (climaxWinner === null || best.durationSec >= climaxWinner.durationSec * PORTAL_CLIMAX_BAR)) {
       portalClimaxUnit = best;
     } else {
@@ -2325,7 +2543,15 @@ export function composeRoutePlan(
     }
     scored.sort(
       (a, b) =>
-        b.shared - a.shared || b.userOverlap - a.userOverlap || b.toneTie - a.toneTie || prog(a.parent) - prog(b.parent),
+        b.shared - a.shared ||
+        b.userOverlap - a.userOverlap ||
+        // Audience coloring (Nov 5, 2026): within equally
+        // thread-affine hops the family class decides before
+        // the tone tie — the rating leads mood in every sort,
+        // as in byRank (Standard: the term is identically 0).
+        familyRank(a.cand) - familyRank(b.cand) ||
+        b.toneTie - a.toneTie ||
+        prog(a.parent) - prog(b.parent),
     );
     const usedParents = new Set<string>();
     let portalsAdded = 0;
@@ -2500,6 +2726,7 @@ export function composeRoutePlan(
           mid: midEntry?.unit ?? null,
           previouslyHeardSubject: priorHeardSubject,
           priorDrive,
+          audience,
         })
       : null;
   const previewText = previewCtx ? previewTextFor(previewCtx) : null;
@@ -2550,6 +2777,7 @@ export function composeRoutePlan(
             climaxLast: climaxSequenced,
             promiseMade,
             offRoute: entry.portalClimax === true,
+            audience,
           });
       const text = bridgeTextFor(prev, u, {
         targetSec: target,
@@ -2693,6 +2921,7 @@ export function composeRoutePlan(
       usedPlaces,
       path,
       destination,
+      audience,
     });
     if (inHand.length < wovenMemberNeed) wovenMembersSeeking = thread.topic;
   }
@@ -2702,6 +2931,7 @@ export function composeRoutePlan(
     destinationName,
     destination,
     path,
+    audience,
     driveSec: null,
     budgetSec: Number.isFinite(budgetSec) ? budgetSec : totalSec,
     items,
@@ -2968,11 +3198,21 @@ export function wovenMemberCandidates(
     usedPlaces: ReadonlySet<string>;
     path: GeoPoint[];
     destination: GeoPoint;
+    /**
+     * The build's audience coloring (Nov 5, 2026): under
+     * 'family', hard-class units are out of candidacy (member
+     * units arrive here WITHOUT passing the composer's
+     * partition — a member-fetched spooky-primary unit must
+     * not seat) and gray candidates rank below clean ones.
+     * Absent/'standard' = the standing candidacy exactly.
+     */
+    audience?: RouteAudience;
   },
 ): LibraryUnit[] {
   const inCorridor = (u: LibraryUnit): boolean =>
     haversineM({ lat: u.lat, lng: u.lng }, args.destination) <= DESTINATION_RADIUS_M ||
     distanceToPathM({ lat: u.lat, lng: u.lng }, args.path) <= LANDMARK_PATH_RADIUS_M;
+  const famRank = (u: LibraryUnit): number => (args.audience === 'family' ? familyRankOf(u) : 0);
   return units
     .filter(
       u =>
@@ -2983,9 +3223,13 @@ export function wovenMemberCandidates(
         u.id !== args.climaxUnitId &&
         !args.usedIds.has(u.id) &&
         !args.usedPlaces.has(u.placeKey) &&
-        !inCorridor(u),
+        !inCorridor(u) &&
+        (args.audience !== 'family' || !familyHardExcluded(u)),
     )
-    .sort((a, b) => b.durationSec - a.durationSec || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    .sort(
+      (a, b) =>
+        famRank(a) - famRank(b) || b.durationSec - a.durationSec || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+    );
 }
 
 /**
@@ -3097,6 +3341,7 @@ export function seatWovenMembers(
     usedPlaces,
     path: plan.path,
     destination: plan.destination,
+    audience: plan.audience,
   });
   // Members the plan already carries (the normal pass's
   // seats, when this is the thread-carried top-up call):
@@ -3180,6 +3425,7 @@ export function seatWovenMembers(
             climaxLast: true,
             promiseMade: true,
             offRoute: true,
+            audience: plan.audience,
           })
         : buildBridgeContext({
             earlier: earlierUnits(gap.next),
@@ -3189,6 +3435,7 @@ export function seatWovenMembers(
             isClimaxBridge: false,
             promiseMade: false,
             nextWoven: true,
+            audience: plan.audience,
           });
       const target = bridgeTarget(
         (gap.prev.anchorProgress ?? 0) * driveSec,
@@ -3235,6 +3482,7 @@ export function seatWovenMembers(
           ? true
           : plan.previewFacts !== null && plan.climaxUnitId !== null,
         offRoute: gap.next.portalClimax === true || nextIsCarriedClimax,
+        audience: plan.audience,
       });
       const target = bridgeTarget(
         memberAnchorSec,
@@ -3402,6 +3650,7 @@ export function seatWovenMembers(
         previouslyHeardSubject: previewContext?.previouslyHeardSubject ?? null,
         priorDrive: previewContext?.priorDrive ?? null,
         threadCarried: true,
+        audience: plan.audience,
       });
       const text = ctx ? previewTextFor(ctx) : null;
       if (ctx && text !== null) {
@@ -3489,6 +3738,16 @@ export function buildBridgeContext(args: {
    * ranging along the thread — never as ground ahead.
    */
   nextWoven?: boolean;
+  /**
+   * The build's audience coloring (Nov 5, 2026): under
+   * 'family', a GRAY-class previous story contributes no
+   * quoted gist — the bridge names the subject only (the
+   * gist rule: bridges may quote a story's own first line,
+   * and a gray story's first line is exactly what Family
+   * tissue must not speak verbatim). Absent/'standard' =
+   * the standing context exactly.
+   */
+  audience?: RouteAudience;
 }): BridgeContext {
   const { earlier, prev, next, thread, isClimaxBridge, climaxLast, promiseMade, offRoute, nextWoven } = args;
   // The bridge into a SEQUENCED climax is the payoff, thread
@@ -3498,7 +3757,8 @@ export function buildBridgeContext(args: {
   const ctx: BridgeContext = {
     threadTopic: thread?.topic ?? null,
     prevSubject: prev.placeName,
-    prevGist: storyGist(prev),
+    prevGist:
+      args.audience === 'family' && familyClassOf(prev) === 'gray' ? null : storyGist(prev),
     nextSubject: next.placeName,
     role,
   };
@@ -3558,6 +3818,14 @@ export function buildPreviewContext(args: {
    * frames the quiet road and the thread honestly.
    */
   threadCarried?: boolean;
+  /**
+   * The build's audience coloring (Nov 5, 2026): under
+   * 'family', a GRAY-class mid story is named but never
+   * quoted — the preview's mid hook is the one place a
+   * shelf story's literal first sentence is spoken by
+   * tissue, and the gist rule closes it for gray stories.
+   */
+  audience?: RouteAudience;
 }): PreviewContext | null {
   const { thread, destinationName, storyCount, closing, climax, mid, previouslyHeardSubject, priorDrive } = args;
   if (!closing) return null;
@@ -3572,7 +3840,8 @@ export function buildPreviewContext(args: {
   if (args.threadCarried) ctx.threadCarried = true;
   if (thread && mid && mid.placeName !== ctx.closingSubject) {
     ctx.midSubject = mid.placeName;
-    const gist = storyGist(mid);
+    const gist =
+      args.audience === 'family' && familyClassOf(mid) === 'gray' ? null : storyGist(mid);
     if (gist && gist.length <= 110) ctx.midGist = gist;
   }
   if (previouslyHeardSubject) ctx.previouslyHeardSubject = previouslyHeardSubject;
@@ -4322,7 +4591,7 @@ export async function parseRouteInput(
     const topics = Array.isArray(obj.topics)
       ? (obj.topics.filter(t => typeof t === 'string') as string[])
       : fallback.topics;
-    return { destinationText: obj.destination.trim(), arrivalTimeMs, tone, topics };
+    return { destinationText: obj.destination.trim(), arrivalTimeMs, tone, topics, audience: fallback.audience };
   } catch {
     return fallback;
   }

@@ -79,6 +79,8 @@ export interface EpisodeCaptureContext {
   tone: string | null;
   /** The requested topics after the UI/parser merge. */
   topics: string[];
+  /** The build's audience coloring (Nov 5, 2026): 'standard' | 'family', after the UI merge. */
+  audience: string;
   /**
    * Build stage durations, ms — the boundaries the Nov 4
    * resilience build made visible: the maps stage (tap →
@@ -136,6 +138,14 @@ export interface CapturedItem {
   /** The plan's designated climax. */
   climax: boolean;
   /**
+   * Who speaks the piece (audience coloring, Nov 5, 2026):
+   * 'color-puck' on a Color Puck piece (a reaction-slot,
+   * aside, or closeout beat authored under the color
+   * prompt); null on everything else — Miles solo is the
+   * absence of a mark, exactly as the plan carries it.
+   */
+  voice: string | null;
+  /**
    * Audio in hand when the plan row was filed (at opening
    * settle). False no longer means dropped: under the
    * render-ahead pipeline the piece may still render ahead of
@@ -169,8 +179,14 @@ export interface CapturedItem {
 }
 
 const INTRO_ANGLES = new Set(['neighborhood_intro', 'neighborhood_intro_greet']);
-/** Generated gap stories are shelved under a fresh audio key carrying this suffix. */
-const GAP_AUDIO_MARKER = '-route-gap-v1';
+/**
+ * Generated gap stories are shelved under a fresh audio key
+ * carrying one of these suffixes — the standing marker, and
+ * (audience coloring, Nov 5, 2026) the family marker a
+ * Family-generated story is promoted under. Both name the
+ * same provenance: a Coverage Guarantee generation.
+ */
+const GAP_AUDIO_MARKERS = ['-route-gap-v1', '-route-gap-fam-v1'];
 
 /**
  * The normalized kind. Derivations, all from durable markers
@@ -188,7 +204,7 @@ export function captureKindFor(item: PlanItem): CapturedItemKind {
   switch (item.kind) {
     case 'story': {
       const audioPath = item.unit?.audioPath ?? '';
-      if (audioPath.includes(GAP_AUDIO_MARKER)) return 'gap_fill';
+      if (GAP_AUDIO_MARKERS.some(m => audioPath.includes(m))) return 'gap_fill';
       if (item.unit && INTRO_ANGLES.has(item.unit.angle)) return 'intro';
       return 'story';
     }
@@ -257,6 +273,7 @@ export function assemblePlanItems(plan: RoutePlan, renderedItemIds: ReadonlySet<
       woven: it.woven === true,
       portal: it.portal === true || it.portalClimax === true,
       climax: it.climax === true,
+      voice: it.voice ?? null,
       rendered: renderedItemIds.has(it.id),
       fromSubject: it.prevUnitId ? (subjectByUnitId.get(it.prevUnitId) ?? null) : null,
       toSubject: it.nextUnitId ? (subjectByUnitId.get(it.nextUnitId) ?? null) : null,
@@ -282,6 +299,7 @@ export function assemblePlanItems(plan: RoutePlan, renderedItemIds: ReadonlySet<
       woven: false,
       portal: false,
       climax: false,
+      voice: null,
       rendered: renderedItemIds.has('wrap-up'),
       fromSubject: null,
       toSubject: null,
@@ -318,6 +336,17 @@ export interface RouteEpisodePlanPayload {
   destination_name: string;
   tone: string | null;
   topics: string[];
+  /**
+   * Audience coloring (Nov 5, 2026; additive — schema stays
+   * 2): the rating this episode was built under, and how
+   * many Color Puck pieces the plan carries (their full
+   * texts ride items[] with voice 'color-puck'; the outcome
+   * row's played[] says which of them actually sounded).
+   * Zero in every Family plan — the color prompt never runs
+   * there.
+   */
+  audience: string;
+  color_pieces: number;
   budget_sec: number;
   route_duration_sec: number | null;
   route_distance_m: number;
@@ -360,6 +389,8 @@ export function assemblePlanCapture(args: {
     destination_name: plan.destinationName,
     tone: context.tone,
     topics: context.topics,
+    audience: context.audience,
+    color_pieces: args.items.filter(i => i.voice === 'color-puck').length,
     budget_sec: plan.budgetSec,
     route_duration_sec: plan.driveSec,
     route_distance_m: Math.round(pathLengthM(plan.path)),
