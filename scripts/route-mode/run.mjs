@@ -106,9 +106,10 @@ execFileSync(
 const rc = await import(pathToFileURL(rcOut).href);
 
 // The humor bank data module (Unfiltered, Nov 6, 2026):
-// the shipped bank's emptiness IS the inertness contract —
-// its suites pin it, and the draw suites inject fixture
-// banks through the colorize deps, never through here.
+// the shipped bank is Erik's reviewed bank (populated
+// Nov 6, 2026) — its suites pin the reviewed contents, and
+// the draw suites inject fixture banks through the colorize
+// deps, never through here.
 const hbOut = join(mkdtempSync(join(tmpdir(), 'route-humor-')), 'humorBank.mjs');
 execFileSync(
   join(repoRoot, 'node_modules', '.bin', 'esbuild'),
@@ -6868,16 +6869,18 @@ check('coloring capture: the rating and the color pieces ride the plan payload (
 });
 
 // ── Unfiltered humor layer (Nov 6, 2026) ─────────────────
-// The machinery only: the shipped bank is EMPTY and the
-// suites below inject a FIXTURE bank of obviously-test
-// lines through the colorize deps. Production never does.
+// The shipped bank is Erik's REVIEWED bank (populated
+// Nov 6, 2026): the first suite pins its contents and its
+// lint. The draw suites below inject a FIXTURE bank of
+// obviously-test lines through the colorize deps —
+// production draws the shipped bank, never a fixture.
 // The layer's contract, per the scope + Erik's rulings:
 // bank-primary hybrid under the shared 5-piece color cap,
 // humor capped at 2, memorial kill episode-wide, adjacency
 // suppression on both neighbors, 20-drive cooldown through
-// the drive records, and — with the shipped bank — PROVABLY
-// inert (an Unfiltered build composes and colorizes exactly
-// as Standard, modulo generated color).
+// the drive records, and — with no bank draws available —
+// PROVABLY inert (an Unfiltered build composes and
+// colorizes exactly as Standard, modulo generated color).
 
 const testLine = (id, over = {}) => ({
   id,
@@ -6930,8 +6933,9 @@ const genBeat = async () => 'Generated color beat.';
 const humorPiecesOf = plan => plan.items.filter(i => i.humor === true);
 const colorPiecesOf = plan => plan.items.filter(i => i.voice === 'color-puck');
 
-check('unfiltered: THE INERTNESS PROOF — the shipped bank is empty and lint-clean', () => {
-  assert.deepEqual(hb.HUMOR_BANK, [], 'the shipped bank ships EMPTY — no line enters without Erik’s review');
+check('unfiltered: THE REVIEWED BANK — Erik’s approved lines are in, lint-clean, the audit kill applied', () => {
+  assert.equal(hb.HUMOR_BANK.length, 149, 'the reviewed bank: 150 drafted lines minus the audit’s one kill');
+  assert.ok(!hb.HUMOR_BANK.some(l => l.id === 'T-10'), 'T-10 (the checkpoint line) does NOT ship — the drafter’s expected kill, applied on Erik’s approval');
   assert.deepEqual(hb.validateHumorBank(hb.HUMOR_BANK), [], 'the shipped bank passes the lint');
   assert.equal(hb.HUMOR_MAX_PER_EPISODE, 2, 'the ruled humor cap');
   assert.equal(hb.HUMOR_COOLDOWN_DRIVES, 20, 'the ruled cooldown window');
@@ -6946,7 +6950,7 @@ check('unfiltered: the bank lint catches the shapes the review workflow must rej
   assert.ok(hb.validateHumorBank([testLine('badexp', { expires: 'next spring' })]).length > 0, 'non-ISO expires caught');
 });
 
-await checkAsync('unfiltered: inert with the shipped bank — composition and colorize are Standard-identical', async () => {
+await checkAsync('unfiltered: inert with no bank draws available — composition and colorize are Standard-identical', async () => {
   const units = [32.71, 32.74, 32.77, 32.8, 32.83, 32.86, 32.88].map((lat, i) => unit(`s${i + 1}|landmark_origin`, lat));
   const composeAs = aud =>
     rm.composeRoutePlan(units, path, dest, 'Dest',
@@ -6972,11 +6976,15 @@ await checkAsync('unfiltered: inert with the shipped bank — composition and co
       unfCalls += 1;
       return 'Generated color beat.';
     },
+    // No bank draws available (the pre-population posture):
+    // the bank stage finds nothing, the generated stage must
+    // behave exactly as Standard's.
+    humorBank: [],
   });
   const shape = p => p.items.map(i => [i.kind, i.id, i.text ?? null, i.voice ?? null, i.colorForId ?? null]);
-  assert.deepEqual(shape(unfOut), shape(stdOut), 'with the empty bank, Unfiltered colorizes EXACTLY as Standard');
+  assert.deepEqual(shape(unfOut), shape(stdOut), 'with no bank draws available, Unfiltered colorizes EXACTLY as Standard');
   assert.equal(unfCalls, stdCalls, 'the generator is called the same number of times');
-  assert.equal(humorPiecesOf(unfOut).length, 0, 'zero humor pieces — the layer is inert');
+  assert.equal(humorPiecesOf(unfOut).length, 0, 'zero humor pieces — no draws, no humor');
 });
 
 await checkAsync('unfiltered: bank draw basics — a generic line fills a slot, flagged and verbatim', async () => {
