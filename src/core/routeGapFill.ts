@@ -64,6 +64,7 @@ import { registryNear } from './facts';
 import { MAJOR_PLACES } from '../content/majorPlaces';
 import { tagsFor } from '../data/routeTags';
 import { presenceFor } from '../data/routePresence';
+import { memorialFor } from '../data/routeMemorial';
 
 /** A dead stretch longer than this (seconds of drive time) is a gap worth filling. */
 export const GAP_THRESHOLD_SEC = 180;
@@ -688,6 +689,7 @@ function gapSubjectFamilyExcluded(subject: GapSubject): boolean {
     audioPath: null,
     storyText: null,
     protectedRegister: presenceFor(placeKey, GAP_STORY_ANGLE)?.protected ?? false,
+    memorial: memorialFor(placeKey, GAP_STORY_ANGLE),
   };
   return familyHardExcluded(pseudo);
 }

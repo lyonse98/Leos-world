@@ -73,6 +73,7 @@ import {
 } from './core/routeHistory';
 import { tagsFor } from './data/routeTags';
 import { presenceFor, wovenEligibleFor } from './data/routePresence';
+import { memorialFor } from './data/routeMemorial';
 import { loadAmbientEnabled, saveAmbientEnabled } from './core/ambience';
 import {
   BUILD_ID,
@@ -1382,6 +1383,12 @@ function MilesApp() {
           // and the generated-rating stamp read off the row's
           // audio key — Family classifications consult both.
           protectedRegister: presenceFor(row.place_key, row.angle)?.protected ?? false,
+          // Memorial class (memorial audit, Nov 7, 2026):
+          // the audited death/memorial set from the bundled
+          // memorial data — the humor kill reads it on the
+          // unit (memorialClassFor); an unclassified row is
+          // not memorial, the safe direction.
+          memorial: memorialFor(row.place_key, row.angle),
           generatedRating: generatedRatingForAudioPath(row.audio_path),
         });
       }
@@ -1603,6 +1610,7 @@ function MilesApp() {
             // partition never sees — its Family exclusion
             // consults these fields on the unit directly.
             protectedRegister: presenceFor(row.place_key, row.angle)?.protected ?? false,
+            memorial: memorialFor(row.place_key, row.angle),
             generatedRating: generatedRatingForAudioPath(row.audio_path),
           });
         }
@@ -1679,6 +1687,7 @@ function MilesApp() {
               // candidacy consults the Protected register and
               // the rating stamp (wovenMemberCandidates).
               protectedRegister: presenceFor(row.place_key, row.angle)?.protected ?? false,
+              memorial: memorialFor(row.place_key, row.angle),
               generatedRating: generatedRatingForAudioPath(row.audio_path),
             });
           }

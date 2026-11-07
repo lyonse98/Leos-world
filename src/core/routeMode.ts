@@ -453,6 +453,20 @@ export interface LibraryUnit {
    */
   protectedRegister?: boolean;
   /**
+   * Memorial class (memorial audit, Nov 7, 2026): the
+   * AUDITED set of tellings whose subject is a real death
+   * event or a memorial itself — PSA Flight 182's class —
+   * baked in by the caller from the bundled memorial data
+   * (src/data/routeMemorial, keyed place_key|angle exactly
+   * like the presence register). This flag alone trips the
+   * humor layer's episode-wide kill (memorialClassFor);
+   * the Protected register and the somber/spooky tones no
+   * longer do — they keep their per-slot suppression via
+   * colorSuppressedFor. Absent = not memorial: the safe
+   * direction for an unclassified telling.
+   */
+  memorial?: boolean;
+  /**
    * Generated-rating stamp (audience coloring, Nov 5, 2026):
    * for a story the Coverage Guarantee generated and promoted
    * to the shelf (-route-gap audio keys), the rating it was
@@ -550,22 +564,31 @@ export function colorSuppressedFor(u: LibraryUnit): boolean {
 }
 
 /**
- * Memorial class (humor layer, Nov 6, 2026): the narrower
- * cut inside the color-suppression class that kills the
- * humor layer for a WHOLE episode, not just a slot's
- * neighborhood (Erik's ruling: the episode-wide memorial
- * kill is YES). The mechanical reading from the shelf's
- * signals: the Protected register (the shelf's own most
- * sensitive register — its memorials and grief ground), or
- * a SOMBER PRIMARY tone (grief is the telling's headline
- * register — PSA 182's telling is somber-class). A spooky
- * or scandal story, or somber in the secondary slot only,
- * suppresses its own neighborhood via colorSuppressedFor
- * but does not silence an episode it merely passes through.
+ * Memorial class (humor layer, Nov 6, 2026; NARROWED to
+ * the audited set, Erik's ruling Nov 7, 2026): the cut
+ * that kills the humor layer for a WHOLE episode, not
+ * just a slot's neighborhood (the episode-wide memorial
+ * kill is YES). It began as a mechanical reading —
+ * Protected register OR somber primary tone — and the
+ * first real-bank smoke showed the cost: Mount Soledad
+ * is Protected on every angle, so the NBSD commute (a
+ * Soledad fixture) could never laugh, though only one
+ * Soledad angle is a memorial telling. Erik ruled the
+ * kill belongs to PSA Flight 182's class alone: tellings
+ * whose SUBJECT is a real death event or a memorial
+ * itself. That judgment cannot be read off tone/register
+ * signals, so it is an AUDITED SET (memorial-classes.csv,
+ * Nov 7, 2026 — every Protected and somber-primary row
+ * read against its live telling), bundled as
+ * src/data/routeMemorial and baked onto the unit by the
+ * caller as `memorial`, beside protectedRegister. The
+ * wider classes — Protected, somber/spooky in either
+ * slot, scandal — keep suppressing their own neighborhood
+ * via colorSuppressedFor; they no longer silence an
+ * episode they merely pass through.
  */
 export function memorialClassFor(u: LibraryUnit): boolean {
-  if (u.protectedRegister === true) return true;
-  return u.tone === 'somber';
+  return u.memorial === true;
 }
 
 /** The audio-key marker a Family-generated gap story is promoted under (backend.ingestRouteGapStory). */

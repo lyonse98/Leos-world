@@ -126,6 +126,25 @@ execFileSync(
 );
 const hb = await import(pathToFileURL(hbOut).href);
 
+// The bundled memorial data (memorial audit, Nov 7, 2026):
+// the audited death/memorial set the narrowed episode-wide
+// kill reads — its suite below pins the audit's contents
+// (the Soledad split included) against the CSV's calls.
+const rmdOut = join(mkdtempSync(join(tmpdir(), 'route-memorial-')), 'routeMemorial.mjs');
+execFileSync(
+  join(repoRoot, 'node_modules', '.bin', 'esbuild'),
+  [
+    join(repoRoot, 'src', 'data', 'routeMemorial.ts'),
+    '--bundle',
+    '--format=esm',
+    '--platform=node',
+    `--outfile=${rmdOut}`,
+    '--log-level=warning',
+  ],
+  { stdio: 'inherit' },
+);
+const rmd = await import(pathToFileURL(rmdOut).href);
+
 let passed = 0;
 let failed = 0;
 function check(name, fn) {
@@ -7028,9 +7047,11 @@ await checkAsync('unfiltered: hybrid precedence + shared cap — bank fills firs
 
 await checkAsync('unfiltered: adjacency suppression — no humor on a somber story, and none immediately before one', async () => {
   // The neighbor is somber in its SECONDARY slot: suppression
-  // class (colorSuppressedFor) but NOT memorial class — a
-  // somber-PRIMARY story would trip the episode-wide kill
-  // instead (that case is the memorial suite's, below).
+  // class (colorSuppressedFor) but NOT memorial class. Since
+  // the Nov 7 narrowing, even a somber-PRIMARY story does not
+  // trip the episode-wide kill without the audit's flag —
+  // only its neighborhood is suppressed (the kill itself is
+  // the memorial suite's, below).
   const plan = litPlan([
     litStory('a|landmark_origin'),
     litReaction('reaction-0'),
@@ -7050,30 +7071,112 @@ await checkAsync('unfiltered: adjacency suppression — no humor on a somber sto
   assert.equal(onSomber.voice, undefined, 'no piece of any kind rides the somber story');
 });
 
-check('unfiltered: memorialClassFor — the mechanical reading (Protected or somber-primary, nothing wider)', () => {
-  assert.equal(rm.memorialClassFor(litUnit('x|a', { protectedRegister: true })), true, 'Protected register is memorial class');
-  assert.equal(rm.memorialClassFor(litUnit('x|a', { tone: 'somber' })), true, 'somber primary is memorial class (PSA 182’s telling is somber-class)');
-  assert.equal(rm.memorialClassFor(litUnit('x|a', { toneSecondary: 'somber' })), false, 'somber in the secondary slot only suppresses its neighborhood — it does not kill an episode');
-  assert.equal(rm.memorialClassFor(litUnit('x|a', { tone: 'spooky' })), false, 'spooky is suppression class, not memorial class');
-  assert.equal(rm.memorialClassFor(litUnit('x|a', { angle: 'landmark_scandal' })), false, 'scandal is suppression class, not memorial class');
-  assert.equal(rm.memorialClassFor(litUnit('x|a')), false, 'a warm story is neither');
+check('memorial audit: THE AUDITED SET — the bundled map carries exactly the Nov 7 audit’s memorial rows', () => {
+  const keys = Object.keys(rmd.ROUTE_MEMORIAL);
+  assert.equal(keys.length, 12, 'twelve audited memorial tellings (of 48 Protected/somber candidates read against their live texts)');
+  // The death-event tellings: a real death event is the subject.
+  for (const k of [
+    'fort rosecrans national cemetery|landmark_origin', // the Bennington explosion, 66 sailors
+    'fort rosecrans national cemetery|landmark_people', // the Bennington dead and their obelisk
+    'i-805 north: kearny mesa to university city|corridor', // Hickman's 1959 death dive
+    'i-805 south: university city to kearny mesa|corridor', // Hickman
+    'sr-52 west: kearny mesa to clairemont|corridor', // Hickman
+    'sr-52 east: la jolla to clairemont|corridor', // Hickman as the climax
+    'cabrillo national monument|landmark_event', // Cabrillo's death, the monument his only headstone
+    'junipero serra museum|landmark_people', // the 1775 killing of Fr. Jayme (judgment call)
+    'hatfield-the-rainmaker|filler_hosted', // the 1916 flood — 'the disaster claimed lives' (filler angle)
+    'poway|neighborhood_intro', // the 2019 Chabad of Poway shooting (intro angle)
+    'poway|neighborhood_intro_greet', // the same narration, greet variant
+  ]) assert.equal(rmd.ROUTE_MEMORIAL[k], true, `${k} is memorial`);
+  // The one memorial-itself call: the telling's subject is the memorial.
+  assert.equal(
+    rmd.ROUTE_MEMORIAL['mount soledad national veterans memorial|landmark_event'],
+    true,
+    'the Soledad walls telling: the memorial itself is the subject (the closest call — Erik reviews it)',
+  );
+  // The exclusions that free the commute and the corridor.
+  for (const k of [
+    'mount soledad national veterans memorial|landmark_origin', // the cross's legal war, not the memorial
+    'mount soledad national veterans memorial|landmark_scandal', // the legal war again
+    'i-805 north: lincoln park to north park|corridor', // the Gill text — no 182 narration lives on the shelf here
+    'i-805 south: north park to lincoln park|corridor', // 182 is one allusive sentence, not the subject
+    'fort rosecrans national cemetery|landmark_surroundings', // whaling surroundings
+    'mount hope cemetery|landmark_origin', // cemetery-general civic history
+    'el campo santo cemetery|landmark_origin', // uncertain — classified out, promotable on re-audit
+    'berkeley ferryboat|landmark_event', // uncertain — classified out, promotable on re-audit
+  ]) assert.equal(rmd.ROUTE_MEMORIAL[k], undefined, `${k} is NOT memorial`);
+  assert.equal(rmd.memorialFor('mount soledad national veterans memorial', 'landmark_origin'), false);
+  assert.equal(rmd.memorialFor('fort rosecrans national cemetery', 'landmark_people'), true);
+  assert.equal(rmd.memorialFor('never audited', 'landmark_origin'), false, 'unclassified reads not-memorial — the safe direction');
 });
 
-await checkAsync('unfiltered: the memorial kill is episode-wide — and a merely-spooky cast member does not trigger it', async () => {
+check('unfiltered: memorialClassFor — the audited flag alone, never the register or the tone', () => {
+  assert.equal(rm.memorialClassFor(litUnit('x|a', { memorial: true })), true, 'an audited memorial telling is memorial class');
+  assert.equal(rm.memorialClassFor(litUnit('x|a', { protectedRegister: true })), false, 'Protected alone no longer kills — the Soledad commute case');
+  assert.equal(rm.memorialClassFor(litUnit('x|a', { tone: 'somber' })), false, 'somber primary alone no longer kills');
+  assert.equal(rm.memorialClassFor(litUnit('x|a', { protectedRegister: true, tone: 'somber' })), false, 'even Protected + somber together need the audit’s flag');
+  assert.equal(rm.memorialClassFor(litUnit('x|a', { toneSecondary: 'somber' })), false, 'somber in the secondary slot only ever suppressed its neighborhood');
+  assert.equal(rm.memorialClassFor(litUnit('x|a', { tone: 'spooky' })), false, 'spooky is suppression class, not memorial class');
+  assert.equal(rm.memorialClassFor(litUnit('x|a', { angle: 'landmark_scandal' })), false, 'scandal is suppression class, not memorial class');
+  assert.equal(rm.memorialClassFor(litUnit('x|a')), false, 'an unflagged story is not memorial class');
+});
+
+await checkAsync('unfiltered: the memorial kill is episode-wide — and the Soledad commute case no longer triggers it', async () => {
   const bank = [testLine('test-kill')];
-  for (const [label, over] of [['Protected', { protectedRegister: true }], ['somber-primary', { tone: 'somber' }]]) {
-    const plan = litPlan([
-      litStory('a|landmark_origin'),
-      litReaction('reaction-0'),
-      litStory('m|landmark_origin', over),
-      litReaction('reaction-1'),
-      litStory('c|landmark_origin'),
-      litReaction('reaction-2'),
-    ]);
-    const out = await rc.colorizeRoutePlan(plan, { generateColor: genBeat, humorBank: bank });
-    assert.equal(humorPiecesOf(out).length, 0, `${label} in the cast: zero humor anywhere in the episode`);
-    assert.ok(colorPiecesOf(out).length >= 1, `${label}: generated color still proceeds, as in Standard`);
-  }
+  // The kill case: a unit carrying the audit's memorial flag —
+  // a PSA 182-class fixture (a death-event telling).
+  const killPlan = litPlan([
+    litStory('a|landmark_origin'),
+    litReaction('reaction-0'),
+    litStory('m|landmark_origin', { memorial: true }),
+    litReaction('reaction-1'),
+    litStory('c|landmark_origin'),
+    litReaction('reaction-2'),
+  ]);
+  const killed = await rc.colorizeRoutePlan(killPlan, { generateColor: genBeat, humorBank: bank });
+  assert.equal(humorPiecesOf(killed).length, 0, 'a memorial telling in the cast: zero humor anywhere in the episode');
+  assert.ok(colorPiecesOf(killed).length >= 1, 'generated color still proceeds, as in Standard');
+
+  // The commute case (the Nov 7 narrowing's reason to exist):
+  // Erik's NBSD drive carries Mount Soledad's ORIGIN angle,
+  // baked exactly as production bakes it — Protected register,
+  // reflective tone, and the memorial flag the audit actually
+  // assigns it (false: the telling's subject is the cross's
+  // legal war, not the memorial). Under the pre-narrowing
+  // mechanical reading this cast drew ZERO humor.
+  const soledad = 'mount soledad national veterans memorial';
+  const commutePlan = litPlan([
+    litStory(`${soledad}|landmark_origin`, {
+      protectedRegister: true,
+      tone: 'reflective',
+      memorial: rmd.memorialFor(soledad, 'landmark_origin'),
+    }),
+    litReaction('reaction-0'),
+    litStory('b|landmark_origin'),
+    litReaction('reaction-1'),
+    litStory('c|landmark_origin'),
+    litReaction('reaction-2'),
+  ]);
+  const commute = await rc.colorizeRoutePlan(commutePlan, { generateColor: genBeat, humorBank: bank });
+  const commuteHumor = humorPiecesOf(commute);
+  assert.equal(commuteHumor.length, 1, 'a Protected non-memorial cast member no longer silences the episode — humor draws proceed');
+  assert.equal(commuteHumor[0].id, 'reaction-1', 'the draw lands past the Protected story’s own suppressed slot, on clean ground');
+
+  // Somber-primary without the audit's flag: no kill either —
+  // its neighborhood is suppressed, the episode still laughs.
+  const somberPlan = litPlan([
+    litStory('a|landmark_origin'),
+    litReaction('reaction-0'),
+    litStory('m|landmark_origin', { tone: 'somber' }),
+    litReaction('reaction-1'),
+    litStory('c|landmark_origin'),
+    litReaction('reaction-2'),
+  ]);
+  const somberOut = await rc.colorizeRoutePlan(somberPlan, { generateColor: genBeat, humorBank: bank });
+  const somberHumor = humorPiecesOf(somberOut);
+  assert.equal(somberHumor.length, 1, 'a somber-primary non-memorial story suppresses only its neighborhood now');
+  assert.equal(somberHumor[0].id, 'reaction-2');
+
   const spookyPlan = litPlan([
     litStory('a|landmark_origin'),
     litReaction('reaction-0'),
