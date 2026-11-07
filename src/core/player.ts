@@ -98,6 +98,16 @@ export interface AudibleItem {
   angleOf?: string;
   storySource?: string;
   anchor?: { lat: number; lng: number } | null;
+  /**
+   * Entry-fix anchor (Nov 7): for a live WELCOME, the driver's
+   * position at the fix where its area was resolved — the area
+   * NAME is sampled at that entry moment, while `anchor` is
+   * sampled at generation time. The pair (filed as entry_lat /
+   * entry_lng beside subject_lat / subject_lng) makes pass-by
+   * geometry directly measurable instead of reconstructed. Live
+   * welcomes only; absent on every other item.
+   */
+  entryAnchor?: { lat: number; lng: number } | null;
   regionAnchored?: boolean;
   corridorSegmentId?: string | null;
   segmentExit?: { lat: number; lng: number } | null;

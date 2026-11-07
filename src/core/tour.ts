@@ -349,7 +349,19 @@ export class Tour {
    * story sounds first. The opening welcome's failure-retry is
    * NOT entry-born — O15's owed first hello is senior to the slot.
    */
-  private owedWelcome: { name: string; retryAt: number; entry: boolean } | null = null;
+  private owedWelcome: {
+    name: string;
+    retryAt: number;
+    entry: boolean;
+    /**
+     * The entry fix (Nov 7): the position at which this
+     * obligation's area was resolved. Carried through generation
+     * and stamped onto the live welcome item (entryAnchor) so
+     * its telemetry pairs the entry moment with the
+     * generation-time anchor.
+     */
+    entryPos?: { lat: number; lng: number };
+  } | null = null;
   private welcomeServing = false;
   /**
    * Orientation ledger (Nov 1): areas whose one orientation slot
@@ -369,7 +381,12 @@ export class Tour {
    * the cross-day heard set.
    */
   private entryWelcomeAnchor: { name: string; lat: number; lng: number } | null = null;
-  private deferredWelcome: { name: string; since: number } | null = null;
+  private deferredWelcome: {
+    name: string;
+    since: number;
+    /** The entry fix at the deferral's creation (Nov 7) — the parent area was resolved at this position. */
+    entryPos?: { lat: number; lng: number };
+  } | null = null;
   /** An owed WELCOME has been generated and offered; it re-arms only when that item settles. */
   private welcomeOffered = false;
   /**
@@ -1030,7 +1047,11 @@ export class Tour {
       this.clock.setTimeout(() => void this.serveOpeningWelcome(), 1500);
       return;
     }
-    const area = await this.seams.reverseArea(this.position.lat, this.position.lng);
+    // The entry fix (Nov 7): the start area is resolved AT this
+    // position — the welcome's telemetry pairs it (entry_lat /
+    // entry_lng) with the generation-time anchor.
+    const entryFix = this.position;
+    const area = await this.seams.reverseArea(entryFix.lat, entryFix.lng);
     if (this.phase !== 'active') return;
     this.area = area;
     const name = area.neighborhood ?? area.city ?? 'this neighborhood';
@@ -1041,7 +1062,7 @@ export class Tour {
     // the deadline, the stored shelf intro for the start area
     // serves in its place, so a live outage can no longer silence
     // the first hello the way it did before this fallback existed.
-    const item = await this.generateWelcomeBeforeDeadline(name, this.position);
+    const item = await this.generateWelcomeBeforeDeadline(name, this.position, entryFix);
     if (this.phase !== 'active') return;
     // Q&A discharge (Nov 1 follow-on): the listener asked about
     // the start area while its welcome was warming — the question
@@ -1080,7 +1101,12 @@ export class Tour {
         return;
       }
       this.welcomeState = 'none';
-      this.owedWelcome = { name, retryAt: this.clock.now() + WELCOME_COOLDOWN_MS, entry: false };
+      this.owedWelcome = {
+        name,
+        retryAt: this.clock.now() + WELCOME_COOLDOWN_MS,
+        entry: false,
+        entryPos: { lat: entryFix.lat, lng: entryFix.lng },
+      };
       this.maybeOpenTour();
       return;
     }
@@ -1102,13 +1128,14 @@ export class Tour {
   private async generateWelcomeBeforeDeadline(
     name: string,
     at: Position,
+    entryFix?: { lat: number; lng: number } | null,
   ): Promise<AudibleItem | null> {
     let timer: unknown = null;
     const deadline = new Promise<null>(resolve => {
       timer = this.clock.setTimeout(() => resolve(null), WELCOME_LIVE_DEADLINE_MS);
     });
     try {
-      return await Promise.race([this.generateWelcome(name, at), deadline]);
+      return await Promise.race([this.generateWelcome(name, at, false, entryFix), deadline]);
     } finally {
       if (timer !== null) this.clock.clearTimeout(timer);
     }
@@ -1118,8 +1145,9 @@ export class Tour {
     name: string,
     at: Position,
     deferrable = false,
+    entryFix?: { lat: number; lng: number } | null,
   ): Promise<AudibleItem | null> {
-    const built = await this.buildWelcomeItem(name, at, deferrable, 'arrival');
+    const built = await this.buildWelcomeItem(name, at, deferrable, 'arrival', undefined, entryFix);
     return built?.item ?? null;
   }
 
@@ -1141,6 +1169,7 @@ export class Tour {
     deferrable: boolean,
     framing: 'arrival' | 'passby',
     packIn?: facts.FactPack,
+    entryFix?: { lat: number; lng: number } | null,
   ): Promise<{ item: AudibleItem; pack: facts.FactPack } | null> {
     const pseudo: facts.Candidate = {
       name,
@@ -1198,6 +1227,11 @@ export class Tour {
           subject,
           storySource: 'live',
           anchor: { lat: at.lat, lng: at.lng },
+          // The entry fix rides the item (Nov 7): sampled where
+          // the area was resolved, carried through generation —
+          // and through a pass-by conversion's re-roll, which
+          // hands the withdrawn item's fix to its replacement.
+          ...(entryFix ? { entryAnchor: { lat: entryFix.lat, lng: entryFix.lng } } : {}),
           regionAnchored: true,
           fetchMs,
           generatedAt: this.clock.now(),
@@ -1264,16 +1298,17 @@ export class Tour {
    */
   private async generateOwedWelcome(
     name: string,
+    entryFix?: { lat: number; lng: number } | null,
   ): Promise<
     { kind: 'item'; item: AudibleItem } | { kind: 'failed' } | { kind: 'converted-failed' }
   > {
     if (!this.position) return { kind: 'failed' };
     const at = this.position;
     const exited = this.passbyExitApplies(name);
-    const built = await this.buildWelcomeItem(name, at, true, exited ? 'passby' : 'arrival');
+    const built = await this.buildWelcomeItem(name, at, true, exited ? 'passby' : 'arrival', undefined, entryFix);
     if (!built) return { kind: 'failed' };
     if (!exited && this.passbyExitApplies(name)) {
-      const rerolled = await this.buildWelcomeItem(name, at, true, 'passby', built.pack);
+      const rerolled = await this.buildWelcomeItem(name, at, true, 'passby', built.pack, entryFix);
       if (!rerolled) {
         this.bankPassbySalvage(name, built.item);
         return { kind: 'converted-failed' };
@@ -1435,14 +1470,23 @@ export class Tour {
         anchor.name !== key &&
         calculateDistance(pos.lat, pos.lng, anchor.lat, anchor.lng) < NESTED_AREA_RADIUS_M
       ) {
-        this.deferredWelcome = { name, since: this.clock.now() };
+        this.deferredWelcome = {
+          name,
+          since: this.clock.now(),
+          entryPos: { lat: pos.lat, lng: pos.lng },
+        };
         // A serve cycle with the new area in hand: named places
         // and corridors may serve as usual — only the area's
         // orientation voices (its welcome, and the generic area
         // story in serveAreaStory) hold for the deferral.
         void this.runServeCycle('area-deferred');
       } else {
-        this.owedWelcome = { name, retryAt: 0, entry: true };
+        this.owedWelcome = {
+          name,
+          retryAt: 0,
+          entry: true,
+          entryPos: { lat: pos.lat, lng: pos.lng },
+        };
         void this.serveOwedWelcome();
       }
     }
@@ -1475,7 +1519,12 @@ export class Tour {
     this.deferredWelcome = null;
     const key = deferred.name.toLowerCase();
     if (this.welcomed.has(key) || this.welcomeServing || this.welcomeOffered) return;
-    this.owedWelcome = { name: deferred.name, retryAt: 0, entry: true };
+    this.owedWelcome = {
+      name: deferred.name,
+      retryAt: 0,
+      entry: true,
+      entryPos: deferred.entryPos,
+    };
     void this.serveOwedWelcome();
   }
 
@@ -1483,6 +1532,10 @@ export class Tour {
     if (!this.owedWelcome || this.welcomeServing || this.welcomeOffered || !this.position) return;
     if (this.clock.now() < this.owedWelcome.retryAt) return;
     const { name } = this.owedWelcome;
+    // The obligation's entry fix (Nov 7), captured before any
+    // await can replace the record: a live generation below
+    // stamps it onto the welcome item.
+    const entryPos = this.owedWelcome.entryPos;
     // Heard discipline (Erik, Oct 30, extended same day): WHY the
     // area's subject is blocked decides the welcome.
     const block = this.subjectBlockReason(backend.placeKeyOf(name), null);
@@ -1537,7 +1590,7 @@ export class Tour {
           return;
         }
         if (!item) {
-          const gen = await this.generateOwedWelcome(name);
+          const gen = await this.generateOwedWelcome(name, entryPos);
           if (gen.kind === 'converted-failed') {
             // Pass-by conversion (Nov 5): the driver exited
             // during generation and the one re-roll failed —
@@ -1576,7 +1629,7 @@ export class Tour {
           return;
         }
         if (!item) {
-          const gen = await this.generateOwedWelcome(name);
+          const gen = await this.generateOwedWelcome(name, entryPos);
           if (gen.kind === 'converted-failed') {
             // Pass-by conversion (Nov 5): the driver exited
             // during generation and the one re-roll failed —
@@ -1597,6 +1650,7 @@ export class Tour {
             name,
             retryAt: this.clock.now() + WELCOME_COOLDOWN_MS,
             entry: this.owedWelcome?.entry ?? true,
+            entryPos: this.owedWelcome?.entryPos,
           };
           return;
         }
@@ -1683,7 +1737,18 @@ export class Tour {
     pack?: facts.FactPack,
   ): Promise<void> {
     if (!this.position) return;
-    const built = await this.buildWelcomeItem(name, this.position, true, 'passby', pack);
+    // The converted telling keeps the ORIGINAL entry fix (Nov 7):
+    // the withdrawn arrival item carries it, and the pass-by's
+    // telemetry must name where the area was entered, not where
+    // the conversion happened to fire.
+    const built = await this.buildWelcomeItem(
+      name,
+      this.position,
+      true,
+      'passby',
+      pack,
+      fromItem.entryAnchor ?? undefined,
+    );
     if (this.phase !== 'active') return;
     if (!built) {
       this.bankPassbySalvage(name, fromItem);
@@ -2337,6 +2402,12 @@ export class Tour {
       framing: item.framing ?? null,
       subject_lat: item.anchor?.lat ?? null,
       subject_lng: item.anchor?.lng ?? null,
+      // Entry fix (Nov 7): where the driver was when this
+      // welcome's area was resolved — pairs with the
+      // generation-time subject anchor above. Live welcomes
+      // only; null everywhere else.
+      entry_lat: item.entryAnchor?.lat ?? null,
+      entry_lng: item.entryAnchor?.lng ?? null,
       distance_m:
         item.anchor && this.position
           ? Math.round(
@@ -2414,6 +2485,13 @@ export class Tour {
           // welcome's retry stays senior to the orientation slot).
           entry:
             this.owedWelcome?.name.toLowerCase() === name ? this.owedWelcome.entry : false,
+          // …and its entry fix (Nov 7): the settled item carries
+          // its own; the standing record is the fallback.
+          entryPos:
+            item.entryAnchor ??
+            (this.owedWelcome?.name.toLowerCase() === name
+              ? this.owedWelcome.entryPos
+              : undefined),
         };
         if (this.welcomeState === 'handed') this.welcomeState = 'none';
         this.maybeOpenTour();
@@ -2577,6 +2655,8 @@ export class Tour {
       framing: item.framing ?? null,
       subject_lat: item.anchor?.lat ?? null,
       subject_lng: item.anchor?.lng ?? null,
+      entry_lat: item.entryAnchor?.lat ?? null,
+      entry_lng: item.entryAnchor?.lng ?? null,
       distance_m:
         item.anchor && this.position
           ? Math.round(
@@ -2952,6 +3032,7 @@ export class Tour {
       name,
       retryAt: this.clock.now(),
       entry: this.owedWelcome?.entry ?? true,
+      entryPos: item.entryAnchor ?? this.owedWelcome?.entryPos,
     };
     if (this.welcomeState === 'handed') this.welcomeState = 'none';
     this.maybeOpenTour();

@@ -3161,6 +3161,105 @@ export async function runScenarios(Tour, extras) {
     tour.endTour();
   }
 
+  // ---------------------------------------------------------- ET: entry-position telemetry (Nov 7)
+  // A live welcome's subject_lat/lng are sampled when its text
+  // is generated, but its area NAME was resolved earlier, at the
+  // entry fix — the Nov 5 Bay Ho welcome's record pinned an I-5
+  // point in University City for exactly this reason. Erik ruled
+  // Nov 7: record both. entry_lat/entry_lng carry the entry fix
+  // (captured where the area resolves, carried with the owed
+  // record through generation and through a pass-by conversion);
+  // the payload stays additive and every other story files null.
+
+  suite('ET-1 live welcome: telemetry carries BOTH the entry fix and the generation-time anchor');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: [] });
+    world.genStoryBehavior = prompt => {
+      if (prompt.includes('NEIGHBORHOOD WELCOME') && prompt.includes('Bay Ho')) {
+        return new Promise(res => world.clock.setTimeout(() => res(PB_ARRIVAL), 5_000));
+      }
+      return 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+    };
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    // The opening welcome's entry fix is its resolution position
+    // (the tour's start fix): both fields are that same point.
+    const opening = playbacksFor(world, 'welcome:university city');
+    check('the opening welcome carries its resolution fix as the entry position',
+      opening.length === 1 && opening[0]?.payload.entry_lat === UTC.lat && opening[0]?.payload.entry_lng === UTC.lng,
+      JSON.stringify(opening.map(e => e.payload)));
+    // Enter Bay Ho at the entry fix E — then move ~445 m deeper
+    // in the SAME synchronous breath, before the owed serve's
+    // generation samples the current position as its anchor.
+    // The two samples must land in the record as two positions.
+    const E = { lat: UTC.lat + 0.01, lng: UTC.lng };
+    const G = { lat: UTC.lat + 0.014, lng: UTC.lng };
+    world.area = { neighborhood: 'Bay Ho', city: 'San Diego' };
+    tour.onPosition({ lat: E.lat, lng: E.lng, speedMps: 8, headingDeg: 180 });
+    tour.onPosition({ lat: G.lat, lng: G.lng, speedMps: 8, headingDeg: 180 });
+    for (let i = 0; i < 10; i++) {
+      await world.clock.advance(10_000);
+      tour.onPosition({ lat: G.lat, lng: G.lng, speedMps: 8, headingDeg: 180 });
+    }
+    check('the welcome generated live, exactly once',
+      welcomePromptsFor(world, 'Bay Ho').length === 1,
+      `arrival=${welcomePromptsFor(world, 'Bay Ho').length}`);
+    const played = welcomePlayed(world, 'welcome:bay ho');
+    check('story_played pairs the entry fix (entry_*) with the generation position (subject_*)',
+      played.length === 1 &&
+        played[0]?.payload.entry_lat === E.lat && played[0]?.payload.entry_lng === E.lng &&
+        played[0]?.payload.subject_lat === G.lat && played[0]?.payload.subject_lng === G.lng,
+      JSON.stringify(played.map(e => e.payload)));
+    const pbs = playbacksFor(world, 'welcome:bay ho');
+    check('story_playback carries the same pair, sounded and completed',
+      pbs.length === 1 && pbs[0]?.payload.sounded === true && pbs[0]?.payload.completed === true &&
+        pbs[0]?.payload.entry_lat === E.lat && pbs[0]?.payload.entry_lng === E.lng &&
+        pbs[0]?.payload.subject_lat === G.lat && pbs[0]?.payload.subject_lng === G.lng,
+      JSON.stringify(pbs.map(e => e.payload)));
+    tour.endTour();
+  }
+
+  suite('ET-2 pass-by conversion: the converted telling keeps the ORIGINAL entry fix');
+  {
+    resetLocalStorage();
+    const LJ = { lat: 32.85, lng: -117.25 };
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: LJ.lat, lng: LJ.lng })],
+      library: [{ name: 'Alpha Park', lat: LJ.lat, lng: LJ.lng }],
+      intros: [],
+    });
+    world.genStoryBehavior = pbBehavior(world);
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 90_000, synth: 12_000 }));
+    const { tour } = await healthyOpening(world, audio, LJ);
+    // PB-1's shape: enter Bay Ho at E with Alpha occupying the
+    // channel; the arrival item generates and waits.
+    const E = { lat: LJ.lat + 0.01, lng: LJ.lng };
+    world.area = { neighborhood: 'Bay Ho', city: 'San Diego' };
+    let lat = E.lat;
+    tour.onPosition({ lat, lng: LJ.lng, speedMps: 29.8, headingDeg: 180 });
+    await world.clock.advance(35_000);
+    // The freeway exit converts the waiting welcome (checkpoint 3).
+    world.area = { neighborhood: 'University City', city: 'San Diego' };
+    tour.onPosition({ lat: (lat += 0.004), lng: LJ.lng, speedMps: 29.8, headingDeg: 180 });
+    for (let i = 0; i < 16; i++) {
+      await world.clock.advance(10_000);
+      tour.onPosition({ lat: (lat += 0.0027), lng: LJ.lng, speedMps: 29.8, headingDeg: 180 });
+    }
+    const played = welcomePlayed(world, 'welcome:bay ho');
+    check('both commits — the arrival item and the converted one — carry the Bay Ho entry fix',
+      played.length === 2 &&
+        played.every(e => e.payload.entry_lat === E.lat && e.payload.entry_lng === E.lng),
+      JSON.stringify(played.map(e => e.payload)));
+    const pbs = playbacksFor(world, 'welcome:bay ho');
+    check('the pass-by playback names the entry fix, not the conversion position',
+      pbs.length === 1 && pbs[0]?.payload.framing === 'passby' &&
+        pbs[0]?.payload.entry_lat === E.lat && pbs[0]?.payload.entry_lng === E.lng &&
+        pbs[0]?.payload.subject_lat !== E.lat,
+      JSON.stringify(pbs.map(e => e.payload)));
+    tour.endTour();
+  }
+
   // ---------------------------------------------------------- WT: woven twins (Nov 4, 2026)
   // The woven tranche's twins ride the shelf as sibling rows
   // (source angle + '-woven-v1') RESERVED for route mode:
