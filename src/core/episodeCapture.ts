@@ -425,6 +425,22 @@ export interface RouteEpisodePlanPayload {
   thread_menu_shown: boolean;
   thread_source: string;
   thread_final: { topic: string | null; label: string; anchor_kind: string; anchor_key: string } | null;
+  /**
+   * Tone suggestion (Nov 7, 2026; additive — schema stays 2):
+   * the tones this drive's cast could actually lean on, in
+   * menu order (tone + honest geo-cast count), whether the
+   * listener was asked (the seam card carried a tone section),
+   * how the final tone was arrived at (tone_source: 'detected'
+   * | 'prose' | 'menu_pick' | 'none'), and the final tone the
+   * build composed with (null = no lean — byte-for-byte the
+   * old no-tone behavior). Empty offered + 'none' + null = the
+   * plan carries no tone record (pre-suggestion assemblies) or
+   * no tone qualified and no prose tone was read.
+   */
+  tone_alternatives_offered: { tone: string; castCount: number }[];
+  tone_menu_shown: boolean;
+  tone_source: string;
+  tone_final: string | null;
   /** The route_plan_started event payload, verbatim — decisions and all. */
   route_plan_started: Record<string, unknown>;
   items: CapturedItem[];
@@ -491,6 +507,17 @@ export function assemblePlanCapture(args: {
           anchor_key: plan.thread.anchorKey ?? plan.thread.topic ?? '',
         }
       : null,
+    tone_alternatives_offered: (plan.toneMenu?.offered ?? []).map(o => ({
+      tone: o.tone,
+      castCount: o.castCount,
+    })),
+    tone_menu_shown: plan.toneMenu?.menuShown ?? false,
+    tone_source: plan.toneMenu?.source ?? 'none',
+    // The seam record's settled tone wins when one exists (it
+    // is the menu's own account); otherwise the capture
+    // context's tone — the tone the build ran with — is the
+    // final tone (pre-suggestion assemblies, harness worlds).
+    tone_final: plan.toneMenu?.pickedTone ?? context.tone ?? null,
     route_plan_started: args.routePlanStarted,
     items: args.items,
     stage_timings_ms: context.stageTimingsMs,

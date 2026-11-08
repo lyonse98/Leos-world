@@ -26,13 +26,14 @@ import {
   qualifyingForkAlternatives,
   resolveDestination,
   resolveThreadCandidates,
+  resolveToneSuggestion,
   routeOptionLabel,
   seatWovenMembers,
   selectMemberFetchEntries,
   threadOptionLabel,
+  toneOptionLabel,
   wovenIndexSupportByTopic,
   WOVEN_MEMBER_CAP,
-  ROUTE_TONES,
   type ComputedRouteOption,
   type LibraryUnit,
   type RouteAudience,
@@ -40,6 +41,9 @@ import {
   type ThreadCandidate,
   type ThreadChoice,
   type ThreadMenuRecord,
+  type ToneAlternative,
+  type ToneMenuRecord,
+  type ToneSource,
   type TourMode,
 } from './core/routeMode';
 import {
@@ -492,18 +496,41 @@ interface ThreadPickChoice {
   menu: ThreadMenuRecord;
 }
 
-interface ThreadPickerState {
-  /** The qualifying candidates, in menu order (class order — the composer's own order). */
+/**
+ * One settled SEAM card outcome (thread menu Nov 5, 2026 +
+ * tone suggestion Nov 7, 2026): the thread outcome when the
+ * card carried a thread section, plus the tone outcome the
+ * card always settles when it appears. A card with no thread
+ * section leaves `thread` undefined — the composer resolves
+ * the drive's thread itself, exactly as on a no-menu build.
+ */
+interface SeamPickChoice {
+  thread?: ThreadPickChoice;
+  /** The final tone the build composes with (null = no lean — today's no-tone behavior). */
+  tone: string | null;
+  /** The tone menu's record — filed on the plan for the episode capture. */
+  toneMenu: ToneMenuRecord;
+}
+
+interface SeamPickerState {
+  /** Thread section rows (empty = the card carries no thread section). */
   candidates: ThreadCandidate[];
-  /**
-   * The confirmed row: an index into candidates, or -1 for
-   * "Just the road — no thread". Pre-selected to the
-   * detection default (cooldown applied) — a cooled thread
-   * can be a row, never the pre-selection.
-   */
+  /** Thread selection: an index into candidates, or -1 for "Just the road — no thread". */
   selected: number;
-  /** The detection default's index (the pre-selection) — the confirm reads a kept default as 'default-detected'. */
+  /** The thread detection default's index (the pre-selection). */
   defaultIndex: number;
+  /**
+   * Tone section rows: the qualifying tones in menu order,
+   * plus the prose tone as an added row when the listener's
+   * own ask doesn't qualify in-cast. Empty = no tone section.
+   */
+  toneRows: ToneAlternative[];
+  /** Tone selection: an index into toneRows, or -1 for "No lean — keep it mixed". */
+  toneSelected: number;
+  /** The tone pre-selection's index — the confirm reads a kept pre-selection by its source, a change as a menu pick. */
+  toneDefaultSelected: number;
+  /** How the tone pre-selection was arrived at: the cast's suggestion ('detected') or the listener's prose ask ('prose'). */
+  tonePreSource: 'detected' | 'prose' | 'none';
 }
 
 function MilesApp() {
@@ -543,7 +570,11 @@ function MilesApp() {
   // v15 landing renders instead.
   const [landingStep, setLandingStep] = useState<'mode' | 'choice' | 'route'>('mode');
   const [routeDest, setRouteDest] = useState('');
-  const [routeTone, setRouteTone] = useState('');
+  // (Tone suggestion, Nov 7, 2026: there is deliberately no
+  // intake tone state anymore — the Mood select is gone. The
+  // tone a build runs with is settled at the seam menu from
+  // the cast itself, or from the prose the listener typed;
+  // see the seam staging in buildRoute.)
   // Audience coloring (Nov 5, 2026): the rating for THIS
   // build — 'standard' (the full story, Color Puck riding
   // along), 'family' (the G-rated telling), or 'unfiltered'
@@ -570,16 +601,20 @@ function MilesApp() {
   // is up; a build with no fork never touches either.
   const [routePicker, setRoutePicker] = useState<RoutePickerState | null>(null);
   const routePickResolveRef = useRef<((pick: RoutePickChoice | null) => void) | null>(null);
-  // Thread menu (Nov 5, 2026 — the re-anchor amendment): the
-  // menu's state while a build pauses after the cast fetch,
-  // and the resolver that resumes it — exactly the route
-  // picker's seam. The menu offers the threads THIS drive can
-  // actually carry (the composer's own candidate set), so the
-  // blind topic chips it replaced are gone from both route
-  // forms. Null whenever no menu is up; a build with fewer
-  // than two qualifying threads never touches either.
-  const [threadPicker, setThreadPicker] = useState<ThreadPickerState | null>(null);
-  const threadPickResolveRef = useRef<((pick: ThreadPickChoice | null) => void) | null>(null);
+  // Seam menu (thread menu Nov 5, 2026 — the re-anchor
+  // amendment; tone section added Nov 7, 2026): the card's
+  // state while a build pauses after the cast fetch, and the
+  // resolver that resumes it — exactly the route picker's
+  // seam. The card offers the threads THIS drive can actually
+  // carry (the composer's own candidate set), so the blind
+  // topic chips it replaced are gone from both route forms —
+  // and, since Nov 7, the tones this drive's cast can actually
+  // lean on, in place of the intake's blind Mood select. Null
+  // whenever no card is up; a build with fewer than two
+  // qualifying threads AND no qualifying (or prose-asked) tone
+  // never touches either.
+  const [seamPicker, setSeamPicker] = useState<SeamPickerState | null>(null);
+  const seamPickResolveRef = useRef<((pick: SeamPickChoice | null) => void) | null>(null);
   const [routeRunner, setRouteRunner] = useState<RoutePlanRunner | null>(null);
   const [routeView, setRouteView] = useState<RouteRunnerView | null>(null);
   // Manifest (differentiator 3): the built plan's episode card,
@@ -830,9 +865,9 @@ function MilesApp() {
     routePickResolveRef.current?.(null);
     routePickResolveRef.current = null;
     setRoutePicker(null);
-    threadPickResolveRef.current?.(null);
-    threadPickResolveRef.current = null;
-    setThreadPicker(null);
+    seamPickResolveRef.current?.(null);
+    seamPickResolveRef.current = null;
+    setSeamPicker(null);
     setRouteBuilding(false);
     setRouteFailure(null);
     setRouteStatus('');
@@ -1123,10 +1158,16 @@ function MilesApp() {
       // arrival time is solicited by the UI or used anywhere —
       // the Routes drive-time estimate is the composition's sole
       // budget (budgetSecFor below).
-      const input = {
+      // `let`, not `const` (tone suggestion, Nov 7, 2026): the
+      // seam staging below REASSIGNS input.tone to the settled
+      // final tone before the first compose, so every compose
+      // and the episode capture read the settled value. Until
+      // the seam, input.tone is only the parser's prose read —
+      // provisional, never composed on.
+      let input = {
         ...parsed,
         arrivalTimeMs: null,
-        tone: routeTone || parsed.tone,
+        tone: parsed.tone,
         // Thread menu (Nov 5, 2026 — the re-anchor amendment):
         // topics travel EMPTY from the intake. The blind picks
         // the chips provided are gone — the only place a theme
@@ -1454,7 +1495,7 @@ function MilesApp() {
         discardRunner();
         return;
       }
-      // ------------------------------------------------ thread menu (Nov 5, 2026)
+      // ------------------------------------------------ seam menu (thread menu Nov 5, 2026; tone section Nov 7, 2026)
       // The re-anchor amendment: with the route chosen (and
       // the fork settled above, when there was one) and the
       // cast fetched, pause at the SAME staging seam the
@@ -1463,17 +1504,33 @@ function MilesApp() {
       // resolved from the SAME partition the composer will
       // tile (partitionRoutePools is shared verbatim), the
       // same woven support, the same index support, the same
-      // drive records (the cooldown's evidence). The menu
-      // shows ONLY when at least two candidates qualify:
-      // exactly one → that thread, no pause (the composer
-      // resolves it itself); zero → no thread. A pick settles
-      // threadChoice, which EVERY compose below composes on —
-      // climax and member re-composes included — and a menu
-      // pick is a user pick: cooldown-exempt, the episode's
-      // thread in full. Back abandons the build quietly with
-      // the form untouched, exactly like the route picker's
-      // Back. The dwell is excluded from compose-stage timing
-      // (the route-choice convention).
+      // drive records (the cooldown's evidence). The thread
+      // section shows ONLY when at least two candidates
+      // qualify: exactly one → that thread, no pause (the
+      // composer resolves it itself); zero → no thread. A pick
+      // settles threadChoice, which EVERY compose below
+      // composes on — climax and member re-composes included —
+      // and a menu pick is a user pick: cooldown-exempt, the
+      // episode's thread in full. Back abandons the build
+      // quietly with the form untouched, exactly like the
+      // route picker's Back. The dwell is excluded from
+      // compose-stage timing (the route-choice convention).
+      //
+      // Tone suggestion (Nov 7, 2026 — Erik's ruling): the
+      // SAME card carries a tone section whenever the cast can
+      // lean — the primary-tone distribution over the same geo
+      // pool, a tone qualifying at ≥3 cast members, the
+      // plurality qualifier pre-selected. A tone the listener
+      // asked for in their own prose pre-selects instead, and
+      // rides as a row even when it doesn't qualify (an
+      // explicit ask outranks the ≥3 bar) — which is also why
+      // the card can appear for the tone section alone: the
+      // ask must be VISIBLE to be kept or changed, never a
+      // silent default. The settled tone is written back onto
+      // input before the first compose, so composition consumes
+      // it exactly as it consumed an intake pick — soft,
+      // selection-only — and "No lean" is the old no-tone
+      // behavior, byte-for-byte.
       let threadChoice: ThreadChoice | undefined;
       const menuPools = partitionRoutePools(units, route.path, geocoded.location, {
         heardKeys,
@@ -1504,20 +1561,85 @@ function MilesApp() {
         },
         { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
       );
-      if (threadResolution.candidates.length >= 2) {
+      // Tone resolution over the SAME geo pool (the primary-
+      // tone distribution): qualifying tones in menu order,
+      // the plurality suggestion, and the prose ask's standing.
+      // The menu rows are the qualifiers, plus the prose tone
+      // as an added row when the ask doesn't qualify in-cast.
+      const toneResolution = resolveToneSuggestion({
+        geoPool: menuPools.geoAll,
+        proseTone: parsed.tone,
+      });
+      const toneRows: ToneAlternative[] = [...toneResolution.alternatives];
+      if (
+        toneResolution.proseTone !== null &&
+        !toneResolution.proseQualifies &&
+        !toneRows.some(r => r.tone === toneResolution.proseTone)
+      ) {
+        toneRows.push({ tone: toneResolution.proseTone, castCount: toneResolution.proseCastCount });
+      }
+      // The pre-selection: the prose ask when there is one (it
+      // is always a row by construction), else the cast's
+      // suggestion, else — no rows at all — no tone section.
+      const toneDefaultSelected =
+        toneResolution.proseTone !== null
+          ? toneRows.findIndex(r => r.tone === toneResolution.proseTone)
+          : toneResolution.suggested !== null
+            ? toneRows.findIndex(r => r.tone === toneResolution.suggested)
+            : -1;
+      const tonePreSource: 'detected' | 'prose' | 'none' =
+        toneResolution.proseTone !== null
+          ? 'prose'
+          : toneResolution.suggested !== null
+            ? 'detected'
+            : 'none';
+      const threadSectionShown = threadResolution.candidates.length >= 2;
+      const toneSectionShown = toneRows.length > 0;
+      void emitEvent(
+        sessionId,
+        'route_tone_offered',
+        {
+          offered: toneResolution.alternatives,
+          prose: toneResolution.proseTone
+            ? {
+                tone: toneResolution.proseTone,
+                castCount: toneResolution.proseCastCount,
+                qualifies: toneResolution.proseQualifies,
+              }
+            : null,
+          shown: toneSectionShown,
+          cardShown: threadSectionShown || toneSectionShown,
+        },
+        { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
+      );
+      // The tone record every path files on the plan: no card
+      // → 'none', no lean (the silent path, exactly as today).
+      let toneMenu: ToneMenuRecord = {
+        offered: toneResolution.alternatives,
+        menuShown: false,
+        source: 'none',
+        pickedTone: null,
+      };
+      if (threadSectionShown || toneSectionShown) {
         const defaultIndex = Math.max(0, threadResolution.defaultIndex);
-        setRouteStatus('Choose the thread of this drive');
+        setRouteStatus(
+          threadSectionShown ? 'Choose the thread of this drive' : 'Choose the tone of this drive',
+        );
         const menuShownAtMs = Date.now();
-        const pick = await new Promise<ThreadPickChoice | null>(resolve => {
-          threadPickResolveRef.current = resolve;
-          setThreadPicker({
-            candidates: threadResolution.candidates,
+        const pick = await new Promise<SeamPickChoice | null>(resolve => {
+          seamPickResolveRef.current = resolve;
+          setSeamPicker({
+            candidates: threadSectionShown ? threadResolution.candidates : [],
             selected: defaultIndex,
             defaultIndex,
+            toneRows,
+            toneSelected: toneDefaultSelected,
+            toneDefaultSelected,
+            tonePreSource,
           });
         });
         threadDwellMs += Date.now() - menuShownAtMs;
-        setThreadPicker(null);
+        setSeamPicker(null);
         if (!pick) {
           // Back from the menu: the build is abandoned
           // quietly, form state preserved — the mirror of the
@@ -1539,13 +1661,30 @@ function MilesApp() {
           discardRunner();
           return;
         }
-        threadChoice = { candidate: pick.candidate, menu: pick.menu };
+        if (pick.thread) {
+          threadChoice = { candidate: pick.thread.candidate, menu: pick.thread.menu };
+          void emitEvent(
+            sessionId,
+            'route_thread_picked',
+            {
+              key: pick.thread.menu.pickedKey,
+              source: pick.thread.menu.source,
+            },
+            { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
+          );
+        }
+        toneMenu = pick.toneMenu;
+        // The settled tone lands on the input BEFORE the
+        // first compose — every compose below (climax and
+        // member re-composes included) and the episode
+        // capture read it from here.
+        input = { ...input, tone: pick.tone };
         void emitEvent(
           sessionId,
-          'route_thread_picked',
+          'route_tone_picked',
           {
-            key: pick.menu.pickedKey,
-            source: pick.menu.source,
+            tone: pick.tone,
+            source: pick.toneMenu.source,
           },
           { lat: origin.lat, lng: origin.lng, movementMode: tourMode },
         );
@@ -1561,6 +1700,7 @@ function MilesApp() {
         corridorTellingCounts,
         wovenIndexSupport: wovenSupportNow(),
         ...(threadChoice ? { threadChoice } : {}),
+        toneMenu,
       };
       let plan = composeRoutePlan(units, route.path, geocoded.location, geocoded.name, input, composeOpts);
       // The off-route portal climax (consolidation §4): when the
@@ -2197,81 +2337,165 @@ function MilesApp() {
     resolve?.(null);
   };
 
-  // Thread menu (Nov 5, 2026): the menu's taps — the mirror
-  // of the fork picker's. The confirm (the build button,
-  // which reads 'Build with this thread' while the menu is
-  // up) settles the paused build's promise with the selected
-  // row: a candidate (a menu pick when it differs from the
-  // pre-selected default, 'default-detected' when it is the
-  // default) or the "Just the road" row (candidate null — a
-  // deliberate no-thread pick, still a menu pick). Back
-  // settles null, which abandons the build quietly with the
-  // form preserved, exactly like the route picker's Back.
-  const confirmThreadPick = () => {
-    const resolve = threadPickResolveRef.current;
-    const picker = threadPicker;
-    threadPickResolveRef.current = null;
+  // Seam menu (thread menu Nov 5, 2026; tone section Nov 7,
+  // 2026): the card's taps — the mirror of the fork picker's.
+  // The confirm (the build button, which reads 'Build with
+  // this thread' while the card is up, or 'Build with this
+  // tone' on a tone-only card) settles the paused build's
+  // promise with BOTH sections' selections: the thread row (a
+  // menu pick when it differs from the pre-selected default,
+  // 'default-detected' when it is the default; the "Just the
+  // road" row is candidate null — a deliberate no-thread pick,
+  // still a menu pick) and the tone row (keeping the
+  // pre-selection files its source — 'detected' for the cast's
+  // suggestion, 'prose' for the listener's own ask; changing
+  // it, "No lean" included, is a 'menu_pick'). A card with no
+  // thread section settles no thread outcome at all — the
+  // composer resolves the thread itself. Back settles null,
+  // which abandons the build quietly with the form preserved,
+  // exactly like the route picker's Back.
+  const confirmSeamPick = () => {
+    const resolve = seamPickResolveRef.current;
+    const picker = seamPicker;
+    seamPickResolveRef.current = null;
     if (!resolve || !picker) return;
-    const candidate = picker.selected >= 0 ? (picker.candidates[picker.selected] ?? null) : null;
-    const isDefault = candidate !== null && picker.selected === picker.defaultIndex;
+    const thread: ThreadPickChoice | undefined =
+      picker.candidates.length > 0
+        ? (() => {
+            const candidate =
+              picker.selected >= 0 ? (picker.candidates[picker.selected] ?? null) : null;
+            const isDefault = candidate !== null && picker.selected === picker.defaultIndex;
+            return {
+              candidate,
+              menu: {
+                offered: picker.candidates.map(c => ({
+                  kind: c.kind,
+                  key: c.key,
+                  label: c.label,
+                  count: c.count,
+                })),
+                menuShown: true,
+                source: candidate && isDefault ? ('default-detected' as const) : ('menu-pick' as const),
+                pickedKey: candidate?.key ?? null,
+              },
+            };
+          })()
+        : undefined;
+    const tone = picker.toneSelected >= 0 ? (picker.toneRows[picker.toneSelected]?.tone ?? null) : null;
+    const toneSource: ToneSource =
+      picker.toneRows.length === 0
+        ? 'none'
+        : picker.toneSelected === picker.toneDefaultSelected
+          ? picker.tonePreSource
+          : 'menu_pick';
     resolve({
-      candidate,
-      menu: {
-        offered: picker.candidates.map(c => ({ kind: c.kind, key: c.key, label: c.label, count: c.count })),
-        menuShown: true,
-        source: candidate && isDefault ? 'default-detected' : 'menu-pick',
-        pickedKey: candidate?.key ?? null,
+      ...(thread ? { thread } : {}),
+      tone,
+      toneMenu: {
+        offered: picker.toneRows,
+        menuShown: picker.toneRows.length > 0,
+        source: toneSource,
+        pickedTone: tone,
       },
     });
   };
-  const cancelThreadPick = () => {
-    const resolve = threadPickResolveRef.current;
-    threadPickResolveRef.current = null;
+  const cancelSeamPick = () => {
+    const resolve = seamPickResolveRef.current;
+    seamPickResolveRef.current = null;
     resolve?.(null);
   };
 
-  // The thread menu (Nov 5, 2026), rendered by BOTH route
-  // forms in the same status slot the fork picker uses — zero
-  // added height beyond its rows. Rows are the drive's
-  // qualifying threads in class order, each labeled with its
-  // anchor tie and honest cast count, plus "Just the road —
-  // no thread". The detection default (cooldown applied) is
-  // pre-selected; tapping a row only moves the selection.
-  const threadPickerBlock = threadPicker ? (
+  // The seam card (thread menu Nov 5, 2026; tone section
+  // Nov 7, 2026), rendered by BOTH route forms in the same
+  // status slot the fork picker uses — zero added height
+  // beyond its rows. The thread section (when the drive
+  // carries ≥2 threads) lists them in class order, each
+  // labeled with its anchor tie and honest cast count, plus
+  // "Just the road — no thread"; the tone section (when the
+  // cast can lean, or the listener's prose asked for a tone)
+  // lists the qualifying tones with their cast counts, plus
+  // "No lean — keep it mixed". Both pre-selections are set
+  // when the card opens (thread: the detection default,
+  // cooldown applied; tone: the prose ask, else the cast's
+  // plurality suggestion); tapping a row only moves that
+  // section's selection.
+  const seamPickerBlock = seamPicker ? (
     <div className="mt-3 rounded-[1.5rem] bg-white/80 p-4 shadow-lg shadow-ink/10">
-      <p className="text-center text-sm font-bold text-ink">This drive can carry a thread</p>
-      <div className="mt-3 flex flex-col gap-2">
-        {threadPicker.candidates.map((candidate, i) => (
-          <button
-            key={candidate.key}
-            type="button"
-            aria-pressed={threadPicker.selected === i}
-            onClick={() => setThreadPicker(p => (p ? { ...p, selected: i } : p))}
-            className={`w-full rounded-full px-4 py-3 text-sm font-bold transition ${
-              threadPicker.selected === i
-                ? 'bg-ink text-cream shadow-lg shadow-ink/20'
-                : 'bg-cream2 text-ink hover:bg-sage/25'
-            }`}
+      {seamPicker.candidates.length > 0 && (
+        <>
+          <p className="text-center text-sm font-bold text-ink">This drive can carry a thread</p>
+          <div className="mt-3 flex flex-col gap-2">
+            {seamPicker.candidates.map((candidate, i) => (
+              <button
+                key={candidate.key}
+                type="button"
+                aria-pressed={seamPicker.selected === i}
+                onClick={() => setSeamPicker(p => (p ? { ...p, selected: i } : p))}
+                className={`w-full rounded-full px-4 py-3 text-sm font-bold transition ${
+                  seamPicker.selected === i
+                    ? 'bg-ink text-cream shadow-lg shadow-ink/20'
+                    : 'bg-cream2 text-ink hover:bg-sage/25'
+                }`}
+              >
+                {threadOptionLabel(candidate)}
+              </button>
+            ))}
+            <button
+              type="button"
+              aria-pressed={seamPicker.selected === -1}
+              onClick={() => setSeamPicker(p => (p ? { ...p, selected: -1 } : p))}
+              className={`w-full rounded-full px-4 py-3 text-sm font-bold transition ${
+                seamPicker.selected === -1
+                  ? 'bg-ink text-cream shadow-lg shadow-ink/20'
+                  : 'bg-cream2 text-ink hover:bg-sage/25'
+              }`}
+            >
+              Just the road — no thread
+            </button>
+          </div>
+        </>
+      )}
+      {seamPicker.toneRows.length > 0 && (
+        <>
+          <p
+            className={`text-center text-sm font-bold text-ink ${seamPicker.candidates.length > 0 ? 'mt-4' : ''}`}
           >
-            {threadOptionLabel(candidate)}
-          </button>
-        ))}
-        <button
-          type="button"
-          aria-pressed={threadPicker.selected === -1}
-          onClick={() => setThreadPicker(p => (p ? { ...p, selected: -1 } : p))}
-          className={`w-full rounded-full px-4 py-3 text-sm font-bold transition ${
-            threadPicker.selected === -1
-              ? 'bg-ink text-cream shadow-lg shadow-ink/20'
-              : 'bg-cream2 text-ink hover:bg-sage/25'
-          }`}
-        >
-          Just the road — no thread
-        </button>
-      </div>
+            {seamPicker.candidates.length > 0 ? 'And a tone to lean on' : 'This drive has a tone'}
+          </p>
+          <div className="mt-3 flex flex-col gap-2">
+            {seamPicker.toneRows.map((row, i) => (
+              <button
+                key={row.tone}
+                type="button"
+                aria-pressed={seamPicker.toneSelected === i}
+                onClick={() => setSeamPicker(p => (p ? { ...p, toneSelected: i } : p))}
+                className={`w-full rounded-full px-4 py-3 text-sm font-bold transition ${
+                  seamPicker.toneSelected === i
+                    ? 'bg-ink text-cream shadow-lg shadow-ink/20'
+                    : 'bg-cream2 text-ink hover:bg-sage/25'
+                }`}
+              >
+                {toneOptionLabel(row)}
+              </button>
+            ))}
+            <button
+              type="button"
+              aria-pressed={seamPicker.toneSelected === -1}
+              onClick={() => setSeamPicker(p => (p ? { ...p, toneSelected: -1 } : p))}
+              className={`w-full rounded-full px-4 py-3 text-sm font-bold transition ${
+                seamPicker.toneSelected === -1
+                  ? 'bg-ink text-cream shadow-lg shadow-ink/20'
+                  : 'bg-cream2 text-ink hover:bg-sage/25'
+              }`}
+            >
+              No lean — keep it mixed
+            </button>
+          </div>
+        </>
+      )}
       <button
         type="button"
-        onClick={cancelThreadPick}
+        onClick={cancelSeamPick}
         className="mt-3 w-full rounded-full px-4 py-2 text-xs font-bold text-inksoft transition hover:text-ink"
       >
         Back
@@ -2527,27 +2751,15 @@ function MilesApp() {
                 placeholder="e.g. Balboa Park"
                 className="mt-2 w-full rounded-full border-2 border-sage/30 bg-white px-5 py-3 text-base text-ink placeholder:text-inksoft/50 focus:border-sagedeep focus:outline-none"
               />
-              <label className="mt-3 block text-sm font-bold text-ink" htmlFor="route-tone-step">
-                Mood for the ride (optional)
-              </label>
-              <select
-                id="route-tone-step"
-                value={routeTone}
-                onChange={e => setRouteTone(e.target.value)}
-                className="mt-2 w-full rounded-full border-2 border-sage/30 bg-white px-5 py-3 text-base text-ink focus:border-sagedeep focus:outline-none"
-              >
-                <option value="">Any mood</option>
-                {ROUTE_TONES.map(t => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
-              </select>
+              {/* Tone suggestion (Nov 7, 2026): the Mood
+                  select is GONE from this form — tone is
+                  suggested at the seam menu after the cast is
+                  fetched, never picked blind here. */}
               {/* Audience coloring (Nov 5, 2026): the rating
-                  selector sits beside Mood in both route forms
-                  — a per-build choice, defaulting to Standard,
-                  deliberately separate from the Driving /
-                  Passenger mode box. */}
+                  selector in both route forms — a per-build
+                  choice, defaulting to Standard, deliberately
+                  separate from the Driving / Passenger mode
+                  box. */}
               <label className="mt-3 block text-sm font-bold text-ink" htmlFor="route-audience-step">
                 Audience (optional)
               </label>
@@ -2568,22 +2780,22 @@ function MilesApp() {
               <button
                 type="button"
                 onClick={() =>
-                  routePicker ? confirmRoutePick() : threadPicker ? confirmThreadPick() : void buildRoute()
+                  routePicker ? confirmRoutePick() : seamPicker ? confirmSeamPick() : void buildRoute()
                 }
-                disabled={routeBuilding && !routePicker && !threadPicker}
+                disabled={routeBuilding && !routePicker && !seamPicker}
                 className="mt-4 w-full rounded-full bg-ink px-4 py-3.5 text-sm font-bold text-cream shadow-lg shadow-ink/20 transition hover:bg-sagedeep disabled:opacity-50"
               >
                 {routePicker
                   ? 'Build on this road'
-                  : threadPicker
-                    ? 'Build with this thread'
+                  : seamPicker
+                    ? (seamPicker.candidates.length > 0 ? 'Build with this thread' : 'Build with this tone')
                     : routeBuilding
                       ? 'Building…'
                       : 'Build my route'}
               </button>
               {routeStatus && <p className="mt-2 text-center text-xs leading-relaxed text-inksoft">{routeStatus}</p>}
               {routePickerBlock}
-              {threadPickerBlock}
+              {seamPickerBlock}
               {routeFailureBlock}
               <p className="mt-2 text-center text-[11px] text-inksoft">
                 One route, composed at departure from stories you haven&rsquo;t heard — no re-planning mid-drive.
@@ -2729,25 +2941,13 @@ function MilesApp() {
                     placeholder="e.g. Balboa Park"
                     className="mt-2 w-full rounded-full border-2 border-sage/30 bg-white px-5 py-3 text-base text-ink placeholder:text-inksoft/50 focus:border-sagedeep focus:outline-none"
                   />
-                  <label className="mt-4 block text-sm font-bold text-ink" htmlFor="route-tone">
-                    Mood for the ride (optional)
-                  </label>
-                  <select
-                    id="route-tone"
-                    value={routeTone}
-                    onChange={e => setRouteTone(e.target.value)}
-                    className="mt-2 w-full rounded-full border-2 border-sage/30 bg-white px-5 py-3 text-base text-ink focus:border-sagedeep focus:outline-none"
-                  >
-                    <option value="">Any mood</option>
-                    {ROUTE_TONES.map(t => (
-                      <option key={t} value={t}>
-                        {t}
-                      </option>
-                    ))}
-                  </select>
+                  {/* Tone suggestion (Nov 7, 2026): the Mood
+                      select is GONE from this form too — tone
+                      is suggested at the seam menu after the
+                      cast is fetched, never picked blind. */}
                   {/* Audience coloring (Nov 5, 2026): the same
                       rating selector as the stepped form —
-                      beside Mood, per-build, default Standard. */}
+                      per-build, default Standard. */}
                   <label className="mt-4 block text-sm font-bold text-ink" htmlFor="route-audience">
                     Audience (optional)
                   </label>
@@ -2768,22 +2968,22 @@ function MilesApp() {
                   <button
                     type="button"
                     onClick={() =>
-                      routePicker ? confirmRoutePick() : threadPicker ? confirmThreadPick() : void buildRoute()
+                      routePicker ? confirmRoutePick() : seamPicker ? confirmSeamPick() : void buildRoute()
                     }
-                    disabled={routeBuilding && !routePicker && !threadPicker}
+                    disabled={routeBuilding && !routePicker && !seamPicker}
                     className="mt-5 w-full rounded-full bg-ink px-4 py-3.5 text-sm font-bold text-cream shadow-lg shadow-ink/20 transition hover:bg-sagedeep disabled:opacity-50"
                   >
                     {routePicker
                       ? 'Build on this road'
-                      : threadPicker
-                        ? 'Build with this thread'
+                      : seamPicker
+                        ? (seamPicker.candidates.length > 0 ? 'Build with this thread' : 'Build with this tone')
                         : routeBuilding
                           ? 'Building…'
                           : 'Build my route'}
                   </button>
                   {routeStatus && <p className="mt-3 text-center text-xs leading-relaxed text-inksoft">{routeStatus}</p>}
                   {routePickerBlock}
-                  {threadPickerBlock}
+                  {seamPickerBlock}
                   {routeFailureBlock}
                   <p className="mt-2 text-center text-[11px] text-inksoft">
                     One route, composed at departure from stories you haven’t heard — no re-planning mid-drive.

@@ -1383,6 +1383,14 @@ export interface RoutePlan {
    * files no menu record.
    */
   threadMenu?: ThreadMenuRecord | null;
+  /**
+   * The tone menu's record on this plan (tone suggestion,
+   * Nov 7, 2026): what was offered, whether the listener was
+   * asked, and how the final tone was arrived at. Filed by
+   * the App's seam staging through ComposeOptions.toneMenu;
+   * null/absent on plans composed without it.
+   */
+  toneMenu?: ToneMenuRecord | null;
   /** The climax unit id, when the plan has one (addendum 4: not destination-geared). */
   climaxUnitId: string | null;
   /**
@@ -2211,6 +2219,114 @@ export function threadOptionLabel(c: ThreadCandidate): string {
   return `${c.label} · ${threadTieLabel(c.kind)} — ${c.count} ${c.count === 1 ? 'story' : 'stories'} on this drive`;
 }
 
+// ------------------------------------------------------------
+// Tone suggestion (Nov 7, 2026 — Erik's ruling: tone leaves the
+// intake form and is SUGGESTED at the seam menu, the way threads
+// have been since the Nov 5 re-anchor). Doctrine: no blind
+// choices before the road and cast are known — a blind tone pick
+// can be unservable, and tone is a soft lever, so it degrades
+// silently and the listener concludes the control is fake. The
+// composer consumes the final tone exactly as it consumed a
+// picked tone (soft, selection-only); only WHEN and HOW the tone
+// is chosen changes.
+
+/** Qualification bar: a tone is suggestible when at least this many geo-cast members carry it as their PRIMARY tone. */
+export const TONE_QUALIFY_MIN_CAST = 3;
+
+/** One tone this drive can actually lean on, with its honest geo-cast count. */
+export interface ToneAlternative {
+  tone: string;
+  castCount: number;
+}
+
+/**
+ * The tone resolution over a drive's geo pool: the qualifying
+ * tones (primary-tone distribution, ≥ TONE_QUALIFY_MIN_CAST
+ * carriers), in menu order (cast count descending; ties break
+ * by the closed vocabulary's own order, so the menu is stable),
+ * the suggested tone (the plurality qualifier, or null), and
+ * the prose tone's standing — an explicit ask outranks the ≥3
+ * bar for ROW MEMBERSHIP (it may be offered with a thin cast),
+ * but it never becomes the suggestion on its own: the
+ * suggestion is always the cast's plurality qualifier.
+ */
+export interface ToneResolution {
+  alternatives: ToneAlternative[];
+  suggested: string | null;
+  /** The prose-read tone, when it is in the closed vocabulary; null otherwise. */
+  proseTone: string | null;
+  /** The prose tone's primary-tone carriers in this cast (0 when proseTone is null). */
+  proseCastCount: number;
+  /** Whether the prose tone clears the qualification bar in this cast. */
+  proseQualifies: boolean;
+}
+
+/**
+ * Resolve the tone suggestion from the SAME geo pool the thread
+ * resolver sees (partitionRoutePools' geoAll — the selectable
+ * geo cast). Pure and offline. Primary tone only: a story's
+ * secondary tone is a lean it can serve, not a vote for what
+ * the drive IS — the distribution reads the cast's declared
+ * registers, exactly the units' `tone` field.
+ */
+export function resolveToneSuggestion(args: {
+  geoPool: LibraryUnit[];
+  proseTone?: string | null;
+}): ToneResolution {
+  const counts = new Map<string, number>();
+  for (const u of args.geoPool) {
+    if (u.tone !== null) counts.set(u.tone, (counts.get(u.tone) ?? 0) + 1);
+  }
+  const vocabOrder = new Map<string, number>(ROUTE_TONES.map((t, i) => [t as string, i]));
+  const alternatives = [...counts.entries()]
+    .filter(([, n]) => n >= TONE_QUALIFY_MIN_CAST)
+    .map(([tone, castCount]) => ({ tone, castCount }))
+    .sort(
+      (a, b) =>
+        b.castCount - a.castCount ||
+        (vocabOrder.get(a.tone) ?? Number.MAX_SAFE_INTEGER) - (vocabOrder.get(b.tone) ?? Number.MAX_SAFE_INTEGER),
+    );
+  const proseTone =
+    args.proseTone != null && vocabOrder.has(args.proseTone) ? args.proseTone : null;
+  const proseCastCount = proseTone !== null ? (counts.get(proseTone) ?? 0) : 0;
+  return {
+    alternatives,
+    suggested: alternatives.length > 0 ? alternatives[0].tone : null,
+    proseTone,
+    proseCastCount,
+    proseQualifies: proseTone !== null && proseCastCount >= TONE_QUALIFY_MIN_CAST,
+  };
+}
+
+/** Where a plan's final tone came from (the capture taxonomy, tone suggestion, Nov 7, 2026). */
+export type ToneSource = 'detected' | 'prose' | 'menu_pick' | 'none';
+
+/**
+ * The tone menu's record — filed on the plan by the App's seam
+ * staging through ComposeOptions.toneMenu, and copied into the
+ * episode capture's plan payload: what was offered, whether the
+ * listener was asked, how the final tone was arrived at, and
+ * the final tone itself. 'detected' = the listener kept the
+ * cast's suggested lean; 'prose' = the listener kept the tone
+ * their own typed words asked for; 'menu_pick' = the listener
+ * changed the selection (another tone, or "No lean"); 'none' =
+ * no menu, no lean — the build composed with no tone, byte-for-
+ * byte today's no-tone behavior.
+ */
+export interface ToneMenuRecord {
+  offered: ToneAlternative[];
+  menuShown: boolean;
+  source: ToneSource;
+  /** The final tone the build composes with (null = no lean). */
+  pickedTone: string | null;
+}
+
+/** One tone row's full label: name + honest cast count ("Reflective — leans on 9 of this drive's stories"). */
+export function toneOptionLabel(a: ToneAlternative): string {
+  const name = a.tone.charAt(0).toUpperCase() + a.tone.slice(1);
+  return `${name} — leans on ${a.castCount} of this drive's ${a.castCount === 1 ? 'story' : 'stories'}`;
+}
+
 export interface ComposeOptions {
   nowMs: number;
   /**
@@ -2300,6 +2416,16 @@ export interface ComposeOptions {
    * the candidates itself and takes the detection default.
    */
   threadChoice?: ThreadChoice;
+  /**
+   * The tone menu's settled record (tone suggestion, Nov 7,
+   * 2026): filed onto the plan verbatim for the episode
+   * capture. The composer never reads it — the final tone
+   * itself travels on the input, exactly as a picked tone
+   * always did; this record is the seam's account of how that
+   * tone was arrived at. Absent on plans composed without the
+   * App's seam staging (harness/grader assemblies).
+   */
+  toneMenu?: ToneMenuRecord | null;
   /** The destination's library place_key when the build could derive one (addendum 2 matching). */
   destinationPlaceKey?: string | null;
   /**
@@ -3609,6 +3735,7 @@ export function composeRoutePlan(
           ? 'user'
           : 'detected',
     threadMenu,
+    toneMenu: opts.toneMenu ?? null,
     climaxUnitId,
     climaxMode,
     climaxSubject,

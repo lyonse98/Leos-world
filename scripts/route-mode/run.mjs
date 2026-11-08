@@ -7815,6 +7815,245 @@ check('menu capture: the offered set, the shown flag, the source and the final t
   assert.deepEqual(payload.thread_final, { topic: 'Food & Drink', label: 'Harbor Gate', anchor_kind: 'destination', anchor_key: 'harbor' });
 });
 
+// ── Tone suggestion (Nov 7, 2026) ──────────────────────
+// Erik's ruling: the intake's blind Mood select is gone;
+// tone is SUGGESTED at the seam card from the cast itself —
+// the primary-tone distribution over the same geo pool the
+// thread resolver sees, a ≥3-carrier bar, the plurality
+// qualifier as the suggestion, and the prose ask riding as a
+// pre-selected row even off-bar. The suites below pin the
+// resolution, the card's section conditions (via the two
+// resolutions the App reads), the capture record, no-tone
+// parity, and the intake's source shape.
+
+const tonePoolsOf = units => rm.partitionRoutePools(units, path, dest, { heardKeys: new Set() });
+const toneResOf = (units, extra = {}) =>
+  rm.resolveToneSuggestion({ geoPool: tonePoolsOf(units).geoAll, ...extra });
+const toneCast = specs => {
+  // specs: [tone, count] pairs laid along the meridian path.
+  const units = [];
+  let lat = 32.71;
+  for (const [tone, n] of specs) {
+    for (let i = 0; i < n; i++) {
+      units.push(unit(`tc${units.length}|landmark_origin`, lat, { tone }));
+      lat += 0.012;
+    }
+  }
+  return units;
+};
+
+check('tone suggestion: detection thresholds — ≥3 primary-tone carriers qualify, plurality is suggested, ties break by vocabulary order', () => {
+  const res = toneResOf(toneCast([['reflective', 4], ['warm', 3], ['light', 2]]));
+  assert.deepEqual(res.alternatives, [
+    { tone: 'reflective', castCount: 4 },
+    { tone: 'warm', castCount: 3 },
+  ]);
+  assert.equal(res.suggested, 'reflective', 'the plurality qualifier is the suggestion');
+  assert.equal(rm.TONE_QUALIFY_MIN_CAST, 3);
+  // Exactly at the bar qualifies; one under does not.
+  assert.deepEqual(toneResOf(toneCast([['grand', 3]])).alternatives, [{ tone: 'grand', castCount: 3 }]);
+  assert.deepEqual(toneResOf(toneCast([['grand', 2]])).alternatives, []);
+  // A tie at the top breaks by the closed vocabulary's order
+  // (warm precedes reflective in ROUTE_TONES) — stable menus.
+  const tie = toneResOf(toneCast([['reflective', 3], ['warm', 3]]));
+  assert.equal(tie.suggested, 'warm');
+  assert.deepEqual(tie.alternatives.map(a => a.tone), ['warm', 'reflective']);
+  // Secondary tones are NOT votes: four spooky secondaries
+  // across a cast whose primaries all sit under the bar
+  // qualify nothing.
+  const secondaries = toneResOf([
+    unit('ts0|landmark_origin', 32.71, { tone: 'light', toneSecondary: 'spooky' }),
+    unit('ts1|landmark_origin', 32.73, { tone: 'light', toneSecondary: 'spooky' }),
+    unit('ts2|landmark_origin', 32.75, { tone: 'warm', toneSecondary: 'spooky' }),
+    unit('ts3|landmark_origin', 32.77, { tone: 'grand', toneSecondary: 'spooky' }),
+    unit('ts4|landmark_origin', 32.79, { tone: 'warm' }),
+  ]);
+  assert.deepEqual(secondaries.alternatives, [], 'the distribution reads PRIMARY tone only');
+  assert.equal(secondaries.suggested, null);
+});
+
+check('tone suggestion: prose standing — a qualifying ask is carried; an off-bar ask rides as a row but never becomes the suggestion', () => {
+  const castUnits = toneCast([['reflective', 4], ['warm', 3]]);
+  const qualifying = toneResOf(castUnits, { proseTone: 'warm' });
+  assert.equal(qualifying.proseTone, 'warm');
+  assert.equal(qualifying.proseQualifies, true);
+  assert.equal(qualifying.proseCastCount, 3);
+  assert.equal(qualifying.suggested, 'reflective', 'the suggestion stays the cast plurality — the App pre-selects the ask, the resolver does not crown it');
+  const offBar = toneResOf([...castUnits, unit('sp1|landmark_origin', 32.87, { tone: 'spooky' })], { proseTone: 'spooky' });
+  assert.equal(offBar.proseTone, 'spooky');
+  assert.equal(offBar.proseQualifies, false);
+  assert.equal(offBar.proseCastCount, 1);
+  assert.ok(!offBar.alternatives.some(a => a.tone === 'spooky'), 'an off-bar ask is not an alternative — it joins as an added row at the App seam');
+  assert.equal(offBar.suggested, 'reflective');
+  // A prose tone outside the closed vocabulary is not an ask.
+  const junk = toneResOf(castUnits, { proseTone: 'dark' });
+  assert.equal(junk.proseTone, null);
+  assert.equal(junk.proseCastCount, 0);
+});
+
+check('tone suggestion: no-lean silence — no qualifier and no ask resolves empty, and a no-tone plan files the none record', () => {
+  const res = toneResOf(toneCast([['warm', 2], ['light', 2], ['grand', 1]]));
+  assert.deepEqual(res.alternatives, []);
+  assert.equal(res.suggested, null);
+  assert.equal(res.proseTone, null);
+  const plan = leverCompose(toneCast([['warm', 2], ['light', 2]]), 2400, {
+    toneMenu: { offered: [], menuShown: false, source: 'none', pickedTone: null },
+  });
+  assert.equal(plan.toneMenu?.source, 'none');
+  const payload = ec.assemblePlanCapture({
+    tourId: 'route-tone-none',
+    buildId: 'fresh-test',
+    context: captureCtx,
+    plan,
+    routePlanStarted: null,
+    items: ec.assemblePlanItems(plan, new Set()),
+  });
+  assert.equal(payload.schema, 2);
+  assert.deepEqual(payload.tone_alternatives_offered, []);
+  assert.equal(payload.tone_menu_shown, false);
+  assert.equal(payload.tone_source, 'none');
+  assert.equal(payload.tone_final, null);
+});
+
+check('tone suggestion: card coexistence — thread-only, tone-only, and both sections resolve off the same pools', () => {
+  const sectionOf = units => {
+    const pools = tonePoolsOf(units);
+    const threads = rm.resolveThreadCandidates({
+      geoPool: pools.geoAll,
+      wovenSupport: pools.portalAll.filter(u => u.wovenEligible === true),
+      path,
+      destination: dest,
+    });
+    const tones = rm.resolveToneSuggestion({ geoPool: pools.geoAll });
+    return { thread: threads.candidates.length >= 2, tone: tones.alternatives.length > 0 };
+  };
+  // Thread-only: two qualifying threads, every tone at ≤1.
+  const threadOnly = sectionOf([
+    unit('harbor|landmark_origin', 32.895, { placeName: 'Harbor Gate', topics: ['Food & Drink'], tone: 'warm' }),
+    unit('harbor|landmark_event', 32.9, { placeName: 'Harbor Gate', topics: ['Food & Drink'], tone: 'reflective' }),
+    unit('harbor|landmark_people', 32.905, { placeName: 'Harbor Gate', topics: [], tone: 'light' }),
+    unit('tp1|landmark_origin', 32.74, { topics: [WT], tone: 'grand' }),
+    unit('tp2|landmark_origin', 32.78, { topics: [WT], tone: 'somber' }),
+    unit('tp3|landmark_origin', 32.82, { topics: [WT], tone: 'reverent' }),
+  ]);
+  assert.deepEqual(threadOnly, { thread: true, tone: false });
+  // Tone-only: no thread qualifies (no anchors, no topics),
+  // reflective carries the cast.
+  const toneOnly = sectionOf(toneCast([['reflective', 4], ['warm', 2]]));
+  assert.deepEqual(toneOnly, { thread: false, tone: true });
+  // Both: the harbor world with a leaning cast.
+  const both = sectionOf([
+    unit('harbor|landmark_origin', 32.895, { placeName: 'Harbor Gate', topics: ['Food & Drink'], tone: 'reflective' }),
+    unit('harbor|landmark_event', 32.9, { placeName: 'Harbor Gate', topics: ['Food & Drink'], tone: 'reflective' }),
+    unit('harbor|landmark_people', 32.905, { placeName: 'Harbor Gate', topics: [], tone: 'reflective' }),
+    ...[32.74, 32.78, 32.82].map((lat, i) => wGeo(`bt${i + 1}|landmark_origin`, lat, 120, `Both ${i + 1}`)),
+  ]);
+  assert.deepEqual(both, { thread: true, tone: true });
+});
+
+check('tone suggestion: no-tone parity — the no-lean plan is the no-tone plan, item for item; a leaned plan keeps the same cast', () => {
+  const castUnits = toneCast([['reflective', 4], ['warm', 3], ['light', 2]]);
+  const composeWith = (tone, toneMenu) =>
+    rm.composeRoutePlan(
+      castUnits,
+      path,
+      dest,
+      'Dest',
+      { destinationText: 'Dest', arrivalTimeMs: null, tone, topics: [] },
+      {
+        nowMs: NOW,
+        heardKeys: new Set(),
+        budgetSecOverride: 2400,
+        driveSec: 2400,
+        ...(toneMenu ? { toneMenu } : {}),
+      },
+    );
+  const baseline = composeWith(null, null);
+  assert.equal(baseline.toneMenu, null, 'a plan composed without the seam record carries none');
+  const noLean = composeWith(null, {
+    offered: [
+      { tone: 'reflective', castCount: 4 },
+      { tone: 'warm', castCount: 3 },
+    ],
+    menuShown: true,
+    source: 'menu_pick',
+    pickedTone: null,
+  });
+  assert.deepEqual(
+    noLean.items.map(i => `${i.kind}:${i.id}`),
+    baseline.items.map(i => `${i.kind}:${i.id}`),
+    'no-lean composes the identical plan — the record is filed, nothing steers',
+  );
+  assert.equal(noLean.thread?.anchorKey ?? null, baseline.thread?.anchorKey ?? null);
+  assert.equal(noLean.climaxUnitId, baseline.climaxUnitId);
+  assert.equal(noLean.totalSec, baseline.totalSec);
+  assert.equal(noLean.toneMenu?.source, 'menu_pick');
+  // A leaned plan: tone steers RANK only — the story cast is
+  // the same set (tone never filters), and toneMatched reads.
+  const leaned = composeWith('reflective', {
+    offered: [
+      { tone: 'reflective', castCount: 4 },
+      { tone: 'warm', castCount: 3 },
+    ],
+    menuShown: true,
+    source: 'detected',
+    pickedTone: 'reflective',
+  });
+  const storyIds = p => p.items.filter(i => i.kind === 'story').map(i => i.id).sort();
+  assert.deepEqual(storyIds(leaned), storyIds(baseline), 'a lean reorders within the cast — it never removes a story');
+  assert.equal(leaned.toneMatched, true);
+  assert.equal(leaned.toneMenu?.pickedTone, 'reflective');
+});
+
+check('tone capture: the offered set, the shown flag, the source and the final tone ride the plan payload (schema stays 2)', () => {
+  const storyUnit = unit('s1|landmark_origin', 32.71);
+  const items = [
+    { kind: 'story', id: storyUnit.id, label: 'S1', durationSec: 100, unit: storyUnit, ready: true, anchorProgress: 0.1, releaseProgress: 0.1, expireProgress: 0.3 },
+  ];
+  const plan = {
+    destinationName: 'Dest',
+    destination: dest,
+    path,
+    driveSec: 1000,
+    budgetSec: 1000,
+    items,
+    wrapUp: null,
+    audience: 'standard',
+    thread: null,
+    threadMenu: null,
+    toneMenu: {
+      offered: [
+        { tone: 'reflective', castCount: 9 },
+        { tone: 'warm', castCount: 5 },
+      ],
+      menuShown: true,
+      source: 'prose',
+      pickedTone: 'warm',
+    },
+  };
+  const payload = ec.assemblePlanCapture({
+    tourId: 'route-tone-1',
+    buildId: 'fresh-test',
+    context: captureCtx,
+    plan,
+    routePlanStarted: null,
+    items: ec.assemblePlanItems(plan, new Set()),
+  });
+  assert.equal(payload.schema, 2);
+  assert.deepEqual(payload.tone_alternatives_offered, plan.toneMenu.offered);
+  assert.equal(payload.tone_menu_shown, true);
+  assert.equal(payload.tone_source, 'prose');
+  assert.equal(payload.tone_final, 'warm', 'the seam record’s settled tone is the final tone');
+});
+
+check('tone suggestion: the intake forms carry no tone control; the seam card carries the tone section (App source)', () => {
+  const appSrc = readFileSync(join(repoRoot, 'src', 'App.tsx'), 'utf8');
+  assert.ok(!appSrc.includes('Mood for the ride'), 'the blind Mood select is gone from both route forms');
+  assert.ok(!appSrc.includes('routeTone'), 'no intake tone state survives');
+  assert.ok(appSrc.includes('No lean — keep it mixed'), 'the seam card offers the no-lean row');
+  assert.ok(appSrc.includes('resolveToneSuggestion'), 'the seam resolves the suggestion from the cast');
+});
+
 await checkAsync('thread anchors battery: 100% anchor rate on fresh drives; zero cooldown repeats inside the window', async () => {
   const anchors = await grader.runThreadAnchors({ rm, gf, rh });
   assert.deepEqual(anchors.fresh.misses, [], 'every fresh default is the resolution’s own');
