@@ -322,6 +322,9 @@ function PosterBackdrop() {
  * live at trymiles.app/terms and trymiles.app/privacy. Shown on the
  * access gate and the pre-tour landing only — the in-tour screen
  * stays face-only with nothing tappable beyond the transport bar.
+ * Feedback link added Nov 7, 2026 (Erik's ruling): the anonymous
+ * tester feedback form at trymiles.app/feedback rides the same
+ * footer, same treatment.
  */
 function LegalLinks() {
   return (
@@ -342,6 +345,15 @@ function LegalLinks() {
         className="underline underline-offset-2"
       >
         Privacy
+      </a>
+      {' · '}
+      <a
+        href="https://trymiles.app/feedback"
+        target="_blank"
+        rel="noreferrer"
+        className="underline underline-offset-2"
+      >
+        Feedback
       </a>
     </p>
   );
