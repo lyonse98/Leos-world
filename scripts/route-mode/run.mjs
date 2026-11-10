@@ -4022,7 +4022,7 @@ const storyIds = plan => plan.items.filter(i => i.kind === 'story').map(i => i.i
 const memberIds = plan => plan.items.filter(i => i.woven).map(i => i.id);
 
 check('woven data: the bundled presence map pins the audit — Protected excluded whatever its register', () => {
-  assert.equal(Object.keys(rpd.ROUTE_PRESENCE).length, 1294, 'one row per shelf story (1,264 audit rows + 30 woven twins)');
+  assert.equal(Object.keys(rpd.ROUTE_PRESENCE).length, 1395, 'one row per shelf story (1,264 audit rows + 16 Wave C-1 + 15 city-works + 100 woven twins)');
   // Kuchamaa is Protected register: even its weave-SAFE
   // telling is never woven material.
   assert.deepEqual(rpd.presenceFor('kuchamaa', 'landmark_origin'), { presence: 'safe', protected: true });
@@ -4049,7 +4049,9 @@ check('woven data regen: deterministic, and the committed routePresence.ts is in
 });
 
 // ── Woven twins, wired (Nov 4, 2026) ──────────────────────
-// The tranche's 30 twins (source angle + '-woven-v1') are
+// The tranche's 100 twins (30 rendered Nov 2026 via AI Studio
+// batch + the remaining 70 rendered Nov 10, 2026 on Vertex,
+// completing the tranche; source angle + '-woven-v1') are
 // real shelf rows now: the tag map carries them with their
 // sources' topics, the presence map classifies them
 // weave-safe by construction (derived in the generator, not
@@ -4057,10 +4059,10 @@ check('woven data regen: deterministic, and the committed routePresence.ts is in
 // counting and the member fetch — can reach them.
 const TWIN_SUFFIX = '-woven-v1';
 const twinKeysOf = map => Object.keys(map).filter(k => k.split('|')[1]?.endsWith(TWIN_SUFFIX));
-check('woven twins (data): the tag map carries all 30 twins with topics inherited from their sources', () => {
-  assert.equal(Object.keys(rtg.ROUTE_TAGS).length, 1310, 'one tag row per shelf story (1,294 + 16 Wave C-1)');
+check('woven twins (data): the tag map carries all 100 twins with topics inherited from their sources', () => {
+  assert.equal(Object.keys(rtg.ROUTE_TAGS).length, 1405, 'one tag row per shelf story (1,310 + 70 woven twins + 10 probe + 15 city-works)');
   const twins = twinKeysOf(rtg.ROUTE_TAGS);
-  assert.equal(twins.length, 30, 'the November tranche twins are index-visible');
+  assert.equal(twins.length, 100, 'the completed tranche twins are index-visible');
   let coast = 0;
   for (const k of twins) {
     const [pk, ang] = [k.slice(0, k.indexOf('|')), k.slice(k.indexOf('|') + 1)];
@@ -4070,7 +4072,7 @@ check('woven twins (data): the tag map carries all 30 twins with topics inherite
     assert.deepEqual(twin.topics, source.topics, `${k} inherits its source's topics`);
     if (twin.topics.includes('Coast')) coast += 1;
   }
-  assert.equal(coast, 24, 'the Coast tranche landed whole (24 of 30 twins carry Coast)');
+  assert.equal(coast, 24, 'the Coast tranche landed whole (24 of 100 twins carry Coast — the November 30 were the Coast head; ranks 31–100 carry none)');
 });
 check('woven twins (data): every twin resolves weave-safe and eligible; its source keeps the audit’s call', () => {
   for (const k of twinKeysOf(rtg.ROUTE_TAGS)) {
@@ -4087,7 +4089,7 @@ check('woven twins (data): every twin resolves weave-safe and eligible; its sour
   for (const [k, e] of Object.entries(rpd.ROUTE_PRESENCE)) {
     if (!k.split('|')[1]?.endsWith(TWIN_SUFFIX)) split[e.presence] += 1;
   }
-  assert.deepEqual(split, { bound: 195, mixed: 567, safe: 502 }, 'the recovered audit split, byte-stable');
+  assert.deepEqual(split, { bound: 197, mixed: 582, safe: 516 }, 'the recovered audit split (195/567/502) plus the C-1 regen (2 bound / 5 mixed / 9 safe) and the city-works classes (10 mixed / 5 safe), byte-stable');
 });
 check('woven twins (data): index support counts the twins, and the member fetch can return them', () => {
   // The REAL shipped index (every tag-map key), all placed on
