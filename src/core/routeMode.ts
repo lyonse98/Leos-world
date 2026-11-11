@@ -1246,7 +1246,15 @@ export function selectMemberFetchEntries(
   return out;
 }
 
-export type PlanItemKind = 'preview' | 'story' | 'bridge' | 'reaction' | 'filler' | 'signoff' | 'handoff';
+export type PlanItemKind =
+  | 'preview'
+  | 'story'
+  | 'bridge'
+  | 'reaction'
+  | 'filler'
+  | 'signoff'
+  | 'handoff'
+  | 'silence';
 
 export interface PlanItem {
   kind: PlanItemKind;
@@ -1292,6 +1300,13 @@ export interface PlanItem {
   humorBankId?: string;
   /** False when its plan-time render failed → skip-fallback drops it. */
   ready: boolean;
+  /**
+   * Planned silence only (Nov 11, 2026): the named seam the
+   * composer seated this beat at ('post-climax', 'post-memorial',
+   * 'corridor'). The runner files it on the planned_silence
+   * telemetry record. Absent on every other kind.
+   */
+  seam?: string;
   /** Stories: the unit's progress along the path (its anchor). */
   anchorProgress?: number;
   /**
@@ -3523,6 +3538,15 @@ export function composeRoutePlan(
   // once, and no connective-bank line can repeat (lane 1: bank
   // lines no longer author into bridges at all).
   const bridgeLedger = newBridgeEpisodeState();
+  // Planned silence (Nov 11, 2026): composed beats seated at
+  // named seams — after the climax, after a memorial/somber
+  // story, before a chapter across a long corridor stretch.
+  // Guards: never in the first 60 s of the tour (the seam's
+  // expected start is the preceding story's expected end),
+  // never back-to-back, at most 3 per tour. The beat is a queue
+  // item, not an absence: the runner plays it as occupied time
+  // over the ambience bed.
+  let silencesSeated = 0;
   sequence.forEach((entry, i) => {
     const u = entry.unit;
     // Bridges join story → story only: a filler spackle gets no
@@ -3604,6 +3628,34 @@ export function composeRoutePlan(
       ...(entry.portal ? { portal: true, portalParentId: entry.portalParentId } : {}),
       ...(entry.portalClimax ? { portalClimax: true } : {}),
     });
+    // Planned silence seating (Nov 11, 2026): directly after
+    // the story whose seam it is, ahead of any reaction tissue.
+    if (!isFiller && silencesSeated < 3 && items[items.length - 1]?.kind !== 'silence') {
+      const expectedEndSec = anchor * driveDur + u.durationSec;
+      let seam: { name: string; sec: number } | null = null;
+      if (memorialClassFor(u) || colorSuppressedFor(u)) {
+        seam = { name: 'post-memorial', sec: 4 };
+      } else if (isClimax) {
+        seam = { name: 'post-climax', sec: 3 };
+      } else if (i < sequence.length - 1) {
+        const nextU = sequence[i + 1].unit;
+        const corridorGapSec = Math.max(0, (prog(nextU) - prog(u)) * driveDur - u.durationSec);
+        if (corridorGapSec >= 300) seam = { name: 'corridor', sec: 3 };
+      }
+      if (seam && expectedEndSec >= 60) {
+        items.push({
+          kind: 'silence',
+          id: `silence:after-${u.id}`,
+          label: 'Planned silence',
+          durationSec: seam.sec,
+          ready: true,
+          seam: seam.name,
+          prevUnitId: u.id,
+          ...(i < sequence.length - 1 ? { nextUnitId: sequence[i + 1].unit.id } : {}),
+        });
+        silencesSeated += 1;
+      }
+    }
     storiesSinceReaction += 1;
     if (storiesSinceReaction >= 3 && i < sequence.length - 1) {
       const reaction = spokenFormText(REACTION_BANK[Math.floor(i / 3) % REACTION_BANK.length]);
@@ -4283,6 +4335,9 @@ export function seatWovenMembers(
           ? true
           : plan.previewFacts !== null && plan.climaxUnitId !== null,
         offRoute: gap.next.portalClimax === true || nextIsCarriedClimax,
+        // The bridge OUT of a member returns to the road: an
+        // anchor's job (Nov 11, 2026).
+        prevWoven: true,
         audience: plan.audience,
       });
       const target = bridgeTarget(
@@ -4540,6 +4595,13 @@ export function buildBridgeContext(args: {
    */
   nextWoven?: boolean;
   /**
+   * True when the PREVIOUS story is a woven member (Nov 11,
+   * 2026): the member-surgery bridge OUT, returning to the
+   * road. The narration layer keeps that bridge an anchor —
+   * proximity framing is honest again on the return.
+   */
+  prevWoven?: boolean;
+  /**
    * The build's audience coloring (Nov 5, 2026): under
    * 'family', a GRAY-class previous story contributes no
    * quoted gist — the bridge names the subject only (the
@@ -4568,6 +4630,19 @@ export function buildBridgeContext(args: {
       args.audience === 'family' && familyClassOf(prev) === 'gray' ? null : storyGist(prev),
     nextSubject: next.placeName,
     role,
+    // Bridge moves (Nov 11, 2026): the facts the move rotation
+    // reads — the next story's gist (the tease's promise; the
+    // same Family gray guard as prevGist) and angle (the
+    // question's key), the pair's memorial/somber classes (the
+    // audited sets), and the segment's own geometry (the
+    // distance marker speaks nothing else).
+    nextGist:
+      args.audience === 'family' && familyClassOf(next) === 'gray' ? null : storyGist(next),
+    nextAngle: next.angle ?? null,
+    memorialPair: memorialClassFor(prev) || memorialClassFor(next),
+    somberPair: colorSuppressedFor(prev) || colorSuppressedFor(next),
+    segDistanceM: haversineM({ lat: prev.lat, lng: prev.lng }, { lat: next.lat, lng: next.lng }),
+    ...(args.prevWoven ? { prevWoven: true } : {}),
   };
   if (role === 'payoff') {
     ctx.promiseMade = promiseMade;

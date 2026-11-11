@@ -589,12 +589,39 @@ export interface BridgeEpisodeState {
   threadCalloutUsed: boolean;
   /** Opening shapes authored so far, in order. */
   openings: BridgeOpeningShape[];
+  /**
+   * Bridge MOVES authored so far, in order (Nov 11, 2026): a
+   * bridge performs ONE move from the seven-move set, and the
+   * rotation rules (no move twice running, anchor a minority,
+   * question ≤2/episode, a mandated quiet handoff in long
+   * episodes) are enforced off this ledger — the same discipline
+   * as the opening shapes.
+   */
+  moves: BridgeMove[];
 }
 
 /** A fresh episode ledger (a plan's first bridge starts here). */
 export function newBridgeEpisodeState(): BridgeEpisodeState {
-  return { bankLinesUsed: [], threadCalloutUsed: false, openings: [] };
+  return { bankLinesUsed: [], threadCalloutUsed: false, openings: [], moves: [] };
 }
+
+/**
+ * The seven bridge moves (Nov 11, 2026). A bridge is connective
+ * tissue with a JOB: anchor the road in place-names, tease what
+ * is coming, call back what was heard, ask the question the next
+ * story answers, stitch the thread, mark the distance, or hand
+ * over quietly. The sameness the field drives heard came from
+ * every bridge doing the anchor's job in the same syntax; the
+ * rotation exists so each bridge does a different one.
+ */
+export type BridgeMove =
+  | 'anchor'
+  | 'forward-tease'
+  | 'callback'
+  | 'question'
+  | 'thread-stitch'
+  | 'distance'
+  | 'quiet-handoff';
 
 /** Which head shape a bridge text opens with, by its fingerprint. Null when it matches none (fixtures, foreign texts). */
 function openingShapeOf(text: string): BridgeOpeningShape | null {
@@ -615,6 +642,19 @@ function openingShapeOf(text: string): BridgeOpeningShape | null {
  * seeded this way knows exactly what the listener has already
  * heard.
  */
+/** Which bridge move a text performed, by its fingerprint. Null when it matches none (fixtures, foreign texts). */
+function moveShapeOf(text: string): BridgeMove | null {
+  if (text.includes('?')) return 'question';
+  if (text.includes('two ends of the same story') || text.includes('thread again')) return 'thread-stitch';
+  if (text.includes('stays with us')) return 'callback';
+  if (text.includes('miles of road yet') || text.includes('another mile of road')) return 'distance';
+  if (text.includes('earns its moment') || text.includes('worth the wait')) return 'forward-tease';
+  const t = text.trim();
+  if (/^From .{1,60} we roll on\.$/.test(t) && t.length <= 80) return 'quiet-handoff';
+  if (openingShapeOf(t)) return 'anchor';
+  return null;
+}
+
 export function bridgeEpisodeStateFromTexts(texts: string[]): BridgeEpisodeState {
   const state = newBridgeEpisodeState();
   for (const t of texts) {
@@ -624,6 +664,8 @@ export function bridgeEpisodeStateFromTexts(texts: string[]): BridgeEpisodeState
     if (t.includes('two ends of the same story')) state.threadCalloutUsed = true;
     const shape = openingShapeOf(t);
     if (shape) state.openings.push(shape);
+    const move = moveShapeOf(t);
+    if (move) state.moves.push(move);
   }
   return state;
 }
@@ -679,6 +721,188 @@ export interface BridgeContext {
    * for it.
    */
   wovenSubject?: string;
+  /**
+   * The next story's one-line gist (Nov 11, 2026): the forward
+   * tease names it as a promise. Null when the next story carries
+   * no text (or, under Family, when its first line must not be
+   * spoken verbatim — the same gist rule as prevGist).
+   */
+  nextGist?: string | null;
+  /** The next story's angle — the question move is keyed to it (a question is only posed where the story demonstrably answers it). */
+  nextAngle?: string | null;
+  /**
+   * The PREVIOUS story is a woven member (Nov 11, 2026): this
+   * bridge is the return to the road, and the return is the
+   * anchor's job — proximity framing is honest again here, and
+   * no other move displaces it.
+   */
+  prevWoven?: boolean;
+  /**
+   * Memorial guardrails (Nov 11, 2026): either side of the pair
+   * is in the audited memorial set. Into memorial ground the
+   * allowed moves shrink to quiet handoff, plain anchor, and
+   * factual callback — question, forward tease, and the thread
+   * callout formula are banned there.
+   */
+  memorialPair?: boolean;
+  /** Either side is somber/protected-register: the quiet handoff is preferred. */
+  somberPair?: boolean;
+  /**
+   * The pair's segment distance in meters (anchor to anchor,
+   * derived from the plan's own geometry): the distance/time
+   * marker speaks only this, in honest bands.
+   */
+  segDistanceM?: number | null;
+}
+
+/**
+ * A story's gist as a speakable mid-sentence clause: trailing
+ * punctuation stripped, and the first word lowercased ONLY when
+ * it is a common sentence-starter — a proper noun or an acronym
+ * keeps its capital, so TTS never hears a mangled name.
+ */
+const GIST_STARTERS = new Set([
+  'the', 'a', 'an', 'it', 'in', 'on', 'when', 'before', 'after', 'long', 'by',
+  'for', 'with', 'this', 'that', 'there', 'here', 'he', 'she', 'they', 'we',
+  'its', 'his', 'her', 'their', 'one', 'two', 'first', 'back', 'over', 'under',
+]);
+/**
+ * A gist as a bridge SPEAKS it: trimmed to a transition's size
+ * (~110 chars at a word boundary). The context gist keeps its
+ * full 160-char cap for composition logic; only the spoken
+ * callback/tease sentences trim — bridge durations feed the
+ * runner's suppression predictions, and a bridge that recaps
+ * at length reprices every window behind it.
+ */
+export function spokenGist(gist: string): string {
+  const clean = gist.replace(/…$/, '').trim();
+  if (clean.length <= 110) return clean;
+  // Prefer a whole sentence when one ends inside the budget
+  // (the context gist carries up to two); else a word boundary.
+  const sentenceEnd = clean.lastIndexOf('. ', 110);
+  if (sentenceEnd > 40) return clean.slice(0, sentenceEnd + 1).trim();
+  const cut = clean.slice(0, 110);
+  const at = cut.lastIndexOf(' ');
+  return (at > 60 ? cut.slice(0, at) : cut).trim();
+}
+
+export function gistClause(gist: string): string {
+  const clean = gist.replace(/\s+/g, ' ').trim().replace(/[.!?…]+$/, '');
+  const m = clean.match(/^(\S+)\s+(.*)$/);
+  if (!m) return clean;
+  const first = m[1];
+  const rest = m[2];
+  const lower = first.toLowerCase();
+  // A plain capitalized starter ("The", "In", "When") lowercases;
+  // anything with interior capitals or apostrophes (a name, an
+  // acronym) keeps its case untouched.
+  const plainCapitalized =
+    first.length > 1 &&
+    first.charAt(0) === first.charAt(0).toUpperCase() &&
+    first.slice(1) === first.slice(1).toLowerCase();
+  if (GIST_STARTERS.has(lower) && (first === lower || plainCapitalized)) {
+    return `${lower} ${rest}`;
+  }
+  return clean;
+}
+
+/** The question move's templates, keyed by the next story's angle class. Null = no honest question exists for this pair. */
+function questionTextFor(angle: string | null | undefined, prev: string, next: string): string | null {
+  if (!angle) return null;
+  if (angle.includes('mechanism') || angle.includes('how') || angle.includes('works')) {
+    return `From ${prev} we keep rolling. So how does ${next} actually work? Stay close — the answer is just ahead.`;
+  }
+  if (angle.includes('origin') || angle.includes('founding') || angle.includes('begin')) {
+    return `From ${prev} we keep rolling. How did ${next} even begin? Stay close — the answer is just ahead.`;
+  }
+  if (angle.includes('event') || angle.includes('history') || angle.includes('story')) {
+    return `From ${prev} we keep rolling. So what happened at ${next}? Stay close — the answer is just ahead.`;
+  }
+  return null;
+}
+
+/**
+ * Choose this bridge's move from the ledger + the pair's facts —
+ * deterministic, the pickStandardHead discipline. Every rule is
+ * a degrade toward the anchor: when a move's facts are missing
+ * or its budget is spent, the next move is tried, and the anchor
+ * (today's heads) is the floor every bridge can always stand on.
+ */
+function chooseBridgeMove(ctx: BridgeContext, episode: BridgeEpisodeState): BridgeMove {
+  const moves = episode.moves;
+  const done = moves.length;
+  const last = moves[done - 1];
+  const count = (m: BridgeMove) => moves.filter(x => x === m).length;
+  // The return from a woven member re-anchors on the road.
+  if (ctx.prevWoven) return 'anchor';
+  // The thread stitch outranks even the first-bridge anchor:
+  // when the pair carries a real callback subject on threaded,
+  // non-memorial, non-somber ground, the callout family IS the
+  // bridge the episode is owed (the field-fix lane-1 pin: the
+  // uncapped first bridge of a threaded episode carries the
+  // callout). Memorial pairs never stitch (guardrails below).
+  if (
+    ctx.role === 'mid' &&
+    (ctx.threadTopic || ctx.threadLabel) &&
+    ctx.callbackSubject &&
+    last !== 'thread-stitch' &&
+    !ctx.memorialPair &&
+    !ctx.somberPair
+  ) {
+    return 'thread-stitch';
+  }
+  // The episode's first bridge anchors (the road gets named
+  // before it gets played with) — except into memorial ground,
+  // where the quiet handoff may lead.
+  if (done === 0 && !ctx.memorialPair) return 'anchor';
+  // Mandated quiet handoff (episodes of 7+ stories carry ≥6
+  // bridges): if the sixth bridge arrives with none served, it
+  // serves — the episode is guaranteed its one composed beat.
+  if (done >= 5 && !moves.includes('quiet-handoff')) return 'quiet-handoff';
+  // Memorial ground: quiet handoff, factual callback, plain
+  // anchor — nothing else, ever.
+  if (ctx.memorialPair) {
+    if (ctx.somberPair && last !== 'quiet-handoff') return 'quiet-handoff';
+    if (ctx.prevGist && last !== 'callback') return 'callback';
+    if (last !== 'quiet-handoff' && count('quiet-handoff') === 0 && done >= 2) return 'quiet-handoff';
+    return 'anchor';
+  }
+  // Somber ground prefers the quiet handoff.
+  if (ctx.somberPair && last !== 'quiet-handoff' && count('quiet-handoff') < 2) return 'quiet-handoff';
+  // The thread stitch: today's callout family, when the pair
+  // carries a real callback subject and the move is off cooldown.
+  if (
+    ctx.role === 'mid' &&
+    (ctx.threadTopic || ctx.threadLabel) &&
+    ctx.callbackSubject &&
+    last !== 'thread-stitch'
+  ) {
+    return 'thread-stitch';
+  }
+  // Callback: the previous story's gist, actually spoken — the
+  // fact the old skeleton carried and never said.
+  if (ctx.prevGist && last !== 'callback' && done >= 1 && count('callback') * 2 <= done) return 'callback';
+  // Question: angle-keyed, ≤2 per episode, never twice running,
+  // on a spaced cadence.
+  if (questionTextFor(ctx.nextAngle, ctx.prevSubject, ctx.nextSubject) && count('question') < 2 && last !== 'question' && done % 3 === 2) {
+    return 'question';
+  }
+  // Distance/time marker: a real stretch of road between the pair.
+  if (ctx.segDistanceM != null && ctx.segDistanceM >= 1609 && last !== 'distance') return 'distance';
+  // Forward tease: the next story's gist named as a promise.
+  if (ctx.role === 'mid' && ctx.nextGist && count('forward-tease') < 3 && last !== 'forward-tease' && done >= 1) {
+    return 'forward-tease';
+  }
+  // A long episode still owes its quiet handoff.
+  if (done >= 3 && last !== 'quiet-handoff' && count('quiet-handoff') === 0) return 'quiet-handoff';
+  // Anchor budget: from the fifth bridge on, anchors stay a
+  // minority — when the share would pass 40%, a factual
+  // alternative serves instead.
+  if (done >= 4 && (count('anchor') + 1) / (done + 1) > 0.4) {
+    if (ctx.prevGist && last !== 'callback') return 'callback';
+    if (last !== 'quiet-handoff') return 'quiet-handoff';
+  }
+  return 'anchor';
 }
 
 /** The standard on-road head shapes, in rotation order (lane 1b). Each is pure phrasing around the same two facts. */
@@ -756,6 +980,16 @@ export function bridgeTextFor(
     context?: BridgeContext;
     episode?: BridgeEpisodeState;
     maxChars?: number;
+    /**
+     * A re-bridge COMMISSION (the runner's repair for a dropped
+     * story): the repair keeps its historic composition — the
+     * rotating standard head plus the thread sentence when the
+     * pair carries one (the field-fix lane 1/1b pin) — rather
+     * than drawing a fresh move from the rotation. Memorial
+     * guardrails still bind: on memorial ground the chooser's
+     * restricted set decides, commission or not.
+     */
+    commission?: boolean;
   } = {},
 ): string {
   const ctx = opts.context;
@@ -768,6 +1002,13 @@ export function bridgeTextFor(
   // discipline: the next story is not ahead either — the host
   // is ranging along the thread, and the head says that
   // instead of pointing at the road.
+  // The bridge's MOVE (Nov 11, 2026): chosen from the episode
+  // ledger + the pair's facts, recorded on the ledger, and the
+  // head is authored for the move. Portal and woven framings
+  // keep their exact texts (their honesty discipline is the
+  // point); the payoff bridge is the forward tease's formal
+  // case and keeps its composition.
+  let move: BridgeMove = 'anchor';
   if (opts.portalTopic) {
     // A portal hop (lane 4 framing): a story ranged for and
     // TOLD from across the county — the connection that earned
@@ -777,14 +1018,64 @@ export function bridgeTextFor(
       `From ${prev.placeName}, we range off the road for a story — ${next.placeName}, clear across the county. The ${opts.portalTopic} thread ties it to ${prev.placeName}, and the connection is too good to skip.`,
     );
     episode.openings.push('portal');
+    move = 'anchor';
   } else if (ctx?.offRouteSubject || ctx?.wovenSubject) {
     sentences.push(`From ${prev.placeName} we keep rolling.`);
     episode.openings.push('rolling');
+    move = ctx?.wovenSubject ? 'thread-stitch' : 'anchor';
+  } else if (ctx && ctx.role !== 'payoff') {
+    move =
+      opts.commission &&
+      !ctx.memorialPair &&
+      ctx.role === 'mid' &&
+      (ctx.threadTopic || ctx.threadLabel) &&
+      ctx.callbackSubject
+        ? 'thread-stitch'
+        : chooseBridgeMove(ctx, episode);
+    if (move === 'callback' && ctx.prevGist) {
+      // The previous story's gist, spoken as the sentence it
+      // is, then tied forward — the fact the old skeleton
+      // carried in its context and never said. The spoken gist
+      // is trimmed harder than the context gist (a bridge is a
+      // transition, not a recap — and the runner's suppression
+      // math prices bridge durations, so a bridge must stay a
+      // transition's size).
+      const gist = spokenGist(ctx.prevGist);
+      const gistSentence = /[.!?]$/.test(gist) ? gist : `${gist}.`;
+      sentences.push(
+        `From ${prev.placeName} we roll on. ${gistSentence} That stays with us. Ahead: ${next.placeName}.`,
+      );
+    } else if (move === 'forward-tease' && ctx.nextGist) {
+      sentences.push(
+        `From ${prev.placeName} we keep rolling — and ahead, ${next.placeName}: ${gistClause(spokenGist(ctx.nextGist))}. It earns its moment.`,
+      );
+    } else if (move === 'question' && questionTextFor(ctx.nextAngle, prev.placeName, next.placeName)) {
+      sentences.push(questionTextFor(ctx.nextAngle, prev.placeName, next.placeName) as string);
+    } else if (move === 'distance' && ctx.segDistanceM != null) {
+      sentences.push(
+        ctx.segDistanceM >= 5000
+          ? `From ${prev.placeName} we roll on — miles of road yet before ${next.placeName}.`
+          : `From ${prev.placeName} we roll on — at least another mile of road before ${next.placeName}.`,
+      );
+    } else if (move === 'quiet-handoff') {
+      // The quiet handoff: a bare clause, or nothing at all —
+      // small-scale planned silence inside the tissue itself.
+      sentences.push(`From ${prev.placeName}, we roll on.`);
+    } else {
+      // Anchor (and every move whose facts fell through): the
+      // standard rotating head, exactly as before.
+      if (move !== 'anchor' && move !== 'thread-stitch') move = 'anchor';
+      const head = pickStandardHead(episode);
+      sentences.push(head.make(prev.placeName, next.placeName));
+      episode.openings.push(head.shape);
+    }
   } else {
+    if (ctx?.role === 'payoff') move = 'forward-tease';
     const head = pickStandardHead(episode);
     sentences.push(head.make(prev.placeName, next.placeName));
     episode.openings.push(head.shape);
   }
+  episode.moves.push(move);
   /** The one optional sentence's index (the mid thread callback/callout) — droppable under a char cap. */
   let optionalIdx = -1;
   if (ctx && !opts.portalTopic) {
@@ -828,7 +1119,12 @@ export function bridgeTextFor(
           `Now — this next one isn't on our road at all. ${ctx.offRouteSubject} is clear across the county from here. But it's the story this whole drive has been about, so we're making the hop.`,
         );
       }
-    } else if ((ctx.threadTopic || ctx.threadLabel) && ctx.role === 'mid' && ctx.callbackSubject) {
+    } else if (
+      move === 'thread-stitch' &&
+      (ctx.threadTopic || ctx.threadLabel) &&
+      ctx.role === 'mid' &&
+      ctx.callbackSubject
+    ) {
       // The thread callout fires at most once per episode
       // (lane 1b): the first mid bridge that can name it gets
       // the formula; later ones connect on the callback fact
