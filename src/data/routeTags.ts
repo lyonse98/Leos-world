@@ -1,6 +1,6 @@
 // GENERATED — do not hand-edit. Built by
 // scripts/route-mode/build-route-tags.mjs from story-tags.csv
-// (3585 rows, Nov 1 tone/topic tagging). The route
+// (3598 rows, Nov 1 tone/topic tagging). The route
 // composer joins library-index rows to this map at runtime, so no
 // DB change is needed for route mode to see tone/topic tags.
 
@@ -3597,6 +3597,19 @@ export const ROUTE_TAGS: Record<string, RouteTagEntry> = {
   "pomerado rd east: segment 2|corridor": { topics: ["Highway"], tone: "reflective", toneSecondary: "warm" },
   "carlsbad dinosaur|landmark_event": { topics: ["Deep Time"], tone: "reflective", toneSecondary: "grand" },
   "i-15 south: rainbow to fallbrook|corridor-woven-v1": { topics: ["Film"], tone: "warm", toneSecondary: "light" },
+  "tierrasanta|landmark_origin": { topics: [], tone: "reflective", toneSecondary: "grand" },
+  "vista|landmark_origin": { topics: ["Water"], tone: "warm", toneSecondary: "reflective" },
+  "hellhole canyon|landmark_origin": { topics: ["Water"], tone: "grand", toneSecondary: "reflective" },
+  "poway|landmark_origin": { topics: [], tone: "reflective", toneSecondary: "warm" },
+  "valley center|landmark_origin": { topics: [], tone: "warm", toneSecondary: "reflective" },
+  "fallbrook|landmark_origin": { topics: ["Rail"], tone: "reflective", toneSecondary: "warm" },
+  "ramona|landmark_origin": { topics: [], tone: "reflective", toneSecondary: "light" },
+  "allied gardens|landmark_origin": { topics: [], tone: "warm", toneSecondary: "reflective" },
+  "borrego springs|landmark_origin": { topics: ["Desert"], tone: "grand", toneSecondary: "reflective" },
+  "carmel valley|landmark_origin": { topics: [], tone: "light", toneSecondary: "warm" },
+  "carmel valley|landmark_sports": { topics: ["Sport"], tone: "reflective", toneSecondary: "warm" },
+  "adobe falls|landmark_origin": { topics: ["Water"], tone: "reflective", toneSecondary: "light" },
+  "rancho penasquitos|landmark_origin": { topics: [], tone: "reflective", toneSecondary: "grand" },
 };
 
 export function tagsFor(placeKey: string, angle: string): RouteTagEntry {

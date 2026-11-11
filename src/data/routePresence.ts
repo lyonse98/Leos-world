@@ -1,6 +1,6 @@
 // GENERATED — do not hand-edit. Built by
 // scripts/route-mode/build-route-presence.mjs from
-// presence-classes.csv (3585 rows, the Nov 4, 2026
+// presence-classes.csv (3598 rows, the Nov 4, 2026
 // presence audit). The route build joins library rows to this
 // map at runtime, so no DB change is needed for route mode to
 // know a story's presence register.
@@ -3325,6 +3325,19 @@ export const ROUTE_PRESENCE: Record<string, RoutePresenceEntry> = {
   "pomerado rd east: segment 2|corridor": { presence: "bound", protected: false },
   "carlsbad dinosaur|landmark_event": { presence: "safe", protected: false },
   "i-15 south: rainbow to fallbrook|corridor-woven-v1": { presence: "safe", protected: false },
+  "tierrasanta|landmark_origin": { presence: "safe", protected: false },
+  "vista|landmark_origin": { presence: "safe", protected: false },
+  "hellhole canyon|landmark_origin": { presence: "safe", protected: false },
+  "poway|landmark_origin": { presence: "safe", protected: false },
+  "valley center|landmark_origin": { presence: "safe", protected: false },
+  "fallbrook|landmark_origin": { presence: "safe", protected: false },
+  "ramona|landmark_origin": { presence: "safe", protected: false },
+  "allied gardens|landmark_origin": { presence: "safe", protected: false },
+  "borrego springs|landmark_origin": { presence: "safe", protected: false },
+  "carmel valley|landmark_origin": { presence: "safe", protected: false },
+  "carmel valley|landmark_sports": { presence: "safe", protected: false },
+  "adobe falls|landmark_origin": { presence: "safe", protected: false },
+  "rancho penasquitos|landmark_origin": { presence: "safe", protected: false },
   "sr-75 north: imperial beach to coronado cays|corridor-woven-v1": { presence: "safe", protected: false },
   "sr-75 north: coronado cays to coronado|corridor-woven-v1": { presence: "safe", protected: false },
   "coronado ferry landing|landmark_event-woven-v1": { presence: "safe", protected: false },
