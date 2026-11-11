@@ -105,7 +105,7 @@ async function healthyOpening(world, audio, pos = UTC, speed = 8) {
 }
 
 export async function runScenarios(Tour, extras) {
-  const { CORRIDOR_SEGMENTS, matchCorridor, resolveFillerRegion, accessGate, ambience } = extras;
+  const { CORRIDOR_SEGMENTS, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs } = extras;
 
   // ---------------------------------------------------------- S-01 healthy start
   suite('S-01 healthy start / opener order');
@@ -3679,5 +3679,253 @@ export async function runScenarios(Tour, extras) {
       world.events.length === filedAtEnd,
       `extra=${JSON.stringify(world.events.slice(filedAtEnd).map(e => e.type))}`,
     );
+  }
+
+  // ---------------------------------------------------------- IB-01 intro-form pure helpers
+  suite('IB-01 intro forms: daypart, rotation pool, callback composer, hook validation');
+  {
+    check('daypart bands from the device clock', intro.daypartOf(new Date(2026, 10, 11, 7, 30)) === 'early' &&
+      intro.daypartOf(new Date(2026, 10, 11, 12, 0)) === 'midday' &&
+      intro.daypartOf(new Date(2026, 10, 11, 17, 15)) === 'golden' &&
+      intro.daypartOf(new Date(2026, 10, 11, 23, 40)) === 'night' &&
+      intro.daypartOf(new Date(2026, 10, 11, 3, 5)) === 'night');
+    const base = { recentForms: [], daypartGreeting: false, hookFailed: false, regular: false };
+    check('fresh pool offers plain/wandering/hook', JSON.stringify(intro.eligibleIntroForms(base)) === JSON.stringify(['plain', 'wandering', 'hook-question']),
+      JSON.stringify(intro.eligibleIntroForms(base)));
+    check('a form served within 3 starts leaves the pool',
+      !intro.eligibleIntroForms({ ...base, recentForms: ['x', 'plain', 'wandering'] }).includes('plain'));
+    check('day-aware needs the daypart greeting', intro.eligibleIntroForms({ ...base, daypartGreeting: true })[0] === 'day-aware' &&
+      !intro.eligibleIntroForms(base).includes('day-aware'));
+    check('regulars-short needs recency', intro.eligibleIntroForms({ ...base, regular: true }).includes('regulars-short') &&
+      !intro.eligibleIntroForms(base).includes('regulars-short'));
+    check('a failed hook leaves the pool', !intro.eligibleIntroForms({ ...base, hookFailed: true }).includes('hook-question'));
+    check('exhausted pool falls back to the least-recently-served form',
+      intro.fallbackIntroForm({ recentForms: ['plain', 'wandering', 'hook-question'], daypartGreeting: false, hookFailed: true, regular: false }) === 'plain');
+    const owed = intro.composeCallbackText({ areaName: 'University City', lastStoryLabel: 'Balboa Park', owedName: 'North Park', endedAt: 0 });
+    check('callback: an owed welcome outranks a plain memory', typeof owed === 'string' && owed.includes('North Park') && owed.includes("haven't forgotten"), owed ?? 'null');
+    const memory = intro.composeCallbackText({ areaName: 'University City', lastStoryLabel: 'Balboa Park', owedName: null, endedAt: 0 });
+    check('callback: composed from recorded facts only', typeof memory === 'string' && memory.includes('University City') && memory.includes('Balboa Park'), memory ?? 'null');
+    check('callback: an empty record composes nothing', intro.composeCallbackText({ areaName: null, lastStoryLabel: null, owedName: null, endedAt: 0 }) === null);
+    check('callback asset freshness window (14 days)',
+      intro.callbackAssetFresh({ text: 'Welcome back.', record: {}, createdAt: 1_000_000 }, 1_000_000 + 13 * 24 * 3600_000) === true &&
+      intro.callbackAssetFresh({ text: 'Welcome back.', record: {}, createdAt: 1_000_000 }, 1_000_000 + 15 * 24 * 3600_000) === false &&
+      intro.callbackAssetFresh(null, 0) === false);
+    check('hook validation: one honest question passes',
+      intro.validateHookText('Why does the old ferry landing still lean toward the bay?') !== null);
+    check('hook validation: statements, multi-questions and rambling fail',
+      intro.validateHookText('The ferry landing leans toward the bay.') === null &&
+      intro.validateHookText('Why is it old? And why here?') === null &&
+      intro.validateHookText('Short?') === null);
+  }
+
+  // ---------------------------------------------------------- IB-02 form rotation across starts
+  suite('IB-02 intro forms: rotation never repeats a form within 3 starts');
+  {
+    resetLocalStorage();
+    const forms = [];
+    for (let n = 0; n < 6; n += 1) {
+      // The callback asset is cleared per start: this suite
+      // isolates the ROTATION (the callback holds priority
+      // outside it and is exercised in IB-03).
+      localStorage.removeItem('leo_callback_next');
+      const world = makeWorld(Tour, {
+        candidates: [makeCandidate('Balboa Park')],
+        library: ['Balboa Park'],
+      });
+      const audio = new FakeAudio(world.clock, okPolicy());
+      const tour = await startAt(world, audio, UTC);
+      await world.clock.advance(60_000);
+      const primaries = world.eventsOf('opener_clip').filter(e => e.payload.segment === 'primary' || e.payload.segment === 'none');
+      check(`start ${n + 1}: exactly one opener form served`, primaries.length === 1, JSON.stringify(world.eventsOf('opener_clip').map(e => e.payload)));
+      if (primaries.length === 1) forms.push(primaries[0].payload.form);
+      check(`start ${n + 1}: the welcome still sounds`, world.eventsOf('story_played').some(e => typeof e.payload.subject === 'string' && e.payload.subject.startsWith('welcome:')));
+      tour.endTour();
+    }
+    let rotationOk = forms.length === 6;
+    for (let i = 0; i + 2 < forms.length; i += 1) {
+      const window3 = forms.slice(i, i + 3);
+      if (new Set(window3).size !== 3) rotationOk = false;
+    }
+    check('no form repeats within any 3 consecutive starts', rotationOk, forms.join(','));
+    check('forms carry the axis + rung telemetry', forms.every(f => typeof f === 'string' && f.length > 0), forms.join(','));
+  }
+
+  // ---------------------------------------------------------- IB-03 callback: closeout → next start
+  suite('IB-03 intro forms: callback pre-rendered at closeout, spent once at the next start');
+  {
+    resetLocalStorage();
+    const world1 = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park')],
+      library: ['Balboa Park'],
+    });
+    const audio1 = new FakeAudio(world1.clock, okPolicy());
+    const tour1 = await startAt(world1, audio1, UTC);
+    await world1.clock.advance(60_000);
+    const cacheBeforeEnd = new Set(world1.cache.keys());
+    tour1.endTour();
+    await world1.clock.advance(5_000); // the closeout pre-render lands
+    const raw = localStorage.getItem('leo_callback_next');
+    const asset = raw ? JSON.parse(raw) : null;
+    check('closeout wrote a callback asset', asset !== null && typeof asset.text === 'string', raw ?? 'null');
+    check('the callback line speaks only recorded facts (area + last story)',
+      asset !== null && asset.text.includes('University City') && asset.text.includes('Balboa Park'), asset?.text ?? 'null');
+    const newSynthKeys = [...world1.cache.keys()].filter(k => k.startsWith('synth-') && !cacheBeforeEnd.has(k));
+    check('the callback clip was pre-rendered into the audio cache at closeout',
+      newSynthKeys.length >= 1, JSON.stringify(newSynthKeys));
+
+    const world2 = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park')],
+      library: ['Balboa Park'],
+    });
+    const audio2 = new FakeAudio(world2.clock, okPolicy());
+    const tour2 = await startAt(world2, audio2, UTC);
+    const runs2 = watchKinds(world2, tour2);
+    await world2.clock.advance(60_000);
+    const cb = world2.eventsOf('opener_clip').filter(e => e.payload.form === 'callback');
+    check('the next start serves the callback form', cb.length === 1 && cb[0].payload.opener_id === 'callback-next' && cb[0].payload.sounded === true,
+      JSON.stringify(world2.eventsOf('opener_clip').map(e => e.payload)));
+    const seq2 = kindSeq(runs2);
+    check('order preserved: greeting → callback opener → welcome', seq2[0] === 'greeting' && seq2[1] === 'opener' && seq2[2] === 'story', seq2.join(','));
+    check('the asset is spent once — gone after the start that used it', localStorage.getItem('leo_callback_next') === null);
+    tour2.endTour();
+  }
+
+  // ---------------------------------------------------------- IB-04 hook-question: served / late-discarded
+  suite('IB-04 intro forms: hook-question races its slot — served when ready, discarded when late');
+  {
+    resetLocalStorage();
+    const realRandom = Math.random;
+    Math.random = () => 0.99; // standard greeting axis; the pool's last entry is the hook
+    try {
+      const world = makeWorld(Tour, {
+        candidates: [makeCandidate('Balboa Park')],
+        library: ['Balboa Park'],
+        genStoryBehavior: prompt =>
+          prompt.includes('HOOK QUESTION')
+            ? 'Why does the old ferry landing still lean toward the bay?'
+            : 'A generated story about the road ahead, told with care and local color. '.repeat(3),
+      });
+      const audio = new FakeAudio(world.clock, okPolicy());
+      const tour = await startAt(world, audio, UTC);
+      await world.clock.advance(60_000);
+      const hooks = world.eventsOf('opener_clip').filter(e => e.payload.form === 'hook-question');
+      check('a ready hook serves as the primary opener', hooks.length === 1 && hooks[0].payload.segment === 'primary' && hooks[0].payload.sounded === true,
+        JSON.stringify(world.eventsOf('opener_clip').map(e => e.payload)));
+      check('the hook was commissioned from the welcome fact pack', world.genStoryPrompts.some(p => p.includes('HOOK QUESTION') && p.includes('FACT PACK')));
+      tour.endTour();
+    } finally {
+      Math.random = realRandom;
+    }
+
+    resetLocalStorage();
+    Math.random = () => 0.99;
+    try {
+      const world = makeWorld(Tour, {
+        candidates: [makeCandidate('Balboa Park')],
+        library: ['Balboa Park'],
+        genStoryBehavior: prompt =>
+          prompt.includes('HOOK QUESTION')
+            ? new Promise(() => {}) // the hook never lands inside its slot
+            : 'A generated story about the road ahead, told with care and local color. '.repeat(3),
+      });
+      const audio = new FakeAudio(world.clock, okPolicy());
+      const tour = await startAt(world, audio, UTC);
+      await world.clock.advance(90_000);
+      const clips = world.eventsOf('opener_clip');
+      check('a late hook is discarded — never served', !clips.some(e => e.payload.form === 'hook-question'), JSON.stringify(clips.map(e => e.payload)));
+      const fb = clips.filter(e => e.payload.segment === 'primary');
+      check('the displaced bank clip serves one rung down (hook-late)', fb.length === 1 && fb[0].payload.form === 'wandering' && fb[0].payload.fallback_rung === 'hook-late' && fb[0].payload.sounded === true,
+        JSON.stringify(clips.map(e => e.payload)));
+      check('the welcome still sounds behind the degraded opener', world.eventsOf('story_played').some(e => typeof e.payload.subject === 'string' && e.payload.subject.startsWith('welcome:')));
+      tour.endTour();
+    } finally {
+      Math.random = realRandom;
+    }
+  }
+
+  // ---------------------------------------------------------- IB-05 greeting-only (R2)
+  suite('IB-05 intro forms: greeting-only start — regular, every form on cooldown');
+  {
+    resetLocalStorage();
+    localStorage.setItem('leo_intro_form_history', JSON.stringify(['callback', 'plain', 'wandering', 'regulars-short']));
+    localStorage.setItem('leo_last_tour_start_at', JSON.stringify(Date.now() - 3600_000));
+    const realRandom = Math.random;
+    Math.random = () => 0.99; // standard greeting axis (no day-aware in the pool)
+    try {
+      const world = makeWorld(Tour, {
+        candidates: [makeCandidate('Balboa Park')],
+        library: ['Balboa Park'],
+        genStoryBehavior: prompt => {
+          if (prompt.includes('HOOK QUESTION')) throw new Error('hook generation down');
+          return 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+        },
+      });
+      const audio = new FakeAudio(world.clock, okPolicy());
+      const tour = await startAt(world, audio, UTC);
+      const runs = watchKinds(world, tour);
+      await world.clock.advance(60_000);
+      const clips = world.eventsOf('opener_clip');
+      check('greeting-only files its opener_clip record (segment none)', clips.length === 1 && clips[0].payload.segment === 'none' && clips[0].payload.form === 'greeting-only',
+        JSON.stringify(clips.map(e => e.payload)));
+      const seq = kindSeq(runs);
+      check('no opener sounds: greeting → welcome directly', seq[0] === 'greeting' && seq[1] === 'story' && !seq.includes('opener'), seq.join(','));
+      tour.endTour();
+    } finally {
+      Math.random = realRandom;
+    }
+  }
+
+  // ---------------------------------------------------------- IB-06 freeform planned silence (R1)
+  suite('IB-06 planned silence: freeform corridor beat — guarded, telemetered, filler stands down');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park'), makeCandidate('North Park'), makeCandidate('Coronado'), makeCandidate('Ocean Beach')],
+      library: ['Balboa Park', 'North Park', 'Coronado', 'Ocean Beach'],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC, 25); // freeway speed: a corridor stretch
+    const runs = watchKinds(world, tour);
+    for (let n = 0; n < 10; n += 1) {
+      tour.onPosition({ lat: UTC.lat + 0.004 * (n + 1), lng: UTC.lng, speedMps: 25, headingDeg: 180 });
+      await world.clock.advance(20_000);
+    }
+    const silences = world.eventsOf('planned_silence').filter(e => e.payload.mode === 'freeform');
+    check('a planned silence sounded on the corridor stretch', silences.length >= 1, `count=${silences.length}`);
+    check('the beat is the composed 3 s (R1 limit)', silences.every(e => e.payload.duration_s === 3), JSON.stringify(silences.map(e => e.payload)));
+    const firstSilence = runs.find(r => r.kind === 'silence');
+    check('never in the first 60 s', firstSilence !== undefined && firstSilence.at >= 60_000, `at=${firstSilence?.at}`);
+    check('the beat occupies the slot as a silence item', firstSilence !== undefined, JSON.stringify(runs.slice(0, 12)));
+    check('at most 3 beats in the tour', silences.length <= 3, `count=${silences.length}`);
+    tour.endTour();
+  }
+
+  // ---------------------------------------------------------- IB-07 route breath vs planned silence
+  suite('IB-07 planned silence: the produced breath never stacks on a silence');
+  {
+    const breath = routeInterItemGapMs({
+      closing: false,
+      lastSettled: { sounded: true, skipped: false, planItem: true },
+      next: { planItem: true, expireProgress: null, departure: false },
+      lastProgress: 0.2,
+      progressPerSec: null,
+    });
+    const intoSilence = routeInterItemGapMs({
+      closing: false,
+      lastSettled: { sounded: true, skipped: false, planItem: true },
+      next: { planItem: true, expireProgress: null, departure: false, silence: true },
+      lastProgress: 0.2,
+      progressPerSec: null,
+    });
+    const outOfSilence = routeInterItemGapMs({
+      closing: false,
+      lastSettled: { sounded: true, skipped: false, planItem: true, silence: true },
+      next: { planItem: true, expireProgress: null, departure: false },
+      lastProgress: 0.2,
+      progressPerSec: null,
+    });
+    check('a back-to-back plan transition breathes (700 ms)', breath === 700, `breath=${breath}`);
+    check('into a silence: standing gap only — the silence is the beat', intoSilence === 600, `gap=${intoSilence}`);
+    check('out of a silence: standing gap only', outOfSilence === 600, `gap=${outOfSilence}`);
   }
 }

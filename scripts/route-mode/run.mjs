@@ -1974,7 +1974,11 @@ await checkAsync('wrap-up runner: overrun handoff and early End Tour never play 
   runner.onPosition({ lat: 32.78, lng: -117.25 });
   await until(() => heard.includes('b|landmark_origin'), 'second story sounded');
   runner.onPosition({ lat: 32.87, lng: -117.25 });
-  await until(() => runner.view().closeoutDone, 'overrun closeout after the plan exhausts');
+  // Nov 11, 2026: the plan now carries three composed beats
+  // (two corridor, one post-climax) at 3 real seconds each in
+  // the sim's real-time player — exhaustion honestly takes
+  // longer; the wait grows to fit the composed plan.
+  await until(() => runner.view().closeoutDone, 'overrun closeout after the plan exhausts', 20000);
   assert.equal(runner.view().endedKind, 'overrun');
   assert.ok(!audio.played.includes('blob:wrapup'), 'no wrap-up on the overrun handoff');
   assert.ok(synthTexts.some(t => t.includes('freeform')), "today's handoff line was synthesized");
@@ -5650,7 +5654,12 @@ await checkAsync('pipeline: capture rows stay complete under pipelining — ever
   assert.equal(cap.schema, 2, 'the plan row is schema 2');
   assert.equal(cap.items.length, plan.items.length + 1, 'every plan item plus the wrap-up pseudo-item');
   assert.ok(
-    cap.items.every(i => typeof i.text === 'string' && i.text.length > 0),
+    // Planned silence (Nov 11, 2026) is the one item kind with
+    // no text BY DESIGN — composed air carries text: null.
+    // Every item that speaks still carries its full text.
+    cap.items.every(
+      i => i.kind === 'silence' ? i.text === null : typeof i.text === 'string' && i.text.length > 0,
+    ),
     'EVERY live text is present at opening settle — only synthesis is pipelined, never text',
   );
   const wrapItem = cap.items.find(i => i.kind === 'wrap_up');
@@ -6031,7 +6040,11 @@ await checkAsync('phase1 (f): normal pace — zero commissions, zero suppression
   const plan = anchorPlan();
   assert.deepEqual(
     plan.items.map(i => i.kind),
-    ['preview', 'story', 'bridge', 'story', 'bridge', 'story'],
+    // Nov 11, 2026: the sparse-anchor fixture (2000 s drive,
+    // three stories) now legitimately carries composed beats —
+    // a corridor silence in each long gap and a post-climax
+    // beat after C. The spoken pieces keep their exact order.
+    ['preview', 'story', 'silence', 'bridge', 'story', 'silence', 'bridge', 'story', 'silence'],
     'fixture shape',
   );
   const bridgeAB = plan.items.find(i => i.kind === 'bridge' && i.nextUnitId === 'b|landmark_origin');
@@ -6292,7 +6305,16 @@ await checkAsync('fieldfix lanes 1/1b (runner): the commission inherits the epis
   await until(() => events.some(e => e.t === 'route_rebridge_sounded'), 'the A→C commission sounds');
   const fired = events.filter(e => e.t === 'route_rebridge_fired');
   assert.equal(fired.length, 1, 'exactly one commission');
-  const text = audio.played.map(decodedOf).find(t => t.startsWith('From a') && t.includes('ahead is c'));
+  // Nov 11, 2026: the locator keys on the plain thread
+  // sentence (unique to the commission — the composed bridges
+  // spent the formula) rather than one literal head shape:
+  // with the bridge-move rotation, composed episodes spend
+  // standard heads more sparingly, so the commission's
+  // inherited rotation legitimately lands on whichever head
+  // the ledger has used least — the invariant is that it
+  // connects on the alternate thread line, under the cap,
+  // with the spent formula nowhere in it.
+  const text = audio.played.map(decodedOf).find(t => t.startsWith('From a') && t.includes('runs through c too'));
   assert.ok(text, 'the sounded commission text is on the audio record');
   assert.ok(text.length <= rp.REBRIDGE_MAX_CHARS, `commission within the hard cap (${text.length} chars)`);
   assert.ok(!text.includes('two ends of the same story'), 'the spent callout does not repeat in the commission');
@@ -8394,6 +8416,106 @@ check('lane C: both in-tour transport bars wrap at phone widths; in-tour labels 
   assert.ok(nowrap.length >= 7, `every in-tour button carries whitespace-nowrap (found ${nowrap.length})`);
 });
 
+
+check('bridge moves: rotation, budgets, and the mandated quiet handoff (Nov 11, 2026)', () => {
+  const P = id => ({ id, placeName: id });
+  const ledger = rn.newBridgeEpisodeState();
+  const texts = [];
+  const pairs = [['A', 'B'], ['B', 'C'], ['C', 'D'], ['D', 'E'], ['E', 'F'], ['F', 'G'], ['G', 'H']];
+  for (const [p, n] of pairs) {
+    texts.push(
+      rn.bridgeTextFor(P(p), P(n), {
+        context: {
+          threadTopic: null,
+          prevSubject: p,
+          prevGist: 'The harbor was built by hand.',
+          nextSubject: n,
+          role: 'mid',
+          nextGist: 'The lighthouse still turns.',
+          nextAngle: 'landmark_origin',
+          segDistanceM: 300,
+        },
+        episode: ledger,
+      }),
+    );
+  }
+  assert.equal(ledger.moves.length, 7, 'every bridge records its move');
+  assert.equal(ledger.moves[0], 'anchor', 'the first bridge anchors');
+  for (let i = 1; i < ledger.moves.length; i++) {
+    assert.notEqual(ledger.moves[i], ledger.moves[i - 1], `no move twice running (bridge ${i})`);
+  }
+  assert.ok(ledger.moves.includes('quiet-handoff'), 'a 7-bridge episode carries its mandated quiet handoff');
+  const anchors = ledger.moves.filter(m => m === 'anchor').length;
+  assert.ok(anchors / ledger.moves.length <= 0.45, `anchor is the minority (got ${anchors}/7)`);
+  assert.ok(texts.filter(t => t.includes('?')).length <= 2, 'question ≤2 per episode');
+  assert.ok(texts.some(t => t.includes('That stays with us')), 'a callback bridge speaks the previous story’s gist');
+  assert.ok(texts.some(t => t.includes('earns its moment')), 'a forward tease names the next story’s gist as a promise');
+  assert.ok(texts.every(t => t.startsWith('From ')), 'every bridge is pair-specific');
+});
+
+check('bridge moves: memorial ground bans question, tease, and the callout formula (Nov 11, 2026)', () => {
+  const ledger = rn.newBridgeEpisodeState();
+  const ctx = {
+    threadTopic: 'War Memory',
+    threadLabel: null,
+    prevSubject: 'A',
+    prevGist: 'Men from this town did not come home.',
+    nextSubject: 'B',
+    role: 'mid',
+    callbackSubject: 'A0',
+    nextGist: 'The memorial lists nine names.',
+    nextAngle: 'landmark_origin',
+    memorialPair: true,
+    somberPair: true,
+    segDistanceM: 9000,
+  };
+  for (let i = 0; i < 3; i++) {
+    const t = rn.bridgeTextFor({ id: 'a', placeName: 'A' }, { id: 'b', placeName: 'B' }, { context: ctx, episode: ledger });
+    assert.ok(!t.includes('?'), 'no question into memorial ground');
+    assert.ok(!t.includes('two ends of the same story'), 'no callout formula into memorial ground');
+    assert.ok(!t.includes('earns its moment'), 'no forward tease into memorial ground');
+  }
+  assert.ok(
+    ledger.moves.every(m => ['quiet-handoff', 'callback', 'anchor'].includes(m)),
+    `memorial moves stay in the allowed set (got ${ledger.moves.join(',')})`,
+  );
+});
+
+check('bridge context: buildBridgeContext carries the move facts (Nov 11, 2026)', () => {
+  const prev = unit('p|landmark_origin', 32.71);
+  const next = unit('n|landmark_origin', 32.85, { memorial: true });
+  const ctx = rm.buildBridgeContext({ earlier: [prev], prev, next, thread: null, isClimaxBridge: false, promiseMade: false });
+  assert.equal(ctx.memorialPair, true, 'the audited memorial flag rides the pair');
+  assert.equal(ctx.somberPair, false, 'a plain pair is not somber');
+  assert.ok(typeof ctx.nextGist === 'string' && ctx.nextGist.length > 0, 'the next story’s gist is carried (the tease’s fact)');
+  assert.ok(ctx.segDistanceM > 10000, `the segment distance is the plan’s own geometry (got ${ctx.segDistanceM})`);
+  assert.equal(ctx.nextAngle, 'landmark_origin');
+});
+
+check('planned silence: the composer seats composed beats at named seams only (Nov 11, 2026)', () => {
+  const units = [
+    navy('s1|landmark_origin', 32.71),
+    navy('s2|landmark_origin', 32.75, { memorial: true }),
+    navy('s3|landmark_origin', 32.8),
+    navy('s4|landmark_origin', 32.88),
+  ];
+  const plan = composeDense(units);
+  const silences = plan.items.filter(i => i.kind === 'silence');
+  assert.ok(silences.length >= 1 && silences.length <= 3, `between 1 and 3 beats seat (got ${silences.length})`);
+  assert.ok(
+    silences.some(s => s.seam === 'post-memorial' && s.prevUnitId === 's2|landmark_origin'),
+    'a beat follows the memorial story',
+  );
+  for (const s of silences) {
+    assert.ok(['post-climax', 'post-memorial', 'corridor'].includes(s.seam), `the seam is named (got ${s.seam})`);
+    const idx = plan.items.indexOf(s);
+    assert.equal(plan.items[idx - 1]?.kind, 'story', 'a beat directly follows the story whose seam it is');
+    assert.notEqual(plan.items[idx + 1]?.kind, 'silence', 'never back-to-back');
+    const prevStory = plan.items[idx - 1];
+    const expectedEnd = (prevStory.anchorProgress ?? 0) * plan.driveSec + prevStory.durationSec;
+    assert.ok(expectedEnd >= 60, `never in the first 60 s (seam at ${Math.round(expectedEnd)}s)`);
+  }
+});
 
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

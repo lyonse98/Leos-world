@@ -2,6 +2,15 @@
 // Bundled with esbuild (platform=node) by run.mjs; never shipped.
 export { Tour } from '../../src/core/tour';
 export { Player, makePrimeUrl } from '../../src/core/player';
+export {
+  daypartOf,
+  eligibleIntroForms,
+  fallbackIntroForm,
+  composeCallbackText,
+  callbackAssetFresh,
+  validateHookText,
+} from '../../src/core/introForms';
+export { routeInterItemGapMs } from '../../src/core/routePlayback';
 export { CORRIDOR_SEGMENTS, matchCorridor } from '../../src/data/corridors';
 export { resolveFillerRegion } from '../../src/data/fillerRegions';
 export { isTesterUnlocked, tryTesterUnlock, TESTER_ACCESS_CODE } from '../../src/core/accessGate';

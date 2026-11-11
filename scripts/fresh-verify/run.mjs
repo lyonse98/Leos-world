@@ -32,6 +32,15 @@ execFileSync(
 const engine = await import(pathToFileURL(out).href);
 const extras = {
   Player: engine.Player,
+  intro: {
+    daypartOf: engine.daypartOf,
+    eligibleIntroForms: engine.eligibleIntroForms,
+    fallbackIntroForm: engine.fallbackIntroForm,
+    composeCallbackText: engine.composeCallbackText,
+    callbackAssetFresh: engine.callbackAssetFresh,
+    validateHookText: engine.validateHookText,
+  },
+  routeInterItemGapMs: engine.routeInterItemGapMs,
   CORRIDOR_SEGMENTS: engine.CORRIDOR_SEGMENTS,
   matchCorridor: engine.matchCorridor,
   resolveFillerRegion: engine.resolveFillerRegion,
