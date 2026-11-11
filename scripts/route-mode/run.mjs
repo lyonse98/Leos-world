@@ -4022,7 +4022,7 @@ const storyIds = plan => plan.items.filter(i => i.kind === 'story').map(i => i.i
 const memberIds = plan => plan.items.filter(i => i.woven).map(i => i.id);
 
 check('woven data: the bundled presence map pins the audit — Protected excluded whatever its register', () => {
-  assert.equal(Object.keys(rpd.ROUTE_PRESENCE).length, 3236, 'one row per shelf story (1,395 Phase 0+1 wiring + 10 probe presence (P7) + 20 Wave C-2 + 836 Vertex Phase 3 T1 + 62 Vertex Phase 4 T2 + 699 Vertex Phase 5 T3 + 214 Vertex Phase 6 T4)');
+  assert.equal(Object.keys(rpd.ROUTE_PRESENCE).length, 3463, 'one row per shelf story (1,395 Phase 0+1 wiring + 10 probe presence (P7) + 20 Wave C-2 + 836 Vertex Phase 3 T1 + 62 Vertex Phase 4 T2 + 699 Vertex Phase 5 T3 + 214 Vertex Phase 6 T4 + 46 city-works remainder + 181 woven twins wave 2, wrap-ins Nov 11)');
   // Kuchamaa is Protected register: even its weave-SAFE
   // telling is never woven material.
   assert.deepEqual(rpd.presenceFor('kuchamaa', 'landmark_origin'), { presence: 'safe', protected: true });
@@ -4059,10 +4059,10 @@ check('woven data regen: deterministic, and the committed routePresence.ts is in
 // counting and the member fetch — can reach them.
 const TWIN_SUFFIX = '-woven-v1';
 const twinKeysOf = map => Object.keys(map).filter(k => k.split('|')[1]?.endsWith(TWIN_SUFFIX));
-check('woven twins (data): the tag map carries all 100 twins with topics inherited from their sources', () => {
-  assert.equal(Object.keys(rtg.ROUTE_TAGS).length, 3236, 'one tag row per shelf story (1,405 Phase 0+1 wiring + 20 Wave C-2 + 836 Vertex Phase 3 T1 + 62 Vertex Phase 4 T2 + 699 Vertex Phase 5 T3 + 214 Vertex Phase 6 T4)');
+check('woven twins (data): the tag map carries all 281 twins with topics inherited from their sources', () => {
+  assert.equal(Object.keys(rtg.ROUTE_TAGS).length, 3463, 'one tag row per shelf story (1,405 Phase 0+1 wiring + 20 Wave C-2 + 836 Vertex Phase 3 T1 + 62 Vertex Phase 4 T2 + 699 Vertex Phase 5 T3 + 214 Vertex Phase 6 T4 + 46 city-works remainder + 181 woven twins wave 2, wrap-ins Nov 11)');
   const twins = twinKeysOf(rtg.ROUTE_TAGS);
-  assert.equal(twins.length, 100, 'the completed tranche twins are index-visible');
+  assert.equal(twins.length, 281, 'the completed tranche twins (100) plus woven twins wave 2 (181, wrap-ins Nov 11) are index-visible');
   let coast = 0;
   for (const k of twins) {
     const [pk, ang] = [k.slice(0, k.indexOf('|')), k.slice(k.indexOf('|') + 1)];
@@ -4072,7 +4072,7 @@ check('woven twins (data): the tag map carries all 100 twins with topics inherit
     assert.deepEqual(twin.topics, source.topics, `${k} inherits its source's topics`);
     if (twin.topics.includes('Coast')) coast += 1;
   }
-  assert.equal(coast, 24, 'the Coast tranche landed whole (24 of 100 twins carry Coast — the November 30 were the Coast head; ranks 31–100 carry none)');
+  assert.equal(coast, 52, 'Coast twins across both waves (24 of the 100 tranche twins carry Coast — the November 30 were the Coast head; wave 2 adds 28 more from the tagged-bound pool)');
 });
 check('woven twins (data): every twin resolves weave-safe and eligible; its source keeps the audit’s call', () => {
   for (const k of twinKeysOf(rtg.ROUTE_TAGS)) {
@@ -4089,7 +4089,7 @@ check('woven twins (data): every twin resolves weave-safe and eligible; its sour
   for (const [k, e] of Object.entries(rpd.ROUTE_PRESENCE)) {
     if (!k.split('|')[1]?.endsWith(TWIN_SUFFIX)) split[e.presence] += 1;
   }
-  assert.deepEqual(split, { bound: 274, mixed: 850, safe: 2012 }, 'the recovered audit split (195/567/502) plus the C-1 regen (2 bound / 5 mixed / 9 safe), the city-works classes (10 mixed / 5 safe), the Phase 0 probe classes (3 mixed / 7 safe), the Wave C-2 classes (4 mixed / 16 safe), the Vertex Phase 3 T1 classes (690 safe / 121 mixed / 25 bound across B1-B5 Gate 5 classify), the Vertex Phase 4 T2 classes (53 safe / 8 mixed / 1 bound, Gate 5 classify), the Vertex Phase 5 T3 classes (565 safe / 92 mixed / 42 bound across B1-B5 Gate 5 classify) and the Vertex Phase 6 T4 classes (165 safe / 40 mixed / 9 bound across B1-B3 Gate 5 classify), byte-stable');
+  assert.deepEqual(split, { bound: 282, mixed: 857, safe: 2043 }, 'the recovered audit split (195/567/502) plus the C-1 regen (2 bound / 5 mixed / 9 safe), the city-works classes (10 mixed / 5 safe), the Phase 0 probe classes (3 mixed / 7 safe), the Wave C-2 classes (4 mixed / 16 safe), the Vertex Phase 3 T1 classes (690 safe / 121 mixed / 25 bound across B1-B5 Gate 5 classify), the Vertex Phase 4 T2 classes (53 safe / 8 mixed / 1 bound, Gate 5 classify), the Vertex Phase 5 T3 classes (565 safe / 92 mixed / 42 bound across B1-B5 Gate 5 classify) and the Vertex Phase 6 T4 classes (165 safe / 40 mixed / 9 bound across B1-B3 Gate 5 classify) and the wrap-ins classes (city-works 31 safe / 7 mixed / 8 bound, Gate 5 classify; 181 wave-2 woven twins derived safe), byte-stable');
 });
 check('woven twins (data): index support counts the twins, and the member fetch can return them', () => {
   // The REAL shipped index (every tag-map key), all placed on
@@ -4125,6 +4125,10 @@ check('woven twins (data): index support counts the twins, and the member fetch 
   const inHand = new Set(
     index.filter(e => isLandmarkCoast(e) && !e.angle.endsWith(TWIN_SUFFIX)).map(e => `${e.place_key}|${e.angle}`),
   );
+  // Wave 2 (wrap-ins Nov 11) grew the landmark Coast twins past
+  // the production read cap (36 > 24): reachability is asserted
+  // with the cap lifted; the cap's own discipline is asserted
+  // on the first page below.
   const fetched = rm.selectMemberFetchEntries(index, {
     topic: 'Coast',
     fetchedIds: inHand,
@@ -4132,6 +4136,7 @@ check('woven twins (data): index support counts the twins, and the member fetch 
     destination: dest,
     tagsOf,
     eligibleOf,
+    cap: 1000,
   });
   assert.equal(fetched.length, landmarkCoastTwins, 'every landmark Coast twin is fetchable');
   assert.ok(fetched.every(e => e.angle.endsWith(TWIN_SUFFIX)), 'only twins remain to fetch');
