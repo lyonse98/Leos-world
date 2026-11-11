@@ -4022,7 +4022,7 @@ const storyIds = plan => plan.items.filter(i => i.kind === 'story').map(i => i.i
 const memberIds = plan => plan.items.filter(i => i.woven).map(i => i.id);
 
 check('woven data: the bundled presence map pins the audit — Protected excluded whatever its register', () => {
-  assert.equal(Object.keys(rpd.ROUTE_PRESENCE).length, 1425, 'one row per shelf story (1,395 Phase 0+1 wiring + 10 probe presence (P7) + 20 Wave C-2)');
+  assert.equal(Object.keys(rpd.ROUTE_PRESENCE).length, 2261, 'one row per shelf story (1,395 Phase 0+1 wiring + 10 probe presence (P7) + 20 Wave C-2 + 836 Vertex Phase 3 T1)');
   // Kuchamaa is Protected register: even its weave-SAFE
   // telling is never woven material.
   assert.deepEqual(rpd.presenceFor('kuchamaa', 'landmark_origin'), { presence: 'safe', protected: true });
@@ -4060,7 +4060,7 @@ check('woven data regen: deterministic, and the committed routePresence.ts is in
 const TWIN_SUFFIX = '-woven-v1';
 const twinKeysOf = map => Object.keys(map).filter(k => k.split('|')[1]?.endsWith(TWIN_SUFFIX));
 check('woven twins (data): the tag map carries all 100 twins with topics inherited from their sources', () => {
-  assert.equal(Object.keys(rtg.ROUTE_TAGS).length, 1425, 'one tag row per shelf story (1,405 Phase 0+1 wiring + 20 Wave C-2)');
+  assert.equal(Object.keys(rtg.ROUTE_TAGS).length, 2261, 'one tag row per shelf story (1,405 Phase 0+1 wiring + 20 Wave C-2 + 836 Vertex Phase 3 T1)');
   const twins = twinKeysOf(rtg.ROUTE_TAGS);
   assert.equal(twins.length, 100, 'the completed tranche twins are index-visible');
   let coast = 0;
@@ -4089,7 +4089,7 @@ check('woven twins (data): every twin resolves weave-safe and eligible; its sour
   for (const [k, e] of Object.entries(rpd.ROUTE_PRESENCE)) {
     if (!k.split('|')[1]?.endsWith(TWIN_SUFFIX)) split[e.presence] += 1;
   }
-  assert.deepEqual(split, { bound: 197, mixed: 589, safe: 539 }, 'the recovered audit split (195/567/502) plus the C-1 regen (2 bound / 5 mixed / 9 safe), the city-works classes (10 mixed / 5 safe), the Phase 0 probe classes (3 mixed / 7 safe) and the Wave C-2 classes (4 mixed / 16 safe), byte-stable');
+  assert.deepEqual(split, { bound: 222, mixed: 710, safe: 1229 }, 'the recovered audit split (195/567/502) plus the C-1 regen (2 bound / 5 mixed / 9 safe), the city-works classes (10 mixed / 5 safe), the Phase 0 probe classes (3 mixed / 7 safe), the Wave C-2 classes (4 mixed / 16 safe) and the Vertex Phase 3 T1 classes (690 safe / 121 mixed / 25 bound across B1-B5 Gate 5 classify), byte-stable');
 });
 check('woven twins (data): index support counts the twins, and the member fetch can return them', () => {
   // The REAL shipped index (every tag-map key), all placed on
