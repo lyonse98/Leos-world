@@ -1,6 +1,6 @@
 // GENERATED — do not hand-edit. Built by
 // scripts/route-mode/build-route-tags.mjs from story-tags.csv
-// (3582 rows, Nov 1 tone/topic tagging). The route
+// (3585 rows, Nov 1 tone/topic tagging). The route
 // composer joins library-index rows to this map at runtime, so no
 // DB change is needed for route mode to see tone/topic tags.
 
@@ -3594,6 +3594,9 @@ export const ROUTE_TAGS: Record<string, RouteTagEntry> = {
   "alonzo horton|landmark_people": { topics: ["founders,new town"], tone: "warm", toneSecondary: "grand" },
   "san diego river mouth|landmark_origin": { topics: ["rivers,mission bay,derby"], tone: "light", toneSecondary: "warm" },
   "lindbergh field|landmark_event": { topics: ["aviation,the field opening"], tone: "grand", toneSecondary: "reflective" },
+  "pomerado rd east: segment 2|corridor": { topics: ["Highway"], tone: "reflective", toneSecondary: "warm" },
+  "carlsbad dinosaur|landmark_event": { topics: ["Deep Time"], tone: "reflective", toneSecondary: "grand" },
+  "i-15 south: rainbow to fallbrook|corridor-woven-v1": { topics: ["Film"], tone: "warm", toneSecondary: "light" },
 };
 
 export function tagsFor(placeKey: string, angle: string): RouteTagEntry {

@@ -1,6 +1,6 @@
 // GENERATED — do not hand-edit. Built by
 // scripts/route-mode/build-route-presence.mjs from
-// presence-classes.csv (3582 rows, the Nov 4, 2026
+// presence-classes.csv (3585 rows, the Nov 4, 2026
 // presence audit). The route build joins library rows to this
 // map at runtime, so no DB change is needed for route mode to
 // know a story's presence register.
@@ -3322,6 +3322,9 @@ export const ROUTE_PRESENCE: Record<string, RoutePresenceEntry> = {
   "santee town center|landmark_place": { presence: "safe", protected: false },
   "gillespie field|landmark_place": { presence: "mixed", protected: false },
   "lindbergh field|landmark_event": { presence: "safe", protected: false },
+  "pomerado rd east: segment 2|corridor": { presence: "bound", protected: false },
+  "carlsbad dinosaur|landmark_event": { presence: "safe", protected: false },
+  "i-15 south: rainbow to fallbrook|corridor-woven-v1": { presence: "safe", protected: false },
   "sr-75 north: imperial beach to coronado cays|corridor-woven-v1": { presence: "safe", protected: false },
   "sr-75 north: coronado cays to coronado|corridor-woven-v1": { presence: "safe", protected: false },
   "coronado ferry landing|landmark_event-woven-v1": { presence: "safe", protected: false },
