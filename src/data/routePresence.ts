@@ -1,6 +1,6 @@
 // GENERATED — do not hand-edit. Built by
 // scripts/route-mode/build-route-presence.mjs from
-// presence-classes.csv (1395 rows, the Nov 4, 2026
+// presence-classes.csv (1425 rows, the Nov 4, 2026
 // presence audit). The route build joins library rows to this
 // map at runtime, so no DB change is needed for route mode to
 // know a story's presence register.
@@ -1316,6 +1316,36 @@ export const ROUTE_PRESENCE: Record<string, RoutePresenceEntry> = {
   "bazaar del mundo|landmark_origin": { presence: "mixed", protected: false },
   "louis rose & temple beth israel|landmark_people": { presence: "safe", protected: false },
   "san diego presidio|landmark_origin": { presence: "mixed", protected: false },
+  "balboa park|landmark_event": { presence: "safe", protected: false },
+  "the merge|landmark_origin": { presence: "mixed", protected: false },
+  "ballast point|landmark_origin": { presence: "safe", protected: false },
+  "cabrillo national monument|landmark_people": { presence: "mixed", protected: false },
+  "lomaland|landmark_origin": { presence: "safe", protected: false },
+  "portuguese fishing community of point loma|landmark_origin": { presence: "safe", protected: false },
+  "af and ruby cornell house|landmark_origin": { presence: "mixed", protected: false },
+  "abraham and anne ratner house|landmark_origin": { presence: "safe", protected: false },
+  "abraham and mary scott house|landmark_origin": { presence: "safe", protected: false },
+  "ada black/herbert mann and thomas shepherd house|landmark_origin": { presence: "safe", protected: false },
+  "san diego civic theatre|landmark_origin": { presence: "safe", protected: false },
+  "garnet avenue|landmark_origin": { presence: "safe", protected: false },
+  "torrey pines gliderport|landmark_event": { presence: "safe", protected: false },
+  "torrey pines gliderport|landmark_origin": { presence: "safe", protected: false },
+  "harbor island|landmark_origin": { presence: "safe", protected: false },
+  "san diego central library|landmark_building": { presence: "safe", protected: false },
+  "san diego central library|landmark_origin": { presence: "safe", protected: false },
+  "old point loma lighthouse|landmark_building": { presence: "safe", protected: false },
+  "old point loma lighthouse|landmark_origin": { presence: "safe", protected: false },
+  "mission beach|landmark_origin": { presence: "safe", protected: false },
+  "orange avenue|landmark_origin": { presence: "mixed", protected: false },
+  "scripps institution of oceanography|landmark_origin": { presence: "safe", protected: false },
+  "scripps institution of oceanography|landmark_people": { presence: "safe", protected: false },
+  "seaport village|landmark_event": { presence: "mixed", protected: false },
+  "seaport village|landmark_origin": { presence: "safe", protected: false },
+  "shelter island|landmark_origin": { presence: "safe", protected: false },
+  "shelter island|landmark_surroundings": { presence: "mixed", protected: false },
+  "la jolla shores|landmark_origin": { presence: "mixed", protected: false },
+  "spreckels park|landmark_origin": { presence: "safe", protected: false },
+  "la valencia hotel|landmark_origin": { presence: "safe", protected: false },
   "sr-75 north: imperial beach to coronado cays|corridor-woven-v1": { presence: "safe", protected: false },
   "sr-75 north: coronado cays to coronado|corridor-woven-v1": { presence: "safe", protected: false },
   "coronado ferry landing|landmark_event-woven-v1": { presence: "safe", protected: false },
