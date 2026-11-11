@@ -109,6 +109,148 @@ export const OPENER_CLIPS: OpenerClip[] = [
   },
 ];
 
+// ------------------------------------------------------------ intro forms (Nov 11, 2026)
+//
+// The intro/bridge build (design note 2026-11-10): the pre-welcome
+// opener is no longer one shape. These banks back the new opener
+// FORMS — day-aware (daypart greetings + daypart heads), wandering
+// frame, and the regular's short open. Every line is Puck's own
+// voice, rendered through the intro/opener builder pipeline into
+// the same bucket; durations are measured from the renders.
+// The callback form has NO bank by design (a generic callback is a
+// contradiction — its clip is pre-rendered per-listener at the
+// previous tour's closeout), and the hook-question form is
+// generated live from the welcome's own fact pack.
+
+export type Daypart = 'early' | 'midday' | 'golden' | 'night';
+
+/** Daypart greetings: two per daypart, each carrying the AI disclosure. */
+export const GREETINGS_DAYPART: Record<Daypart, GreetingLine[]> = {
+  early: [
+    { id: 'daypart-early-1', text: "Morning. I'm Miles — your AI tour guide. Let's see what the day's starting with, out here." },
+    { id: 'daypart-early-2', text: "Early miles are the best miles. I'm Miles, your AI tour guide — let's go see what's awake." },
+  ],
+  midday: [
+    { id: 'daypart-midday-1', text: "Hey, I'm Miles — your AI tour guide. Middle of the day, and the city's all lit up. Let's look around." },
+    { id: 'daypart-midday-2', text: "I'm Miles, your AI tour guide. Lunchtime light, full city out there — let's see what's around us." },
+  ],
+  golden: [
+    { id: 'daypart-golden-1', text: "Golden hour. I'm Miles — your AI tour guide — and this is when the city shows off. Let's look." },
+    { id: 'daypart-golden-2', text: "Evening light coming on. I'm Miles, your AI tour guide. Let's catch the city in this mood." },
+  ],
+  night: [
+    { id: 'daypart-night-1', text: "Night drive. I'm Miles — your AI tour guide. The city after dark tells different stories. Let's hear them." },
+    { id: 'daypart-night-2', text: "I'm Miles, your AI tour guide. After dark, everything out there gets a second story. Let's find a few." },
+  ],
+};
+
+/** The daypart greeting lines join the shared clip record (GREETING_CLIPS). */
+export const DAYPART_GREETING_CLIPS: Record<string, { path: string; durationSec: number }> = {
+  'daypart-early-1': { path: 'miles/intros/daypart-early-1.wav', durationSec: 6.4 },
+  'daypart-early-2': { path: 'miles/intros/daypart-early-2.wav', durationSec: 5.8 },
+  'daypart-midday-1': { path: 'miles/intros/daypart-midday-1.wav', durationSec: 6.7 },
+  'daypart-midday-2': { path: 'miles/intros/daypart-midday-2.wav', durationSec: 6.0 },
+  'daypart-golden-1': { path: 'miles/intros/daypart-golden-1.wav', durationSec: 6.9 },
+  'daypart-golden-2': { path: 'miles/intros/daypart-golden-2.wav', durationSec: 7.5 },
+  'daypart-night-1': { path: 'miles/intros/daypart-night-1.wav', durationSec: 7.6 },
+  'daypart-night-2': { path: 'miles/intros/daypart-night-2.wav', durationSec: 6.8 },
+};
+
+Object.assign(GREETING_CLIPS, DAYPART_GREETING_CLIPS);
+
+/** Day-aware opener heads: one per daypart, paired with its greeting. */
+export const DAYPART_HEADS: Record<Daypart, OpenerClip> = {
+  early: {
+    id: 'daypart-head-early',
+    path: 'openers/daypart-head-early.wav',
+    durationSec: 13.2,
+    lengthClass: 'short',
+    transcript:
+      "First light does something honest to this town — fishermen, bakers, and surfers all clock in before the traffic does. Whatever corner we're rolling through, it has a morning version of itself. Let's go meet it.",
+  },
+  midday: {
+    id: 'daypart-head-midday',
+    path: 'openers/daypart-head-midday.wav',
+    durationSec: 12.4,
+    lengthClass: 'short',
+    transcript:
+      "Midday is when a city stops posing. Delivery trucks, lunch lines, the real working rhythm of the place — that's the San Diego locals actually live in. Keep your eyes open; the good stories don't wait for golden hour.",
+  },
+  golden: {
+    id: 'daypart-head-golden',
+    path: 'openers/daypart-head-golden.wav',
+    durationSec: 12.8,
+    lengthClass: 'short',
+    transcript:
+      "This is the hour San Diego brags about — the light goes amber, the bay turns to hammered copper, and every neighborhood puts its best face on. Fair warning: it makes even the traffic bearable.",
+  },
+  night: {
+    id: 'daypart-head-night',
+    path: 'openers/daypart-head-night.wav',
+    durationSec: 15.0,
+    lengthClass: 'short',
+    transcript:
+      "After dark the map changes. The landmarks go quiet and the small places light up — the diners, the dive bars, the late ferries. Different city, same streets. I'll narrate the night version.",
+  },
+};
+
+/** Wandering-frame openers: freeform framed honestly — no plan, streets pitch. */
+export const WANDERING_OPENERS: OpenerClip[] = [
+  {
+    id: 'wandering-1',
+    path: 'openers/wandering-1.wav',
+    durationSec: 6.1,
+    lengthClass: 'short',
+    transcript: "No plan today. We roll, and the streets pitch stories. I like days like this.",
+  },
+  {
+    id: 'wandering-2',
+    path: 'openers/wandering-2.wav',
+    durationSec: 6.3,
+    lengthClass: 'short',
+    transcript: "Freeform day — no route, no script. Wherever the road wanders, I'll find what's worth hearing on it.",
+  },
+  {
+    id: 'wandering-3',
+    path: 'openers/wandering-3.wav',
+    durationSec: 6.8,
+    lengthClass: 'short',
+    transcript: "We go where we go today. My only job is making sure you hear what the streets are hiding as we pass.",
+  },
+  {
+    id: 'wandering-4',
+    path: 'openers/wandering-4.wav',
+    durationSec: 7.1,
+    lengthClass: 'short',
+    transcript: "No destination, no problem. Some of the best stories only show up when nobody's aiming anywhere.",
+  },
+];
+
+/** The regular's short open: earned by recency — a nod, then the road. */
+export const REGULARS_SHORTS: OpenerClip[] = [
+  {
+    id: 'regular-1',
+    path: 'openers/regular-1.wav',
+    durationSec: 4.2,
+    lengthClass: 'short',
+    transcript: "Back again — good. Quick hello, then straight to the good stuff.",
+  },
+  {
+    id: 'regular-2',
+    path: 'openers/regular-2.wav',
+    durationSec: 5.0,
+    lengthClass: 'short',
+    transcript: "You know the drill by now. Let's get rolling — stories first, small talk later.",
+  },
+  {
+    id: 'regular-3',
+    path: 'openers/regular-3.wav',
+    durationSec: 5.1,
+    lengthClass: 'short',
+    transcript: "Right back at it. I'll keep the hello short; the road's got better material.",
+  },
+];
+
 export interface StallClip {
   id: string;
   path: string;

@@ -53,6 +53,10 @@ const LS = {
   installNudgeSeen: 'leo_install_nudge_seen',
   spotifyPrompted: 'leo_spotify_prompted',
   routeDrives: 'leo_route_drives',
+  introFormHistory: 'leo_intro_form_history',
+  lastTourStartAt: 'leo_last_tour_start_at',
+  daypartGreetingsPlayed: 'leo_daypart_greetings_played',
+  callbackNext: 'leo_callback_next',
 } as const;
 
 export function lsGet(key: keyof typeof LS): string | null {
