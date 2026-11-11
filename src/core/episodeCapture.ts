@@ -138,7 +138,10 @@ export type CapturedItemKind =
   | 'wrap_up'
   | 'gap_fill'
   | 'signoff'
-  | 'handoff';
+  | 'handoff'
+  // Planned silence (Nov 11, 2026): composed air — carries
+  // text: null by design and must never normalize to 'story'.
+  | 'silence';
 
 export interface CapturedItem {
   /** Position in the plan, 0-based (the wrap-up rides last). */
@@ -251,6 +254,8 @@ export function captureKindFor(item: PlanItem): CapturedItemKind {
       return 'signoff';
     case 'handoff':
       return 'handoff';
+    case 'silence':
+      return 'silence';
     default:
       return 'story';
   }

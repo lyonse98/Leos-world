@@ -37,7 +37,15 @@ export interface AudioPort {
   setErrorHandler(cb: (() => void) | null): void;
 }
 
-export type ItemKind = 'greeting' | 'opener' | 'story' | 'answer' | 'bridge' | 'filler' | 'commentary';
+export type ItemKind =
+  | 'greeting'
+  | 'opener'
+  | 'story'
+  | 'answer'
+  | 'bridge'
+  | 'filler'
+  | 'commentary'
+  | 'silence';
 
 export type AudioSource =
   | { kind: 'url'; url: string }
@@ -125,6 +133,20 @@ export interface AudibleItem {
   // Opener clip identity (P1: the opener_clip settle record).
   openerClipId?: string;
   openerLengthClass?: string;
+  // Intro-form identity (Nov 11, 2026): which opener FORM this item
+  // serves, the greeting axis it followed, and the degrade rung that
+  // produced it (null = the form served as picked). Filed on the
+  // opener_clip record by the engine.
+  introForm?: string;
+  greetingAxis?: string;
+  fallbackRung?: string | null;
+  // Planned silence (Nov 11, 2026): kind === 'silence' items carry
+  // the named seam they were seated at ('post-climax',
+  // 'post-memorial', 'corridor', 'post-story') for the
+  // planned_silence telemetry record. The item occupies the slot
+  // for durationSec and settles sounded on a timer — no audio is
+  // loaded, and the stall hook never fires over it.
+  silenceSeam?: string;
 }
 
 export type LatchState = 'unearned' | 'earned' | 'lost';
@@ -261,6 +283,13 @@ export class Player {
   private retryTimer: unknown = null;
   private driveGen = 0;
   private stallUsedFor = new Set<string>();
+  // Planned silence (Nov 11, 2026): the current silence item's
+  // timer + bookkeeping. The beat is wall-clock on the injected
+  // clock; a listener pause suspends it (remaining time is kept),
+  // skip/teardown clear it and settle through the normal paths.
+  private silenceTimer: unknown = null;
+  private silenceEndsAt = 0;
+  private silenceRemainingMs = 0;
   /** True while the fallback sample prime owns the element: element-level ended/error events belong to the prime, never to a resting current item. */
   private primeActive = false;
   private progressTimer: unknown = null;
@@ -706,13 +735,25 @@ export class Player {
 
   pauseByUser(): void {
     this.userPaused = true;
+    // A sounding planned silence suspends with the tour: its timer
+    // stops and the remaining beat is kept for the resume.
+    if (this.current?.kind === 'silence' && this.silenceTimer !== null) {
+      this.clock.clearTimeout(this.silenceTimer);
+      this.silenceTimer = null;
+      this.silenceRemainingMs = Math.max(0, this.silenceEndsAt - this.clock.now());
+    }
     this.audio.pause();
     this.hooks.onState();
   }
 
   resumeByUser(): void {
     this.userPaused = false;
-    if (this.current && this.soundStartAt !== null) {
+    if (this.current?.kind === 'silence' && this.soundStartAt !== null && !this.current.settled) {
+      // Resume the suspended beat; there is no element to play.
+      if (this.silenceTimer === null) {
+        this.armSilenceTimer(this.current, this.driveGen, this.silenceRemainingMs);
+      }
+    } else if (this.current && this.soundStartAt !== null) {
       void this.audio.play().catch(() => undefined);
     } else {
       this.pump();
@@ -726,6 +767,7 @@ export class Player {
     const item = this.current;
     this.current = null;
     this.driveGen += 1;
+    this.clearSilenceTimer();
     this.audio.pause();
     this.settleItem(item, {
       sounded: this.soundStartAt !== null,
@@ -762,6 +804,7 @@ export class Player {
     this.tornDown = true;
     this.driveGen += 1;
     this.stopProbe();
+    this.clearSilenceTimer();
     this.clearProgressWatchdog();
     if (this.gapTimer !== null) this.clock.clearTimeout(this.gapTimer);
     if (this.retryTimer !== null) this.clock.clearTimeout(this.retryTimer);
@@ -906,6 +949,22 @@ export class Player {
     if (!this.commitMarked.has(item.id)) {
       this.commitMarked.add(item.id);
       this.hooks.onCommit(item);
+    }
+
+    // Planned silence (Nov 11, 2026): a composed beat, not an audio
+    // item. The slot is occupied for the item's duration and the
+    // item settles sounded on the clock — no resolution, no element,
+    // no stall cover (the stall hook belongs to stories waiting on
+    // synthesis; this silence is deliberate, not a wait). The beat
+    // counts as the item sounding from its first instant, so pause,
+    // skip and teardown all meet a live item with soundStartAt set.
+    if (item.kind === 'silence') {
+      item.attempts = 1;
+      this.soundStartAt = this.clock.now();
+      this.hooks.onSoundStart(item);
+      this.hooks.onState();
+      this.armSilenceTimer(item, gen, Math.max(0, item.durationSec * 1000));
+      return;
     }
 
     // Resolve audio: a synthesis failure is not a playback attempt
@@ -1227,6 +1286,41 @@ export class Player {
     if (this.progressTimer !== null) this.clock.clearTimeout(this.progressTimer);
     this.progressTimer = null;
     this.progressFor = null;
+  }
+
+  /**
+   * Arm (or re-arm, after a listener pause) the planned-silence
+   * beat. On expiry the item settles sounded + completed with its
+   * full composed duration — the silence was served, in full, by
+   * construction. Staleness is judged exactly like the drive loop's:
+   * a superseded generation, a teardown, or a different current
+   * item all make the timer a no-op.
+   */
+  private armSilenceTimer(item: AudibleItem, gen: number, ms: number): void {
+    this.clearSilenceTimer();
+    this.silenceRemainingMs = ms;
+    this.silenceEndsAt = this.clock.now() + ms;
+    this.silenceTimer = this.clock.setTimeout(() => {
+      this.silenceTimer = null;
+      if (this.tornDown || gen !== this.driveGen || this.current !== item || item.settled) return;
+      this.current = null;
+      this.settleItem(item, {
+        sounded: true,
+        completed: true,
+        soundedMs: Math.round(item.durationSec * 1000),
+        failKind: 'none',
+        exhausted: false,
+        dropReason: null,
+        skipped: false,
+      });
+      this.soundStartAt = null;
+      this.afterSettle();
+    }, ms);
+  }
+
+  private clearSilenceTimer(): void {
+    if (this.silenceTimer !== null) this.clock.clearTimeout(this.silenceTimer);
+    this.silenceTimer = null;
   }
 
   private handleEnded(): void {

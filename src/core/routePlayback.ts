@@ -326,13 +326,16 @@ export const ROUTE_BREATH_MS = 700;
  */
 export function routeInterItemGapMs(args: {
   closing: boolean;
-  lastSettled: { sounded: boolean; skipped: boolean; planItem: boolean } | null;
-  next: { planItem: boolean; expireProgress: number | null; departure: boolean } | null;
+  lastSettled: { sounded: boolean; skipped: boolean; planItem: boolean; silence?: boolean } | null;
+  next: { planItem: boolean; expireProgress: number | null; departure: boolean; silence?: boolean } | null;
   lastProgress: number;
   progressPerSec: number | null;
 }): number {
   const { closing, lastSettled, next, lastProgress, progressPerSec } = args;
   if (closing) return GAP_MS;
+  // A planned silence IS the beat (Nov 11, 2026): no produced
+  // breath stacks on either side of it — the standing gap only.
+  if (lastSettled?.silence || next?.silence) return GAP_MS;
   if (!lastSettled || !lastSettled.sounded || lastSettled.skipped || !lastSettled.planItem) return GAP_MS;
   if (!next || !next.planItem) return GAP_MS;
   if (next.expireProgress !== null && !next.departure && progressPerSec !== null && progressPerSec > 0) {
@@ -670,7 +673,7 @@ export class RoutePlanRunner {
   >();
   private progressPerSec: number | null = null;
   /** The most recent plan-item settle (the breath's back-to-back input). */
-  private lastSettle: { sounded: boolean; skipped: boolean; planItem: boolean } | null = null;
+  private lastSettle: { sounded: boolean; skipped: boolean; planItem: boolean; silence?: boolean } | null = null;
   private begun = false;
   /** Manifest hold (differentiator 3): a staged plan renders but does not begin until beginStaged(). */
   private heldStart = false;
@@ -792,6 +795,7 @@ export class RoutePlanRunner {
                 planItem: entry !== undefined,
                 expireProgress: entry?.planItem.expireProgress ?? null,
                 departure: entry !== undefined && entry === this.firstReadyStoryEntry(),
+                silence: entry?.planItem.kind === 'silence',
               }
             : null,
           lastProgress: this.lastProgress,
@@ -1747,6 +1751,73 @@ export class RoutePlanRunner {
         }
         return; // still rendering and its moment has not come (or it is a story): wait
       }
+      if (it.kind === 'silence') {
+        // PLANNED SILENCE at the gate (Nov 11, 2026): two
+        // disciplines ride on the beat.
+        // (1) DEPENDENCY: the beat is its story's held breath —
+        // if that story dropped, failed, or settled unplayed,
+        // the beat dies silently with it, exactly as a doomed
+        // story's lead-in bridge dies. A beat after a story
+        // that never sounded is a hole, not a pause.
+        const prevId = it.prevUnitId ?? null;
+        const prevEntry = prevId
+          ? this.entries.find(e => e.planItem.kind === 'story' && e.planItem.id === prevId)
+          : undefined;
+        if (
+          prevId &&
+          (this.droppedStoryIds.has(prevId) ||
+            this.settledUnplayed.has(prevId) ||
+            (prevEntry !== undefined && prevEntry.state === 'failed'))
+        ) {
+          entry.state = 'dropped';
+          this.gateSkippedItemIds.add(it.id);
+          this.feedCursor += 1;
+          this.resolvedCount += 1;
+          continue;
+        }
+        // (2) PEEK-THROUGH JUDGMENT: the beat sits between a
+        // story and its lead-in bridge, which moves the bridge's
+        // suppression judgment behind the beat — by the time the
+        // beat has sounded, the story it follows is spent and
+        // the prediction has lost the bulk it must price. So
+        // the bridge directly behind a ready beat is judged
+        // HERE, before the beat is promised, with the beat's
+        // own seconds priced into the delay. A doomed verdict
+        // drops the story and its bridge (the beat itself still
+        // sounds — it is the previous story's breath, honestly
+        // earned); an unjudged verdict holds the beat under the
+        // same lane-3 discipline the bridge itself holds under.
+        if (entry.state === 'ready') {
+          const nextEntry = this.entries[this.feedCursor + 1];
+          if (nextEntry && nextEntry.planItem.kind === 'bridge' && nextEntry.state === 'ready') {
+            const target = this.suppressionTarget(nextEntry);
+            if (target) {
+              const judgment = this.suppressionJudgment(nextEntry.planItem, target, it.durationSec);
+              if (judgment.kind === 'unjudged' && this.player.current !== null) {
+                return; // held for a sharper judgment, as a bridge would be
+              }
+              if (judgment.kind === 'doomed') {
+                nextEntry.state = 'dropped';
+                this.gateSkippedItemIds.add(nextEntry.planItem.id);
+                this.resolvedCount += 1;
+                const rec = this.commissions.get(nextEntry.planItem.id);
+                if (rec && rec.state === 'pending') {
+                  rec.state = 'late';
+                  this.deps.onEvent?.('route_rebridge_skipped', {
+                    reason: 'suppressed',
+                    commission_id: rec.id,
+                    dropped_id: rec.forStoryId,
+                    into_id: rec.nextStoryId,
+                    via: rec.via,
+                    mode: 'route',
+                  });
+                }
+                this.dropStoryStale(target, 'suppression', judgment.prediction);
+              }
+            }
+          }
+        }
+      }
       if (it.kind === 'bridge' && entry.state === 'ready') {
         // DOOMED LEAD-IN SUPPRESSION (drop coherence): judge
         // the story this bridge leads into BEFORE the bridge
@@ -1905,6 +1976,7 @@ export class RoutePlanRunner {
   private suppressionJudgment(
     bridge: PlanItem,
     target: RenderEntry,
+    extraDelaySec = 0,
   ):
     | { kind: 'doomed'; prediction: SuppressionPrediction }
     | { kind: 'safe' }
@@ -1944,7 +2016,11 @@ export class RoutePlanRunner {
       note('no_remaining', null, rate);
       return { kind: 'unjudged', reason: 'no_remaining' };
     }
-    const delaySec = remaining + bridge.durationSec + ROUTE_BREATH_MS / 1000;
+    // extraDelaySec: composed items seated BETWEEN the current
+    // item and this bridge (a planned-silence beat) honestly
+    // delay the story's earliest start — the peek-through
+    // judgment at a silence seat prices them in.
+    const delaySec = remaining + extraDelaySec + bridge.durationSec + ROUTE_BREATH_MS / 1000;
     const predictedStartProgress = this.lastProgress + rate * delaySec;
     if (predictedStartProgress <= expire) {
       note('judged_not_doomed', predictedStartProgress, rate);
@@ -2182,6 +2258,7 @@ export class RoutePlanRunner {
       context,
       episode: this.bridgeLedger,
       maxChars: REBRIDGE_MAX_CHARS,
+      commission: true,
     });
     const id = `rebridge:${dropped.id}>${next.id}`;
     const item: PlanItem = {
@@ -2371,6 +2448,22 @@ export class RoutePlanRunner {
   private async toAudibleItem(it: PlanItem): Promise<AudibleItem | null> {
     const id = `route-${++runnerSeq}`;
     const onSettle = (rec: { sounded: boolean; skipped: boolean }) => this.onItemSettle(it, rec);
+    if (it.kind === 'silence') {
+      // Planned silence (Nov 11, 2026): no audio to render — the
+      // Player item carries the composed duration and occupies
+      // the slot on a timer, riding the ambience bed.
+      return {
+        id,
+        kind: 'silence',
+        label: it.label,
+        source: { kind: 'url', url: '' },
+        durationSec: it.durationSec,
+        attempts: 0,
+        settled: false,
+        onSettle,
+        silenceSeam: it.seam,
+      };
+    }
     if (it.kind === 'story' || it.kind === 'filler') {
       const unit = it.unit;
       if (!unit) return null;
@@ -2471,7 +2564,23 @@ export class RoutePlanRunner {
     // The breath's input (commit D): every plan-item settle
     // is recorded before anything else reads it — the Player
     // consults the gap hook immediately after this returns.
-    this.lastSettle = { sounded, skipped: rec.skipped, planItem: true };
+    this.lastSettle = { sounded, skipped: rec.skipped, planItem: true, silence: it.kind === 'silence' };
+    // Planned silence telemetry (Nov 11, 2026): a served beat
+    // files its duration, its seam, and its neighbors — the
+    // field record that proves the silence was composed, not
+    // a stall.
+    if (it.kind === 'silence' && sounded && this.plan) {
+      const idx = this.plan.items.indexOf(it);
+      const prevItem = idx > 0 ? this.plan.items[idx - 1] : null;
+      const nextItem = idx >= 0 && idx < this.plan.items.length - 1 ? this.plan.items[idx + 1] : null;
+      this.deps.onEvent?.('planned_silence', {
+        duration_s: it.durationSec,
+        seam: it.seam ?? '',
+        prev_id: prevItem?.id ?? null,
+        next_id: nextItem?.id ?? null,
+        mode: 'route',
+      });
+    }
     if (it.kind === 'story' && it.unit && sounded) {
       this.playedStoryIds.add(it.unit.id);
       this.lastSoundedStoryId = it.id;
@@ -2721,8 +2830,14 @@ export class RoutePlanRunner {
     // abandoned in the queue, or never fed fails the gate —
     // that drive was cut short, and today's closeout line
     // speaks instead. The overrun handoff never plays it.
+    // A planned-silence entry beyond the feed cursor does not
+    // veto "run out" (Nov 11, 2026): the beat is composed air,
+    // not a story owed — a post-climax beat still unfed at the
+    // arrival moment must not demote a completed episode to
+    // the owed closeout or cost it its wrap-up.
     const planRanOut =
-      this.feedCursor >= this.entries.length && unplayed.every(u => u.id === soundingStoryId);
+      this.entries.every((e, idx) => idx < this.feedCursor || e.planItem.kind === 'silence') &&
+      unplayed.every(u => u.id === soundingStoryId);
     const wrapGateOpen = kind !== 'overrun' && planRanOut && plan.wrapUp != null;
     // The accounting just finalized — file the drive record
     // (addendum 2) with the closeout's actual owed list.
