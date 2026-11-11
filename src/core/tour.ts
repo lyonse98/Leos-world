@@ -23,12 +23,32 @@ import * as facts from './facts';
 import {
   GREETINGS_FRESH,
   GREETINGS_RESUME,
+  GREETINGS_DAYPART,
   GREETING_CLIPS,
   OPENER_CLIPS,
+  DAYPART_HEADS,
+  WANDERING_OPENERS,
+  REGULARS_SHORTS,
   STALL_CLIPS,
   BRIDGE_CLIPS,
+  type Daypart,
+  type GreetingLine,
   type OpenerClip,
 } from '../content/clips';
+import {
+  daypartOf,
+  eligibleIntroForms,
+  fallbackIntroForm,
+  pickIntroForm,
+  composeCallbackText,
+  callbackAssetFresh,
+  buildHookPrompt,
+  validateHookText,
+  type CallbackAsset,
+  type CloseoutRecord,
+  type GreetingAxis,
+  type IntroForm,
+} from './introForms';
 import {
   COMMENTARY_CLIPS,
   COMMENTARY_ENABLED,
@@ -197,6 +217,15 @@ function leadFactFromText(text: string): string | null {
 const BACKSTOP_MS = 180_000;
 const WELCOME_COOLDOWN_MS = 180_000;
 /**
+ * The hook race's placeholder debt id (Nov 11, 2026): while the
+ * hook-question form waits out its slot deadline, this sentinel
+ * holds the opener's place in the opening debt — the welcome
+ * cannot hand over mid-race, and whichever way the race resolves
+ * (hook served, or the displaced bank clip served a rung down)
+ * the sentinel is discharged first.
+ */
+const HOOK_SLOT_DEBT_ID = 'opener-slot:hook-question';
+/**
  * The opening welcome's live deadline (Erik, Oct 30): the first
  * hello is generated live — custom, ear-catching — but it races
  * this deadline; if live has not produced inside it, the stored
@@ -337,6 +366,31 @@ export class Tour {
   private openerPrimaryClipId: string | null = null;
   private openerExtensionUsed = false;
   private backstopTimer: unknown = null;
+
+  // Intro forms (Nov 11, 2026): the opener is a FORM picked at
+  // greeting settle, not a clip picked at the tap. The greeting
+  // axis is decided at start (the greeting is the first sound);
+  // the form, the hook race, and the callback asset resolve over
+  // the greeting's ~4.5 s. Every form degrades rung-by-rung to
+  // the plain path; the fields below are that machinery's state.
+  private greetingAxis: GreetingAxis = 'standard';
+  private daypartToday: Daypart | null = null;
+  private introFormDecided = false;
+  private prevStartAtMs: number | null = null;
+  private callbackAssetPending: CallbackAsset | null = null;
+  private hookState: 'idle' | 'pending' | 'ready' | 'failed' | 'discarded' = 'idle';
+  private hookText: string | null = null;
+  private hookCommissioned = false;
+  private hookWaiterTimer: unknown = null;
+  private hookFallbackClip: OpenerClip | null = null;
+
+  // Planned silence, freeform lane (Nov 11, 2026, R1-limited):
+  // post-story corridor beats only — the marker the filler lane
+  // reads as spoken-for, the per-tour count (≤3), and the last
+  // seam's time (beats never cluster).
+  private plannedSilenceUntil = 0;
+  private plannedSilenceCount = 0;
+  private lastPlannedSilenceAt = 0;
   private welcomeState: 'none' | 'warming' | 'ready' | 'handed' | 'settled' = 'none';
   private pendingWelcome: AudibleItem | null = null;
 
@@ -747,7 +801,53 @@ export class Tour {
     // attempt inside the tap (O1): the emit initiates a network
     // write, so it files after the opening is registered and begun.
     this.opening = 'priming';
-    const line = this.pickGreeting(resume);
+
+    // Intro-form state for this start (Nov 11, 2026): the
+    // previous start's timestamp (the regular's gate) and the
+    // callback asset the previous tour's closeout pre-rendered
+    // are read BEFORE this start writes its own. Both are
+    // synchronous local reads — the greeting's attempt below is
+    // still the tap's first media action.
+    this.introFormDecided = false;
+    this.hookState = 'idle';
+    this.hookText = null;
+    this.hookCommissioned = false;
+    this.hookFallbackClip = null;
+    this.daypartToday = null;
+    this.plannedSilenceUntil = 0;
+    this.plannedSilenceCount = 0;
+    this.lastPlannedSilenceAt = 0;
+    const prevStartRaw = backend.lsJson<number>('lastTourStartAt');
+    this.prevStartAtMs = typeof prevStartRaw === 'number' ? prevStartRaw : null;
+    backend.lsJsonSet('lastTourStartAt', Date.now());
+    const cbRaw = backend.lsJson<CallbackAsset>('callbackNext');
+    this.callbackAssetPending =
+      !resume && callbackAssetFresh(cbRaw, Date.now()) ? cbRaw : null;
+
+    // The greeting axis: resume keeps the re-entry lines exactly;
+    // a fresh start may take a DAYPART greeting when the
+    // day-aware form is off cooldown and no callback is waiting
+    // (the callback form pairs with a standard greeting).
+    let line: GreetingLine;
+    if (resume) {
+      this.greetingAxis = 'reentry';
+      line = this.pickGreeting(true);
+    } else {
+      this.greetingAxis = 'standard';
+      line = this.pickGreeting(false);
+      if (!this.callbackAssetPending) {
+        const history = backend.lsJson<string[]>('introFormHistory') ?? [];
+        if (!history.slice(-3).includes('day-aware') && Math.random() < 0.6) {
+          const dp = daypartOf(new Date());
+          const dayLine = this.pickDaypartGreeting(dp);
+          if (dayLine) {
+            line = dayLine;
+            this.greetingAxis = 'daypart';
+            this.daypartToday = dp;
+          }
+        }
+      }
+    }
     const clip = GREETING_CLIPS[line.id];
     const greeting = this.makeItem({
       kind: 'greeting',
@@ -760,12 +860,19 @@ export class Tour {
     this.debt.add(greeting.id);
     this.player.beginWithItem(greeting);
 
-    // OPENER debt behind the GREETING: fresh → medium, resume → short.
-    const opener = this.pickOpener(resume ? 'short' : 'medium', []);
-    if (opener) {
-      const item = this.makeOpenerItem(opener, true);
-      this.openerPrimaryClipId = opener.id;
-      this.player.enqueuePromised(item);
+    // OPENER debt behind the GREETING: resume starts keep
+    // today's exact shape (re-entry greeting + a short opener,
+    // picked here). A FRESH start picks no clip at the tap —
+    // its opener FORM is chosen at greeting settle, when the
+    // heard ledger and the hook commission have had the
+    // greeting's length to land (see selectIntroForm).
+    if (resume) {
+      const opener = this.pickOpener('short', []);
+      if (opener) {
+        const item = this.makeOpenerItem(opener, true, { form: 'resume' });
+        this.openerPrimaryClipId = opener.id;
+        this.player.enqueuePromised(item);
+      }
     }
 
     this.emit('session_start', { variant: 'fresh' });
@@ -808,6 +915,20 @@ export class Tour {
       if (clip) jobs.push(this.warmClipUrl(clip.path));
     }
     for (const opener of OPENER_CLIPS) jobs.push(this.warmClipUrl(opener.path));
+    // Intro-form banks (Nov 11, 2026): the daypart greetings and
+    // heads, the wandering frames, and the regular's shorts warm
+    // with the standing banks — a form chosen at greeting settle
+    // must find its clip already on-device.
+    for (const lines of Object.values(GREETINGS_DAYPART)) {
+      for (const line of lines) {
+        const clip = GREETING_CLIPS[line.id];
+        if (clip) jobs.push(this.warmClipUrl(clip.path));
+      }
+    }
+    for (const head of Object.values(DAYPART_HEADS)) jobs.push(this.warmClipUrl(head.path));
+    for (const clip of [...WANDERING_OPENERS, ...REGULARS_SHORTS]) {
+      jobs.push(this.warmClipUrl(clip.path));
+    }
     const [index] = (await Promise.all(jobs)) as [backend.LibraryIndexEntry[]];
     if (index.length) this.libraryIndex = index;
   }
@@ -863,7 +984,17 @@ export class Tour {
   }
 
   private pickOpener(lengthClass: 'short' | 'medium' | 'long', excludeIds: string[]): OpenerClip | null {
-    const pool = OPENER_CLIPS.filter(o => o.lengthClass === lengthClass);
+    return this.pickFromBank(OPENER_CLIPS.filter(o => o.lengthClass === lengthClass), excludeIds);
+  }
+
+  /**
+   * Pick a clip from any opener bank under the standing per-line
+   * rule: a line heard within 7 days is excluded, and when the
+   * exclusion empties the pool the full pool serves (a daily
+   * driver cycles the bank rather than hearing silence). The
+   * pick is timestamped into the shared openersPlayed map.
+   */
+  private pickFromBank(pool: OpenerClip[], excludeIds: string[]): OpenerClip | null {
     if (pool.length === 0) return null;
     const played = backend.lsJson<Record<string, number>>('openersPlayed') ?? {};
     const now = Date.now();
@@ -878,14 +1009,72 @@ export class Tour {
     return pick;
   }
 
-  private makeOpenerItem(clip: OpenerClip, primary: boolean): AudibleItem {
+  /** A daypart greeting line, under the same 7-day per-line exclusion (its own map). */
+  private pickDaypartGreeting(dp: Daypart): GreetingLine | null {
+    const pool = GREETINGS_DAYPART[dp];
+    if (!pool || pool.length === 0) return null;
+    const played = backend.lsJson<Record<string, number>>('daypartGreetingsPlayed') ?? {};
+    const now = Date.now();
+    const fresh = pool.filter(l => !(played[l.id] && now - played[l.id] < 7 * 24 * 3600_000));
+    const usable = fresh.length > 0 ? fresh : pool;
+    const pick = usable[Math.floor(Math.random() * usable.length)];
+    played[pick.id] = now;
+    backend.lsJsonSet('daypartGreetingsPlayed', played);
+    return pick;
+  }
+
+  private makeOpenerItem(
+    clip: OpenerClip,
+    primary: boolean,
+    meta?: { form: IntroForm; fallbackRung?: string | null },
+  ): AudibleItem {
     const item = this.makeItem({
       kind: 'opener',
       label: `Opener — ${clip.id}`,
       source: { kind: 'url', url: this.clipSourceUrl(clip.path) },
       durationSec: clip.durationSec,
       onSettle: rec => this.onOpenerSettle(item, rec, primary),
-      story: { openerClipId: clip.id, openerLengthClass: clip.lengthClass },
+      story: {
+        openerClipId: clip.id,
+        openerLengthClass: clip.lengthClass,
+        ...(meta
+          ? {
+              introForm: meta.form,
+              greetingAxis: this.greetingAxis,
+              fallbackRung: meta.fallbackRung ?? null,
+            }
+          : {}),
+      },
+    });
+    this.debt.add(item.id);
+    return item;
+  }
+
+  /**
+   * A synthesized opener item (the callback and hook-question
+   * forms): the text IS the clip — pre-rendered into the synth
+   * cache at closeout (callback) or during the greeting (hook),
+   * so resolution is a cache hit and the slot spends no latency.
+   */
+  private makeSynthOpenerItem(
+    text: string,
+    clipId: string,
+    form: IntroForm,
+    fallbackRung: string | null,
+  ): AudibleItem {
+    const item = this.makeItem({
+      kind: 'opener',
+      label: `Opener — ${clipId}`,
+      source: { kind: 'synth', text },
+      durationSec: estimateSpeechDurationS(text),
+      onSettle: rec => this.onOpenerSettle(item, rec, true),
+      story: {
+        openerClipId: clipId,
+        openerLengthClass: 'short',
+        introForm: form,
+        greetingAxis: this.greetingAxis,
+        fallbackRung,
+      },
     });
     this.debt.add(item.id);
     return item;
@@ -920,11 +1109,248 @@ export class Tour {
       ms_from_tour_start: this.clock.now() - this.tourStartAt,
     });
     if (item) this.debt.delete(item.id);
+    // Intro forms (Nov 11, 2026): a FRESH start chooses its
+    // opener FORM here, at greeting settle — the heard ledger
+    // has had the greeting's length to hydrate and the hook
+    // commission the same window to land. The chosen opener
+    // joins the debt BEFORE the gate is re-judged below, so a
+    // ready welcome can never slip ahead of it. Resume starts
+    // already carry their opener (picked in start, as always).
+    if (!this.resumeStart && this.phase === 'active' && this.opening === 'priming') {
+      this.selectIntroForm();
+    }
     if (this.opening === 'priming') {
       this.opening = this.debt.size > 0 ? 'welcoming' : 'covered';
     }
     this.afterDebtChange();
     this.notify();
+  }
+
+  /**
+   * Choose and serve this start's opener form. The callback
+   * asset holds PRIORITY outside the rotation (it is spent
+   * once, here, whether or not its item sounds — a crashed
+   * start must not replay yesterday's memory forever). The
+   * rotation itself never repeats a form within 3 starts; an
+   * exhausted pool lands on greeting-only for a regular (R2)
+   * or on the least-recently-served form for anyone else. No
+   * path through here can silence the opening: every rung ends
+   * in a served opener or the greeting-only floor.
+   */
+  private selectIntroForm(): void {
+    if (this.introFormDecided) return;
+    this.introFormDecided = true;
+    const asset = this.callbackAssetPending;
+    this.callbackAssetPending = null;
+    if (asset) {
+      backend.lsDel('callbackNext');
+      this.serveIntroClip(null, asset.text, 'callback', null);
+      return;
+    }
+    const history = backend.lsJson<string[]>('introFormHistory') ?? [];
+    const regular =
+      this.prevStartAtMs !== null && Date.now() - this.prevStartAtMs < 48 * 3600_000;
+    const inputs = {
+      recentForms: history,
+      daypartGreeting: this.greetingAxis === 'daypart',
+      hookFailed: this.hookState === 'failed',
+      regular,
+    };
+    const pool = eligibleIntroForms(inputs);
+    if (pool.length === 0) {
+      if (regular) {
+        this.serveGreetingOnly();
+        return;
+      }
+      this.serveIntroForm(fallbackIntroForm(inputs), null);
+      return;
+    }
+    this.serveIntroForm(pickIntroForm(pool, Math.random()), null);
+  }
+
+  /** Serve a form: bank forms pick their clip; hook enters its race; any miss degrades one rung to plain. */
+  private serveIntroForm(form: IntroForm, fallbackRung: string | null): void {
+    switch (form) {
+      case 'plain': {
+        const clip = this.pickFromBank(OPENER_CLIPS.filter(o => o.lengthClass === 'medium'), []);
+        if (clip) return this.serveIntroClip(clip, null, 'plain', fallbackRung);
+        break;
+      }
+      case 'day-aware': {
+        const head = this.daypartToday ? DAYPART_HEADS[this.daypartToday] : null;
+        if (head) return this.serveIntroClip(head, null, 'day-aware', fallbackRung);
+        break;
+      }
+      case 'wandering': {
+        const clip = this.pickFromBank(WANDERING_OPENERS, []);
+        if (clip) return this.serveIntroClip(clip, null, 'wandering', fallbackRung);
+        break;
+      }
+      case 'regulars-short': {
+        const clip = this.pickFromBank(REGULARS_SHORTS, []);
+        if (clip) return this.serveIntroClip(clip, null, 'regulars-short', fallbackRung);
+        break;
+      }
+      case 'hook-question':
+        return this.serveHookForm(fallbackRung);
+      default:
+        break;
+    }
+    if (form !== 'plain') return this.serveIntroForm('plain', fallbackRung ?? 'bank-miss');
+    this.serveGreetingOnly();
+  }
+
+  /** Enqueue the form's opener item and record the served form on the rotation ledger. */
+  private serveIntroClip(
+    clip: OpenerClip | null,
+    synthText: string | null,
+    form: IntroForm,
+    fallbackRung: string | null,
+  ): void {
+    const item = clip
+      ? this.makeOpenerItem(clip, true, { form, fallbackRung })
+      : this.makeSynthOpenerItem(
+          synthText ?? '',
+          form === 'callback' ? 'callback-next' : 'hook-question',
+          form,
+          fallbackRung,
+        );
+    if (clip) this.openerPrimaryClipId = clip.id;
+    const history = backend.lsJson<string[]>('introFormHistory') ?? [];
+    history.push(form);
+    backend.lsJsonSet('introFormHistory', history.slice(-12));
+    this.player.enqueuePromised(item);
+  }
+
+  /**
+   * R2 (Nov 11, 2026): the greeting-only start — greeting, then
+   * the welcome, no opener at all. Earned only by recency with
+   * every form on cooldown. The greeting carries the AI
+   * disclosure, so nothing the listener is owed goes unsaid;
+   * the opener_clip record files with segment 'none' so the
+   * form is visible in the data, not silent.
+   */
+  private serveGreetingOnly(): void {
+    const history = backend.lsJson<string[]>('introFormHistory') ?? [];
+    history.push('greeting-only');
+    backend.lsJsonSet('introFormHistory', history.slice(-12));
+    this.emit('opener_clip', {
+      topic: '',
+      opener_id: '',
+      voice: 'gemini',
+      source: 'none',
+      kind: 'none',
+      length_class: 'none',
+      segment: 'none',
+      sounded: false,
+      completed: true,
+      engine: 'none',
+      attempts: 0,
+      sounded_ms: 0,
+      ms_from_tour_start: this.clock.now() - this.tourStartAt,
+      form: 'greeting-only',
+      greeting_axis: this.greetingAxis,
+      fallback_rung: null,
+    });
+  }
+
+  /**
+   * The hook-question form: the hook was commissioned in
+   * parallel with the first welcome (same fact pack) during the
+   * greeting. Ready → served now. Still pending → the slot is
+   * held on the placeholder debt and raced against the
+   * displaced bank clip's own length; the clip is picked NOW so
+   * the degrade, if it comes, is instant. Failed → degrade a
+   * rung immediately.
+   */
+  private serveHookForm(fallbackRung: string | null): void {
+    if (this.hookState === 'ready' && this.hookText) {
+      this.serveIntroClip(null, this.hookText, 'hook-question', fallbackRung);
+      return;
+    }
+    if (this.hookState === 'pending') {
+      this.hookFallbackClip = this.pickFromBank(WANDERING_OPENERS, []);
+      this.debt.add(HOOK_SLOT_DEBT_ID);
+      const slotMs = (this.hookFallbackClip?.durationSec ?? 10) * 1000;
+      this.hookWaiterTimer = this.clock.setTimeout(() => this.onHookSlotDeadline(), slotMs);
+      return;
+    }
+    this.serveIntroForm('wandering', 'hook-unavailable');
+  }
+
+  /** The hook landed inside its slot: discharge the placeholder and serve it. */
+  private onHookReady(): void {
+    if (this.hookWaiterTimer === null) return;
+    this.clock.clearTimeout(this.hookWaiterTimer);
+    this.hookWaiterTimer = null;
+    this.debt.delete(HOOK_SLOT_DEBT_ID);
+    this.hookFallbackClip = null;
+    if (this.phase !== 'active' || !this.hookText) return;
+    this.serveIntroClip(null, this.hookText, 'hook-question', null);
+  }
+
+  /** The hook failed while the slot waited: the displaced clip serves, one rung down. */
+  private onHookFailed(): void {
+    if (this.hookWaiterTimer === null) return;
+    this.clock.clearTimeout(this.hookWaiterTimer);
+    this.hookWaiterTimer = null;
+    this.debt.delete(HOOK_SLOT_DEBT_ID);
+    if (this.phase !== 'active') return;
+    const clip = this.hookFallbackClip;
+    this.hookFallbackClip = null;
+    if (clip) this.serveIntroClip(clip, null, 'wandering', 'hook-failed');
+    else this.serveIntroForm('plain', 'hook-failed');
+    this.afterDebtChange();
+  }
+
+  /**
+   * The slot deadline passed with no hook: the hook is
+   * DISCARDED (its late arrival checks the state and drops
+   * itself — never late-served) and the displaced bank clip
+   * serves in its place, one rung down.
+   */
+  private onHookSlotDeadline(): void {
+    this.hookWaiterTimer = null;
+    this.debt.delete(HOOK_SLOT_DEBT_ID);
+    if (this.phase !== 'active') return;
+    if (this.hookState === 'pending') this.hookState = 'discarded';
+    const clip = this.hookFallbackClip;
+    this.hookFallbackClip = null;
+    if (clip) this.serveIntroClip(clip, null, 'wandering', 'hook-late');
+    else this.serveIntroForm('plain', 'hook-late');
+    this.afterDebtChange();
+  }
+
+  /**
+   * Commission the hook (Nov 11, 2026): one small generation
+   * over the SAME fact pack the opening welcome is being built
+   * from, fired in parallel with it. The result is validated as
+   * a single honest question and pre-rendered into the synth
+   * cache, so a hook that wins its race serves with zero slot
+   * latency. Any failure marks the form failed — the selection
+   * at greeting settle then never offers it, or the waiting slot
+   * degrades a rung.
+   */
+  private commissionHook(name: string, pack: facts.FactPack): void {
+    this.hookCommissioned = true;
+    this.hookState = 'pending';
+    void (async () => {
+      try {
+        const raw = await this.seams.generateStory(buildHookPrompt(name, facts.factPackText(pack)));
+        const text = validateHookText(raw);
+        if (!text) throw new Error('hook text failed validation');
+        const blob = await this.seams.synthesize(text);
+        await this.seams.audioCachePut(this.synthCacheKeyFor(text), blob);
+        if (this.hookState === 'discarded') return; // late: dropped, never served
+        this.hookText = text;
+        this.hookState = 'ready';
+        this.onHookReady();
+      } catch {
+        if (this.hookState === 'discarded') return;
+        this.hookState = 'failed';
+        this.onHookFailed();
+      }
+    })();
   }
 
   private onOpenerSettle(item: AudibleItem, rec: SettleRecord, primary: boolean): void {
@@ -948,6 +1374,12 @@ export class Tour {
         attempts: item.attempts,
         sounded_ms: Math.round(rec.soundedMs),
         ms_from_tour_start: this.clock.now() - this.tourStartAt,
+        // Intro forms (Nov 11, 2026): which form served, the
+        // greeting axis it followed, and the degrade rung that
+        // produced it (null = served as picked).
+        form: item.introForm ?? '',
+        greeting_axis: item.greetingAxis ?? '',
+        fallback_rung: item.fallbackRung ?? null,
       });
     }
     // Settles arriving during teardown file their record but spawn
@@ -955,10 +1387,16 @@ export class Tour {
     // is the player's; side effects stop at tour end).
     if (this.phase !== 'active') return;
     // Fresh start, WELCOME still warming when the primary settles:
-    // one long extension buys the rest of the runway.
+    // one long extension buys the rest of the runway. Since the
+    // form build (Nov 11, 2026) the extension belongs to the
+    // HOOK-QUESTION form alone — its generation is the welcome's
+    // own runway, and it is the only form that may hold the slot
+    // past 26 s. Every other form hands the slot back; the
+    // welcome gate, not filler tissue, owns the wait.
     if (
       primary &&
       !this.resumeStart &&
+      item.introForm === 'hook-question' &&
       !this.openerExtensionUsed &&
       this.welcomeState !== 'ready' &&
       this.welcomeState !== 'handed' &&
@@ -1187,6 +1625,22 @@ export class Tour {
     };
     try {
       const pack = packIn ?? (await this.seams.buildFactPack(pseudo, this.area, []));
+      // Hook commission (Nov 11, 2026): the OPENING welcome's
+      // own fact pack also commissions the hook-question — one
+      // parallel call over the same facts, so the welcome that
+      // follows can honestly answer the question the hook poses.
+      // Opening builds only: an arrival framing with no handed-in
+      // pack, while the opening is still priming, on a fresh
+      // start. Mid-tour welcomes never commission.
+      if (
+        framing === 'arrival' &&
+        !packIn &&
+        !this.hookCommissioned &&
+        !this.resumeStart &&
+        (this.opening === 'priming' || this.opening === 'welcoming')
+      ) {
+        this.commissionHook(name, pack);
+      }
       const nowIn =
         this.area.neighborhood && this.area.neighborhood.toLowerCase() !== name.toLowerCase()
           ? this.area.neighborhood
@@ -2782,6 +3236,10 @@ export class Tour {
       }
       this.lastStoryItem = item;
       this.lastSubject = item.label;
+      // Planned silence (Nov 11, 2026, R1): a sounded, completed
+      // story on a corridor stretch may earn the tour one
+      // composed 3 s beat before the next telling.
+      this.maybeSeatPlannedSilence(rec);
       // P3 thread ledger: a sounded settle is a DELIVERED telling —
       // the only entries the thread ever gains. Welcome and area
       // subjects stay out (A's rule: the thread is place tellings;
@@ -3148,9 +3606,7 @@ export class Tour {
     // The key carries persona + TTS model + voice (a model bump
     // must not silently reuse old-model audio) and a dual hash to
     // keep the collision tail negligible over a long-lived cache.
-    const cacheKey = `synth-${hashString(
-      `${LEO_PERSONA_VERSION}|${gemini.TTS_MODEL_ID}|Puck|${text}`,
-    )}-${hashString(`${text}::b`)}`;
+    const cacheKey = this.synthCacheKeyFor(text);
     // Concurrent resolutions of the same text share ONE synthesis:
     // a presynth that starts moments before the item's own drive
     // resolve (the common case when the slot turns over quickly)
@@ -3179,6 +3635,19 @@ export class Tour {
     } finally {
       this.resolving.delete(cacheKey);
     }
+  }
+
+  /**
+   * The synth cache key for a text (see resolveUrl): persona +
+   * TTS model + voice + a dual hash. Shared by the resolver and
+   * the two pre-render lanes (the hook commission, the callback
+   * closeout render) so a pre-rendered line is exactly the entry
+   * the resolver looks up.
+   */
+  private synthCacheKeyFor(text: string): string {
+    return `synth-${hashString(
+      `${LEO_PERSONA_VERSION}|${gemini.TTS_MODEL_ID}|Puck|${text}`,
+    )}-${hashString(`${text}::b`)}`;
   }
 
   private objectUrlFor(key: string, blob: Blob): string {
@@ -3479,7 +3948,60 @@ export class Tour {
     return true;
   }
 
+  /**
+   * Seat one freeform planned silence (Nov 11, 2026, R1-limited):
+   * a 3 s composed beat after a story, corridor stretches only.
+   * The guards are the design's, verbatim: never in the first
+   * 60 s, never after a technical drop (the story must have
+   * sounded AND completed — that seam belongs to the re-serve
+   * machinery), never back-to-back (≥90 s between beats), at
+   * most 3 per tour, and only at freeway speed, where a corridor
+   * stretch is a real thing. The beat is a queue item: it
+   * occupies the slot on the player's timer and files its own
+   * planned_silence record when it sounds.
+   */
+  private maybeSeatPlannedSilence(rec: SettleRecord): void {
+    if (!rec.sounded || !rec.completed) return;
+    if (this.opening !== 'open' || this.phase !== 'active') return;
+    if (this.qaPhase !== 'idle' || this.userPausedFlag) return;
+    if (this.plannedSilenceCount >= 3) return;
+    const now = this.clock.now();
+    if (now - this.tourStartAt < 60_000) return;
+    if (this.lastPlannedSilenceAt > 0 && now - this.lastPlannedSilenceAt < 90_000) return;
+    if ((this.position?.speedMps ?? 0) < FREEWAY_MPS) return;
+    this.plannedSilenceCount += 1;
+    this.lastPlannedSilenceAt = now;
+    this.plannedSilenceUntil = now + 3000 + 2000;
+    const item = this.makeItem({
+      kind: 'silence',
+      label: 'Planned silence',
+      source: { kind: 'url', url: '' },
+      durationSec: 3,
+      onSettle: srec => {
+        if (srec.sounded) {
+          this.emit('planned_silence', {
+            duration_s: 3,
+            seam: 'post-story',
+            prev_id: null,
+            next_id: null,
+            mode: 'freeform',
+          });
+        }
+      },
+      story: { silenceSeam: 'post-story' },
+    });
+    this.player.enqueuePromised(item);
+  }
+
   private fillerTick(elapsedMs: number): void {
+    // Planned silence (Nov 11, 2026): inside a composed beat's
+    // window the lane treats the quiet as SPOKEN FOR — it does
+    // not accumulate toward a fire, so no filler pair can land
+    // on top of a silence the tour chose on purpose.
+    if (this.clock.now() < this.plannedSilenceUntil) {
+      this.silenceMs = 0;
+      return;
+    }
     if (!this.fillerReady || this.laneStoodDown || this.pairOutstanding) {
       if (!this.trueSilence() && !this.proofSilence()) this.silenceMs = 0;
       return;
@@ -4050,6 +4572,17 @@ export class Tour {
 
   endTour(): void {
     if (this.phase !== 'active') return;
+    // Intro forms (Nov 11, 2026): freeform files a CLOSEOUT
+    // RECORD before anything else — the facts the next start's
+    // callback form may speak — and pre-renders that callback
+    // clip on the live lane, so the next start spends zero
+    // latency on it. Best-effort by construction: a failed
+    // record or render degrades the next start to the rotation.
+    this.writeCloseoutRecord();
+    if (this.hookWaiterTimer !== null) {
+      this.clock.clearTimeout(this.hookWaiterTimer);
+      this.hookWaiterTimer = null;
+    }
     // P1 salvage: the session closeout (A's session_end) — the
     // tour's totals, filed before teardown settles begin.
     this.emit('session_end', {
@@ -4083,6 +4616,46 @@ export class Tour {
     // telemetry sink stayed open.
     this.emitSealed = true;
     this.notify();
+  }
+
+  /**
+   * The freeform closeout record (Nov 11, 2026): last area, last
+   * story, owed welcome — recorded facts only, composed into the
+   * callback line by the pure composer (a record with nothing in
+   * it writes nothing). The line is pre-rendered into the synth
+   * cache under its resolver key; the spend is one live-lane
+   * synthesis (~$0.01–0.02), inside the live budget, never shelf
+   * accounting. Skipped outright when the TTS quota has tripped.
+   */
+  private writeCloseoutRecord(): void {
+    try {
+      const last = this.lastStoryItem;
+      const lastIsWelcome = (last?.subject ?? '').startsWith('welcome:');
+      const record: CloseoutRecord = {
+        areaName: this.area.neighborhood ?? this.area.city ?? null,
+        lastStoryLabel: last && !lastIsWelcome ? last.label : null,
+        owedName: this.owedWelcome?.name ?? null,
+        endedAt: Date.now(),
+      };
+      const text = composeCallbackText(record);
+      if (!text) {
+        backend.lsDel('callbackNext');
+        return;
+      }
+      const asset: CallbackAsset = { text, record, createdAt: Date.now() };
+      backend.lsJsonSet('callbackNext', asset);
+      if (this.seams.ttsQuotaTripped()) return;
+      void (async () => {
+        try {
+          const blob = await this.seams.synthesize(text);
+          await this.seams.audioCachePut(this.synthCacheKeyFor(text), blob);
+        } catch {
+          /* the next start resolves the callback by live synthesis, or rotates on */
+        }
+      })();
+    } catch {
+      /* closeout is best-effort; the tour ends regardless */
+    }
   }
 
   /** Whether a resumable tour marker exists (the 30-minute window, contract D). */
