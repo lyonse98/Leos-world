@@ -546,6 +546,14 @@ export interface EpisodeOutcomeAccounting {
   settledUnplayed: ReadonlyMap<string, { skipped: boolean }>;
   /** Story item ids dropped stale at the feed gate. */
   droppedStaleItemIds: ReadonlySet<string>;
+  /**
+   * Per-drop reason overrides for gate drops that are not
+   * the plain stale-window kind (field fix F3, Nov 12, 2026:
+   * 'late-presence' — a story dropped because its presence
+   * window had effectively passed, so the next field read
+   * can tell the two defect classes apart).
+   */
+  dropReasons?: ReadonlyMap<string, string>;
   /** Bridge item ids the gate skipped because their parent story was dropped. */
   gateSkippedItemIds: ReadonlySet<string>;
   /** Item ids that never rendered (skip-fallback at plan time). */
@@ -708,7 +716,7 @@ export function assembleOutcomeCapture(
   acc.planItemIds.forEach((id, index) => {
     if (playedSet.has(id)) return;
     let reason: string;
-    if (acc.droppedStaleItemIds.has(id)) reason = 'stale-window';
+    if (acc.droppedStaleItemIds.has(id)) reason = acc.dropReasons?.get(id) ?? 'stale-window';
     else if (acc.gateSkippedItemIds.has(id)) reason = 'parent-dropped';
     else if (acc.lateSkippedItemIds?.has(id)) reason = 'skipped-late';
     else if (acc.unrenderedItemIds.has(id)) reason = 'render-failed';

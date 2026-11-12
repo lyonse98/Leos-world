@@ -626,6 +626,8 @@ export class RoutePlanRunner {
   private resolvedCount = 0;
   /** Stories dropped at the feed gate for an expired window (their outgoing bridges are skipped too). */
   private droppedStoryIds = new Set<string>();
+  /** Non-default drop reasons by story item id (F3's 'late-presence'), filed into the outcome capture. */
+  private dropReasonById = new Map<string, string>();
   /**
    * Drop coherence (Nov 4, 2026): re-bridge commissions by
    * pseudo-item id, plus the same records in firing order
@@ -1659,6 +1661,7 @@ export class RoutePlanRunner {
           playedItemIds: playedIds,
           settledUnplayed: this.settledUnplayed,
           droppedStaleItemIds: this.droppedStoryIds,
+          dropReasons: this.dropReasonById,
           gateSkippedItemIds: this.gateSkippedItemIds,
           unrenderedItemIds: new Set(
             this.entries.filter(e => e.state === 'failed').map(e => e.planItem.id),
@@ -2315,6 +2318,7 @@ export class RoutePlanRunner {
   ): void {
     const it = storyEntry.planItem;
     this.droppedStoryIds.add(it.id);
+    if (reason !== 'stale-window') this.dropReasonById.set(it.id, reason);
     // The suppression near-miss record (field fix lane 3):
     // every drop carries how suppression stood toward this
     // story — the fired prediction, the last judgment's
