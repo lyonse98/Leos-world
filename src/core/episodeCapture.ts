@@ -571,6 +571,14 @@ export interface EpisodeOutcomeAccounting {
    * CapturedCommission.
    */
   commissions?: CapturedCommission[];
+  /**
+   * Bridge items whose render failed and whose seam fell
+   * back (field fix F5, Nov 12, 2026; optional — accountings
+   * that predate the fallback omit it). Plan item ids; the
+   * fallback FORM rides the items' own seamFallback marks in
+   * the runner's telemetry (route_bridge_fallback).
+   */
+  seamFallbackItemIds?: readonly string[];
   /** Ms from plan-fix until the render queue drained (null = never drained before close). */
   queueDrainedMs?: number | null;
   /** Heard recording: story unit ids that sounded (the ledger's own list). */
@@ -669,6 +677,8 @@ export interface RouteEpisodeOutcomePayload {
   render_results: CapturedRenderResult[];
   /** Re-bridge commissions (drop coherence); empty when none fired — and on rows that predate the field. */
   commissions: CapturedCommission[];
+  /** Bridge items that sounded via the render-failure seam fallback (field fix F5); empty when none — and on rows that predate the field. */
+  seam_fallbacks: string[];
   /** Ms from plan-fix until the render queue drained; null if it never did before close. */
   render_queue_drained_ms: number | null;
   heard_unit_ids: string[];
@@ -718,6 +728,7 @@ export function assembleOutcomeCapture(
     dropped,
     render_results: acc.renderResults ? [...acc.renderResults] : [],
     commissions: acc.commissions ? [...acc.commissions] : [],
+    seam_fallbacks: acc.seamFallbackItemIds ? [...acc.seamFallbackItemIds] : [],
     render_queue_drained_ms: acc.queueDrainedMs ?? null,
     heard_unit_ids: [...acc.heardUnitIds],
     max_displacement_m: maxDisplacementM,

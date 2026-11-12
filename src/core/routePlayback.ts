@@ -12,8 +12,11 @@
 //   - plan exhaustion before arrival → handoff line + freeform
 //     tail (the App starts a freeform Tour); never dead air.
 // Bridges are rendered at plan time in start(): a bridge whose
-// synthesis fails is dropped before anything plays (skip-fallback),
-// exactly as routeMode.applyBridgeFallback prescribes.
+// synthesis fails falls back to the neutral seam in its own slot
+// (field fix F5, Nov 12, 2026) — a planned-silence beat behind
+// it if even the seam fails — never a raw gap and never a drop,
+// exactly as routeMode.applyBridgeFallback prescribes at plan
+// time and applyBridgeSeamFallback applies mid-tour.
 //
 // Render-ahead pipeline (Nov 4, 2026 — Erik's latency ruling,
 // amending the Nov 3 settled-before-start doctrine): only the
@@ -112,7 +115,9 @@ import {
   estimateDurationSec,
   hasArrived,
   haversineM,
+  isDestinationArea,
   isOffCorridor,
+  neutralSeamTextFor,
   owedLine,
   progressAlongPath,
   type BridgeContext,
@@ -409,6 +414,50 @@ const SUPPRESSION_RATE_FRESH_MS = 30_000;
  */
 const SUPPRESSION_MAX_INTERVAL_PROGRESS = 0.05;
 
+/**
+ * Promise discipline (field fix F2c, Nov 12, 2026): the
+ * safety margin every lead-in commitment judgment prices in,
+ * in wall seconds of predicted travel. Suppression judges a
+ * story doomed when its predicted start lands within this
+ * margin of its window's close, and a re-bridge commission
+ * names its target only when the same test clears — a bridge
+ * may announce only what is committed, and a story starting
+ * inside its window's final seconds is not committed, it is
+ * merely not yet late.
+ */
+export const SUPPRESSION_SAFETY_SEC = 15;
+
+/** The commission bridge's own predicted cost in the commitment test (a ≤350-char commission speaks ~15–23 s). */
+const REBRIDGE_PREDICTION_SEC = 20;
+
+/**
+ * Late-presence conversion points (field fix F3, Nov 12,
+ * 2026): a windowed story reached when the driver has
+ * consumed MORE than this fraction of the window's
+ * post-anchor span is late — its presence register has gone
+ * false — and it converts to its woven twin (the studio
+ * register, true at any distance) or does not sound.
+ *
+ * Two points, because presence means two things. A CORRIDOR
+ * story's presence claim spans its SEGMENT — miles of road
+ * the narration treats as under the car — so the claim dies
+ * early: halfway through the closing window, the segment is
+ * behind (the SR-52 East shape: the item sounded framed as
+ * if the driver were on a segment he had already left). A
+ * POINT story's presence is the window doctrine itself: a
+ * telling is composed to start before its pin and play
+ * THROUGH it, and the window's close (one story-length past
+ * the anchor) is the shelf's own line for "a whole story
+ * behind" — so only the final sliver converts, where the
+ * telling would run a full story-length past the close and
+ * narrate ground a whole story behind for most of its run.
+ */
+export const LATE_PRESENCE_FRACTION_CORRIDOR = 0.5;
+export const LATE_PRESENCE_FRACTION_POINT = 0.9;
+
+/** The planned-silence length a doubly-failed bridge converts to (field fix F5): a breath, the planned-silence family's size. */
+export const FALLBACK_SEAM_SILENCE_SEC = 3;
+
 /** routeMode's spokenSec, mirrored (bridges estimate at 150 wpm, floored at 3 s) — the runner stays import-light. */
 function spokenSecEstimate(text: string): number {
   const words = text.trim().split(/\s+/).filter(Boolean).length;
@@ -524,6 +573,15 @@ export interface RenderEntry {
   planItem: PlanItem;
   audible: AudibleItem | null;
   state: 'pending' | 'ready' | 'failed' | 'late' | 'dropped';
+  /**
+   * Late-presence conversion material (field fix F3, Nov 12,
+   * 2026): the pre-built audible of the story's woven twin
+   * (planItem.lateTwin), rendered alongside the original so
+   * the feed gate can swap synchronously when the story is
+   * reached deep past its anchor. Null when the twin's own
+   * render failed — the gate then drops rather than converts.
+   */
+  lateAudible?: AudibleItem | null;
 }
 
 export class RoutePlanRunner {
@@ -1060,6 +1118,21 @@ export class RoutePlanRunner {
   private async runEntryTask(entry: RenderEntry): Promise<void> {
     const it = entry.planItem;
     const audible = await this.toAudibleItem(it);
+    // Late-presence material (F3): the woven twin's audible is
+    // built NOW, beside the original's, so the feed gate's
+    // conversion decision later is a synchronous swap, never
+    // a render wait. Built before the entry is marked ready —
+    // the gate must never see a ready story whose conversion
+    // material is still in flight.
+    let lateAudible: AudibleItem | null = null;
+    if (audible && it.kind === 'story' && it.lateTwin) {
+      lateAudible = await this.toAudibleItem({
+        ...it,
+        unit: it.lateTwin,
+        label: it.lateTwin.placeName,
+        durationSec: it.lateTwin.durationSec,
+      });
+    }
     this.renderInFlight -= 1;
     // Preview telemetry (consolidation §2): the preview item
     // rendered, or it didn't — a failed preview never wedges
@@ -1080,8 +1153,15 @@ export class RoutePlanRunner {
       }
     } else if (audible) {
       entry.audible = audible;
+      entry.lateAudible = lateAudible;
       entry.state = 'ready';
       this.renderDoneAtMs.set(it.id, Date.now());
+    } else if (it.kind === 'bridge' && (await this.applyBridgeSeamFallback(entry))) {
+      // Bridge render-failure fallback (field fix F5, Nov 12,
+      // 2026): the seam fallback already substituted the item
+      // and marked the entry ready — the seam sounds in the
+      // bridge's place, and the entry resolves at the gate
+      // like any ready tissue. Never a raw gap.
     } else {
       // Render failure → dropped, never wedged (skip-fallback).
       // It counts as resolved NOW: the gate will step over it
@@ -1105,6 +1185,68 @@ export class RoutePlanRunner {
       }
     }
     this.afterTaskSettle();
+  }
+
+  /**
+   * Bridge render-failure fallback (field fix F5, Nov 12,
+   * 2026): a bridge whose synthesis failed is replaced, in
+   * its own slot, by the neutral seam — a short composed line
+   * naming neither neighbor — rendered on the spot. If even
+   * the seam cannot render, the item converts to a
+   * planned-silence beat of the same slot: the seam is a
+   * breath either way, never a raw gap (the Nov 12 episode's
+   * three failed bridges left exactly those). The fallback
+   * is stamped on the item (seamFallback) and telemetered;
+   * the episode capture files it at close. Returns false only
+   * when both forms failed — the caller then takes the
+   * standing failed path.
+   */
+  private async applyBridgeSeamFallback(entry: RenderEntry): Promise<boolean> {
+    const it = entry.planItem;
+    const seamText = neutralSeamTextFor(it.id);
+    const seamItem: PlanItem = {
+      ...it,
+      text: seamText,
+      durationSec: spokenSecEstimate(seamText),
+      seamFallback: 'seam',
+    };
+    const seamAudible = await this.toAudibleItem(seamItem);
+    if (seamAudible) {
+      entry.planItem = seamItem;
+      entry.audible = seamAudible;
+      entry.state = 'ready';
+      this.renderDoneAtMs.set(it.id, Date.now());
+      this.deps.onEvent?.('route_bridge_fallback', {
+        form: 'seam',
+        bridge_id: it.id,
+        next_id: it.nextUnitId ?? null,
+        mode: 'route',
+      });
+      return true;
+    }
+    const silenceItem: PlanItem = {
+      ...it,
+      kind: 'silence',
+      text: undefined,
+      seam: 'render-fallback',
+      durationSec: FALLBACK_SEAM_SILENCE_SEC,
+      seamFallback: 'silence',
+    };
+    const silenceAudible = await this.toAudibleItem(silenceItem);
+    if (silenceAudible) {
+      entry.planItem = silenceItem;
+      entry.audible = silenceAudible;
+      entry.state = 'ready';
+      this.renderDoneAtMs.set(it.id, Date.now());
+      this.deps.onEvent?.('route_bridge_fallback', {
+        form: 'silence',
+        bridge_id: it.id,
+        next_id: it.nextUnitId ?? null,
+        mode: 'route',
+      });
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -1524,6 +1666,9 @@ export class RoutePlanRunner {
           lateSkippedItemIds: this.lateSkippedItemIds,
           renderResults: this.renderResults(),
           commissions: this.commissionsCapture(),
+          seamFallbackItemIds: this.entries
+            .filter(e => e.planItem.seamFallback && plan.items.some(p => p.id === e.planItem.id))
+            .map(e => e.planItem.id),
           queueDrainedMs:
             this.queueDrainedAtMs !== null ? this.queueDrainedAtMs - this.planFixAtMs : null,
           heardUnitIds,
@@ -1884,13 +2029,61 @@ export class RoutePlanRunner {
       if (it.kind === 'story' && !it.portal && !it.woven && entry !== this.firstReadyStoryEntry()) {
         const release = it.releaseProgress ?? 0;
         const expire = it.expireProgress ?? Number.POSITIVE_INFINITY;
-        if (this.lastProgress > expire) {
-          this.feedCursor += 1;
-          this.resolvedCount += 1;
-          this.dropStoryStale(entry, 'gate');
-          continue;
+        // Late-presence conversion (field fix F3, Nov 12,
+        // 2026): a windowed story the feed reaches deep past
+        // its anchor must not sound in the presence register —
+        // the Nov 12 SR-52 East corridor item played framed as
+        // if the driver were on a segment he had already left.
+        // Inside its window but past the late point, the story
+        // converts to its woven twin (pre-rendered beside it)
+        // or drops silently as late-presence. Exempt: the
+        // climax (the payoff is sequence-driven, its ground is
+        // the episode's destination-ward arc) and destination-
+        // area stories (presence at the destination is still
+        // true on arrival). Past expire entirely, the standing
+        // stale-window drop below governs, unchanged.
+        let converted = false;
+        if (
+          it.anchorProgress !== undefined &&
+          it.releaseProgress !== undefined &&
+          it.expireProgress !== undefined &&
+          !it.climax &&
+          this.lastProgress <= expire &&
+          !(this.plan && it.unit && isDestinationArea(it.unit, this.plan.destination))
+        ) {
+          const lateFraction =
+            it.unit?.angle === 'corridor'
+              ? LATE_PRESENCE_FRACTION_CORRIDOR
+              : LATE_PRESENCE_FRACTION_POINT;
+          const lateThreshold =
+            it.anchorProgress + lateFraction * (it.expireProgress - it.anchorProgress);
+          if (this.lastProgress > lateThreshold) {
+            if (this.tryLateConversion(entry)) {
+              converted = true;
+            } else {
+              this.feedCursor += 1;
+              this.resolvedCount += 1;
+              this.deps.onEvent?.('route_late_conversion', {
+                form: 'drop',
+                from_id: it.id,
+                subject: it.unit?.placeName ?? it.label,
+                at_progress: Math.round(this.lastProgress * 1000) / 1000,
+                mode: 'route',
+              });
+              this.dropStoryStale(entry, 'gate', undefined, 'late-presence');
+              continue;
+            }
+          }
         }
-        if (this.lastProgress < release) return; // window not open yet: wait for the ground
+        if (!converted) {
+          if (this.lastProgress > expire) {
+            this.feedCursor += 1;
+            this.resolvedCount += 1;
+            this.dropStoryStale(entry, 'gate');
+            continue;
+          }
+          if (this.lastProgress < release) return; // window not open yet: wait for the ground
+        }
       }
       this.player.enqueuePromised(entry.audible as AudibleItem);
       this.feedCursor += 1;
@@ -2022,7 +2215,18 @@ export class RoutePlanRunner {
     // judgment at a silence seat prices them in.
     const delaySec = remaining + extraDelaySec + bridge.durationSec + ROUTE_BREATH_MS / 1000;
     const predictedStartProgress = this.lastProgress + rate * delaySec;
-    if (predictedStartProgress <= expire) {
+    // Promise discipline (field fix F2c, Nov 12, 2026): the
+    // judgment is made against expire MINUS a safety margin.
+    // A bridge is a promise; a story predicted to start
+    // inside its window's final seconds is a story whose
+    // lead-in must not have spoken its name — the Nov 12
+    // Kate Sessions drop came AFTER its bridge had played,
+    // on a judgment (if any) priced to the window's edge.
+    // Judged inside the margin = doomed for lead-in purposes:
+    // the bridge is suppressed and the story marked for the
+    // gate, exactly like an overrun prediction.
+    const marginProgress = rate * SUPPRESSION_SAFETY_SEC;
+    if (predictedStartProgress <= expire - marginProgress) {
       note('judged_not_doomed', predictedStartProgress, rate);
       return { kind: 'safe' };
     }
@@ -2066,10 +2270,48 @@ export class RoutePlanRunner {
    * suppression marks a story ahead of its turn and the
    * gate's step-over resolves it when the cursor arrives.
    */
+  /**
+   * Late-presence conversion (field fix F3): swap a late
+   * story's entry to its woven twin — synchronously, from
+   * the audible rendered beside the original at fix time.
+   * The twin must be unheard in this episode's accounting:
+   * not already sounded, not dropped, and not seated as its
+   * own plan item elsewhere (a member twin sounds on its own
+   * terms). Returns false when no honest conversion exists —
+   * the caller drops the story rather than play it late.
+   */
+  private tryLateConversion(entry: RenderEntry): boolean {
+    const it = entry.planItem;
+    const twin = it.lateTwin;
+    if (!twin || !entry.lateAudible) return false;
+    if (this.playedStoryIds.has(twin.id) || this.droppedStoryIds.has(twin.id)) return false;
+    if (this.entries.some(e => e !== entry && e.planItem.id === twin.id)) return false;
+    entry.planItem = {
+      ...it,
+      unit: twin,
+      label: twin.placeName,
+      durationSec: twin.durationSec,
+      releaseProgress: undefined,
+      expireProgress: undefined,
+      lateConvertedFrom: it.id,
+    };
+    entry.audible = entry.lateAudible;
+    this.deps.onEvent?.('route_late_conversion', {
+      form: 'twin',
+      from_id: it.id,
+      to_id: twin.id,
+      subject: twin.placeName,
+      at_progress: Math.round(this.lastProgress * 1000) / 1000,
+      mode: 'route',
+    });
+    return true;
+  }
+
   private dropStoryStale(
     storyEntry: RenderEntry,
     via: 'suppression' | 'gate',
     prediction?: SuppressionPrediction,
+    reason = 'stale-window',
   ): void {
     const it = storyEntry.planItem;
     this.droppedStoryIds.add(it.id);
@@ -2103,7 +2345,7 @@ export class RoutePlanRunner {
           : { fired: false, reason_not_fired: 'not_judged' };
     this.deps.onEvent?.('story_dropped', {
       subject: it.unit?.placeName ?? it.label,
-      reason: 'stale-window',
+      reason,
       suppression,
       mode: 'route',
     });
@@ -2238,6 +2480,37 @@ export class RoutePlanRunner {
       // substitute: the story is not on this road, and the
       // bridge must not pretend the ground ahead holds it.
       context.wovenSubject = nextUnit.placeName;
+    }
+    // Promise discipline (field fix F2c, Nov 12, 2026): a
+    // commission NAMES its target only when the target is
+    // committed at authoring time — predicted to start inside
+    // its window with the standing safety margin. The Nov 12
+    // episode's commissions announced two houses by name
+    // ("just ahead is Anna Vickers House…") whose stories
+    // then dropped: a repair bridge is a promise like any
+    // other. When the window is tight — or unjudgeable AND
+    // nearly spent — the commission authors non-committal
+    // (anchor on the current place, quiet handoff), so if
+    // the story drops, nothing was ever promised.
+    if (
+      next.releaseProgress !== undefined &&
+      next.expireProgress !== undefined &&
+      !next.woven &&
+      !next.portal &&
+      !next.portalClimax
+    ) {
+      const rate = this.suppressionRatePerSec(Date.now());
+      const remaining = this.currentRemainingSec();
+      let uncommitted: boolean;
+      if (rate !== null && remaining !== null) {
+        const predictedStart =
+          this.lastProgress + rate * (remaining + REBRIDGE_PREDICTION_SEC + ROUTE_BREATH_MS / 1000);
+        uncommitted = predictedStart > next.expireProgress - rate * SUPPRESSION_SAFETY_SEC;
+      } else {
+        uncommitted =
+          next.expireProgress - this.lastProgress < SUPPRESSION_MAX_INTERVAL_PROGRESS;
+      }
+      if (uncommitted) context.nextUncommitted = true;
     }
     // Honest length, capped (field fix lanes 1/1b): the
     // commission is authored through the seam with the
