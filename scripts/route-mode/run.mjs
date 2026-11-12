@@ -342,14 +342,23 @@ check('v3.1 rotation r1 × granularity: the prior drive’s place yields at plac
   assert.deepEqual(storyIds(alone), ['solo|landmark_origin']);
 });
 
-// ---- bridge skip-fallback ----
-check('bridge skip-fallback: unready bridge drops, stories stay', () => {
+// ---- bridge render-failure fallback (field fix F5, Nov 12,
+// 2026 — supersedes the Nov 3 skip-fallback this check used to
+// pin: an unready bridge is no longer dropped; it is replaced
+// in place by the neutral seam, so the seam is crossed on a
+// composed breath, never a raw gap) ----
+check('bridge fallback (F5): an unready bridge becomes the neutral seam — stories stay, no gap', () => {
   const units = [unit('a|landmark_origin', 32.71), unit('b|landmark_origin', 32.85)];
   const plan = rm.composeRoutePlan(units, path, dest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] }, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 10000 });
   assert.ok(plan.items.some(i => i.kind === 'bridge'), 'expected a bridge');
   const broken = { ...plan, items: plan.items.map(i => (i.kind === 'bridge' ? { ...i, ready: false } : i)) };
   const fixed = rm.applyBridgeFallback(broken);
-  assert.ok(!fixed.items.some(i => i.kind === 'bridge'));
+  const seam = fixed.items.find(i => i.kind === 'bridge');
+  assert.ok(seam, 'the bridge survives as its fallback seam');
+  assert.equal(seam.ready, true);
+  assert.equal(seam.seamFallback, 'seam');
+  assert.ok(rn.NEUTRAL_SEAM_LINES.includes(seam.text), 'the seam text is a neutral seam line');
+  assert.ok(!seam.text.includes('a|landmark_origin') && !seam.text.includes('b|landmark_origin'), 'the seam names neither neighbor');
   assert.equal(fixed.items.filter(i => i.kind === 'story').length, 2);
   assert.equal(fixed.totalSec, fixed.items.reduce((s, i) => s + i.durationSec, 0));
 });
@@ -2893,7 +2902,34 @@ check('preview: a matched prior drive feeds the preview item — its thread and 
   );
   const previewItem = plan.items.find(i => i.kind === 'preview');
   assert.ok(previewItem.text.includes('the thread was Coast'), 'the prior drive’s thread is named');
-  assert.ok(previewItem.text.includes('Miles still owes you Owed Place'), 'the still-owed subject is named (the caller pre-filtered it against the heard ledger)');
+  // Promise discipline (field fix F2a, Nov 12, 2026 — this
+  // assertion replaces the pre-F2 one): an owed subject that
+  // is NOT seated with window protection in this plan is no
+  // longer named — the Nov 12 preview re-promised two owed
+  // stories that then dropped again. The debt is acknowledged
+  // generically instead.
+  assert.ok(!previewItem.text.includes('Owed Place'), 'an unseated owed subject is NOT named (F2a)');
+  assert.ok(
+    previewItem.text.includes('Miles still owes you a story from the last time we came this way'),
+    'the owed tease stays generic when no owed story is protected',
+  );
+  // And the converse: an owed subject seated WITH protection
+  // is named exactly as before.
+  const seatedPlan = composeDense(
+    [
+      navy('n1|landmark_origin', 32.72),
+      navy('n2|landmark_origin', 32.78),
+      unit('owed|landmark_origin', 32.81, { topics: ['Navy Century'], placeName: 'Owed Place' }),
+      navy('n3|landmark_origin', 32.84),
+    ],
+    noTopics,
+    { driveRecords: records },
+  );
+  const seatedPreview = seatedPlan.items.find(i => i.kind === 'preview');
+  assert.ok(
+    seatedPreview.text.includes('Miles still owes you Owed Place'),
+    'a protection-seated owed subject IS named as owed (F2a/F2b)',
+  );
   const byThread = composeDense(
     [navy('n1|landmark_origin', 32.72), navy('n2|landmark_origin', 32.78), navy('n3|landmark_origin', 32.84)],
     noTopics,
@@ -2910,7 +2946,16 @@ check('preview: a matched prior drive feeds the preview item — its thread and 
 check('preview: the drive nod takes the continuity slot over the subject-level nod', () => {
   const heardOnRoute = unit('old|landmark_origin', 32.8);
   const plan = composeDense(
-    [navy('n1|landmark_origin', 32.72), navy('n2|landmark_origin', 32.78), navy('n3|landmark_origin', 32.84), heardOnRoute],
+    [
+      navy('n1|landmark_origin', 32.72),
+      navy('n2|landmark_origin', 32.78),
+      // F2a (Nov 12, 2026): the owed subject is seated with
+      // window protection in this plan, so the drive nod may
+      // name it — the pre-F2 fixture named an unseated debt.
+      unit('owed|landmark_origin', 32.81, { topics: ['Navy Century'], placeName: 'Owed Place' }),
+      navy('n3|landmark_origin', 32.84),
+      heardOnRoute,
+    ],
     noTopics,
     {
       heardKeys: new Set(['old|landmark_origin']),
@@ -4411,7 +4456,24 @@ check('woven framing: the bridge into a member ranges along the thread — no pr
     wCand('w1|landmark_history', 400, { placeName: 'Woven One' }),
     wCand('w2|landmark_history', 350, { placeName: 'Woven Two' }),
   ]);
-  const plan = wCompose(units, 1800);
+  // Fixture geometry (F2c, Nov 12, 2026): this check pins the
+  // woven-vs-geo framing contrast, which needs a COMMITTED
+  // geo bridge. On the coarse 3-point path every geo anchor
+  // quantizes to progress 0.25 and Geo B is baseline-doomed
+  // in the serial model — under promise discipline its
+  // bridge is honestly non-committal there. Composed here on
+  // the dense path (the wCompose staging, mirrored) where
+  // Geo B's window is genuinely protected.
+  const plan = rm.composeRoutePlan(
+    units,
+    densePath,
+    denseDest,
+    'Dest',
+    { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 1800, driveSec: 1800 },
+  );
+  plan.driveSec = 1800;
+  plan.budgetSec = 1800;
   const seated = rm.seatWovenMembers(plan, units, { heardKeys: new Set() });
   assert.ok(memberIds(seated).length >= 1, 'fixture seats at least one member');
   const memberBridge = seated.items.find(i => i.kind === 'bridge' && i.nextUnitId === 'w1|landmark_history');
@@ -5616,12 +5678,23 @@ await checkAsync('pipeline: a mid-tour render failure degrades per-piece — nev
   await until(() => heard.includes('c|landmark_origin'), 'story c sounded without its failed bridge');
   assert.equal(events.filter(e => e.t === 'route_build_failed').length, 0, 'no build-failure event from a mid-tour render failure');
   assert.equal(events.filter(e => e.t === 'route_render_late').length, 0, 'a failed render is not misreported as a late skip');
+  // Bridge render-failure fallback (field fix F5, Nov 12,
+  // 2026 — this replaces the pre-F5 verdict assertions): the
+  // failed bridge does NOT file as failed/render-failed; its
+  // seam fallback renders in its slot, the fallback is
+  // telemetered, and the outcome row files the bridge in
+  // seam_fallbacks.
+  const fb = events.filter(e => e.t === 'route_bridge_fallback');
+  assert.equal(fb.length, 1, 'exactly one bridge fallback fired');
+  assert.equal(fb[0].p.form, 'seam');
+  assert.equal(fb[0].p.bridge_id, badBridge.id);
   runner.endTour();
   const out = outcomes[0];
   const rr = out.render_results.find(r => r.id === badBridge.id);
-  assert.ok(rr && rr.result === 'failed', `capture render verdict is failed (got ${JSON.stringify(rr)})`);
+  assert.ok(rr && rr.result !== 'failed', `the fallback bridge's verdict is a render, not a failure (got ${JSON.stringify(rr)})`);
+  assert.ok(out.seam_fallbacks.includes(badBridge.id), 'the outcome files the fallback in seam_fallbacks');
   const drop = out.dropped.find(d => d.id === badBridge.id);
-  assert.ok(drop && drop.reason === 'render-failed', `capture drop reason is render-failed (got ${JSON.stringify(drop)})`);
+  assert.ok(!drop, `the fallback bridge is not a drop (got ${JSON.stringify(drop)})`);
 });
 
 await checkAsync('pipeline: capture rows stay complete under pipelining — every text at settle, per-item verdicts at close', async () => {
@@ -5694,7 +5767,12 @@ await checkAsync('pipeline: capture rows stay complete under pipelining — ever
   );
   assert.equal(out.render_results.length, plan.items.length + 1, 'a render verdict for every item plus the wrap-up');
   const byId = new Map(out.render_results.map(r => [r.id, r.result]));
-  assert.equal(byId.get(failedBridge.id), 'failed', 'the failed bridge verdict');
+  // F5 (Nov 12, 2026): the synth-failed bridge fell back to
+  // its neutral seam and RENDERED — its verdict is a render
+  // verdict, and the outcome files it under seam_fallbacks.
+  assert.ok(byId.get(failedBridge.id) !== 'failed', 'the failed bridge fell back to its seam (F5) — no failed verdict');
+  assert.ok(out.seam_fallbacks.includes(failedBridge.id), 'the outcome files the seam fallback');
+  assert.ok(out.played_item_ids.includes(failedBridge.id), 'the seam sounded in the failed bridge’s slot');
   assert.equal(byId.get(lastBridge.id), 'ahead', 'the post-begin render verdict');
   assert.equal(byId.get('wrap-up'), 'pre-start', 'the hold-rendered wrap-up verdict');
   assert.ok(out.played_item_ids.includes(lastBridge.id), 'the ahead-rendered bridge still sounded');
@@ -7635,7 +7713,10 @@ check('re-anchor: the road itself is a feature — corridor places never pose as
   assert.ok(!res.candidates.some(c => c.kind === 'onroute'), 'corridor-segment places are the road, not places on it');
   const plan = anchorCompose(units);
   assert.equal(plan.thread?.anchorKind, 'feature');
-  assert.equal(rm.threadOptionLabel(feature), 'Interstate 5 · the road itself — 2 stories on this drive');
+  // Menu label format (field fix F4, Nov 12, 2026): title ·
+  // tie — PITCH · honest count. The pitch segment is new;
+  // the count and tie are unchanged.
+  assert.equal(rm.threadOptionLabel(feature), "Interstate 5 · the road itself — the road's own story, mile by mile · 2 stories on this drive");
 });
 
 check('re-anchor: a geographic topic is a feature only with presence proof', () => {
@@ -7673,13 +7754,16 @@ check('re-anchor: the intersection rule — index depth ranks a topic, it can no
   assert.equal(rm.detectRouteThread(twoGeo, [], support)?.topic, WT);
 });
 
-check('re-anchor: menu labels speak the anchor tie and the honest cast count', () => {
+check('re-anchor: menu labels speak the anchor tie, the pitch, and the honest cast count (F4)', () => {
   const mk = (kind, label, count) => ({ kind, key: 'k', label, topic: null, count, score: count, memberIds: [], cooled: false, lastHeadlineIndex: Infinity });
-  assert.equal(rm.threadOptionLabel(mk('destination', 'Harbor Gate', 3)), 'Harbor Gate · your destination — 3 stories on this drive');
-  assert.equal(rm.threadOptionLabel(mk('onroute', 'Old Town Square', 5)), 'Old Town Square · on your road — 5 stories on this drive');
-  assert.equal(rm.threadOptionLabel(mk('origin', 'Campus Gate', 4)), 'Campus Gate · where you start — 4 stories on this drive');
-  assert.equal(rm.threadOptionLabel(mk('feature', 'Interstate 5', 2)), 'Interstate 5 · the road itself — 2 stories on this drive');
-  assert.equal(rm.threadOptionLabel(mk('topic', WT, 6)), `${WT} · on this drive — 6 stories on this drive`);
+  // Field fix F4 (Nov 12, 2026): menu rows sell the thread —
+  // title · tie — PITCH · honest count. The pitch segment is
+  // the new element; tie and count are unchanged.
+  assert.equal(rm.threadOptionLabel(mk('destination', 'Harbor Gate', 3)), 'Harbor Gate · your destination — it all ties off where you are headed · 3 stories on this drive');
+  assert.equal(rm.threadOptionLabel(mk('onroute', 'Old Town Square', 5)), 'Old Town Square · on your road — the ground mid-drive where the stories gather · 5 stories on this drive');
+  assert.equal(rm.threadOptionLabel(mk('origin', 'Campus Gate', 4)), 'Campus Gate · where you start — where you start, followed the whole way · 4 stories on this drive');
+  assert.equal(rm.threadOptionLabel(mk('feature', 'Interstate 5', 2)), "Interstate 5 · the road itself — the road's own story, mile by mile · 2 stories on this drive");
+  assert.equal(rm.threadOptionLabel(mk('topic', WT, 6)), `${WT} · on this drive — one story told in pieces along the road · 6 stories on this drive`);
 });
 
 check('re-anchor: single- and zero-qualifier drives file their sources and never pause', () => {
