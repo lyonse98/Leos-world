@@ -8601,5 +8601,382 @@ check('planned silence: the composer seats composed beats at named seams only (N
   }
 });
 
+// ---- field fix stack (Nov 12, 2026) ----
+// Built from Erik's Nov 12 route drive on the Nov 11 build
+// (episode route-1794490800702): a four-house thread-member
+// chain after Salk, a preview that promised San Diego River
+// + Naval Medical Center and re-promised two owed stories —
+// all of which dropped — a played bridge into Kate Sessions
+// Park whose story then dropped, an SR-52 corridor served in
+// presence register after its segment was passed, threads
+// that were never sold, and three raw seam gaps where late
+// bridges render-failed. One suite per fix (F1–F5).
+{
+  const ffStories = p => p.items.filter(i => i.kind === 'story');
+  const ffPreview = p => p.items.find(i => i.kind === 'preview');
+  const ffCompose = (units, driveSec, opts = {}) =>
+    rm.composeRoutePlan(units, densePath, denseDest, 'Dest', noTopics, {
+      nowMs: NOW,
+      heardKeys: new Set(),
+      budgetSecOverride: 100000,
+      driveSec,
+      ...opts,
+    });
+
+  check('fieldfix F1: house classification is mechanical — residences and the Architecture topic, compounds excluded', () => {
+    assert.equal(rm.isHouseStory({ placeName: 'Anna Dyblie Spec House #1', angle: 'landmark_origin', topics: [] }), true, 'a registry spec house');
+    assert.equal(rm.isHouseStory({ placeName: 'Wisteria Cottage', angle: 'landmark_origin', topics: [] }), true, 'a cottage');
+    assert.equal(rm.isHouseStory({ placeName: 'Hotel del Coronado', angle: 'landmark_origin', topics: ['Architecture'] }), true, 'the Architecture topic, whatever the building');
+    assert.equal(rm.isHouseStory({ placeName: 'Point Loma Lighthouse', angle: 'landmark_origin', topics: [] }), false, 'a lighthouse is not a house');
+    assert.equal(rm.isHouseStory({ placeName: 'The Playhouse', angle: 'landmark_origin', topics: [] }), false, 'a playhouse is not a house');
+    assert.equal(rm.isHouseStory({ placeName: 'House of Pacific Relations', angle: 'landmark_origin', topics: [] }), false, 'the institutional House-of form is not a residence');
+    assert.equal(rm.isHouseStory({ placeName: 'Coronado Bridge', angle: 'landmark_origin', topics: ['Engineering'] }), false, 'an ordinary landmark');
+  });
+
+  check('fieldfix F1: the member-chain guard — one house member per episode, non-houses seat first, never back-to-back', () => {
+    const stage = units => {
+      const plan = rm.composeRoutePlan(
+        units,
+        densePath,
+        denseDest,
+        'Dest',
+        { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+        { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 1800, driveSec: 1800 },
+      );
+      plan.driveSec = 1800;
+      plan.budgetSec = 1800;
+      return rm.seatWovenMembers(plan, units, { heardKeys: new Set() });
+    };
+    // The Nov 12 shape: a thread whose member candidacy is
+    // dominated by registry houses (and the houses are the
+    // LONGEST candidates — pre-fix they seated first).
+    const mixed = stage(
+      wFixtureUnits([
+        wCand('alpha|landmark_history', 400, { placeName: 'Alpha Spec House' }),
+        wCand('beta|landmark_history', 380, { placeName: 'Beta House' }),
+        wCand('gamma|landmark_history', 360, { placeName: 'Gamma Cottage' }),
+        wCand('delta|landmark_history', 200, { placeName: 'Delta Fort' }),
+      ]),
+    );
+    assert.ok(memberIds(mixed).includes('delta|landmark_history'), 'the non-house member seats ahead of longer houses');
+    assert.deepEqual(
+      mixed.items.filter(i => i.woven && rm.isHouseStory(i.unit)).map(i => i.id),
+      ['alpha|landmark_history'],
+      'exactly one house member — the strongest house',
+    );
+    const seq = ffStories(mixed);
+    for (let i = 1; i < seq.length; i++) {
+      assert.ok(!(rm.isHouseStory(seq[i - 1].unit) && rm.isHouseStory(seq[i].unit)), 'house stories never sit back-to-back');
+    }
+    // A thread only houses can carry seats its single
+    // strongest and fills the rest from the geo pool.
+    const housesOnly = stage(
+      wFixtureUnits([
+        wCand('alpha|landmark_history', 400, { placeName: 'Alpha Spec House' }),
+        wCand('beta|landmark_history', 380, { placeName: 'Beta House' }),
+        wCand('gamma|landmark_history', 360, { placeName: 'Gamma Cottage' }),
+      ]),
+    );
+    assert.deepEqual(memberIds(housesOnly), ['alpha|landmark_history'], 'a houses-only thread seats one member, not a chain');
+  });
+
+  check('fieldfix F1: tiling demotion — houses in a decile yield under budget pressure and still seat when there is room', () => {
+    const mk = () => [
+      unit('h1|landmark_origin', 32.721, { placeName: 'Harbor Spec House' }),
+      unit('h2|landmark_origin', 32.723, { placeName: 'Harbor Cottage' }),
+      unit('lite|landmark_origin', 32.725, { placeName: 'Harbor Light' }),
+      unit('reg|landmark_event', 32.727, { placeName: 'Harbor Regatta', angle: 'landmark_event' }),
+    ];
+    // All four anchor to the same path segment (one decile);
+    // the houses are listed FIRST — input order would seat
+    // them. The budget fits exactly two stories.
+    const tight = ffCompose(mk(), 2000, { budgetSecOverride: 200 });
+    assert.deepEqual(
+      ffStories(tight).map(s => s.id).sort(),
+      ['lite|landmark_origin', 'reg|landmark_event'],
+      'under pressure the landmark and the event win the decile',
+    );
+    const loose = ffCompose(mk(), 2000);
+    assert.equal(ffStories(loose).length, 4, 'demotion is not exclusion — with room, the houses seat too');
+  });
+
+  check('fieldfix F2a: a serial-doomed mid story is promised nowhere — not in the preview, not in its own bridge', () => {
+    // The San Diego River shape: a mid-route story the
+    // serial model already knows cannot start inside its
+    // window with margin. It stays SEATED (the field may
+    // prove the model wrong) but nothing may promise it.
+    const plan = ffCompose(
+      [
+        unit('s1|landmark_origin', 32.72, { placeName: 'First Story', durationSec: 120 }),
+        unit('s2|landmark_origin', 32.76, { placeName: 'Second Story', durationSec: 260 }),
+        unit('mid|landmark_origin', 32.80, { placeName: 'Doomed Mid', durationSec: 150 }),
+        unit('s4|landmark_origin', 32.86, { placeName: 'Final Story', durationSec: 240 }),
+      ],
+      900,
+    );
+    assert.ok(rm.planDoomedStoryIds(plan.items, 900).includes('mid|landmark_origin'), 'fixture sanity: the serial model dooms the mid story');
+    assert.ok(ffStories(plan).some(s => s.id === 'mid|landmark_origin'), 'the doomed story is still seated — doom is not exclusion');
+    const preview = ffPreview(plan);
+    assert.ok(!preview.text.includes('Doomed Mid'), 'the preview never names the doomed story');
+    assert.ok(preview.text.includes('Final Story'), 'the protected closer is still promised');
+    const intoMid = plan.items.find(i => i.kind === 'bridge' && i.nextUnitId === 'mid|landmark_origin');
+    assert.ok(intoMid && !intoMid.text.includes('Doomed Mid'), 'its own bridge does not announce it (the Kate Sessions shape, closed at compose time)');
+    const intoS2 = plan.items.find(i => i.kind === 'bridge' && i.nextUnitId === 's2|landmark_origin');
+    assert.ok(intoS2 && intoS2.text.includes('Second Story'), 'control: a protected story’s bridge names it as before');
+  });
+
+  check('fieldfix F2b: owed seating fights for window protection — protected is named, unprotectable is never named', () => {
+    const records = [mkRecord({ owedSubjects: ['Owed Story'], endedAt: 5000 })];
+    // Case A: a portal hop rides the plan. Left ahead of the
+    // owed story it would re-drop it (the counterfactual
+    // below) — the protection machinery (portal repair +
+    // the owed-priority pass) clears it, and only then may
+    // the preview name the debt.
+    const planA = ffCompose(
+      [
+        unit('s1|landmark_origin', 32.72, { placeName: 'First Story', durationSec: 200, topics: ['Coast'] }),
+        unit('s2|landmark_origin', 32.76, { placeName: 'Second Story', durationSec: 130, topics: ['Coast'] }),
+        unit('owed|landmark_origin', 32.80, { placeName: 'Owed Story', durationSec: 150 }),
+        unit('s4|landmark_origin', 32.86, { placeName: 'Final Story', durationSec: 240, topics: ['Coast'] }),
+        unit('hop|landmark_history', 32.0, { lng: -117.05, placeName: 'Hop Story', durationSec: 200, topics: ['Coast'], wovenEligible: false }),
+      ],
+      1400,
+      { driveRecords: records },
+    );
+    assert.ok(ffStories(planA).some(s => s.id === 'hop|landmark_history'), 'fixture sanity: the hop seats');
+    assert.ok(!rm.planDoomedStoryIds(planA.items, 1400).includes('owed|landmark_origin'), 'the owed story is window-protected at settle');
+    const reordered = [...planA.items];
+    const hopIdx = reordered.findIndex(i => i.id === 'hop|landmark_history');
+    const [hopItem] = reordered.splice(hopIdx, 1);
+    reordered.splice(reordered.findIndex(i => i.id === 'owed|landmark_origin'), 0, hopItem);
+    assert.ok(
+      rm.planDoomedStoryIds(reordered, 1400).includes('owed|landmark_origin'),
+      'counterfactual: with the hop left ahead of it, the owed story WOULD have re-dropped — protection is the difference',
+    );
+    assert.ok(ffPreview(planA).text.includes('Miles still owes you Owed Story'), 'a protected owed story is named as owed');
+    // Case B: the queue ahead of the owed story is simply
+    // too long — no portal to move, no protection possible.
+    // It stays seated, but the preview keeps the debt
+    // generic. (The Nov 12 defect was naming it anyway.)
+    const planB = ffCompose(
+      [
+        unit('s1|landmark_origin', 32.72, { placeName: 'First Story', durationSec: 260 }),
+        unit('s2|landmark_origin', 32.76, { placeName: 'Second Story', durationSec: 260 }),
+        unit('owed|landmark_origin', 32.80, { placeName: 'Owed Story', durationSec: 150 }),
+        unit('s4|landmark_origin', 32.86, { placeName: 'Final Story', durationSec: 240 }),
+      ],
+      900,
+      { driveRecords: records },
+    );
+    assert.ok(rm.planDoomedStoryIds(planB.items, 900).includes('owed|landmark_origin'), 'fixture sanity: this owed story cannot be protected');
+    assert.ok(ffStories(planB).some(s => s.id === 'owed|landmark_origin'), 'unprotectable is not unseatable — the story still rides');
+    const previewB = ffPreview(planB).text;
+    assert.ok(!previewB.includes('Owed Story'), 'an unprotected owed story is never named');
+    assert.ok(
+      previewB.includes('Miles still owes you a story from the last time we came this way'),
+      'the debt is acknowledged generically instead',
+    );
+  });
+
+  check('fieldfix F2c: bridgeTextFor — an uncommitted next is never named; a committed one is named as before', () => {
+    const u1 = navy('bu1|landmark_origin', 32.72, { placeName: 'Earlier Place' });
+    const u2 = navy('bu2|landmark_origin', 32.76, { placeName: 'Current Place' });
+    const u3 = navy('bu3|landmark_origin', 32.80, { placeName: 'Next Place' });
+    const thread = { topic: 'Navy Century', memberIds: [u1.id, u2.id, u3.id], score: 3 };
+    const committed = rm.buildBridgeContext({ earlier: [u1, u2], prev: u2, next: u3, thread, isClimaxBridge: false, promiseMade: true });
+    const committedText = rn.bridgeTextFor(u2, u3, { context: committed, episode: rn.newBridgeEpisodeState() });
+    assert.ok(committedText.includes('Next Place'), 'control: a committed bridge names its story');
+    const uncommitted = rm.buildBridgeContext({ earlier: [u1, u2], prev: u2, next: u3, thread, isClimaxBridge: false, promiseMade: true, nextUncommitted: true });
+    const text = rn.bridgeTextFor(u2, u3, { context: uncommitted, episode: rn.newBridgeEpisodeState() });
+    assert.ok(!text.includes('Next Place'), 'the uncommitted bridge never names the next story');
+    assert.ok(!text.includes('just ahead'), 'no proximity promise either');
+    assert.ok(text.includes('Current Place'), 'the non-committal form anchors on the CURRENT place');
+  });
+
+  await checkAsync('fieldfix F2c: a re-bridge commission authored against a tight window does not name its target', async () => {
+    // Phase-1 (a)'s shape with C pulled close: B drops by
+    // suppression while A still has ~2 nominal minutes to
+    // play, so C's predicted start lands inside its window's
+    // safety margin — C is not committed, and the commission
+    // (the Nov 12 defect: commissions announced two houses
+    // whose stories then dropped) must not name it.
+    const plan = rm.composeRoutePlan(
+      [unit('a|landmark_origin', 32.71), unit('b|landmark_origin', 32.78), unit('c|landmark_origin', 32.81)],
+      finePath,
+      { lat: 32.9, lng: -117.25 },
+      'Dest',
+      noTopics,
+      { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec: 2000 },
+    );
+    const audio = new RealFakeAudio(250);
+    const events = [];
+    const outcomes = [];
+    const runner = p1Runner(audio, events, outcomes);
+    await runner.start(plan);
+    let lat = 32.76; // progress ≈ 0.30, the phase-1 (a) creep
+    runner.onPosition({ lat, lng: -117.25 });
+    for (let i = 0; i < 40 && !events.some(e => e.t === 'story_dropped'); i++) {
+      await new Promise(r => setTimeout(r, 200));
+      lat += 0.0001;
+      runner.onPosition({ lat, lng: -117.25 });
+    }
+    const drops = events.filter(e => e.t === 'story_dropped');
+    assert.equal(drops.length, 1, 'exactly one story dropped');
+    assert.equal(drops[0].p.subject, 'b|landmark_origin');
+    assert.equal(events.filter(e => e.t === 'route_rebridge_fired').length, 1, 'exactly one commission');
+    await until(() => events.some(e => e.t === 'route_rebridge_sounded'), 'the commission sounds');
+    runner.onPosition({ lat: 32.81, lng: -117.25 }); // inside C's window
+    await until(() => audio.played.some(u => u.includes('c%7Clandmark_origin.wav')), 'story C sounds');
+    runner.onPosition({ lat: 32.9, lng: -117.25 }); // arrival
+    await until(() => runner.view().closeoutDone, 'arrival closeout');
+    await until(() => outcomes.length === 1, 'outcome filed');
+    const comm = outcomes[0].commissions[0];
+    assert.ok(comm, 'the commission is filed');
+    assert.equal(comm.next_story_id, 'c|landmark_origin');
+    assert.equal(comm.result, 'sounded');
+    assert.ok(!comm.text.includes('c|landmark_origin'), 'the commission never names its uncommitted target');
+    assert.ok(comm.text.includes('a|landmark_origin'), 'it speaks from the current place instead');
+  });
+
+  // The SR-52 shape (F3): a corridor story whose segment
+  // exit is passed before its release must not sound in
+  // presence register. The teleport is a discontinuity, so
+  // suppression stands down and the feed gate's late check
+  // is the decider — exactly the field geometry.
+  const ffCorridorPlan = withTwin => {
+    const units = [
+      unit('a|landmark_origin', 32.71),
+      unit('sr52|corridor', 32.80, { angle: 'corridor', placeName: 'S R Fifty Two East' }),
+      unit('c|landmark_origin', 32.87),
+    ];
+    if (withTwin) {
+      units.push(
+        unit('sr52|corridor-woven-v1', 32.0, {
+          lng: -117.05,
+          angle: 'corridor-woven-v1',
+          placeName: 'S R Fifty Two East',
+          audioPath: 'x/sr52|corridor-woven-v1.wav',
+          durationSec: 100,
+          wovenEligible: true,
+        }),
+      );
+    }
+    return ffCompose(units, 2000);
+  };
+
+  await checkAsync('fieldfix F3: a corridor released past its segment converts to its woven twin', async () => {
+    const plan = ffCorridorPlan(true);
+    const corr = plan.items.find(i => i.id === 'sr52|corridor');
+    assert.equal(corr?.lateTwin?.id, 'sr52|corridor-woven-v1', 'fixture sanity: compose attached the late twin');
+    const audio = new RealFakeAudio(250);
+    const events = [];
+    const outcomes = [];
+    const heard = [];
+    const runner = p1Runner(audio, events, outcomes, { onStoryHeard: u => heard.push(u.id) });
+    await runner.start(plan);
+    // Progress 0.525: past the corridor's late point
+    // (anchor 0.475 + half its post-anchor span), still
+    // inside its window (expire 0.535) — the SR-52 moment.
+    runner.onPosition({ lat: 32.805, lng: -117.25 });
+    await until(() => heard.includes('sr52|corridor-woven-v1'), 'the woven twin sounds in the corridor’s place');
+    assert.ok(!heard.includes('sr52|corridor'), 'the presence-register original never sounds');
+    assert.ok(audio.played.some(u => u.includes('sr52%7Ccorridor-woven-v1.wav')), 'the twin’s own audio is what played');
+    const conv = events.filter(e => e.t === 'route_late_conversion');
+    assert.equal(conv.length, 1, 'exactly one late conversion');
+    assert.equal(conv[0].p.form, 'twin');
+    runner.onPosition({ lat: 32.87, lng: -117.25 });
+    await until(() => heard.includes('c|landmark_origin'), 'the closing story still sounds');
+    runner.onPosition({ lat: 32.9, lng: -117.25 });
+    await until(() => runner.view().closeoutDone, 'arrival closeout');
+    await until(() => outcomes.length === 1, 'outcome filed');
+    assert.deepEqual(verifier.validateOutcome(outcomes[0]), [], 'the live verifier accepts the conversion outcome');
+  });
+
+  await checkAsync('fieldfix F3: a corridor released past its segment with no twin drops silently (late-presence)', async () => {
+    const plan = ffCorridorPlan(false);
+    const corr = plan.items.find(i => i.id === 'sr52|corridor');
+    assert.ok(corr && !corr.lateTwin, 'fixture sanity: no twin rides this plan');
+    const audio = new RealFakeAudio(250);
+    const events = [];
+    const outcomes = [];
+    const heard = [];
+    const runner = p1Runner(audio, events, outcomes, { onStoryHeard: u => heard.push(u.id) });
+    await runner.start(plan);
+    runner.onPosition({ lat: 32.805, lng: -117.25 }); // the SR-52 moment, as above
+    await until(() => events.some(e => e.t === 'route_late_conversion'), 'the late gate resolves the corridor');
+    const conv = events.filter(e => e.t === 'route_late_conversion');
+    assert.equal(conv.length, 1);
+    assert.equal(conv[0].p.form, 'drop');
+    assert.ok(!heard.includes('sr52|corridor'), 'the corridor never sounds in presence register');
+    assert.ok(!audio.played.some(u => u.includes('sr52%7Ccorridor.wav')), 'its audio never plays');
+    runner.onPosition({ lat: 32.87, lng: -117.25 });
+    await until(() => heard.includes('c|landmark_origin'), 'the closing story still sounds');
+    runner.onPosition({ lat: 32.9, lng: -117.25 });
+    await until(() => runner.view().closeoutDone, 'arrival closeout');
+    await until(() => outcomes.length === 1, 'outcome filed');
+    const out = outcomes[0];
+    assert.equal(out.dropped.find(d => d.id === 'sr52|corridor')?.reason, 'late-presence', 'the drop files as late-presence, not stale-window');
+    assert.deepEqual(verifier.validateOutcome(out), [], 'the live verifier accepts the late-presence outcome');
+  });
+
+  check('fieldfix F4: the preview sells the thread from protected members only — count, span, and menu are honest', () => {
+    // FF2a's geometry wearing a thread: the mid member is
+    // serial-doomed. The sell may count and span only the
+    // protected members; the doomed member is not sold.
+    const navyStory = (id, lat, name, dur) => unit(id, lat, { placeName: name, durationSec: dur, topics: ['Navy Century'] });
+    const plan = ffCompose(
+      [
+        navyStory('n1|landmark_origin', 32.72, 'First Navy', 120),
+        navyStory('n2|landmark_origin', 32.76, 'Second Navy', 260),
+        navyStory('nx|landmark_origin', 32.80, 'Doomed Navy', 150),
+        navyStory('n4|landmark_origin', 32.86, 'Final Navy', 240),
+      ],
+      900,
+    );
+    assert.equal(plan.thread?.topic, 'Navy Century');
+    assert.ok(rm.planDoomedStoryIds(plan.items, 900).includes('nx|landmark_origin'), 'fixture sanity: the mid member is doomed');
+    const preview = ffPreview(plan).text;
+    assert.ok(
+      preview.includes('The thread runs 3 stories deep on this drive — from First Navy to Final Navy.'),
+      'the sell counts and spans the three protected members',
+    );
+    assert.ok(!preview.includes('Doomed Navy'), 'the doomed member is never sold (F2 binds the sell)');
+    const offered = (plan.threadMenu?.offered ?? []).map(o => rm.threadOptionLabel(o));
+    assert.ok(
+      offered.includes('Navy Century · on this drive — one story told in pieces along the road · 4 stories on this drive'),
+      'the menu row sells title + pitch + the honest cast count (4 in the cast, 3 protected on the road)',
+    );
+  });
+
+  await checkAsync('fieldfix F5: when a bridge and its seam both fail to render, the seam becomes a planned-silence beat', async () => {
+    const plan = anchorPlan();
+    const bridgeAB = plan.items.find(i => i.kind === 'bridge');
+    const audio = new RealFakeAudio(250);
+    const events = [];
+    const outcomes = [];
+    const heard = [];
+    const runner = p1Runner(audio, events, outcomes, {
+      synthUrl: async t => {
+        if (t === bridgeAB.text || rn.NEUTRAL_SEAM_LINES.includes(t)) throw new Error('synth down');
+        return 'blob:audio/' + encodeURIComponent(t);
+      },
+      onStoryHeard: u => heard.push(u.id),
+    });
+    await runner.start(plan);
+    await until(() => heard.includes('a|landmark_origin'), 'the departure story sounds');
+    runner.onPosition({ lat: 32.78, lng: -117.25 }); // inside B's window
+    await until(() => heard.includes('b|landmark_origin'), 'story B sounds after the silence beat', 15000);
+    const fb = events.filter(e => e.t === 'route_bridge_fallback');
+    assert.equal(fb.length, 1, 'exactly one bridge fallback fired');
+    assert.equal(fb[0].p.form, 'silence');
+    assert.equal(fb[0].p.bridge_id, bridgeAB.id);
+    await runner.endTour();
+    const out = outcomes[0];
+    assert.ok(out.seam_fallbacks.includes(bridgeAB.id), 'the outcome files the silence fallback');
+    assert.ok(!out.dropped.some(d => d.id === bridgeAB.id), 'the fallback bridge is not a drop');
+    assert.deepEqual(verifier.validateOutcome(out), [], 'the live verifier accepts the fallback outcome');
+  });
+}
+
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
