@@ -8,6 +8,7 @@
 
 import registryData from '../data/sd-historic-registry.json';
 import { MAJOR_PLACES } from '../content/majorPlaces';
+import { isHousePlaceName } from './houseClass';
 import { findNamedArea } from '../services/namedAreas';
 import { calculateDistance } from '../utils/geo';
 
@@ -222,8 +223,27 @@ export async function discoverCandidates(center: GeoPoint, radiusM: number): Pro
     const popularity = c.rating !== null ? (c.rating - 3.5) * 20 + Math.min(20, Math.log10((c.userRatings ?? 0) + 1) * 8) : 0;
     c.score += popularity - c.distanceM / 90;
   }
+  applyHouseDemotion(out);
   out.sort((a, b) => b.score - a.score);
   return out;
+}
+
+/**
+ * House demotion in freeform discovery (field fix F1, Nov 12,
+ * 2026 — the same Erik ruling the route composer applies):
+ * a residence-subject candidate (a registry spec house, a
+ * named cottage/mansion/residence) loses HOUSE_SCORE_PENALTY
+ * points — enough to sink it below the landmarks, majors and
+ * ordinary places it competes with in the serve cycle's
+ * ordering, registry boost included. Ordering only: a house
+ * that is the only candidate near the driver still serves.
+ */
+export const HOUSE_SCORE_PENALTY = 50;
+
+export function applyHouseDemotion(candidates: Candidate[]): void {
+  for (const c of candidates) {
+    if (isHousePlaceName(c.name)) c.score -= HOUSE_SCORE_PENALTY;
+  }
 }
 
 // ------------------------------------------------------------ place context
