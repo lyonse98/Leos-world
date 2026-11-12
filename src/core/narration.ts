@@ -256,6 +256,23 @@ export interface PreviewContext {
   /** A real previously-heard subject on this route's ground, when the ledger has one. */
   previouslyHeardSubject?: string;
   /**
+   * Promise discipline (field fix F2, Nov 12, 2026): false
+   * when the closing subject is seated but NOT window-
+   * protected — the preview names the destination, the
+   * count, and the thread, but never promises the closer by
+   * name. Absent = protected; the promise stands.
+   */
+  closingNamed?: boolean;
+  /**
+   * Promise discipline (F2): the prior drive left owed
+   * stories, but none is seated with window protection in
+   * this plan — the preview acknowledges the debt generically
+   * and names no titles. (A protected owed story rides
+   * priorDrive.stillOwedSubjects and IS named; this flag is
+   * then absent.)
+   */
+  owedUnnamed?: boolean;
+  /**
    * The matched prior DRIVE (addendum 2) — its thread topic
    * and up to two still-owed subjects, all from the stored
    * record as filtered against the current heard ledger. When
@@ -264,6 +281,14 @@ export interface PreviewContext {
    * continuity, and the preview gets one nod, not two).
    */
   priorDrive?: { threadTopic: string | null; stillOwedSubjects: string[] };
+  /**
+   * Thread sell (field fix F4, Nov 12, 2026): the thread's
+   * window-protected members — how many, and the first and
+   * last by name. The preview's cold-open sell is drawn ONLY
+   * from these (promise discipline binds the sell). Absent =
+   * no protected member: the thread is named, never sold.
+   */
+  threadSell?: { count: number; firstSubject: string; lastSubject: string };
 }
 
 /**
@@ -278,10 +303,29 @@ export interface PreviewContext {
  * drive builds to.
  */
 export function previewTextFor(ctx: PreviewContext): string {
-  const promiseSubject = ctx.climaxSubject ?? ctx.closingSubject;
+  // Promise discipline (F2, Nov 12, 2026): the subject the
+  // preview may PROMISE is the protected climax when the
+  // composer cleared one, else the closing subject when IT
+  // is protected. Both unprotected → promised is null: the
+  // preview names the destination, the count, and the thread
+  // (surfaces that cannot drop) and promises no story.
+  const promiseSubject = ctx.climaxSubject ?? (ctx.closingNamed === false ? null : ctx.closingSubject);
   // The thread's spoken name: the anchor label when the
   // thread is anchored to a place or feature, else its topic.
   const threadName = ctx.threadTopic ?? ctx.threadLabel;
+  // Thread sell (F4, Nov 12, 2026): the cold-open close for
+  // threaded previews — the thread's depth and span, drawn
+  // ONLY from its window-protected members (the composer
+  // filtered them; a sold promise is still a promise). One
+  // protected member is sold as what it is; two or more sell
+  // the arc from first to last.
+  const sell = ctx.threadSell;
+  const sellSuffix =
+    sell && sell.count >= 2 && sell.firstSubject !== sell.lastSubject
+      ? ` The thread runs ${sell.count} stories deep on this drive — from ${sell.firstSubject} to ${sell.lastSubject}.`
+      : sell && sell.count === 1
+        ? ` One story carries the thread today: ${sell.firstSubject}.`
+        : '';
   let text: string;
   if (ctx.threadCarried && threadName) {
     // Thread-carried framing (Nov 4, 2026): honest about the
@@ -306,6 +350,7 @@ export function previewTextFor(ctx: PreviewContext): string {
     if (ctx.midSubject) {
       text += ` And halfway there, ${ctx.midSubject} is waiting${ctx.midGist ? ` — ${ctx.midGist.replace(/\.$/, '')}` : ''}.`;
     }
+    text += sellSuffix;
   } else if (threadName && promiseSubject) {
     // Thread re-anchor (Nov 5, 2026): anchored threads are
     // framed by where the thread LIVES on this drive. A
@@ -336,10 +381,43 @@ export function previewTextFor(ctx: PreviewContext): string {
     if (ctx.midSubject) {
       text += ` And halfway there, ${ctx.midSubject} is waiting${ctx.midGist ? ` — ${ctx.midGist.replace(/\.$/, '')}` : ''}.`;
     }
+    text += sellSuffix;
+  } else if (threadName) {
+    // Promise discipline (F2): a thread but NO protected
+    // promise — the thread is named and sold on its own
+    // (it is a protected surface: the cast exists), and no
+    // story is promised by name. The mid hook, when the
+    // composer passed one, is protected by construction.
+    text =
+      ctx.threadAnchorKind === 'destination' && ctx.threadLabel
+        ? `Here's where this drive is headed — not just ${ctx.destinationName}, but ${ctx.threadLabel} itself. The whole road flows toward it.`
+        : ctx.threadAnchorKind === 'onroute' && ctx.threadLabel
+          ? `The heart of this drive is ${ctx.threadLabel} — it owns the middle of the road, and the stories keep gathering there.`
+          : ctx.threadAnchorKind === 'origin' && ctx.threadLabel
+            ? `We're leaving ${ctx.threadLabel} country — the ground we set out from threads this whole drive, all the way to ${ctx.destinationName}.`
+            : ctx.threadTopic
+              ? `Here's the thread to listen for on this drive: ${ctx.threadTopic}. It runs under this whole road, all the way to ${ctx.destinationName}.`
+              : `The thread of this drive is ${threadName} — it runs under this whole road, all the way to ${ctx.destinationName}.`;
+    if (ctx.midSubject) {
+      text += ` And halfway there, ${ctx.midSubject} is waiting${ctx.midGist ? ` — ${ctx.midGist.replace(/\.$/, '')}` : ''}.`;
+    }
+    text += sellSuffix;
   } else if (ctx.storyCount === 1) {
-    text = `We're headed to ${ctx.destinationName} — one story on the way, and it's ${ctx.closingSubject}.`;
+    text =
+      ctx.closingNamed === false
+        ? `We're headed to ${ctx.destinationName} — one story on the way.`
+        : `We're headed to ${ctx.destinationName} — one story on the way, and it's ${ctx.closingSubject}.`;
   } else {
-    text = `We're headed to ${ctx.destinationName} — ${ctx.storyCount} stories between here and there, and the last of them is ${ctx.closingSubject}.`;
+    text =
+      ctx.closingNamed === false
+        ? `We're headed to ${ctx.destinationName} — ${ctx.storyCount} stories between here and there.`
+        : `We're headed to ${ctx.destinationName} — ${ctx.storyCount} stories between here and there, and the last of them is ${ctx.closingSubject}.`;
+  }
+  // Owed but unnameable (F2): the debt is acknowledged
+  // without titles whenever no owed subject survived the
+  // protection gate into priorDrive's named list.
+  if (ctx.owedUnnamed && !(ctx.priorDrive && ctx.priorDrive.stillOwedSubjects.length > 0)) {
+    text += ` And Miles still owes you a story from the last time we came this way.`;
   }
   // One continuity nod, never two: a matched prior DRIVE
   // (addendum 2) takes the slot over the subject-level nod.
@@ -391,6 +469,30 @@ export const BRIDGE_CONNECTIVE_LINES: string[] = [
   'Settle in for a moment. The next story is worth arriving at properly.',
   'This is Miles, riding shotgun — pointing at the things the road forgets to mention.',
 ];
+
+/**
+ * Neutral seam lines (field fix F5, Nov 12, 2026): the
+ * fallback tissue for a bridge whose render failed. The
+ * Nov 12 episode lost three late bridges to render failures
+ * and the stories around them arrived across raw gaps. A
+ * seam names NEITHER neighbor and claims nothing about the
+ * road — it is a breath with words in it, a few seconds of
+ * composed presence where the failure would have left a
+ * tear. Selection is a stable hash of the bridge's own id,
+ * so the same plan always falls back to the same seam.
+ */
+export const NEUTRAL_SEAM_LINES: string[] = [
+  'We roll on.',
+  'On we go.',
+  'The road keeps unfolding.',
+  'And the drive goes on.',
+];
+
+export function neutralSeamTextFor(seed: string): string {
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+  return NEUTRAL_SEAM_LINES[h % NEUTRAL_SEAM_LINES.length];
+}
 
 /** Pre-rendered reaction bank lines (Miles-solo, voice-only — no music, no archival stingers). */
 export const REACTION_BANK: string[] = [
@@ -738,6 +840,19 @@ export interface BridgeContext {
    */
   prevWoven?: boolean;
   /**
+   * Promise discipline (field fix F2c, Nov 12, 2026): the
+   * next story is NOT committed — seated without window
+   * protection, or (for runner-authored commissions) inside
+   * a window too tight to confirm at authoring time. The
+   * bridge must not name or announce it: the lead-in anchors
+   * on the CURRENT place (a factual callback without the
+   * forward tail) or hands off quietly. If the story then
+   * drops, nothing was promised; if it sounds, it arrives
+   * unannounced but unbroken. Set by routeMode's
+   * buildBridgeContext from the caller's verdict.
+   */
+  nextUncommitted?: boolean;
+  /**
    * Memorial guardrails (Nov 11, 2026): either side of the pair
    * is in the audited memorial set. Into memorial ground the
    * allowed moves shrink to quiet handoff, plain anchor, and
@@ -1023,6 +1138,25 @@ export function bridgeTextFor(
     sentences.push(`From ${prev.placeName} we keep rolling.`);
     episode.openings.push('rolling');
     move = ctx?.wovenSubject ? 'thread-stitch' : 'anchor';
+  } else if (ctx?.nextUncommitted) {
+    // Promise discipline (F2c): the next story is not
+    // committed, so this bridge does not name it — the
+    // Kate Sessions shape (a bridge that spoke the name of
+    // a story that then dropped) is impossible from here.
+    // Two honest forms: a factual callback on the story
+    // just told (the standing callback minus its "Ahead:"
+    // tail), or the quiet handoff. The move recorded is
+    // the form used, so the episode rotation stays truthful.
+    if (ctx.prevGist) {
+      const gist = spokenGist(ctx.prevGist);
+      const gistSentence = /[.!?]$/.test(gist) ? gist : `${gist}.`;
+      sentences.push(`From ${prev.placeName} we roll on. ${gistSentence} That stays with us.`);
+      move = 'callback';
+    } else {
+      sentences.push(`From ${prev.placeName}, we roll on.`);
+      move = 'quiet-handoff';
+    }
+    episode.openings.push('rolling');
   } else if (ctx && ctx.role !== 'payoff') {
     move =
       opts.commission &&
@@ -1078,7 +1212,10 @@ export function bridgeTextFor(
   episode.moves.push(move);
   /** The one optional sentence's index (the mid thread callback/callout) — droppable under a char cap. */
   let optionalIdx = -1;
-  if (ctx && !opts.portalTopic) {
+  // Promise discipline (F2c): the optional sentences (payoff
+  // landing, thread callout) all NAME the next story — an
+  // uncommitted next story gets none of them.
+  if (ctx && !opts.portalTopic && !ctx.nextUncommitted) {
     if (ctx.wovenSubject && ctx.role !== 'payoff') {
       // The woven range, framed honestly (Nov 4, 2026): the
       // story is NOT on this road — Miles is following the
