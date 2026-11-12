@@ -20,6 +20,9 @@
 // No live calls happen at import time, in tests, or in the harness.
 //
 import { normalizePlaceName, selectPriorDrive, type RouteDriveRecord } from './routeHistory';
+import { houseRank, houseRankForPlaceKey, isHouseStory } from './houseClass';
+
+export { isHouseStory } from './houseClass';
 
 // The place-name normalizer is part of this module's caller
 // contract (ComposeOptions.corridorTellingCounts is keyed by
@@ -30,6 +33,7 @@ import {
   bridgeTextFor,
   previewTextFor,
   spokenFormText,
+  neutralSeamTextFor,
   newBridgeEpisodeState,
   bridgeEpisodeStateFromTexts,
   BRIDGE_CONNECTIVE_LINES,
@@ -48,6 +52,7 @@ export {
   bridgeTextFor,
   previewTextFor,
   spokenFormText,
+  neutralSeamTextFor,
   newBridgeEpisodeState,
   bridgeEpisodeStateFromTexts,
   BRIDGE_CONNECTIVE_LINES,
@@ -902,7 +907,13 @@ export function orderFetchCandidates(
     list.push(g);
     buckets.set(b, list);
   }
-  for (const list of buckets.values()) list.sort((a, b) => a.p - b.p);
+  for (const list of buckets.values())
+    list.sort(
+      (a, b) =>
+        houseRankForPlaceKey(a.e.place_key, tagsOf(a.e.place_key, a.e.angle).topics) -
+          houseRankForPlaceKey(b.e.place_key, tagsOf(b.e.place_key, b.e.angle).topics) ||
+        a.p - b.p,
+    );
   const ordered: FetchIndexEntry[] = [];
   for (let round = 0; ; round++) {
     let took = false;
@@ -924,7 +935,13 @@ export function orderFetchCandidates(
       d: distanceToPathM({ lat: e.lat, lng: e.lng }, path),
     }))
     .filter(c => c.shared >= 1)
-    .sort((a, b) => b.shared - a.shared || a.d - b.d)
+    .sort(
+      (a, b) =>
+        b.shared - a.shared ||
+        houseRankForPlaceKey(a.e.place_key, tagsOf(a.e.place_key, a.e.angle).topics) -
+          houseRankForPlaceKey(b.e.place_key, tagsOf(b.e.place_key, b.e.angle).topics) ||
+        a.d - b.d,
+    )
     .map(c => c.e);
   return { geo: ordered, portals };
 }
@@ -1343,6 +1360,41 @@ export interface PlanItem {
    * climax: true alongside this flag.
    */
   woven?: boolean;
+  /**
+   * Late-presence conversion (field fix F3, Nov 12, 2026):
+   * the story's own WOVEN TWIN, attached by the composer when
+   * the pool holds one unheard and unseated. A presence-
+   * register telling may only sound while the driver is
+   * still meaningfully at its ground; a windowed story the
+   * feed reaches deep past its anchor (the SR-52 East shape:
+   * the corridor item sounded framed as if the driver were
+   * on a segment he had already left) converts to this twin
+   * — the studio register, honest about distance — or, with
+   * no twin, does not sound at all. The runner owns the
+   * conversion decision (it knows the live position); this
+   * field is only the material.
+   */
+  lateTwin?: LibraryUnit;
+  /**
+   * Set by the RUNNER when the late-presence conversion
+   * fired: the id of the presence original whose slot this
+   * (swapped) item now carries. The original stays unheard —
+   * a future drive can still meet it on time — while the
+   * twin is what the heard ledger records.
+   */
+  lateConvertedFrom?: string;
+  /**
+   * Bridge render-failure fallback (field fix F5, Nov 12,
+   * 2026): set when this bridge's own text failed to render
+   * and the seam fell back — 'seam' = the neutral seam line
+   * (narration.neutralSeamTextFor) sounded in its place;
+   * 'silence' = even the seam failed, and the item plays as
+   * a planned-silence beat. A failed bridge is never simply
+   * absent: the Nov 12 episode's three render failures left
+   * raw gaps on stories that did play. The runner files the
+   * fallback in the episode capture.
+   */
+  seamFallback?: 'seam' | 'silence';
   /**
    * Bridges: the anchor gap the bridge spans, in seconds (the
    * standing elastic-target formula). Bookkeeping since field
@@ -2229,9 +2281,34 @@ export function threadTieLabel(kind: ThreadAnchorKind): string {
   }
 }
 
-/** One menu row's full label: name, tie, honest cast count ("Navy Century · your destination — 8 stories on this drive"). */
+/**
+ * The thread's one-line pitch (field fix F4, Nov 12, 2026 —
+ * Erik: threads were "not very obvious or compelling… should
+ * have been sold harder"): the stake of this thread on this
+ * drive, by anchor class. Deterministic phrases over the
+ * candidate's real facts — the pitch claims nothing the cast
+ * does not hold, and it never names a story (the menu sells
+ * the thread, not items; item promises are the preview's,
+ * under the F2 protection gate).
+ */
+export function threadPitchLine(c: { kind: ThreadAnchorKind; topic: string | null }): string {
+  switch (c.kind) {
+    case 'destination':
+      return 'it all ties off where you are headed';
+    case 'onroute':
+      return 'the ground mid-drive where the stories gather';
+    case 'origin':
+      return 'where you start, followed the whole way';
+    case 'feature':
+      return "the road's own story, mile by mile";
+    case 'topic':
+      return 'one story told in pieces along the road';
+  }
+}
+
+/** One menu row's full label: name, tie, pitch, honest cast count ("Navy Century · your destination — it all ties off where you are headed · 8 stories on this drive"). */
 export function threadOptionLabel(c: ThreadCandidate): string {
-  return `${c.label} · ${threadTieLabel(c.kind)} — ${c.count} ${c.count === 1 ? 'story' : 'stories'} on this drive`;
+  return `${c.label} · ${threadTieLabel(c.kind)} — ${threadPitchLine(c)} · ${c.count} ${c.count === 1 ? 'story' : 'stories'} on this drive`;
 }
 
 // ------------------------------------------------------------
@@ -2859,8 +2936,17 @@ export function composeRoutePlan(
     steerTone && (u.tone === steerTone || u.toneSecondary === steerTone) ? 0 : 1;
   const familyRank = (u: LibraryUnit): number => (family ? familyRankOf(u) : 0);
   const threadRank = (u: LibraryUnit): number => (threadMemberIds.has(u.id) ? 0 : 1);
+  // House demotion (field fix F1, Nov 12, 2026): the house /
+  // architecture class sorts below everything else it competes
+  // with — Erik's ruling after the Nov 12 drive chained four
+  // registry spec houses. The term sits directly under the
+  // Family boundary (a content boundary outranks taste) and
+  // ABOVE tone and thread: thread membership is not an
+  // exemption, and neither is a tone match. Ordering only — a
+  // house still seats when nothing stronger competes.
   const byRank = (a: LibraryUnit, b: LibraryUnit): number =>
     familyRank(a) - familyRank(b) ||
+    houseRank(a) - houseRank(b) ||
     toneRank(a) - toneRank(b) ||
     threadRank(a) - threadRank(b) ||
     angleClassRank(a.angle) - angleClassRank(b.angle) ||
@@ -3140,6 +3226,7 @@ export function composeRoutePlan(
       const head =
         angleClassRank(a.angle) - angleClassRank(b.angle) ||
         familyRank(a) - familyRank(b) ||
+        houseRank(a) - houseRank(b) ||
         toneRank(a) - toneRank(b) ||
         threadRank(a) - threadRank(b);
       if (head !== 0) return head;
@@ -3343,6 +3430,7 @@ export function composeRoutePlan(
         // the tone tie — the rating leads mood in every sort,
         // as in byRank (Standard: the term is identically 0).
         familyRank(a.cand) - familyRank(b.cand) ||
+        houseRank(a.cand) - houseRank(b.cand) ||
         b.toneTie - a.toneTie ||
         prog(a.parent) - prog(b.parent),
     );
@@ -3376,25 +3464,19 @@ export function composeRoutePlan(
     total += f.durationSec;
   }
 
-  // Portal placement safety (field fix lane 2, Nov 5, 2026):
-  // a windowless hop sounds in sequence, so its bulk is spent
-  // against every window behind it. The field episode seated
-  // a 266 s hop fourth, ahead of geo stories whose windows it
-  // helped burn. Repair rule: run the serial sounding model
-  // (estimated tissue, SERIAL_PACE_SAFETY pace) over the
-  // sequence; a windowed story doomed WITH the portals but
-  // safe WITHOUT them is the portals' doing — relocate the
-  // nearest hop to just after the endangered story (never
-  // past the climax) when that saves it, else drop the hop
-  // from the plan. Doom that exists without any portal is the
-  // tiling's own fact, not this pass's to repair. Member
-  // seating (seatWovenMembers) needs no twin of this pass:
-  // members fit ENTIRELY inside silent gaps bounded by the
-  // next story's release, and a window's slack past its
-  // release is its own duration + lead — verified against
-  // planDoomedStoryIds in the harness.
-  {
-    const serialDoom = (seq: SeqEntry[]): Set<string> => {
+  // The serial sounding model over a sequence (estimated
+  // tissue, SERIAL_PACE_SAFETY pace): the set of windowed
+  // story ids whose windows the serial sounding predictably
+  // burns. Two consumers: the portal placement safety pass
+  // below (which repairs doom the portals cause) and the
+  // promise discipline (field fix F2, Nov 12, 2026), for which
+  // this set DEFINES "window-protected" at settle — a story
+  // outside the set is scheduled inside its window with
+  // margin; a story inside it may be seated but may never be
+  // PROMISED (not by the preview, not by a bridge, not by a
+  // suppression commission). One model, one definition, so
+  // the surfaces can never disagree about what was promised.
+  const serialDoom = (seq: SeqEntry[]): Set<string> => {
       const doomed = new Set<string>();
       let t = seq.some(e => e.unit.angle !== 'filler_hosted') ? SERIAL_PREVIEW_EST_SEC : 0;
       let sinceReaction = 0;
@@ -3421,7 +3503,23 @@ export function composeRoutePlan(
         }
       });
       return doomed;
-    };
+  };
+  // Portal placement safety (field fix lane 2, Nov 5, 2026):
+  // a windowless hop sounds in sequence, so its bulk is spent
+  // against every window behind it. The field episode seated
+  // a 266 s hop fourth, ahead of geo stories whose windows it
+  // helped burn. Repair rule: a windowed story doomed WITH
+  // the portals but safe WITHOUT them is the portals' doing —
+  // relocate the nearest hop to just after the endangered
+  // story (never past the climax) when that saves it, else
+  // drop the hop from the plan. Doom that exists without any
+  // portal is the tiling's own fact, not this pass's to
+  // repair. Member seating (seatWovenMembers) needs no twin
+  // of this pass: members fit ENTIRELY inside silent gaps
+  // bounded by the next story's release, and a window's slack
+  // past its release is its own duration + lead — verified
+  // against planDoomedStoryIds in the harness.
+  {
     const baselineDoom = serialDoom(sequence.filter(e => e.portal !== true && e.portalClimax !== true));
     for (let guard = 0; guard < 32; guard++) {
       const victimId = [...serialDoom(sequence)].find(id => !baselineDoom.has(id));
@@ -3455,6 +3553,78 @@ export function composeRoutePlan(
     }
   }
 
+  // Owed-story window protection (field fix F2b, Nov 12,
+  // 2026): a story the previous drive left owed carries a
+  // promise the moment it seats — the closeout teased it, and
+  // the Nov 12 preview named both owed stories (Pacific
+  // Islander Festival, Marine Corps Recruit Depot) before
+  // both dropped stale-window AGAIN. So an owed story seated
+  // in serial doom gets the portal repair's own medicine,
+  // ahead of every ordinary consideration: hops ahead of it
+  // drop out (relocation cannot help — the debt is not the
+  // hop's fault, the queue ahead of it is simply too long)
+  // until its window is protected or no hops remain. If
+  // protection is impossible the story still seats (it may
+  // yet sound — the model is a prediction), but the preview
+  // gate below will not name it: protection, not seating, is
+  // what licenses the name.
+  if (priorDrive && priorDrive.stillOwedSubjects.length > 0) {
+    const owedNames = new Set(priorDrive.stillOwedSubjects.map(s => normalizePlaceName(s)));
+    for (const entry of sequence) {
+      if (!owedNames.has(normalizePlaceName(entry.unit.placeName))) continue;
+      if (entry.portal === true || entry.portalClimax === true) continue;
+      let guard = 0;
+      while (serialDoom(sequence).has(entry.unit.id) && guard++ < 8) {
+        const idx = sequence.indexOf(entry);
+        const hopIdx = sequence.findIndex((e, i) => i < idx && e.portal === true);
+        if (hopIdx === -1) break;
+        sequence.splice(hopIdx, 1);
+      }
+    }
+  }
+
+  // The settle-time doom set the promise discipline reads:
+  // computed once, after every repair, over the final
+  // sequence. entryProtected is the per-entry predicate —
+  // windowless entries (portal hops, the portal climax,
+  // hosted filler) are protected by construction; windowed
+  // entries are protected exactly when the model clears them.
+  const settleDoom = serialDoom(sequence);
+  const entryProtected = (e: SeqEntry): boolean =>
+    e.portal === true ||
+    e.portalClimax === true ||
+    e.unit.angle === 'filler_hosted' ||
+    // The SEQUENCED climax is protected by construction: the
+    // composer re-anchored it to the drive's end, and its
+    // window is that placement, not ground truth the serial
+    // model can judge — the model prices the climax's start
+    // after every story it was sequenced past, double-counting
+    // sounding time the runner actually spends inside the
+    // climax's own window geography (the runner feeds it by
+    // position, in its window, as the payoff). A NATURAL
+    // climax — an ordinary windowed story that merely happens
+    // to be strongest — takes no exemption: the model judges
+    // it like any story, which is the Nov 12 Naval Medical
+    // Center shape (promised as the tie-off, never played).
+    (climaxUnitId !== null && climaxSequenced && e.unit.id === climaxUnitId) ||
+    !settleDoom.has(e.unit.id);
+
+  // Late-presence material (field fix F3, Nov 12, 2026):
+  // the woven twin of every windowed story in the final
+  // sequence, when the build's pool holds the twin unheard
+  // and the twin is not itself seated anywhere in the plan.
+  // Attached to the story item; the RUNNER decides at feed
+  // time whether the conversion fires (it owns the live
+  // position) — see PlanItem.lateTwin.
+  const lateTwinByBase = wovenTwinsByBase(units.filter(u => !opts.heardKeys.has(u.id)));
+  const sequenceUnitIds = new Set(sequence.map(e => e.unit.id));
+  const lateTwinFor = (e: SeqEntry): LibraryUnit | undefined => {
+    if (e.portal === true || e.portalClimax === true || e.unit.angle === 'filler_hosted') return undefined;
+    const twin = lateTwinByBase.get(e.unit.id);
+    if (!twin || twin.id === e.unit.id || sequenceUnitIds.has(twin.id)) return undefined;
+    return twin;
+  };
+
   // Interleave plan-time bridges + sparing reactions,
   // and stamp each story with its release window.
   const items: PlanItem[] = [];
@@ -3466,13 +3636,33 @@ export function composeRoutePlan(
   // composed — the preview item exists by the time any bridge
   // is built, so the promise is a settled fact, not a hope.
   const closingEntry = [...sequence].reverse().find(e => e.unit.angle !== 'filler_hosted');
+  // Promise discipline (field fix F2a, Nov 12, 2026): the
+  // preview may name only window-protected items. The Nov 12
+  // preview promised San Diego River "halfway there" and
+  // Naval Medical Center San Diego as the arrival tie-off —
+  // River dropped stale-window and NMC never played. So:
+  // the climax is promised only when its own window is
+  // protected; the closing subject is the last PROTECTED
+  // story (an unprotected actual closer is simply not named —
+  // closingNamed=false when no story at all is protected);
+  // the mid hook is drawn from protected entries only (the
+  // Kate Sessions shape — promised halfway, dropped — dies
+  // here at the preview surface too); owed subjects pass the
+  // same gate at the previewCtx build below.
+  const closingProtectedEntry = [...sequence]
+    .reverse()
+    .find(e => e.unit.angle !== 'filler_hosted' && entryProtected(e));
   // The preview teases the ACTUAL climax (addendum 4): the
   // winner and its mode when the plan has one; without a
   // winner, the closing story itself, rendered 'late' (it
-  // truly is last).
+  // truly is last). F2a: a doomed winner is not teased — the
+  // preview falls back to the protected closing subject.
+  const climaxEntry = climaxUnitId ? sequence.find(e => e.unit.id === climaxUnitId) : undefined;
   const climaxCtx = climaxUnitId
-    ? { subject: climaxSubject ?? '', mode: climaxMode, sequenced: climaxSequenced }
-    : closingEntry
+    ? climaxEntry && entryProtected(climaxEntry)
+      ? { subject: climaxSubject ?? '', mode: climaxMode, sequenced: climaxSequenced }
+      : null
+    : closingEntry && entryProtected(closingEntry)
       ? { subject: closingEntry.unit.placeName, mode: 'late' as const, sequenced: false }
       : null;
   // The spoken episode preview (consolidation §2): the plan's
@@ -3488,7 +3678,7 @@ export function composeRoutePlan(
     storyEntries.length > 2
       ? storyEntries
           .slice(1)
-          .filter(e => e !== closingEntry)
+          .filter(e => e !== closingEntry && entryProtected(e))
           .sort(
             (a, b) =>
               Math.abs(prog(a.unit) - 0.5) - Math.abs(prog(b.unit) - 0.5) ||
@@ -3508,17 +3698,61 @@ export function composeRoutePlan(
         prog(a) - prog(b) ||
         (a.id < b.id ? -1 : 1),
     )[0]?.placeName ?? null;
+  // Owed subjects pass the promise gate by name (F2a): a
+  // still-owed subject may be NAMED as owed only when its
+  // story is seated in this plan WITH window protection
+  // (the F2b pass above fought for exactly that). An owed
+  // subject that fails the gate — unseated, or seated in
+  // doom — is not named; when every owed subject fails, the
+  // tease stays generic (owedUnnamed): a debt acknowledged,
+  // no title promised.
+  const protectedSubjects = new Set(
+    sequence.filter(e => entryProtected(e)).map(e => normalizePlaceName(e.unit.placeName)),
+  );
+  const owedKept = (priorDrive?.stillOwedSubjects ?? []).filter(s =>
+    protectedSubjects.has(normalizePlaceName(s)),
+  );
+  const owedUnnamed =
+    priorDrive !== null && priorDrive.stillOwedSubjects.length > 0 && owedKept.length === 0;
+  const priorDriveForPreview = priorDrive
+    ? { threadTopic: priorDrive.threadTopic, stillOwedSubjects: owedKept }
+    : null;
+  // Thread sell (field fix F4, Nov 12, 2026): the preview
+  // sells the thread like a cold open — but a sold promise
+  // is still a promise, so the what's-coming is drawn ONLY
+  // from window-protected thread members (F2 binds the
+  // sell): the protected member count, and the first and
+  // last protected member subjects in sequence order.
+  const protectedMembers = thread
+    ? sequence.filter(
+        e =>
+          e.unit.angle !== 'filler_hosted' &&
+          thread.memberIds.includes(e.unit.id) &&
+          entryProtected(e),
+      )
+    : [];
+  const threadSell =
+    thread && protectedMembers.length > 0
+      ? {
+          count: protectedMembers.length,
+          firstSubject: protectedMembers[0].unit.placeName,
+          lastSubject: protectedMembers[protectedMembers.length - 1].unit.placeName,
+        }
+      : null;
   const previewCtx =
     storyEntries.length > 0
       ? buildPreviewContext({
           thread,
           destinationName,
           storyCount: storyEntries.length,
-          closing: closingEntry?.unit ?? null,
+          closing: closingProtectedEntry?.unit ?? closingEntry?.unit ?? null,
+          closingNamed: closingProtectedEntry !== undefined,
           climax: climaxCtx,
           mid: midEntry?.unit ?? null,
           previouslyHeardSubject: priorHeardSubject,
-          priorDrive,
+          priorDrive: priorDriveForPreview,
+          owedUnnamed,
+          threadSell,
           audience,
         })
       : null;
@@ -3579,6 +3813,14 @@ export function composeRoutePlan(
             climaxLast: climaxSequenced,
             promiseMade,
             offRoute: entry.portalClimax === true,
+            // Promise discipline (F2c): a bridge into a story
+            // seated in serial doom may not name it — the
+            // story is not committed, and the Nov 12 Kate
+            // Sessions bridge spoke a name the episode then
+            // dropped. entryProtected is the settle-time
+            // verdict; the runner re-checks live for drops
+            // the plan did not predict.
+            nextUncommitted: !entryProtected(entry),
             audience,
           });
       const text = bridgeTextFor(prev, u, {
@@ -3627,6 +3869,7 @@ export function composeRoutePlan(
       ...(isClimax ? { climax: true } : {}),
       ...(entry.portal ? { portal: true, portalParentId: entry.portalParentId } : {}),
       ...(entry.portalClimax ? { portalClimax: true } : {}),
+      ...(!isFiller && lateTwinFor(entry) ? { lateTwin: lateTwinFor(entry) } : {}),
     });
     // Planned silence seating (Nov 11, 2026): directly after
     // the story whose seam it is, ahead of any reaction tissue.
@@ -4075,7 +4318,15 @@ export function wovenMemberCandidates(
     )
     .sort(
       (a, b) =>
-        famRank(a) - famRank(b) || b.durationSec - a.durationSec || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+        famRank(a) - famRank(b) ||
+        // House demotion (F1): member candidacy is where the
+        // Nov 12 chain formed — houses sort last here too, so
+        // a thread only a house can carry still finds its
+        // strongest house, but any non-house member outranks
+        // every house regardless of length.
+        houseRank(a) - houseRank(b) ||
+        b.durationSec - a.durationSec ||
+        (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
     );
 }
 
@@ -4324,6 +4575,16 @@ export function seatWovenMembers(
       const nextIsCarriedClimax = carriedClimax !== null && next.id === carriedClimax.id;
       const isClimaxNext =
         nextIsCarriedClimax || (plan.climaxUnitId !== null && next.id === plan.climaxUnitId);
+      // Promise discipline (F2c): the bridge OUT of a member
+      // names the road's next story only when that story is
+      // window-protected in the PROSPECTIVE plan (this member
+      // spliced in) — the member's own bulk can be what dooms
+      // it, and the verdict must price that in.
+      const prospective = [...items];
+      prospective.splice(gap.next ? prospective.indexOf(gap.next) : prospective.length, 0, memberItem);
+      const nextDoomed =
+        gap.next.releaseProgress !== undefined &&
+        planDoomedStoryIds(prospective, driveSec).includes(next.id);
       const context = buildBridgeContext({
         earlier: [...earlierUnits(gap.next), cand],
         prev: cand,
@@ -4338,6 +4599,7 @@ export function seatWovenMembers(
         // The bridge OUT of a member returns to the road: an
         // anchor's job (Nov 11, 2026).
         prevWoven: true,
+        nextUncommitted: nextDoomed,
         audience: plan.audience,
       });
       const target = bridgeTarget(
@@ -4387,7 +4649,19 @@ export function seatWovenMembers(
   // final-third room fits it is the fallback. Its span
   // then closes later gaps to members exactly as a
   // composed climax's does (memberGaps reads the item).
-  if (carried && plan.climaxUnitId === null && candidates.length > 0 && seated.length < cap) {
+  if (
+    carried &&
+    plan.climaxUnitId === null &&
+    candidates.length > 0 &&
+    seated.length < cap &&
+    // House guard (F1): a house is never designated the climax
+    // of an episode that already carries a house story — the
+    // member-chain rules below govern its seating instead.
+    !(
+      isHouseStory(candidates[0]) &&
+      plan.items.some(i => i.kind === 'story' && i.unit && isHouseStory(i.unit))
+    )
+  ) {
     const cand = candidates[0];
     const zoneStartSec = CLIMAX_ZONE_START * driveSec;
     const fits = memberGaps(items, driveSec, true)
@@ -4420,6 +4694,16 @@ export function seatWovenMembers(
     }
   }
 
+  // House member-chain guard (field fix F1, Nov 12, 2026):
+  // at most ONE house/architecture member per episode, and
+  // never back-to-back with another house story — the Nov 12
+  // episode chained four registry spec houses as members, and
+  // Erik's ruling is that the class sits at the bottom of the
+  // score, thread membership notwithstanding. A house-only
+  // thread still seats its single strongest house (candidacy
+  // order, houses last); the rest of the episode fills from
+  // the geo pool and non-house members as usual.
+  const houseMembersSeated = (): number => seated.filter(u => isHouseStory(u)).length;
   for (const cand of candidates) {
     if (seated.length >= cap) break;
     if (usedIds.has(cand.id) || usedPlaces.has(cand.placeKey)) continue;
@@ -4429,10 +4713,20 @@ export function seatWovenMembers(
     // the gap it took. Thread-carried mode reads the same
     // gaps with the departure edge open: a member may
     // anchor the episode's start.
-    const gap =
-      memberGaps(items, driveSec, carried)
-        .filter(g => g.end - g.start >= cand.durationSec)
-        .sort((a, b) => b.end - b.start - (a.end - a.start) || a.start - b.start)[0] ?? null;
+    const gaps = memberGaps(items, driveSec, carried)
+      .filter(g => g.end - g.start >= cand.durationSec)
+      .sort((a, b) => b.end - b.start - (a.end - a.start) || a.start - b.start);
+    let gap: MemberGap | null = gaps[0] ?? null;
+    if (isHouseStory(cand)) {
+      if (houseMembersSeated() >= 1) continue;
+      gap =
+        gaps.find(
+          g =>
+            !(g.prev?.unit && isHouseStory(g.prev.unit)) &&
+            !(g.next?.unit && isHouseStory(g.next.unit)),
+        ) ?? null;
+      if (!gap) continue;
+    }
     if (!gap) continue;
     insertIntoGap(cand, gap, false);
   }
@@ -4488,6 +4782,26 @@ export function seatWovenMembers(
                   (a.anchorProgress ?? 0) - (b.anchorProgress ?? 0),
               )[0]
           : undefined;
+      // Thread sell (F4) over the FINAL items: protected
+      // members only — windowless members are protected by
+      // construction; windowed members must clear the
+      // items-level doom check on the settled plan.
+      const rebuildDoom = new Set(planDoomedStoryIds(items, driveSec));
+      const rebuildMembers = items.filter(
+        i =>
+          i.kind === 'story' &&
+          i.unit &&
+          thread.memberIds.includes(i.unit.id) &&
+          (i.releaseProgress === undefined || !rebuildDoom.has(i.id)),
+      );
+      const rebuildSell =
+        rebuildMembers.length > 0
+          ? {
+              count: rebuildMembers.length,
+              firstSubject: (rebuildMembers[0].unit as LibraryUnit).placeName,
+              lastSubject: (rebuildMembers[rebuildMembers.length - 1].unit as LibraryUnit).placeName,
+            }
+          : null;
       const ctx = buildPreviewContext({
         thread,
         destinationName: plan.destinationName,
@@ -4503,8 +4817,13 @@ export function seatWovenMembers(
               }
             : null,
         mid: midItem?.unit ?? null,
+        closingNamed: !(
+          closingItem.releaseProgress !== undefined && rebuildDoom.has(closingItem.id)
+        ),
         previouslyHeardSubject: previewContext?.previouslyHeardSubject ?? null,
         priorDrive: previewContext?.priorDrive ?? null,
+        owedUnnamed: previewContext?.owedUnnamed ?? false,
+        threadSell: rebuildSell,
         threadCarried: true,
         audience: plan.audience,
       });
@@ -4602,6 +4921,17 @@ export function buildBridgeContext(args: {
    */
   prevWoven?: boolean;
   /**
+   * Promise discipline (field fix F2c, Nov 12, 2026): true
+   * when the next story is seated WITHOUT window protection
+   * (serial doom at settle, or — for suppression commissions
+   * authored live by the runner — a window too tight to
+   * confirm at authoring time). The narration layer then
+   * authors the lead-in WITHOUT naming or announcing the
+   * next story: a Kate Sessions bridge must never speak the
+   * name of a story that then drops.
+   */
+  nextUncommitted?: boolean;
+  /**
    * The build's audience coloring (Nov 5, 2026): under
    * 'family', a GRAY-class previous story contributes no
    * quoted gist — the bridge names the subject only (the
@@ -4643,6 +4973,7 @@ export function buildBridgeContext(args: {
     somberPair: colorSuppressedFor(prev) || colorSuppressedFor(next),
     segDistanceM: haversineM({ lat: prev.lat, lng: prev.lng }, { lat: next.lat, lng: next.lng }),
     ...(args.prevWoven ? { prevWoven: true } : {}),
+    ...(args.nextUncommitted ? { nextUncommitted: true } : {}),
   };
   if (role === 'payoff') {
     ctx.promiseMade = promiseMade;
@@ -4693,6 +5024,31 @@ export function buildPreviewContext(args: {
   climax?: { subject: string; mode: 'destination' | 'late' | 'natural' | 'portal' | 'thread'; sequenced: boolean } | null;
   /** The plan's mid-drive hook subject (a real story entry between departure and closing). */
   mid: LibraryUnit | null;
+  /**
+   * Promise discipline (field fix F2a, Nov 12, 2026): false
+   * when the closing unit passed here is NOT window-protected
+   * (it is the plan's actual closer, seated in serial doom,
+   * and no protected story could stand in its place) — the
+   * narration layer then names the destination and the count
+   * but never the closer. Absent/true = the closing subject
+   * is protected and may be promised.
+   */
+  closingNamed?: boolean;
+  /**
+   * Promise discipline (F2a): true when the prior drive left
+   * owed stories but NONE of them is seated with window
+   * protection in this plan — the owed tease stays generic
+   * (a debt acknowledged, no titles named).
+   */
+  owedUnnamed?: boolean;
+  /**
+   * Thread sell (field fix F4, Nov 12, 2026): the thread's
+   * window-protected members in this plan — count and the
+   * first/last subjects — from which the preview's cold-open
+   * sell is drawn. Null when no member is protected (the
+   * thread is still named; nothing is sold).
+   */
+  threadSell?: { count: number; firstSubject: string; lastSubject: string } | null;
   /** A previously-heard subject on this route's ground, drawn from the caller's heard input only. */
   previouslyHeardSubject?: string | null;
   /** The matched prior drive (addendum 2), or null when no record matched. */
@@ -4731,6 +5087,9 @@ export function buildPreviewContext(args: {
     climaxMode: climax?.mode ?? 'natural',
   };
   if (args.threadCarried) ctx.threadCarried = true;
+  if (args.closingNamed === false) ctx.closingNamed = false;
+  if (args.owedUnnamed) ctx.owedUnnamed = true;
+  if (thread && args.threadSell) ctx.threadSell = args.threadSell;
   if (thread && mid && mid.placeName !== ctx.closingSubject) {
     ctx.midSubject = mid.placeName;
     const gist =
@@ -4746,12 +5105,28 @@ export function buildPreviewContext(args: {
 
 
 /**
- * Bridge skip-fallback: a bridge whose plan-time render failed
- * (ready === false) is dropped outright — playback goes straight
- * into the next Miles story. Never a retry, never a live fallback.
+ * Bridge render-failure fallback (field fix F5, Nov 12,
+ * 2026 — superseding the Nov 3 skip-fallback): a bridge whose
+ * plan-time render failed (ready === false) is NOT dropped —
+ * it is replaced, in place, by the neutral seam (a short
+ * template line naming neither neighbor), so playback crosses
+ * a composed breath instead of a raw gap. The substitution
+ * is marked seamFallback so the episode record can tell a
+ * fallback seam from an authored bridge. The runner applies
+ * the same discipline to mid-tour render failures, with a
+ * planned-silence beat behind the seam if even it fails.
  */
 export function applyBridgeFallback(plan: RoutePlan): RoutePlan {
-  const items = plan.items.filter(it => !(it.kind === 'bridge' && !it.ready));
+  let changed = false;
+  const items = plan.items.map(it => {
+    if (it.kind === 'bridge' && !it.ready) {
+      changed = true;
+      const text = neutralSeamTextFor(it.id);
+      return { ...it, text, durationSec: spokenSec(text), ready: true, seamFallback: 'seam' as const };
+    }
+    return it;
+  });
+  if (!changed) return plan;
   return { ...plan, items, totalSec: items.reduce((s, it) => s + it.durationSec, 0) };
 }
 
