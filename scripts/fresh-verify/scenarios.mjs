@@ -3347,6 +3347,126 @@ export async function runScenarios(Tour, extras) {
     tour.endTour();
   }
 
+  // ---------------------------------------------------------- SCF: short cuts (Nov 12, 2026)
+  // A base angle's second LENGTH rides the shelf as angle +
+  // ' (short cut)'. Freeform's version rule is the route
+  // doctrine's freeform form ("density sets the cut"): the
+  // cut serves when the ground inside the serve radius is
+  // dense (≥6 canonical stories, twins deduped to their
+  // base); sparse ground serves the full version. The two
+  // lengths are ONE story: the rotation never picks a twin
+  // as an angle, and dealing either deals both.
+
+  suite('SCF-1 short cuts: dense ground serves the cut; the retell is generated — never the other length');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Cut Place', { tier1: true })],
+      library: [
+        { name: 'Cut Place', angles: ['landmark_origin', 'landmark_origin (short cut)'] },
+        // Five more canonical stories banked at the same
+        // spot: with Cut Place's pair deduped to one story,
+        // the serve radius holds 6 canonical stories —
+        // dense by the freeform line. Only Cut Place is a
+        // candidate, so the neighbors never serve; they are
+        // pure density.
+        ...['Dense One', 'Dense Two', 'Dense Three', 'Dense Four', 'Dense Five'].map(name => ({
+          name,
+          angles: ['landmark_origin'],
+        })),
+      ],
+    });
+    // Starve prefetch so both tellings resolve at serve time (P4's discipline).
+    world.seams.discoverCandidates = async pt =>
+      Math.abs(pt.lat - UTC.lat) < 0.0001 && Math.abs(pt.lng - UTC.lng) < 0.0001
+        ? world.candidates
+        : [];
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    const tellings = () =>
+      world.eventsOf('story_played').filter(e => e.payload.subject === 'cut place');
+    for (let i = 0; i < 80 && tellings().length < 2; i++) await world.clock.advance(5_000);
+    const t = tellings();
+    check('the place was told twice (cut + in-tour retell)', t.length === 2, `n=${t.length}`);
+    check('first telling is the SHORT CUT',
+      t[0]?.payload.source === 'library' && t[0]?.payload.angle === 'landmark_origin (short cut)',
+      JSON.stringify(t[0]?.payload));
+    check('the cut audio is what played',
+      audio.log.some(e => typeof e.src === 'string' && e.src.includes('landmark_origin (short cut)')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    check('second telling is generated live, not the full version',
+      t[1]?.payload.source === 'live' && t[1]?.payload.angle === null,
+      JSON.stringify(t[1]?.payload));
+    check('the full version never played',
+      !audio.log.some(e => typeof e.src === 'string' && e.src.endsWith('library/cut-place/landmark_origin.wav')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    tour.endTour();
+  }
+
+  suite('SCF-2 short cuts: sparse ground serves the full version');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Cut Place', { tier1: true })],
+      library: [{ name: 'Cut Place', angles: ['landmark_origin', 'landmark_origin (short cut)'] }],
+    });
+    world.seams.discoverCandidates = async pt =>
+      Math.abs(pt.lat - UTC.lat) < 0.0001 && Math.abs(pt.lng - UTC.lng) < 0.0001
+        ? world.candidates
+        : [];
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    const tellings = () =>
+      world.eventsOf('story_played').filter(e => e.payload.subject === 'cut place');
+    for (let i = 0; i < 80 && tellings().length < 1; i++) await world.clock.advance(5_000);
+    const t = tellings();
+    check('the place was told', t.length >= 1, `n=${t.length}`);
+    check('the telling is the FULL version (one canonical story in radius is sparse)',
+      t[0]?.payload.source === 'library' && t[0]?.payload.angle === 'landmark_origin',
+      JSON.stringify(t[0]?.payload));
+    check('the cut audio never played',
+      !audio.log.some(e => typeof e.src === 'string' && e.src.includes('(short cut)')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    tour.endTour();
+  }
+
+  suite('SCF-3 short cuts: a corridor serve takes the full original even when the twin sorts first in the index');
+  {
+    resetLocalStorage();
+    // WT-2's segment discipline, verbatim.
+    const segLen = s =>
+      s.polyline.reduce((acc, p, i) => (i === 0 ? 0 : acc + Math.hypot((p.lat - s.polyline[i - 1].lat) * 111_320, (p.lng - s.polyline[i - 1].lng) * 88_000)), 0);
+    const picked = CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
+    const start = picked.polyline[0];
+    const second = picked.polyline[1];
+    const pickedHeading = ((Math.atan2(second.lng - start.lng, second.lat - start.lat) * 180) / Math.PI + 360) % 360;
+    const seg = matchCorridor({ lat: start.lat, lng: start.lng, heading: pickedHeading })?.segment ?? picked;
+    const world = makeWorld(Tour, {
+      candidates: [],
+      // The twin row FIRST in the index: the corridor lane
+      // makes no version decision — it serves the presence
+      // original at full length, on its angle, not its
+      // position.
+      library: [{ name: seg.displayName, angles: ['corridor (short cut)', 'corridor'] }],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ synth: 30_000 }));
+    const tour = world.makeTour(audio);
+    tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 27, headingDeg: pickedHeading });
+    tour.start(false);
+    await world.clock.advance(20_000); // greeting + opener done; welcome (30 s) playing
+    tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 27, headingDeg: pickedHeading });
+    for (let i = 0; i < 24 && audio.plays('library').length === 0; i++) await world.clock.advance(5_000);
+    const libPlays = audio.plays('library');
+    check('the corridor story served from the shelf', libPlays.length >= 1, JSON.stringify(audio.log.map(e => e.src)));
+    check('the corridor ORIGINAL is what played',
+      libPlays.some(e => typeof e.src === 'string' && e.src.endsWith('/corridor.wav')),
+      JSON.stringify(libPlays.map(e => e.src)));
+    check('the twin audio never played',
+      !audio.log.some(e => typeof e.src === 'string' && e.src.includes('(short cut)')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    tour.endTour();
+  }
+
   // ---------------------------------------------------------- AM ambient bed (Nov 5, 2026 scope)
   // The bed is a parallel layer beside the Player: resolver
   // fixtures, the start gate, the duck engine, hysteresis +

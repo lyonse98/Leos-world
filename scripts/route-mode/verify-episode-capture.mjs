@@ -68,6 +68,16 @@ export function validatePlan(p) {
       if (typeof it.index !== 'number' || it.index !== i) problems.push(`items[${i}].index mismatch`);
       if (typeof it.id !== 'string' || !it.id) problems.push(`items[${i}].id missing`);
       if (!(typeof it.text === 'string' || it.text === null)) problems.push(`items[${i}].text not string|null`);
+      // Short-cut version fields (optional — plan rows
+      // written before the wiring shipped omit them).
+      if (it.version !== undefined) {
+        if (it.version !== 'full' && it.version !== 'short') problems.push(`items[${i}].version '${it.version}' unknown`);
+        if (it.version === 'short' && typeof it.versionOf !== 'string') problems.push(`items[${i}].versionOf missing on a short item`);
+        if (it.version === 'full' && it.versionOf !== null && it.versionOf !== undefined) problems.push(`items[${i}].versionOf set on a full item`);
+      }
+    }
+    if (p.short_cut_pieces !== undefined && typeof p.short_cut_pieces !== 'number') {
+      problems.push('short_cut_pieces not a number');
     }
   }
   if (!p.route_plan_started || typeof p.route_plan_started !== 'object') problems.push('route_plan_started missing');

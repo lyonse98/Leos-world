@@ -86,6 +86,23 @@ execFileSync(
 );
 const rtg = await import(pathToFileURL(rtOut).href);
 
+// Short cuts (Nov 12, 2026): the generated base↔twin pair
+// map + measured durations, bundled beside routeTags so the
+// data suites can pin the production manifest's shape.
+const rscOut = join(mkdtempSync(join(tmpdir(), 'short-cuts-')), 'shortCuts.mjs');
+execFileSync(
+  join(repoRoot, 'node_modules', '.bin', 'esbuild'),
+  [
+    join(repoRoot, 'src', 'data', 'shortCuts.ts'),
+    '--bundle',
+    '--format=esm',
+    '--platform=node',
+    '--outfile=' + rscOut,
+  ],
+  { stdio: 'inherit' },
+);
+const rsc = await import(pathToFileURL(rscOut).href);
+
 // The Color Puck pass (audience coloring, Nov 5, 2026),
 // bundled beside routeMode/narration: its suites drive the
 // pass directly with stubbed generation — zero live calls.
@@ -4071,7 +4088,7 @@ const storyIds = plan => plan.items.filter(i => i.kind === 'story').map(i => i.i
 const memberIds = plan => plan.items.filter(i => i.woven).map(i => i.id);
 
 check('woven data: the bundled presence map pins the audit — Protected excluded whatever its register', () => {
-  assert.equal(Object.keys(rpd.ROUTE_PRESENCE).length, 3598, 'one row per shelf story (1,395 Phase 0+1 wiring + 10 probe presence (P7) + 20 Wave C-2 + 836 Vertex Phase 3 T1 + 62 Vertex Phase 4 T2 + 699 Vertex Phase 5 T3 + 214 Vertex Phase 6 T4 + 46 city-works remainder + 181 woven twins wave 2, wrap-ins Nov 11 + 119 gap-fill Nov 11 + 3 Phase 7 mop-up Nov 11 + 13 rural/suburban top-up Nov 11)');
+  assert.equal(Object.keys(rpd.ROUTE_PRESENCE).length, 3598, 'one row per shelf story (1,395 Phase 0+1 wiring + 10 probe presence (P7) + 20 Wave C-2 + 836 Vertex Phase 3 T1 + 62 Vertex Phase 4 T2 + 699 Vertex Phase 5 T3 + 214 Vertex Phase 6 T4 + 46 city-works remainder + 181 woven twins wave 2, wrap-ins Nov 11 + 119 gap-fill Nov 11 + 3 Phase 7 mop-up Nov 11 + 13 rural/suburban top-up Nov 11) — short cuts carry NO presence rows by design (Nov 12, 2026): a twin is its base\'s other length, never woven material, so this count does not move with the 469 twins');
   // Kuchamaa is Protected register: even its weave-SAFE
   // telling is never woven material.
   assert.deepEqual(rpd.presenceFor('kuchamaa', 'landmark_origin'), { presence: 'safe', protected: true });
@@ -4109,7 +4126,7 @@ check('woven data regen: deterministic, and the committed routePresence.ts is in
 const TWIN_SUFFIX = '-woven-v1';
 const twinKeysOf = map => Object.keys(map).filter(k => k.split('|')[1]?.endsWith(TWIN_SUFFIX));
 check('woven twins (data): the tag map carries all 282 twins with topics inherited from their sources', () => {
-  assert.equal(Object.keys(rtg.ROUTE_TAGS).length, 3598, 'one tag row per shelf story (1,405 Phase 0+1 wiring + 20 Wave C-2 + 836 Vertex Phase 3 T1 + 62 Vertex Phase 4 T2 + 699 Vertex Phase 5 T3 + 214 Vertex Phase 6 T4 + 46 city-works remainder + 181 woven twins wave 2, wrap-ins Nov 11 + 119 gap-fill Nov 11 + 3 Phase 7 mop-up Nov 11 + 13 rural/suburban top-up Nov 11)');
+  assert.equal(Object.keys(rtg.ROUTE_TAGS).length, 4067, 'one tag row per shelf story (1,405 Phase 0+1 wiring + 20 Wave C-2 + 836 Vertex Phase 3 T1 + 62 Vertex Phase 4 T2 + 699 Vertex Phase 5 T3 + 214 Vertex Phase 6 T4 + 46 city-works remainder + 181 woven twins wave 2, wrap-ins Nov 11 + 119 gap-fill Nov 11 + 3 Phase 7 mop-up Nov 11 + 13 rural/suburban top-up Nov 11 + 469 short cuts Nov 12)');
   const twins = twinKeysOf(rtg.ROUTE_TAGS);
   assert.equal(twins.length, 282, 'the completed tranche twins (100) plus woven twins wave 2 (181, wrap-ins Nov 11) plus the Fallbrook twin (Phase 7 mop-up Nov 11) are index-visible');
   let coast = 0;
@@ -8977,6 +8994,434 @@ check('planned silence: the composer seats composed beats at named seams only (N
     assert.deepEqual(verifier.validateOutcome(out), [], 'the live verifier accepts the fallback outcome');
   });
 }
+
+// ── Short cuts (Nov 12, 2026) ──────────────────────────
+// Erik's density rule: seating order unchanged (no length
+// bias — pace bias was rejected), version assigned per
+// seat by local density. Dense local supply ahead → the
+// short cut; a genuinely large measured forward gap / thin
+// supply → the full version; keystone seats always full.
+// All id-keyed episode state keys on the BASE id. Fixtures
+// ride the module meridian world; twin fixtures carry a
+// DIFFERENT storyText from their base on purpose — route
+// heard is text-keyed, so a twin with the base's text would
+// make the unification checks meaningless.
+const SC_SUFFIX = ' (short cut)';
+const scCanonId = id =>
+  id.includes('|') && id.slice(id.indexOf('|') + 1).endsWith(SC_SUFFIX)
+    ? id.slice(0, -SC_SUFFIX.length)
+    : id;
+const scStories = p => p.items.filter(i => i.kind === 'story');
+const scPair = (baseId, lat, baseDur, twinDur, extra = {}) => {
+  const ang = baseId.slice(baseId.indexOf('|') + 1);
+  const base = unit(baseId, lat, {
+    durationSec: baseDur,
+    storyText: `BASE ${baseId} ` + 'word '.repeat(200),
+    ...extra,
+  });
+  const twin = unit(`${baseId}${SC_SUFFIX}`, lat, {
+    angle: `${ang}${SC_SUFFIX}`,
+    durationSec: twinDur,
+    storyText: `SHORT ${baseId} ` + 'word '.repeat(60),
+    audioPath: `x/${baseId}${SC_SUFFIX}.wav`,
+    topics: extra.topics ?? [],
+    ...(extra.tone ? { tone: extra.tone } : {}),
+    ...(extra.placeName ? { placeName: extra.placeName } : {}),
+  });
+  return [base, twin];
+};
+// The SC composes ride densePath (21 nodes): the module
+// 3-point path snaps every anchor to a segment midpoint,
+// which would collapse the fixtures' decile geometry. The
+// budget override keeps the budget from binding (the F2
+// fixtures' discipline) so seating is the tiling sweep's
+// alone; plan.driveSec is patched the way leverCompose
+// patches it, for the capture check's window math.
+const scCompose = (units, driveSec = 1800, extraOpts = {}) => {
+  const plan = rm.composeRoutePlan(
+    units,
+    densePath,
+    denseDest,
+    'Dest',
+    { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, driveSec, ...extraOpts },
+  );
+  plan.driveSec = driveSec;
+  return plan;
+};
+// The dense cluster: five twinned stories inside decile 2
+// (progress .21–.29), a plain road behind them, and a long
+// destination story — decile-2 supply is 5 by construction.
+const scClusterLats = [32.742, 32.746, 32.75, 32.754, 32.758];
+const scDenseShelf = (withTwins, tailLats = [32.77, 32.8, 32.83, 32.86]) => {
+  const shelf = [];
+  scClusterLats.forEach((lat, i) => {
+    const [b, t] = scPair(`scd${i + 1}|landmark_origin`, lat, 120, 55);
+    shelf.push(b);
+    if (withTwins) shelf.push(t);
+  });
+  tailLats.forEach((lat, i) => shelf.push(unit(`sct${i + 1}|landmark_origin`, lat, { durationSec: 120 })));
+  const [db, dt] = scPair('scdest|landmark_origin', 32.895, 300, 60);
+  shelf.push(db);
+  if (withTwins) shelf.push(dt);
+  return shelf;
+};
+
+check('short cuts SC-1: a dense segment seats the short versions; seating itself is untouched', () => {
+  const withT = scCompose(scDenseShelf(true));
+  const without = scCompose(scDenseShelf(false));
+  assert.deepEqual(
+    scStories(withT).map(i => scCanonId(i.id)),
+    scStories(without).map(i => i.id),
+    'the same stories seat in the same order with twins on the shelf (no length bias in seating)',
+  );
+  const clusterShorts = scStories(withT).filter(
+    i => scClusterLats.some(lat => Math.abs((i.unit?.lat ?? 0) - lat) < 1e-9) && i.shortCut === true,
+  );
+  assert.ok(clusterShorts.length >= 3, `dense seats serve their cuts (got ${clusterShorts.length} short in the cluster)`);
+  for (const i of clusterShorts) {
+    assert.equal(i.versionOf, scCanonId(i.id), 'versionOf names the base story');
+    assert.equal(i.unit.durationSec, 55, 'the served unit prices the twin length');
+    assert.equal(i.durationSec, 55);
+  }
+  const destItem = scStories(withT).find(i => scCanonId(i.id) === 'scdest|landmark_origin');
+  assert.ok(destItem && destItem.shortCut !== true, 'the destination story is a keystone — full even in a rich tail');
+  const totalWith = scStories(withT).reduce((a, i) => a + i.durationSec, 0);
+  const totalWithout = scStories(without).reduce((a, i) => a + i.durationSec, 0);
+  assert.ok(totalWith < totalWithout, 'the dense episode sounds shorter — the cuts are real, not relabels');
+});
+
+check('short cuts SC-2: sparse ground and a long forward gap both keep the full version', () => {
+  // (a) Thin supply everywhere: three twinned stories alone
+  // on the road — no decile reaches the density line.
+  const sparse = [];
+  for (const [id, lat] of [['sp1|landmark_origin', 32.71], ['sp2|landmark_origin', 32.8], ['sp3|landmark_origin', 32.885]]) {
+    sparse.push(...scPair(id, lat, 150, 55));
+  }
+  const sparsePlan = scCompose(sparse);
+  assert.ok(scStories(sparsePlan).length >= 2, 'fixture sanity: the sparse stories seat');
+  assert.ok(scStories(sparsePlan).every(i => i.shortCut !== true), 'thin supply → every seat serves the full version');
+  // (b) The gap veto: the cluster is dense (supply 5), but
+  // past its last story the road is empty for ~870 s of
+  // forward gap — that seat's long version is the
+  // dead-space instrument and must serve FULL, while the
+  // cluster's earlier seats (next release close behind)
+  // still serve short. Same decile, same supply: only the
+  // gap term differs.
+  const vetoPlan = scCompose(scDenseShelf(true, [32.87]));
+  const lastCluster = scStories(vetoPlan).find(i => scCanonId(i.id) === 'scd5|landmark_origin');
+  assert.ok(lastCluster, 'fixture sanity: the last cluster story seats');
+  assert.ok(lastCluster.shortCut !== true, 'a ≥180 s forward gap vetoes the cut even in a dense decile');
+  assert.ok(
+    scStories(vetoPlan).some(i => i.shortCut === true && scCanonId(i.id) !== 'scd5|landmark_origin'),
+    'the earlier cluster seats still serve short — the veto is the gap, not the decile',
+  );
+  // (c) Just under the line: the next story's release sits
+  // ~130 s of forward gap past the last cluster seat's
+  // window end (anchors quantize to segment midpoints, so
+  // the gap is priced in the composer's own geometry) —
+  // the cut serves.
+  const underPlan = scCompose(scDenseShelf(true, [32.785, 32.86]));
+  const lastUnder = scStories(underPlan).find(i => scCanonId(i.id) === 'scd5|landmark_origin');
+  assert.ok(lastUnder, 'fixture sanity: the last cluster story seats');
+  assert.equal(lastUnder.shortCut, true, 'a forward gap under the threshold does not veto');
+});
+
+check('short cuts SC-3: keystone seats stay full inside a dense segment', () => {
+  // Destination decile (9) made dense: five twinned stories
+  // inside the destination area plus a twinned control just
+  // outside it (2 km out — same decile, no keystone claim).
+  const shelf = [32.72, 32.76, 32.8, 32.84].map((lat, i) => unit(`ska${i + 1}|landmark_origin`, lat, { durationSec: 120 }));
+  const [cb, ct] = scPair('skctl|landmark_origin', 32.882, 150, 55);
+  shelf.push(cb, ct);
+  [32.887, 32.889, 32.891, 32.893, 32.895].forEach((lat, i) => {
+    shelf.push(...scPair(`skd${i + 1}|landmark_origin`, lat, 150, 55));
+  });
+  const plan = scCompose(shelf);
+  const destItems = scStories(plan).filter(i => (i.unit?.lat ?? 0) >= 32.8865);
+  assert.ok(destItems.length >= 2, 'fixture sanity: destination-area stories seat');
+  assert.ok(destItems.every(i => i.shortCut !== true), 'destination-area seats are keystones — full at any density');
+  const climaxItem = scStories(plan).find(i => i.id === plan.climaxUnitId);
+  assert.ok(climaxItem && climaxItem.shortCut !== true, 'the climax seat is full (it is priced and promised at full length)');
+  const ctl = scStories(plan).find(i => scCanonId(i.id) === 'skctl|landmark_origin');
+  assert.ok(ctl, 'fixture sanity: the control seats');
+  assert.equal(ctl.shortCut, true, 'the non-keystone neighbor in the same dense decile serves its cut');
+});
+
+check('short cuts SC-3b: an anchored thread’s cast member is a keystone; a non-member neighbor is not', () => {
+  const shelf = [unit('scta0|landmark_origin', 32.72, { durationSec: 120 })];
+  shelf.push(...scPair('sctnbr|landmark_origin', 32.746, 130, 55));
+  const [ob, ot] = scPair('oldtown|landmark_origin', 32.752, 130, 55, { topics: ['History'] });
+  shelf.push(ob, ot);
+  shelf.push(unit('oldtown|landmark_event', 32.756, { angle: 'landmark_event', topics: ['History'], durationSec: 130 }));
+  shelf.push(unit('oldtown|landmark_people', 32.759, { angle: 'landmark_people', topics: ['History'], durationSec: 130 }));
+  shelf.push(unit('scta1|landmark_origin', 32.8, { durationSec: 120 }));
+  shelf.push(unit('scta2|landmark_origin', 32.86, { durationSec: 120 }));
+  const { res } = resolutionOf(shelf);
+  const onroute = res.candidates.find(c => c.kind === 'onroute');
+  assert.ok(onroute, `fixture sanity: an on-route anchor qualifies (got ${res.candidates.map(c => c.kind).join(',')})`);
+  assert.ok(onroute.memberIds.includes('oldtown|landmark_origin'), 'the cast includes the twinned story');
+  const plan = scCompose(shelf, 1800, {
+    threadChoice: {
+      candidate: onroute,
+      menu: {
+        offered: res.candidates.map(c => ({ kind: c.kind, key: c.key, label: c.label, count: c.count })),
+        menuShown: true,
+        source: 'menu-pick',
+        pickedKey: onroute.key,
+      },
+    },
+  });
+  assert.equal(plan.thread?.anchorKind, 'onroute');
+  const member = scStories(plan).find(i => scCanonId(i.id) === 'oldtown|landmark_origin');
+  assert.ok(member, 'fixture sanity: the cast member seats');
+  assert.ok(member.shortCut !== true, 'a thread-anchor cast member serves FULL in a dense decile');
+  const nbr = scStories(plan).find(i => scCanonId(i.id) === 'sctnbr|landmark_origin');
+  assert.ok(nbr, 'fixture sanity: the neighbor seats');
+  assert.equal(nbr.shortCut, true, 'the non-member neighbor in the same decile serves its cut');
+});
+
+check('short cuts SC-4: heard unification — either version heard retires the story', () => {
+  // Pure expansion, both directions — over a REAL pair
+  // from the production map (the expansion is map-driven;
+  // a fictional id would prove nothing).
+  const [realBase, realTwin] = Object.entries(rsc.SHORT_CUT_TWIN_OF)[0];
+  const fromShort = rsc.expandShortCutHeard(new Set([realTwin]));
+  assert.ok(fromShort.has(realBase), 'hearing the cut marks the base heard');
+  const fromFull = rsc.expandShortCutHeard(new Set([realBase]));
+  assert.ok(fromFull.has(realTwin), 'hearing the full marks the cut heard');
+  assert.equal(rsc.expandShortCutHeard(new Set(['plain|landmark_origin'])).size, 1, 'untwinned ids pass through untouched');
+  // Compose level, both directions — over a REAL
+  // production pair (the expansion is map-driven, so a
+  // fictional pair cannot exercise it; the SR-905 West
+  // corridor pair stands in for the shelf). The texts
+  // differ by construction, so text-keyed heard alone
+  // marks ONLY the heard version — the expansion is what
+  // retires the pair.
+  const REAL_BASE = 'sr-905 west: brown field to i-805|corridor';
+  const REAL_TWIN = `${REAL_BASE}${SC_SUFFIX}`;
+  const shelf = () => {
+    const s = [unit('hu0|landmark_origin', 32.72, { durationSec: 120 })];
+    s.push(unit(REAL_BASE, 32.75, { angle: 'corridor', durationSec: 150, storyText: 'REAL BASE ' + 'word '.repeat(200) }));
+    s.push(
+      unit(REAL_TWIN, 32.75, {
+        angle: `corridor${SC_SUFFIX}`,
+        durationSec: 90.2,
+        storyText: 'REAL SHORT ' + 'word '.repeat(60),
+        audioPath: `x/${REAL_TWIN}.wav`,
+      }),
+    );
+    s.push(...scPair('huB|landmark_origin', 32.82, 150, 55));
+    s.push(unit('hu9|landmark_origin', 32.86, { durationSec: 120 }));
+    return s;
+  };
+  for (const heardTextOf of ['twin', 'base']) {
+    const units = shelf();
+    const target = units.find(u => u.id === (heardTextOf === 'twin' ? REAL_TWIN : REAL_BASE));
+    const raw = rm.heardKeysForStories(units, new Set([target.storyText]));
+    const otherId = heardTextOf === 'twin' ? REAL_BASE : REAL_TWIN;
+    assert.ok(raw.has(target.id) && !raw.has(otherId), 'text-keyed heard alone sees one version only — the expansion is load-bearing');
+    const heardKeys = rsc.expandShortCutHeard(raw);
+    assert.ok(heardKeys.has(REAL_BASE) && heardKeys.has(REAL_TWIN), 'the expansion retires both versions');
+    const plan = scCompose(units, 1800, { heardKeys });
+    assert.ok(
+      !scStories(plan).some(i => scCanonId(i.id) === REAL_BASE),
+      `hearing the ${heardTextOf} seats neither version later`,
+    );
+    assert.equal(plan.skippedHeard, 1, 'exactly one story counts as heard-skipped — the twin never inflates the count');
+    assert.ok(
+      scStories(plan).some(i => scCanonId(i.id) === 'huB|landmark_origin'),
+      'control: the unheard pair still composes',
+    );
+  }
+});
+
+check('short cuts SC-5: F2 promise naming is identical whichever version serves', () => {
+  // F2a's shape (a serial-doomed mid story, a protected
+  // neighbor) rebuilt in dense deciles so BOTH the doomed
+  // story and its protected neighbor actually swap to
+  // their cuts. If the promise machinery keyed on the
+  // served (twin) id, the doomed story — absent from the
+  // base-keyed doom set under its twin id — would read as
+  // protected and get NAMED: the Kate Sessions defect,
+  // reopened by a version swap. The preview must come out
+  // byte-identical to the twins-removed compose, and every
+  // bridge's forward naming must match it.
+  const principals = withTwins => {
+    const s = [
+      unit('f5s1|landmark_origin', 32.715, { placeName: 'First Story', durationSec: 60 }),
+      ...scPair('f5s2|landmark_origin', 32.765, 260, 70, { placeName: 'Second Story' }).filter(u => withTwins || !u.id.endsWith(SC_SUFFIX)),
+      ...scPair('f5mid|landmark_origin', 32.815, 150, 55, { placeName: 'Doomed Mid' }).filter(u => withTwins || !u.id.endsWith(SC_SUFFIX)),
+      unit('f5s4|landmark_origin', 32.86, { placeName: 'Final Story', durationSec: 240 }),
+    ];
+    // Density supply, placed in ANCHOR space (anchors
+    // quantize to segment midpoints on densePath): three
+    // extra canonical stories sharing s2's decile (anchors
+    // .325/.375) and three sharing mid's (.525/.575), so
+    // both principals sit in supply-4 deciles and both
+    // verdicts come out SHORT. The serial queue ahead of
+    // mid (s1 + s2 + the bucket-3 supply) overruns mid's
+    // window — the F2a doom — while s2, early and lightly
+    // preceded, stays protected.
+    [32.762, 32.772, 32.778, 32.805, 32.812, 32.818].forEach((lat, i) =>
+      s.push(unit(`f5x${i}|landmark_origin`, lat, { durationSec: 100 })),
+    );
+    return s;
+  };
+  const treatment = scCompose(principals(true), 900);
+  const control = scCompose(principals(false), 900);
+  const midItem = scStories(treatment).find(i => scCanonId(i.id) === 'f5mid|landmark_origin');
+  assert.ok(midItem, 'fixture sanity: the doomed story seats');
+  assert.equal(midItem.shortCut, true, 'fixture sanity: the doomed story actually swapped — the trap is armed');
+  assert.ok(
+    rm.planDoomedStoryIds(control.items, 900).includes('f5mid|landmark_origin'),
+    'fixture sanity: at settle (full lengths everywhere) the serial model dooms the mid story — protection is judged there, on base ids, before any swap',
+  );
+  const s2Item = scStories(treatment).find(i => scCanonId(i.id) === 'f5s2|landmark_origin');
+  assert.equal(s2Item?.shortCut, true, 'fixture sanity: the protected neighbor swapped too');
+  const previewOf = p => p.items.find(i => i.kind === 'preview')?.text ?? '';
+  assert.equal(previewOf(treatment), previewOf(control), 'preview text is byte-identical across versions');
+  // Bridges: the promise content must be identical; the
+  // tissue need not be byte-identical, for one honest
+  // reason — a bridge's backward callback quotes the
+  // PREVIOUS story's own opening words, and the cut's
+  // opening words are the cut's. Quoting the version the
+  // listener actually heard is version-truthful, not a
+  // promise. What F2 binds is FORWARD naming: whether a
+  // bridge names the story it leads INTO. Compare that,
+  // bridge by bridge, on canonical targets.
+  const bridgesOf = p => p.items.filter(i => i.kind === 'bridge');
+  const tb = bridgesOf(treatment);
+  const cb = bridgesOf(control);
+  assert.equal(tb.length, cb.length, 'the same bridges are authored');
+  const nameOfNext = (p, b) =>
+    scStories(p).find(i => scCanonId(i.id) === scCanonId(b.nextUnitId ?? ''))?.unit?.placeName ?? null;
+  tb.forEach((b, i) => {
+    assert.equal(scCanonId(b.prevUnitId ?? ''), scCanonId(cb[i].prevUnitId ?? ''), 'bridge sources agree (canonical)');
+    assert.equal(scCanonId(b.nextUnitId ?? ''), scCanonId(cb[i].nextUnitId ?? ''), 'bridge targets agree (canonical)');
+    const tName = nameOfNext(treatment, b);
+    const cName = nameOfNext(control, cb[i]);
+    assert.equal(tName, cName, 'both bridges lead into the same story');
+    assert.equal(
+      tName !== null && b.text.includes(tName),
+      cName !== null && cb[i].text.includes(cName),
+      `forward naming is version-independent (bridge into ${tName})`,
+    );
+  });
+  assert.ok(!previewOf(treatment).includes('Doomed Mid'), 'the doomed story is promised nowhere');
+  const intoMid = treatment.items.find(i => i.kind === 'bridge' && scCanonId(i.nextUnitId ?? '') === 'f5mid|landmark_origin');
+  assert.ok(intoMid && !intoMid.text.includes('Doomed Mid'), 'its own bridge does not announce it');
+  const intoS2 = treatment.items.find(i => i.kind === 'bridge' && scCanonId(i.nextUnitId ?? '') === 'f5s2|landmark_origin');
+  assert.ok(intoS2 && intoS2.text.includes('Second Story'), 'the protected neighbor is still named — protection survived the swap');
+});
+
+check('short cuts SC-6: a story with no twin behaves exactly as today', () => {
+  // Sparse shelf, twins on every story, all verdicts FULL:
+  // the plan items must be indistinguishable from the
+  // twin-less compose — kinds, ids, durations, texts.
+  const sparseTwinned = [];
+  for (const [id, lat] of [['np1|landmark_origin', 32.71], ['np2|landmark_origin', 32.8], ['np3|landmark_origin', 32.885]]) {
+    sparseTwinned.push(...scPair(id, lat, 150, 55));
+  }
+  const sparsePlain = sparseTwinned.filter(u => !u.id.endsWith(SC_SUFFIX));
+  const shape = p => p.items.map(i => ({ kind: i.kind, id: i.id, durationSec: i.durationSec, text: i.text ?? null }));
+  assert.deepEqual(shape(scCompose(sparseTwinned)), shape(scCompose(sparsePlain)), 'all-full verdicts → byte-identical plan items');
+  // Twins that never enter the pool (an off-path place far
+  // outside every radius) change nothing either.
+  const offPath = [...sparsePlain, ...scPair('faraway|landmark_origin', 32.0, 150, 55)];
+  assert.deepEqual(shape(scCompose(offPath)), shape(scCompose(sparsePlain)), 'unseatable twins are inert');
+});
+
+check('short cuts SC-7: measured durations price the windows — never the 55–90 s design target', () => {
+  // The override itself, on a REAL production pair (ledger
+  // measurement 90.2 s): a fixture twin claiming 55 s loses
+  // to the bundled measurement.
+  const realBase = unit('sr-905 west: brown field to i-805|corridor', 32.72, { angle: 'corridor', durationSec: 171 });
+  const realTwin = unit('sr-905 west: brown field to i-805|corridor (short cut)', 32.72, {
+    angle: 'corridor (short cut)',
+    durationSec: 55,
+  });
+  assert.equal(rm.servedShortCutUnit(realBase, realTwin).durationSec, 90.2, 'the measured ledger duration wins over any fixture/estimate');
+  // Compose level: a 100.7 s twin (over the design band) in
+  // a dense seat — its item window must expire at the
+  // SERVED duration, not at a target or an estimate.
+  const shelf = [];
+  scClusterLats.forEach((lat, i) => {
+    shelf.push(...scPair(`scw${i + 1}|landmark_origin`, lat, 150, i === 2 ? 100.7 : 55));
+  });
+  [32.77, 32.8, 32.83, 32.86].forEach((lat, i) => shelf.push(unit(`scwt${i + 1}|landmark_origin`, lat, { durationSec: 120 })));
+  const plan = scCompose(shelf);
+  const over = scStories(plan).find(i => scCanonId(i.id) === 'scw3|landmark_origin');
+  assert.ok(over, 'fixture sanity: the over-band story seats');
+  assert.equal(over.shortCut, true, 'the dense seat serves the cut');
+  assert.equal(over.durationSec, 100.7, 'the item prices the measured 100.7 s');
+  const anchorP = rm.progressAlongPath({ lat: 32.75, lng: -117.25 }, densePath);
+  const expectedExpire = rm.storyWindow(anchorP, 100.7, 1800).expire;
+  assert.ok(
+    Math.abs((over.expireProgress ?? 0) - expectedExpire) < 1e-9,
+    `the window expires on the served duration (${over.expireProgress} vs ${expectedExpire})`,
+  );
+  // The bundled duration map's own shape: 469 measured
+  // values, the over-90 s tail carried verbatim.
+  const durs = Object.values(rsc.SHORT_CUT_DURATION_SEC);
+  assert.equal(durs.length, 469);
+  assert.equal(Math.max(...durs), 100.7);
+  assert.equal(Math.min(...durs), 37.0);
+  assert.equal(durs.filter(d => d > 90).length, 43, 'the over-target tail is real data, carried verbatim');
+  assert.equal(durs.filter(d => d < 55).length, 1);
+});
+
+check('short cuts (data): the bundled map carries all 469 production pairs, wired to tags and presence', () => {
+  const pairs = Object.entries(rsc.SHORT_CUT_TWIN_OF);
+  assert.equal(pairs.length, 469, 'one pair per production manifest row');
+  assert.equal(Object.keys(rsc.SHORT_CUT_BASE_OF).length, 469);
+  for (const [baseId, twinId] of pairs) {
+    assert.equal(rsc.SHORT_CUT_BASE_OF[twinId], baseId, `${twinId} maps back`);
+    assert.equal(rm.canonicalStoryId(twinId), baseId, 'canonicalStoryId strips the suffix');
+    assert.equal(rm.canonicalStoryId(baseId), baseId, 'canonicalStoryId is identity on bases');
+    const [pk, ba] = [baseId.slice(0, baseId.indexOf('|')), baseId.slice(baseId.indexOf('|') + 1)];
+    const ta = twinId.slice(twinId.indexOf('|') + 1);
+    assert.equal(ta, `${ba}${SC_SUFFIX}`, 'the twin angle is the base angle + the suffix, by construction');
+    assert.ok(rtg.ROUTE_TAGS[baseId] && rtg.ROUTE_TAGS[twinId], `both rows are tagged: ${baseId}`);
+    assert.deepEqual(rtg.tagsFor(pk, ta).topics, rtg.tagsFor(pk, ba).topics, `twin topics inherit the base's: ${baseId}`);
+    assert.ok(!(twinId in rpd.ROUTE_PRESENCE), `no presence row for a twin: ${twinId}`);
+    const d = rsc.SHORT_CUT_DURATION_SEC[twinId];
+    assert.ok(typeof d === 'number' && d > 0 && d <= 200, `a measured duration rides the pair: ${twinId}`);
+    assert.equal(rsc.shortCutTwinIdFor(pk, ba), twinId);
+    assert.equal(rsc.shortCutBaseIdFor(pk, ta), baseId);
+  }
+});
+
+check('short cuts (capture): the plan records which version each item serves', () => {
+  const plan = scCompose(scDenseShelf(true));
+  const captured = ec.assemblePlanItems(plan, new Set(plan.items.map(i => i.id)));
+  const shorts = captured.filter(i => i.version === 'short');
+  assert.ok(shorts.length >= 3, `the dense plan's cuts are on the record (got ${shorts.length})`);
+  for (const s of shorts) {
+    assert.equal(typeof s.versionOf, 'string', 'a short item names its base');
+    assert.equal(s.unitId, `${s.versionOf}${SC_SUFFIX}`, 'unitId is the served twin; versionOf is the base');
+    assert.ok(s.id.endsWith(SC_SUFFIX), 'the plan item id is the twin’s too — one served identity everywhere');
+  }
+  for (const f of captured.filter(i => i.version === 'full')) {
+    assert.equal(f.versionOf, null, 'full items carry no versionOf');
+  }
+  const payload = ec.assemblePlanCapture({
+    tourId: 'route-sc',
+    buildId: 'fresh-test',
+    context: captureCtx,
+    plan,
+    routePlanStarted: { decisions: {} },
+    items: captured,
+  });
+  assert.equal(payload.short_cut_pieces, shorts.length, 'the plan payload counts its short pieces');
+  assert.deepEqual(verifier.validatePlan(payload), [], 'the live verifier accepts the version fields');
+});
+
+check('short cuts (data): the generator reproduces the committed module byte for byte', () => {
+  const before = readFileSync(join(repoRoot, 'src/data/shortCuts.ts'), 'utf8');
+  execFileSync('node', [join(repoRoot, 'scripts/route-mode/build-short-cuts.mjs')], { cwd: repoRoot, stdio: 'pipe' });
+  assert.equal(readFileSync(join(repoRoot, 'src/data/shortCuts.ts'), 'utf8'), before, 'regen is deterministic and the committed file is in sync');
+});
 
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);
