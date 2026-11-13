@@ -42,6 +42,7 @@ const extras = {
   },
   routeInterItemGapMs: engine.routeInterItemGapMs,
   CORRIDOR_SEGMENTS: engine.CORRIDOR_SEGMENTS,
+  CORRIDOR_BUFFER_M: engine.CORRIDOR_BUFFER_M,
   matchCorridor: engine.matchCorridor,
   resolveFillerRegion: engine.resolveFillerRegion,
   accessGate: {

@@ -105,7 +105,7 @@ async function healthyOpening(world, audio, pos = UTC, speed = 8) {
 }
 
 export async function runScenarios(Tour, extras) {
-  const { CORRIDOR_SEGMENTS, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs } = extras;
+  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs } = extras;
 
   // ---------------------------------------------------------- S-01 healthy start
   suite('S-01 healthy start / opener order');
@@ -3927,5 +3927,82 @@ export async function runScenarios(Tour, extras) {
     check('a back-to-back plan transition breathes (700 ms)', breath === 700, `breath=${breath}`);
     check('into a silence: standing gap only — the silence is the beat', intoSilence === 600, `gap=${intoSilence}`);
     check('out of a silence: standing gap only', outOfSilence === 600, `gap=${outOfSilence}`);
+  }
+
+  // ---------------------------------------------------------- CB corridor buffer
+  // Buffer calibration (Nov 12, 2026 — Erik's Option A ruling after
+  // the Harbor Drive field note; sim: scripts/route-mode/
+  // corridor-buffer-sim.mjs). The buffer tightened 450 → 250 m:
+  // at 450, ~62% of a Harbor Drive drive sat inside a northbound
+  // I-5 segment's buffer and an I-5 story served on Harbor Drive.
+  // 200 m was rejected on evidence: at a 200 m chord bulge / lateral
+  // offset the on-freeway retention collapses (~49%), while at
+  // 250 m every tested case retains exactly as at 450.
+  suite('CB-01 corridor buffer: shipped value is the calibrated 250 m');
+  {
+    check('CORRIDOR_BUFFER_M is 250', CORRIDOR_BUFFER_M === 250, `buffer=${CORRIDOR_BUFFER_M}`);
+  }
+  suite('CB-02 corridor buffer: Harbor Drive no longer matches I-5 at 285 m cross-track');
+  {
+    // On the Harbor Drive alignment by the NBSD gate; the app's
+    // I-5 North: National City to Barrio Logan polyline runs 285 m
+    // east of this point, heading-compatible (Harbor heading ~338°,
+    // segment bearing ~320°, inside the 50° tolerance). This is
+    // Erik's Nov 12 serve geometry in miniature.
+    const pt = { lat: 32.68555, lng: -117.13117, heading: 338 };
+    const at450 = matchCorridor(pt, 450);
+    check(
+      'at the old 450 m buffer the point matched I-5 North: National City to Barrio Logan',
+      at450?.segment.displayName === 'I-5 North: National City to Barrio Logan',
+      `got ${at450?.segment.displayName ?? 'null'} @ ${at450?.distanceM?.toFixed(0)}m`,
+    );
+    const atShipped = matchCorridor(pt);
+    check(
+      'at the shipped buffer the point matches no I-5 segment',
+      atShipped === null || atShipped.segment.freeway !== 'I-5',
+      `got ${atShipped?.segment.displayName ?? 'null'}`,
+    );
+  }
+  suite('CB-03 corridor buffer: interchange-proximity — a driver bulged off a stack-zone chord still matches');
+  {
+    // The longest stack-zone leg in the dataset: I-805 North,
+    // Mission Valley to Kearny Mesa (2,737 m, through the SR-52
+    // stack). Its midpoint displaced 175 m perpendicular — the
+    // chord-bulge a driver on the true curve legitimately carries
+    // there — must still match the segment at the shipped buffer.
+    const seg = CORRIDOR_SEGMENTS.find(s => s.displayName === 'I-805 North: Mission Valley to Kearny Mesa');
+    check('the named stack-zone segment exists', !!seg, 'I-805 North: Mission Valley to Kearny Mesa');
+    const MLAT = 111_320;
+    const mlng = la => MLAT * Math.cos((la * Math.PI) / 180);
+    const dM = (a, b) => Math.hypot((b.lat - a.lat) * MLAT, (b.lng - a.lng) * mlng(a.lat));
+    const bear = (a, b) => ((Math.atan2((b.lng - a.lng) * mlng(a.lat), (b.lat - a.lat) * MLAT) * 180) / Math.PI + 360) % 360;
+    const off = (p, brg, m) => {
+      const r = (brg * Math.PI) / 180;
+      return { lat: p.lat + (m * Math.cos(r)) / MLAT, lng: p.lng + (m * Math.sin(r)) / mlng(p.lat) };
+    };
+    let leg = null;
+    for (let i = 0; i < seg.polyline.length - 1; i++) {
+      const L = dM(seg.polyline[i], seg.polyline[i + 1]);
+      if (!leg || L > leg.L) leg = { a: seg.polyline[i], b: seg.polyline[i + 1], L };
+    }
+    const mid = { lat: (leg.a.lat + leg.b.lat) / 2, lng: (leg.a.lng + leg.b.lng) / 2 };
+    const brg = bear(leg.a, leg.b);
+    for (const side of [1, -1]) {
+      const p = off(mid, brg + 90, side * 175);
+      const m = matchCorridor({ lat: p.lat, lng: p.lng, heading: brg });
+      check(
+        `175 m bulge (side ${side > 0 ? '+' : '−'}) still matches I-805 northbound`,
+        !!m && m.segment.freeway === 'I-805' && m.segment.direction === 'northbound',
+        `got ${m?.segment.displayName ?? 'null'}`,
+      );
+    }
+    // Boundary discipline at the same midpoint: 240 m retains the
+    // segment itself; 260 m (beyond the shipped buffer) does not.
+    const p240 = off(mid, brg + 90, 240);
+    const m240 = matchCorridor({ lat: p240.lat, lng: p240.lng, heading: brg });
+    check('240 m off-chord retains the segment itself', m240?.segment === seg, `got ${m240?.segment.displayName ?? 'null'}`);
+    const p260 = off(mid, brg + 90, 260);
+    const m260 = matchCorridor({ lat: p260.lat, lng: p260.lng, heading: brg });
+    check('260 m off-chord no longer returns the segment', m260?.segment !== seg, `got ${m260?.segment.displayName ?? 'null'}`);
   }
 }

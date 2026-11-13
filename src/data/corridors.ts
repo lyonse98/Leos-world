@@ -48,7 +48,7 @@
 // cross-streets), not surveyed centerlines; segment boundaries were
 // cut along those lines by measured arc length, snapped to
 // neighborhood anchors where the road offers one. The containment
-// buffer (CORRIDOR_BUFFER_M, 450m) is sized to absorb the
+// buffer (CORRIDOR_BUFFER_M, 250m) is sized to absorb the
 // approximation with margin; a GIS-grade pass can tighten the
 // lines later without changing any contract here. Neighborhood
 // anchors are approximate centers of the named areas, used for
@@ -90,10 +90,26 @@ export interface CorridorSegment {
 // How far from a segment's polyline a position may be and still
 // count as ON that segment. Freeway interchanges, parallel frontage
 // roads, and the hand-laid polyline approximation all live inside
-// this; the surface streets that parallel a freeway at more than
-// ~450m (e.g. Mission Bay Drive past the I-5's east shore) fall
-// outside, as they should — their narration is the street pipeline's.
-export const CORRIDOR_BUFFER_M = 450;
+// this.
+//
+// CALIBRATION (Nov 12, 2026 — Erik's Option A ruling after the
+// Harbor Drive field note): tightened 450 → 250 m. At 450, ≈62% of
+// a Harbor Drive drive (NBSD → airport) fell inside a northbound
+// I-5 segment's buffer (the roads parallel at 176–250 m) and an
+// I-5 story served on Harbor Drive. The calibration sim
+// (scripts/route-mode/corridor-buffer-sim.mjs) evaluated
+// 450/300/250/200 against the real geometry: a buffer must absorb
+// the worst-case lateral error of a driver who IS on the freeway —
+// hand-laid chord bulge on the longest curve legs (~200 m by the
+// bulge stress test) plus GPS and lane position. At 200 m that
+// worst case collapses (bulge-200 retention 98% → 49%); at 250 m
+// every tested case — lateral offsets to 200 m, chord bulges to
+// 200 m, stack-zone legs included — retains exactly as at 450,
+// while the Harbor overlap falls by roughly half. Surface streets
+// paralleling beyond ~250 m (Harbor Drive's sustained approach,
+// Mission Bay Drive past the I-5's east shore) fall outside, as
+// they should — their narration is the street pipeline's.
+export const CORRIDOR_BUFFER_M = 250;
 
 // Heading agreement required between the listener's heading and the
 // segment's direction of travel at the nearest polyline point.
@@ -4489,18 +4505,26 @@ export interface CorridorMatch {
 // heading-less match is provisional by construction: the serve
 // layer only acts on it at sustained highway speed, where headings
 // are effectively always present.
-export function matchCorridor(pos: {
-  lat: number;
-  lng: number;
-  heading?: number | null;
-}): CorridorMatch | null {
+//
+// `bufferM` defaults to CORRIDOR_BUFFER_M; it exists so the
+// buffer-calibration sims (scripts/route-mode/corridor-buffer-sim.mjs)
+// can evaluate candidate values against the real segment geometry
+// without editing the constant. Production callers pass nothing.
+export function matchCorridor(
+  pos: {
+    lat: number;
+    lng: number;
+    heading?: number | null;
+  },
+  bufferM: number = CORRIDOR_BUFFER_M
+): CorridorMatch | null {
   let best: CorridorMatch | null = null;
   for (const segment of CORRIDOR_SEGMENTS) {
     for (let i = 0; i < segment.polyline.length - 1; i++) {
       const a = segment.polyline[i];
       const b = segment.polyline[i + 1];
       const { distanceM } = pointToSegmentM(pos, a, b);
-      if (distanceM > CORRIDOR_BUFFER_M) continue;
+      if (distanceM > bufferM) continue;
       const bearing = bearingDeg(a, b);
       if (
         pos.heading !== null &&
