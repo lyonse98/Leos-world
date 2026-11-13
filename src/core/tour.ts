@@ -67,6 +67,7 @@ import {
   fillerMatchFor,
   type FillerRegion,
 } from '../data/fillerRegions';
+import { shortCutDurationSecFor } from '../data/shortCuts';
 import { LEO_MODEL_ID, LEO_PERSONA_VERSION, LEO_QA_MODEL_ID } from '../services/leoPersona';
 import { calculateDistance, bearingDegrees, headingDelta, estimateSpeechDurationS } from '../utils/geo';
 import { hashString } from '../utils/hash';
@@ -261,6 +262,33 @@ const INTRO_ANGLES: ReadonlySet<string> = new Set([
 function isWovenTwinAngle(angle: string): boolean {
   return angle.endsWith('-woven-v1');
 }
+
+/**
+ * Short cuts (Nov 12, 2026): a base angle's second LENGTH
+ * rides the shelf as angle + ' (short cut)' — the same
+ * story, told shorter (routeMode owns the composer's twin
+ * machinery; this file keeps its own copies, per the woven
+ * discipline above). Unlike woven twins, short cuts are NOT
+ * refused here: freeform assigns the version per serve by
+ * local density, the same doctrine as route mode ("density
+ * sets the cut") — but a twin row is never picked AS an
+ * angle by the rotation (the two lengths are one story, so
+ * the rotation deals them together; see onStorySettle).
+ */
+const SHORT_CUT_SUFFIX = ' (short cut)';
+
+function isShortCutAngle(angle: string): boolean {
+  return angle.endsWith(SHORT_CUT_SUFFIX);
+}
+
+/**
+ * Freeform's dense line (routeMode's
+ * SHORT_CUT_DENSE_FREEFORM_MIN, mirrored): this many
+ * canonical library stories inside the serve radius makes
+ * the ground the driver is sitting in dense — the short
+ * cut serves; below it, the full version carries.
+ */
+const SHORT_CUT_DENSE_FREEFORM_MIN = 6;
 /**
  * Nested-area deferral (Nov 1): neighborhoods carry no polygons
  * in this shell — reverse geocoding returns names, not shapes —
@@ -2261,7 +2289,13 @@ export class Tour {
         e.place_key === backend.placeKeyOf(segment.displayName) &&
         e.angle !== 'filler' &&
         !INTRO_ANGLES.has(e.angle) &&
-        !isWovenTwinAngle(e.angle),
+        !isWovenTwinAngle(e.angle) &&
+        // Corridor serves keep the presence original at full
+        // length: a segment is a sparse, fast context, and
+        // the lane's geometry is written against the full
+        // telling (short cuts, Nov 12, 2026 — no version
+        // decision in this lane).
+        !isShortCutAngle(e.angle),
     );
     if (!entry) {
       this.inflight.delete(subject);
@@ -2404,6 +2438,29 @@ export class Tour {
     return now < this.stormUntil || now < this.synthStandDownUntil;
   }
 
+  /**
+   * Local density for the version decision (short cuts,
+   * Nov 12, 2026): canonical library stories inside the
+   * serve radius of the current position — twin rows deduped
+   * to their base (stories, not rows), heard-blocked places
+   * out. Freeform has no forward path to measure a gap
+   * along, so its sparse signal IS a low in-radius count;
+   * the single term is the whole freeform form of the
+   * doctrine, by design (routeMode §density).
+   */
+  private shortCutDensityHere(): number {
+    if (!this.position) return 0;
+    const radius = this.modeName() === 'walking' ? 700 : 1600;
+    const seen = new Set<string>();
+    for (const e of this.libraryIndex) {
+      if (e.angle === 'filler' || INTRO_ANGLES.has(e.angle) || isWovenTwinAngle(e.angle)) continue;
+      if (this.heardTopics.has(e.place_key)) continue;
+      if (calculateDistance(this.position.lat, this.position.lng, e.lat, e.lng) > radius) continue;
+      seen.add(`${e.place_key}|${isShortCutAngle(e.angle) ? e.angle.slice(0, -SHORT_CUT_SUFFIX.length) : e.angle}`);
+    }
+    return seen.size;
+  }
+
   /** library → on-device/shared cache → buffered prefetch text → live (S4/S5). */
   private async serveCandidate(
     candidate: facts.Candidate,
@@ -2418,20 +2475,39 @@ export class Tour {
         e.angle !== 'filler' &&
         !INTRO_ANGLES.has(e.angle) &&
         !isWovenTwinAngle(e.angle) &&
+        // A short cut is never picked AS an angle: left in
+        // the find, the rotation would deal full and short
+        // as two different stories (Nov 12, 2026).
+        !isShortCutAngle(e.angle) &&
         !dealt.has(e.angle),
     );
     if (entry) {
-      const row = await this.seams.fetchLibraryRow(entry.place_key, entry.angle);
+      // Version assignment (short cuts, Nov 12, 2026 —
+      // "density sets the cut", freeform form): when the
+      // index carries the chosen angle's short cut and the
+      // ground here is dense, serve the cut; on sparse
+      // ground the full version carries. The candidate
+      // order (facts' seating) is untouched — only the
+      // length of the telling changes.
+      let serveEntry = entry;
+      const twinEntry = this.libraryIndex.find(
+        e => e.place_key === key && e.angle === entry.angle + SHORT_CUT_SUFFIX && !dealt.has(e.angle),
+      );
+      if (twinEntry && this.shortCutDensityHere() >= SHORT_CUT_DENSE_FREEFORM_MIN) {
+        serveEntry = twinEntry;
+      }
+      const row = await this.seams.fetchLibraryRow(serveEntry.place_key, serveEntry.angle);
       if (row) {
         const item = this.makeItem({
           kind: 'story',
           label: row.place_name,
           source: { kind: 'url', url: this.seams.bucketUrl(row.audio_path) },
-          durationSec: estimateSpeechDurationS(row.story_text),
+          durationSec:
+            shortCutDurationSecFor(row.place_key, row.angle) ?? estimateSpeechDurationS(row.story_text),
           onSettle: rec => this.onStorySettle(item, rec),
           story: {
             subject: key,
-            angleOf: entry.angle,
+            angleOf: serveEntry.angle,
             storySource: 'library',
             anchor: { lat: row.lat, lng: row.lng },
             generatedAt: this.clock.now(),
@@ -3188,6 +3264,15 @@ export class Tour {
       if (item.storySource === 'library' && item.angleOf) {
         const set = this.dealtAngles.get(subject) ?? new Set<string>();
         set.add(item.angleOf);
+        // Short cuts (Nov 12, 2026): the two lengths are one
+        // story — dealing either deals BOTH, or the angle
+        // rotation would serve the other length later this
+        // same tour as if it were a fresh telling.
+        if (isShortCutAngle(item.angleOf)) {
+          set.add(item.angleOf.slice(0, -SHORT_CUT_SUFFIX.length));
+        } else {
+          set.add(item.angleOf + SHORT_CUT_SUFFIX);
+        }
         this.dealtAngles.set(subject, set);
       }
       if (subject.startsWith('welcome:')) {

@@ -18,6 +18,7 @@ import {
   haversineM,
   heardKeysForStories,
   isRouteModeEnabled,
+  isShortCutAngle,
   memberFetchSizing,
   orderFetchCandidates,
   parseRouteInput,
@@ -75,6 +76,7 @@ import {
   saveDriveRecord,
   stillOwedSubjects,
 } from './core/routeHistory';
+import { expandShortCutHeard, shortCutDurationSecFor, shortCutTwinIdFor } from './data/shortCuts';
 import { tagsFor } from './data/routeTags';
 import { presenceFor, wovenEligibleFor } from './data/routePresence';
 import { memorialFor } from './data/routeMemorial';
@@ -1409,6 +1411,19 @@ function MilesApp() {
         rowText: row => row.story_text,
         heardTexts,
       });
+      // Short cuts (Nov 12, 2026): a twin row's duration is
+      // its MEASURED audio length from the production
+      // ledger (bundled in data/shortCuts) — the text
+      // estimate would misprice every window computed for
+      // it. Every bake in this build goes through the one
+      // helper so the fetch lanes can never disagree about
+      // a version's length.
+      const bakeDurationSec = (row: {
+        place_key: string;
+        angle: string;
+        story_text: string | null;
+      }): number =>
+        shortCutDurationSecFor(row.place_key, row.angle) ?? estimateDurationSec(row.story_text);
       const units: LibraryUnit[] = [];
       for (const { row } of [...fetched.geo, ...fetched.portals]) {
         const tags = tagsFor(row.place_key, row.angle);
@@ -1419,7 +1434,7 @@ function MilesApp() {
           angle: row.angle,
           lat: row.lat,
           lng: row.lng,
-          durationSec: estimateDurationSec(row.story_text),
+          durationSec: bakeDurationSec(row),
           topics: tags.topics,
           tone: tags.tone,
           toneSecondary: tags.toneSecondary,
@@ -1449,7 +1464,17 @@ function MilesApp() {
       // only when the ledger holds a telling with its own
       // verbatim text — one heard angle no longer takes the
       // whole place out of the route's window.
-      const heardKeys = heardKeysForStories(units, heardTexts);
+      //
+      // Short-cut expansion (Nov 12, 2026): route heard is
+      // TEXT-keyed, and a short cut's text never equals its
+      // base's — so text matching alone can never unify the
+      // pair, and hearing the short would leave the full
+      // selectable next drive. The expansion adds each heard
+      // story's other version, in both directions, over the
+      // bundled pair map; every consumer below (compose,
+      // partition, member support, gap fill) reads this one
+      // expanded set.
+      const heardKeys = expandShortCutHeard(heardKeysForStories(units, heardTexts));
       // Index-level thread support (the member-fetch lever,
       // Nov 4, 2026): the county index this build already
       // fetched (bundled tags + presence data) holds seatable
@@ -1733,6 +1758,9 @@ function MilesApp() {
           .filter(
             e =>
               e.angle.startsWith('landmark') &&
+              // Short cuts are version material, never a
+              // climax candidate in their own right.
+              !isShortCutAngle(e.angle) &&
               !fetchedIdSet.has(`${e.place_key}|${e.angle}`) &&
               tagsFor(e.place_key, e.angle).topics.includes(topic) &&
               distanceToPathM({ lat: e.lat, lng: e.lng }, route.path) > 1500 &&
@@ -1742,7 +1770,16 @@ function MilesApp() {
         for (const e of extraRows) {
           const row = await fetchLibraryRow(e.place_key, e.angle);
           // Story-level heard (v3.1): only this exact telling is out.
-          if (!row || (row.story_text != null && heardTexts.has(row.story_text))) continue;
+          // The expanded-id check rides beside it (short cuts,
+          // Nov 12, 2026): a twin row whose BASE was heard
+          // passes the text check — its text differs — and
+          // must still never seat.
+          if (
+            !row ||
+            (row.story_text != null && heardTexts.has(row.story_text)) ||
+            heardKeys.has(`${row.place_key}|${row.angle}`)
+          )
+            continue;
           const tags = tagsFor(row.place_key, row.angle);
           climaxOnlyUnits.push({
             id: `${row.place_key}|${row.angle}`,
@@ -1751,7 +1788,7 @@ function MilesApp() {
             angle: row.angle,
             lat: row.lat,
             lng: row.lng,
-            durationSec: estimateDurationSec(row.story_text),
+            durationSec: bakeDurationSec(row),
             topics: tags.topics,
             tone: tags.tone,
             toneSecondary: tags.toneSecondary,
@@ -1819,7 +1856,16 @@ function MilesApp() {
           for (let j = 0; j < chunk.length; j++) {
             const row = rows[j];
             // Story-level heard (v3.1): only this exact telling is out.
-            if (!row || (row.story_text != null && heardTexts.has(row.story_text))) continue;
+            // The expanded-id check rides beside it (short
+            // cuts, Nov 12, 2026): a twin of a heard base —
+            // or the base of a heard twin — must never seat
+            // as a member either.
+            if (
+              !row ||
+              (row.story_text != null && heardTexts.has(row.story_text)) ||
+              heardKeys.has(`${row.place_key}|${row.angle}`)
+            )
+              continue;
             const tags = tagsFor(row.place_key, row.angle);
             memberUnits.push({
               id: `${row.place_key}|${row.angle}`,
@@ -1828,7 +1874,7 @@ function MilesApp() {
               angle: row.angle,
               lat: row.lat,
               lng: row.lng,
-              durationSec: estimateDurationSec(row.story_text),
+              durationSec: bakeDurationSec(row),
               topics: tags.topics,
               tone: tags.tone,
               toneSecondary: tags.toneSecondary,
@@ -1996,6 +2042,16 @@ function MilesApp() {
           u =>
             !plannedIds.has(u.id) &&
             !heardKeys.has(u.id) &&
+            // The tease names a STORY: a short-cut row is its
+            // base's other length, never a distinct owed
+            // story — and a base whose TWIN just served is
+            // not owed either (the listener heard the story,
+            // at the other length) (Nov 12, 2026).
+            !isShortCutAngle(u.angle) &&
+            !(
+              shortCutTwinIdFor(u.placeKey, u.angle) !== null &&
+              plannedIds.has(shortCutTwinIdFor(u.placeKey, u.angle) as string)
+            ) &&
             // The owed story the wrap-up teases must be
             // seatable under the build's rating: never tease
             // a story the Family build itself could not tell
