@@ -3,6 +3,8 @@ import { Play, Pause, Square, Send, MapPin, MessageCircle, Volume2, Waves } from
 import { Tour, type TourView } from './core/tour';
 import { createBrowserAudio } from './core/player';
 import { isTesterUnlocked, tryTesterUnlock } from './core/accessGate';
+import { observeThreadPick, setSeedState, shouldOfferSeed } from './core/profile';
+import { SeedCard, YourMilesScreen } from './profileUi';
 import { usePosition, useWakeLock } from './hooks';
 import {
   assessThreadCarried,
@@ -583,6 +585,13 @@ function MilesApp() {
   // viewport — no scrolling. Flag-off never reads this: the exact
   // v15 landing renders instead.
   const [landingStep, setLandingStep] = useState<'mode' | 'choice' | 'route'>('mode');
+  // Personalization (Nov 13, 2026): which profile panel is open
+  // over the landing — the one-time seed card, or the Your Miles
+  // screen. Neither ever renders in-tour (the face-only rule).
+  const [profilePanel, setProfilePanel] = useState<'none' | 'seed' | 'miles'>('none');
+  // The seed invitation's local dismissal (the recorded skip in
+  // the profile makes it permanent; this clears it immediately).
+  const [seedOfferGone, setSeedOfferGone] = useState(false);
   const [routeDest, setRouteDest] = useState('');
   // (Tone suggestion, Nov 7, 2026: there is deliberately no
   // intake tone state anymore — the Mood select is gone. The
@@ -1700,6 +1709,13 @@ function MilesApp() {
         }
         if (pick.thread) {
           threadChoice = { candidate: pick.thread.candidate, menu: pick.thread.menu };
+          // Inference (Nov 13, 2026): a deliberate menu pick of a
+          // topic thread is a taste signal for the on-device
+          // profile. A detected default the listener simply kept
+          // is NOT counted — only a real pick teaches.
+          if (pick.thread.menu.source === 'menu-pick' && pick.thread.candidate?.topic) {
+            observeThreadPick(pick.thread.candidate.topic);
+          }
           void emitEvent(
             sessionId,
             'route_thread_picked',
@@ -2706,6 +2722,33 @@ function MilesApp() {
                   {owedLine}
                 </p>
               )}
+              {!seedOfferGone && profilePanel === 'none' && shouldOfferSeed() && (
+                <div className="mt-4 w-full rounded-[2rem] bg-white/70 p-4 text-center shadow-lg shadow-ink/10">
+                  <p className="text-sm font-bold text-ink">New here? Make Miles yours in about a minute.</p>
+                  <p className="mt-1 text-xs text-inksoft">
+                    Tap what you like — food, drinks, getting out. It stays on this phone.
+                  </p>
+                  <div className="mt-3 flex gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setProfilePanel('seed')}
+                      className="flex-1 rounded-full bg-ink px-4 py-3 text-sm font-bold text-cream shadow-lg shadow-ink/20 transition hover:bg-sagedeep"
+                    >
+                      Set up my tastes
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSeedState('skipped');
+                        setSeedOfferGone(true);
+                      }}
+                      className="flex-1 rounded-full bg-cream2 px-4 py-3 text-sm font-bold text-ink transition hover:bg-sage/25"
+                    >
+                      Not now
+                    </button>
+                  </div>
+                </div>
+              )}
               <div className="flex flex-1 flex-col justify-end pb-2">
                 <p className="text-center text-base font-bold text-ink">How are you riding?</p>
                 <div className="mt-4 flex flex-col gap-3">
@@ -2875,7 +2918,16 @@ function MilesApp() {
             Miles is an AI guide — he may occasionally get a detail wrong.
           </p>
           <LegalLinks />
+          <button
+            type="button"
+            onClick={() => setProfilePanel('miles')}
+            className="py-1 text-center text-xs font-bold text-inksoft underline underline-offset-2"
+          >
+            Your Miles — what Miles knows about you
+          </button>
         </main>
+        {profilePanel === 'seed' && <SeedCard onDone={() => setProfilePanel('none')} />}
+        {profilePanel === 'miles' && <YourMilesScreen onClose={() => setProfilePanel('none')} />}
       </div>
     );
   }
@@ -3077,7 +3129,16 @@ function MilesApp() {
             and like any good storyteller, he may occasionally get a detail wrong.
           </p>
           <LegalLinks />
+          <button
+            type="button"
+            onClick={() => setProfilePanel('miles')}
+            className="py-1 text-center text-xs font-bold text-inksoft underline underline-offset-2"
+          >
+            Your Miles — what Miles knows about you
+          </button>
         </main>
+        {profilePanel === 'seed' && <SeedCard onDone={() => setProfilePanel('none')} />}
+        {profilePanel === 'miles' && <YourMilesScreen onClose={() => setProfilePanel('none')} />}
       </div>
     );
   }

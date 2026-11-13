@@ -18,6 +18,8 @@ import {
   type SettleRecord,
 } from './player';
 import * as backend from './backend';
+import { observeStoryOutcome } from './profile';
+import { tagsFor } from '../data/routeTags';
 import * as gemini from './gemini';
 import * as facts from './facts';
 import {
@@ -3222,6 +3224,26 @@ export class Tour {
       told_late: this.soundStamps.get(item.id)?.toldLate ?? false,
       horizon_s: this.commitStamps.get(item.id)?.horizonS ?? null,
     });
+    // Inference (Nov 13, 2026): a library story's settle is a
+    // taste signal for the on-device profile — its tag topics
+    // gain (completed) or lose (a real listen cut short) a
+    // little confidence. Best-effort and fully fenced: the
+    // observation can never disturb playback, live-generated
+    // stories carry no shelf tags and teach nothing, and the
+    // profile module itself no-ops while paused.
+    if (rec.sounded && (item.storySource === 'library' || item.storySource === 'corridor') && item.angleOf) {
+      try {
+        const baseAngle = isShortCutAngle(item.angleOf)
+          ? item.angleOf.slice(0, -SHORT_CUT_SUFFIX.length)
+          : item.angleOf;
+        const topics = tagsFor(backend.placeKeyOf(subject), baseAngle).topics;
+        if (topics.length > 0) {
+          observeStoryOutcome({ topics, completed: rec.completed, soundedMs: rec.soundedMs });
+        }
+      } catch {
+        /* inference is a nicety — never a playback failure */
+      }
+    }
     // P1 salvage — story_timing: the story's latency truth (A's
     // per-story timing row). fetchTextS = text generation, synthS =
     // synthesis, cacheHit = audio came from the on-device cache,
