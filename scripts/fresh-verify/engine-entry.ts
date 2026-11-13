@@ -14,6 +14,7 @@ export { routeInterItemGapMs } from '../../src/core/routePlayback';
 export { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor } from '../../src/data/corridors';
 export { resolveFillerRegion } from '../../src/data/fillerRegions';
 export { isTesterUnlocked, tryTesterUnlock, TESTER_ACCESS_CODE } from '../../src/core/accessGate';
+export * as profile from '../../src/core/profile';
 export {
   AmbientBedController,
   resolveAmbientBed,

@@ -162,6 +162,24 @@ execFileSync(
 );
 const rmd = await import(pathToFileURL(rmdOut).href);
 
+// The user profile module (personalization tool, Nov 13,
+// 2026): pure logic over a store seam — its suites drive it
+// through in-memory stores, zero live calls.
+const pfOut = join(mkdtempSync(join(tmpdir(), 'route-profile-')), 'profile.mjs');
+execFileSync(
+  join(repoRoot, 'node_modules', '.bin', 'esbuild'),
+  [
+    join(repoRoot, 'src', 'core', 'profile.ts'),
+    '--bundle',
+    '--format=esm',
+    '--platform=node',
+    `--outfile=${pfOut}`,
+    '--log-level=warning',
+  ],
+  { stdio: 'inherit' },
+);
+const pf = await import(pathToFileURL(pfOut).href);
+
 let passed = 0;
 let failed = 0;
 function check(name, fn) {
@@ -9421,6 +9439,166 @@ check('short cuts (data): the generator reproduces the committed module byte for
   const before = readFileSync(join(repoRoot, 'src/data/shortCuts.ts'), 'utf8');
   execFileSync('node', [join(repoRoot, 'scripts/route-mode/build-short-cuts.mjs')], { cwd: repoRoot, stdio: 'pipe' });
   assert.equal(readFileSync(join(repoRoot, 'src/data/shortCuts.ts'), 'utf8'), before, 'regen is deterministic and the committed file is in sync');
+});
+
+// ---- personalization: the user profile (Nov 13, 2026) ----
+const PF_T0 = Date.parse('2026-11-13T10:00:00-08:00');
+const PF_DAY = 24 * 60 * 60 * 1000;
+const memStore = () => {
+  let v = null;
+  return { read: () => v, write: s => { v = s; }, clear: () => { v = null; } };
+};
+
+check('PF-01 profile: seed-card save persists declared tastes + constraints with provenance', () => {
+  const s = memStore();
+  assert.equal(pf.shouldOfferSeed(s, PF_T0), true, 'a fresh store offers the seed');
+  pf.setDeclaredTaste('cuisines', ['bbq', 'tacos-mexican'], 'seed-card', s, PF_T0);
+  pf.setDeclaredTaste('storyTopics', ['Coast'], 'seed-card', s, PF_T0);
+  pf.setDeclaredConstraint('budgetComfort', 'sit-down', 'seed-card', s, PF_T0);
+  pf.setDeclaredConstraint('maxDetourMinutes', 10, 'seed-card', s, PF_T0);
+  pf.setSeedState('completed', s, PF_T0);
+  const p = pf.loadProfile(s, PF_T0);
+  assert.deepEqual(p.tastes.cuisines.value, ['bbq', 'tacos-mexican']);
+  assert.equal(p.tastes.cuisines.source, 'declared');
+  assert.equal(p.tastes.cuisines.provenance, 'seed-card');
+  assert.equal(p.constraints.budgetComfort.value, 'sit-down');
+  assert.equal(p.constraints.budgetComfort.confidence, null, 'declared entries carry no confidence');
+  assert.equal(pf.shouldOfferSeed(s, PF_T0), false, 'a completed seed is never re-offered');
+});
+
+check('PF-02 profile: seed skip is recorded and costs nothing', () => {
+  const s = memStore();
+  pf.setSeedState('skipped', s, PF_T0);
+  assert.equal(pf.shouldOfferSeed(s, PF_T0), false, 'a skipped seed is never re-offered');
+  const view = pf.getProfile(s, PF_T0);
+  assert.equal(view.hasAnyDeclared, false, 'skipping leaves an inference-only profile');
+  assert.deepEqual(pf.matchInputs(s, PF_T0).topics, [], 'nothing inferred yet');
+});
+
+check('PF-03 profile: declared beats inferred on the same topic (shadowed, never double-counted)', () => {
+  const s = memStore();
+  pf.setDeclaredTaste('storyTopics', ['Coast'], 'seed-card', s, PF_T0);
+  pf.observeStoryOutcome({ topics: ['Coast'], completed: true, soundedMs: 60000 }, s, PF_T0);
+  pf.observeStoryOutcome({ topics: ['Coast'], completed: true, soundedMs: 60000 }, s, PF_T0);
+  const coast = pf.matchInputs(s, PF_T0).topics.filter(t => t.topic === 'Coast');
+  assert.equal(coast.length, 1, 'one Coast entry in the match inputs');
+  assert.equal(coast[0].weight, 1, 'the declared weight wins');
+  assert.equal(coast[0].source, 'declared');
+});
+
+check('PF-04 profile: inference writes topics only — constraints stay declared-only', () => {
+  const s = memStore();
+  pf.observeStoryOutcome({ topics: ['Food & Drink', 'Sport'], completed: true, soundedMs: 90000 }, s, PF_T0);
+  pf.observeThreadPick('Sport', s, PF_T0);
+  const c = pf.getConstraints(s, PF_T0);
+  assert.deepEqual(c, {
+    budgetComfort: null, maxDetourMinutes: null, alcoholOk: null, usuallyWithKids: null,
+    dogFriendly: null, walkingTolerance: null, surpriseTolerance: null, dietary: [],
+  }, 'no constraint was ever inferred');
+  const p = pf.loadProfile(s, PF_T0);
+  assert.ok(p.inferredTopics['Food & Drink'], 'completion taught the topic');
+  assert.equal(p.inferredTopics['Sport'].provenance, 'thread-pick', 'the latest evidence names itself');
+});
+
+check('PF-05 profile: inferred confidence ages at read time; declared never decays', () => {
+  const s = memStore();
+  pf.observeThreadPick('Coast', s, PF_T0); // confidence 0.4 at T0
+  const entry = () => pf.loadProfile(s, PF_T0).inferredTopics['Coast'];
+  assert.equal(pf.agedConfidence(entry(), PF_T0 + 89 * PF_DAY), 0.4, 'full strength inside the grace window');
+  assert.ok(Math.abs(pf.agedConfidence(entry(), PF_T0 + 120 * PF_DAY) - 0.2) < 1e-9, 'one half-life past grace halves it');
+  assert.equal(pf.matchInputs(s, PF_T0 + 400 * PF_DAY).topics.length, 0, 'long-unused affinities fall below the read threshold');
+  pf.setDeclaredConstraint('budgetComfort', 'splurge', 'seed-card', s, PF_T0);
+  assert.equal(pf.getConstraints(s, PF_T0 + 1000 * PF_DAY).budgetComfort, 'splurge', 'a declaration does not decay');
+});
+
+check('PF-06 profile: pause stops inference and empties every personalization read', () => {
+  const s = memStore();
+  pf.setDeclaredTaste('cuisines', ['bbq'], 'seed-card', s, PF_T0);
+  pf.setDeclaredConstraint('maxDetourMinutes', 20, 'seed-card', s, PF_T0);
+  pf.setPaused(true, s, PF_T0);
+  pf.observeStoryOutcome({ topics: ['Coast'], completed: true, soundedMs: 60000 }, s, PF_T0);
+  const p = pf.loadProfile(s, PF_T0);
+  assert.deepEqual(Object.keys(p.inferredTopics), [], 'no inference lands while paused');
+  assert.deepEqual(pf.matchInputs(s, PF_T0), { topics: [], cuisines: [], drinks: [], activities: [], dietary: [] }, 'match inputs empty while paused');
+  assert.equal(pf.getConstraints(s, PF_T0).maxDetourMinutes, null, 'constraints read empty while paused');
+  assert.equal(p.tastes.cuisines.value[0], 'bbq', 'the data itself survives the pause');
+});
+
+check('PF-07 profile: export → wipe → import round-trips every value', () => {
+  const s = memStore();
+  pf.setDeclaredTaste('drinks', ['coffee', 'no-alcohol'], 'seed-card', s, PF_T0);
+  pf.setDeclaredConstraint('usuallyWithKids', true, 'your-miles-edit', s, PF_T0 + 1000);
+  pf.observeThreadPick('Navy Century', s, PF_T0 + 2000);
+  const exported = pf.exportProfile(s, PF_T0 + 3000);
+  pf.wipeProfile(s);
+  assert.equal(pf.getProfile(s, PF_T0).hasAnyDeclared, false, 'wipe leaves the empty profile');
+  const result = pf.importProfile(exported, s);
+  assert.equal(result.ok, true, 'the export imports cleanly');
+  assert.deepEqual(JSON.parse(pf.exportProfile(s, PF_T0 + 4000)), JSON.parse(exported), 'values survive the round trip exactly');
+});
+
+check('PF-08 profile: wipe erases everything; a corrupt store reads as empty, never an error', () => {
+  const s = memStore();
+  pf.setDeclaredTaste('activities', ['markets'], 'seed-card', s, PF_T0);
+  pf.wipeProfile(s);
+  assert.equal(pf.shouldOfferSeed(s, PF_T0), true, 'after a wipe the seed is offerable again');
+  const corrupt = { read: () => '{"version":1,"createdAt":', write: () => {}, clear: () => {} };
+  const p = pf.loadProfile(corrupt, PF_T0);
+  assert.equal(p.version, 1, 'corrupt JSON reads as a fresh profile');
+  assert.equal(p.tastes.cuisines, null);
+});
+
+check('PF-09 profile: the forbidden-fields guard — no gender/income/dob anywhere, ever', () => {
+  const s = memStore();
+  pf.setDeclaredTaste('cuisines', ['bbq'], 'seed-card', s, PF_T0);
+  pf.observeThreadPick('Coast', s, PF_T0);
+  const doc = JSON.parse(pf.exportProfile(s, PF_T0));
+  assert.deepEqual(pf.findForbiddenKeys(doc), [], 'a real profile document carries no forbidden key');
+  assert.deepEqual(pf.findForbiddenKeys(pf.emptyProfile(PF_T0)), [], 'the empty schema is clean');
+  for (const bad of [{ gender: 'x' }, { income: 5 }, { dob: '1990-01-01' }, { nested: { dateOfBirth: 'x' } }]) {
+    assert.ok(pf.findForbiddenKeys(bad).length > 0, `the guard catches ${JSON.stringify(bad)}`);
+    const tainted = JSON.stringify({ ...pf.emptyProfile(PF_T0), ...bad });
+    assert.equal(pf.importProfile(tainted, memStore()).ok, false, 'a tainted import is rejected whole');
+  }
+});
+
+check('PF-10 profile: inference discipline — cut-offs need a real listen; off-vocab and no-field signals teach nothing', () => {
+  const s = memStore();
+  pf.observeStoryOutcome({ topics: ['Coast'], completed: false, soundedMs: 3000 }, s, PF_T0);
+  assert.deepEqual(Object.keys(pf.loadProfile(s, PF_T0).inferredTopics), [], 'a 3-second cut-off is the road, not a rejection');
+  pf.observeStoryOutcome({ topics: ['Coast'], completed: false, soundedMs: 45000 }, s, PF_T0);
+  assert.equal(pf.loadProfile(s, PF_T0).inferredTopics['Coast'], undefined, 'a lone weak negative never creates an affinity from nothing');
+  pf.observeStoryOutcome({ topics: ['Coast'], completed: true, soundedMs: 60000 }, s, PF_T0);
+  pf.observeStoryOutcome({ topics: ['Coast'], completed: false, soundedMs: 45000 }, s, PF_T0);
+  const after = pf.loadProfile(s, PF_T0).inferredTopics['Coast'];
+  assert.ok(Math.abs(after.confidence - 0.15) < 1e-9, 'completion +0.25 then a real cut-off −0.10');
+  const before = JSON.stringify(pf.loadProfile(s, PF_T0));
+  pf.observeStoryOutcome({ topics: ['Not A Real Topic'], completed: true, soundedMs: 60000 }, s, PF_T0);
+  pf.observeTonePick('somber');
+  pf.observeModePick('driving');
+  assert.equal(JSON.stringify(pf.loadProfile(s, PF_T0)), before, 'off-vocab topics, tone picks and mode picks change nothing');
+});
+
+check('PF-11 profile: declared writes are filtered to the closed vocabularies', () => {
+  const s = memStore();
+  pf.setDeclaredTaste('cuisines', ['bbq', 'martian-food', 'bbq'], 'seed-card', s, PF_T0);
+  assert.deepEqual(pf.loadProfile(s, PF_T0).tastes.cuisines.value, ['bbq'], 'unknown values dropped, duplicates collapsed');
+  const bad = JSON.stringify({
+    ...pf.emptyProfile(PF_T0),
+    tastes: { cuisines: { value: ['bbq', 'plutonian'], source: 'declared', provenance: 'x', updatedAt: PF_T0, confidence: null }, drinks: null, activities: null, storyTopics: null },
+  });
+  const s2 = memStore();
+  assert.equal(pf.importProfile(bad, s2).ok, true, 'an import with an off-vocab value still imports');
+  assert.deepEqual(pf.loadProfile(s2, PF_T0).tastes.cuisines.value, ['bbq'], 'the off-vocab value is filtered on the way in');
+});
+
+check('PF-12 profile: a deleted inferred topic stays deleted until new evidence arrives', () => {
+  const s = memStore();
+  pf.observeThreadPick('Sport', s, PF_T0);
+  pf.deleteInferredTopic('Sport', s, PF_T0);
+  assert.deepEqual(pf.getProfile(s, PF_T0).inferredTopics, [], 'the forgotten topic no longer surfaces');
+  pf.observeStoryOutcome({ topics: ['Sport'], completed: true, soundedMs: 60000 }, s, PF_T0 + 1000);
+  assert.equal(pf.getProfile(s, PF_T0 + 1000).inferredTopics.length, 1, 'fresh evidence may re-teach it');
 });
 
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);

@@ -50,6 +50,7 @@ const extras = {
     tryTesterUnlock: engine.tryTesterUnlock,
     TESTER_ACCESS_CODE: engine.TESTER_ACCESS_CODE,
   },
+  profile: engine.profile,
   ambience: {
     AmbientBedController: engine.AmbientBedController,
     resolveAmbientBed: engine.resolveAmbientBed,

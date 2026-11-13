@@ -105,7 +105,7 @@ async function healthyOpening(world, audio, pos = UTC, speed = 8) {
 }
 
 export async function runScenarios(Tour, extras) {
-  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs } = extras;
+  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile } = extras;
 
   // ---------------------------------------------------------- S-01 healthy start
   suite('S-01 healthy start / opener order');
@@ -4124,5 +4124,64 @@ export async function runScenarios(Tour, extras) {
     const p260 = off(mid, brg + 90, 260);
     const m260 = matchCorridor({ lat: p260.lat, lng: p260.lng, heading: brg });
     check('260 m off-chord no longer returns the segment', m260?.segment !== seg, `got ${m260?.segment.displayName ?? 'null'}`);
+  }
+
+  // ---------------------------------------------------------- PF user profile
+  // The personalization tool (Nov 13, 2026): these suites drive
+  // the SHIPPED default store (the harness's localStorage shim)
+  // end to end — the pure-logic depth (decay clocks, inference
+  // math, vocab filters) is proven in the route harness's PF
+  // suites through the store seam.
+  suite('PF-01 profile (shipped store): seed save persists to localStorage and reads back');
+  {
+    resetLocalStorage();
+    check('a fresh device offers the seed card', profile.shouldOfferSeed() === true);
+    profile.setDeclaredTaste('cuisines', ['seafood'], 'seed-card');
+    profile.setDeclaredConstraint('alcoholOk', true, 'seed-card');
+    profile.setSeedState('completed');
+    check(
+      'the profile document is in localStorage under its key',
+      typeof localStorage.getItem(profile.PROFILE_STORAGE_KEY) === 'string',
+    );
+    const view = profile.getProfile();
+    check('declared tastes read back', view.tastes.cuisines.join() === 'seafood', JSON.stringify(view.tastes));
+    check('declared constraints read back', profile.getConstraints().alcoholOk === true);
+    check('a completed seed is not re-offered', profile.shouldOfferSeed() === false);
+  }
+  suite('PF-02 profile (shipped store): inference lands through the default store; pause empties the reads');
+  {
+    resetLocalStorage();
+    profile.observeThreadPick('Coast');
+    profile.observeStoryOutcome({ topics: ['Coast'], completed: true, soundedMs: 60000 });
+    const inputs = profile.matchInputs();
+    check(
+      'thread pick + completion surface as one inferred Coast weight',
+      inputs.topics.length === 1 && inputs.topics[0].topic === 'Coast' && inputs.topics[0].source === 'inferred',
+      JSON.stringify(inputs.topics),
+    );
+    profile.setPaused(true);
+    check('paused match inputs are empty', profile.matchInputs().topics.length === 0);
+    check('paused constraints are empty', profile.getConstraints().budgetComfort === null);
+    profile.setPaused(false);
+    check('resuming restores the reads', profile.matchInputs().topics.length === 1);
+  }
+  suite('PF-03 profile (shipped store): export → wipe → import round-trips; a tainted import is rejected');
+  {
+    resetLocalStorage();
+    profile.setDeclaredTaste('activities', ['live-music', 'markets'], 'seed-card');
+    const exported = profile.exportProfile();
+    profile.wipeProfile();
+    check('wipe clears the stored document', localStorage.getItem(profile.PROFILE_STORAGE_KEY) === null);
+    check('the export imports', profile.importProfile(exported).ok === true);
+    check(
+      'values survive the round trip exactly',
+      JSON.stringify(JSON.parse(profile.exportProfile())) === JSON.stringify(JSON.parse(exported)),
+    );
+    const tainted = JSON.stringify({ ...JSON.parse(exported), income: 120000 });
+    check('an import carrying a forbidden key is rejected whole', profile.importProfile(tainted).ok === false);
+    check(
+      'the rejected import changed nothing',
+      profile.getProfile().tastes.activities.join() === 'live-music,markets',
+    );
   }
 }
