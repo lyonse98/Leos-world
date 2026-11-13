@@ -21,6 +21,7 @@
 //
 import { normalizePlaceName, selectPriorDrive, type RouteDriveRecord } from './routeHistory';
 import { houseRank, houseRankForPlaceKey, isHouseStory } from './houseClass';
+import { SHORT_CUT_DURATION_SEC } from '../data/shortCuts';
 
 export { isHouseStory } from './houseClass';
 
@@ -796,6 +797,146 @@ function shadowedByTwin(u: LibraryUnit, twins: Map<string, LibraryUnit>): boolea
 }
 
 /**
+ * Short cuts (Nov 12, 2026 — Erik's ruling: "density sets
+ * the cut"). A short cut is the SAME story at a second
+ * length: a library row whose angle is the base angle +
+ * ' (short cut)' (the producing program's convention;
+ * src/data/shortCuts carries the bundled pair map). The
+ * dimension is orthogonal to woven twins — a different
+ * register is a different telling, but a different LENGTH
+ * is the same telling, which is why the rules differ from
+ * the woven ones at every point:
+ *
+ *  - Seating order NEVER reads length. Erik rejected a
+ *    pace bias (reaching for shorter stories would exhaust
+ *    the short pool and demote the better long stories);
+ *    who gets picked is exactly the pre-feature order.
+ *  - The VERSION is assigned per seat, after seating, by
+ *    LOCAL DENSITY at the seat: dense forward supply →
+ *    the short cut (more stories per route); a genuinely
+ *    large forward gap / thin supply → the FULL version
+ *    (depth covers distance — long stories are the
+ *    dead-space instrument).
+ *  - Keystone seats (climax, destination ground, an
+ *    anchored thread's cast) always play FULL.
+ *  - A twin row is never a candidate: it is version
+ *    material for its base, reached only through the base's
+ *    seat (partitionRoutePools excludes it; see below).
+ *  - Hearing either version marks the STORY heard (App-side
+ *    expansion over the pair map, expandShortCutHeard).
+ */
+export const SHORT_CUT_SUFFIX = ' (short cut)';
+
+export function isShortCutAngle(angle: string): boolean {
+  return angle.endsWith(SHORT_CUT_SUFFIX);
+}
+
+/** "placeKey|baseAngle" → the short-cut unit a pool carries for it, when it carries one. */
+function shortCutTwinsByBase(pool: LibraryUnit[]): Map<string, LibraryUnit> {
+  const map = new Map<string, LibraryUnit>();
+  for (const u of pool) {
+    if (isShortCutAngle(u.angle)) {
+      map.set(`${u.placeKey}|${u.angle.slice(0, -SHORT_CUT_SUFFIX.length)}`, u);
+    }
+  }
+  return map;
+}
+
+/**
+ * The canonical (base) form of a unit id: a short cut's id
+ * resolves to its base story's id. After a version swap,
+ * EVERY id-keyed lookup that was computed pre-swap (the
+ * settle doom set, thread membership, the climax id) must
+ * key on this form — a twin must never look like a
+ * different story to the promise machinery (a miss reopens
+ * the Nov 12 Kate Sessions defect: a bridge naming a story
+ * the episode then drops).
+ */
+export function canonicalStoryId(id: string): string {
+  const cut = id.lastIndexOf('|');
+  if (cut === -1) return id;
+  return isShortCutAngle(id.slice(cut + 1)) ? id.slice(0, id.length - SHORT_CUT_SUFFIX.length) : id;
+}
+
+/**
+ * Dense-supply line for the version verdict: canonical
+ * stories in the seat's progress decile at or above this
+ * count make the ground dense (≈ one story per ~2.5 min on
+ * a 100-min drive — dense by the shelf's own tiling
+ * standards, where the sweep seats at most one story per
+ * bucket per round).
+ */
+export const SHORT_CUT_DENSE_MIN = 4;
+
+/**
+ * The sparse line for the version verdict: a forward gap at
+ * or above this many seconds vetoes the short cut whatever
+ * the supply says — the seat's road ahead is dead space and
+ * the full version is the instrument that covers it. This
+ * IS routeGapFill's GAP_THRESHOLD_SEC (the Coverage
+ * Guarantee's standing dead-stretch constant), mirrored
+ * across the seam the way this codebase mirrors shared
+ * geometry (routeGapFill imports this module, so the
+ * constant cannot ride the other way).
+ */
+export const SHORT_CUT_SPARSE_GAP_SEC = 180;
+
+/** Freeform's dense line: canonical library stories inside the serve radius (tour.ts). */
+export const SHORT_CUT_DENSE_FREEFORM_MIN = 6;
+
+/**
+ * The version verdict for one seat (Erik's rule, Nov 12,
+ * 2026): SHORT iff the seat is not a keystone, the local
+ * forward supply is dense, AND no genuinely large forward
+ * gap follows the seat. The two terms guard each other's
+ * failure: supply alone misfires at a decile boundary (a
+ * seat at the end of a dense decile with empty road ahead
+ * would cut short and then leave silence); gap alone
+ * misfires in uniformly medium supply (no single 180 s
+ * hole, but five stories queued in the next two minutes).
+ */
+export function shortCutVerdict(args: {
+  keystone: boolean;
+  forwardSupply: number;
+  forwardGapSec: number;
+}): boolean {
+  return (
+    !args.keystone &&
+    args.forwardSupply >= SHORT_CUT_DENSE_MIN &&
+    args.forwardGapSec < SHORT_CUT_SPARSE_GAP_SEC
+  );
+}
+
+/**
+ * The unit a short serve actually plays, built from the
+ * twin row with three inheritances from its base:
+ *  - DURATION: the production ledger's MEASURED seconds
+ *    (src/data/shortCuts), never the text estimate and
+ *    never the 55–90 s design target — the shipped twins
+ *    measure 37.0–100.7 s, and window math must price the
+ *    audio that exists. (A twin outside the bundled map —
+ *    harness fixtures — keeps its own durationSec.)
+ *  - REGISTER: protectedRegister / memorial are properties
+ *    of the STORY, not the length. The twin row bakes with
+ *    default flags (it has no presence/memorial entry of
+ *    its own), so without this inheritance a memorial story
+ *    served short would lose its post-memorial silence and
+ *    its humor-kill contribution, and a Protected story
+ *    served short would look color-safe downstream.
+ *  - wovenEligible: false — a short cut is its base's other
+ *    length, never woven material in its own right.
+ */
+export function servedShortCutUnit(base: LibraryUnit, twin: LibraryUnit): LibraryUnit {
+  return {
+    ...twin,
+    durationSec: SHORT_CUT_DURATION_SEC[twin.id] ?? twin.durationSec,
+    protectedRegister: base.protectedRegister,
+    memorial: base.memorial,
+    wovenEligible: false,
+  };
+}
+
+/**
  * Corridor membership radii (fetch order + composer partition
  * + guarantee fill all read these, so the three never drift):
  * the path radius for corridor rows and every non-landmark
@@ -1384,6 +1525,21 @@ export interface PlanItem {
    */
   lateConvertedFrom?: string;
   /**
+   * Short cut served (Nov 12, 2026): this story item plays
+   * its base story's SHORT CUT — the same story at a second
+   * length, assigned at compose by local density (dense
+   * ground → short; a genuinely large forward gap → full;
+   * keystones always full). The item's unit/id are the
+   * TWIN's (that is the audio that sounds); versionOf
+   * carries the BASE unit id, and every id-keyed episode
+   * state — owed set, heard set, bridge commitment, the
+   * suppression ledger — keys on the base id, never on the
+   * twin's: the two lengths are one story.
+   */
+  shortCut?: boolean;
+  /** Short cuts only: the base unit id this item is a version of. */
+  versionOf?: string;
+  /**
    * Bridge render-failure fallback (field fix F5, Nov 12,
    * 2026): set when this bridge's own text failed to render
    * and the seam fell back — 'seam' = the neutral seam line
@@ -1867,6 +2023,13 @@ export function partitionRoutePools(
   const priorHeard: LibraryUnit[] = [];
   for (const u of units) {
     if (u.angle === 'neighborhood_intro_greet' || u.angle === 'filler' || u.angle === 'filler_hosted') continue;
+    // Short cuts (Nov 12, 2026): a twin row is version
+    // material for its base, never a candidate in its own
+    // right — excluded before the heard branch, so a heard
+    // twin neither inflates skippedHeard nor joins the
+    // preview's prior-subject pool. The composer reaches a
+    // twin only through its seated base (the version swap).
+    if (isShortCutAngle(u.angle)) continue;
     if (opts.heardKeys.has(u.id)) {
       skippedHeard += 1;
       if (u.angle !== 'neighborhood_intro' && inCorridor(u)) priorHeard.push(u);
@@ -3358,6 +3521,15 @@ export function composeRoutePlan(
     portalParentId?: string;
     sharedTopic?: string;
     portalClimax?: boolean;
+    /**
+     * Short-cut version swap (Nov 12, 2026): set when the
+     * version pass below replaced this entry's unit with its
+     * short cut. baseUnitId is the seated story's own id —
+     * the ONLY id pre-swap computations (settleDoom, thread
+     * membership) may be read against once the swap lands.
+     */
+    shortCut?: boolean;
+    baseUnitId?: string;
   }
   const sequence: SeqEntry[] = chosen.map(u => ({ unit: u }));
   // The portal climax rides the sequence's tail (consolidation
@@ -3606,8 +3778,16 @@ export function composeRoutePlan(
     // to be strongest — takes no exemption: the model judges
     // it like any story, which is the Nov 12 Naval Medical
     // Center shape (promised as the tie-off, never played).
-    (climaxUnitId !== null && climaxSequenced && e.unit.id === climaxUnitId) ||
-    !settleDoom.has(e.unit.id);
+    (climaxUnitId !== null && climaxSequenced && (e.baseUnitId ?? e.unit.id) === climaxUnitId) ||
+    // Base-id keying (short cuts, Nov 12, 2026): settleDoom
+    // was computed over BASE ids, before the version swap;
+    // after a swap e.unit.id is the twin's, the lookup would
+    // miss, the entry would read as protected, and a bridge
+    // could NAME a doomed story the episode then drops —
+    // the Nov 12 Kate Sessions defect, reopened by the swap
+    // itself. Every post-swap read of a pre-swap set keys on
+    // the base id (baseUnitId ?? unit.id).
+    !settleDoom.has(e.baseUnitId ?? e.unit.id);
 
   // Late-presence material (field fix F3, Nov 12, 2026):
   // the woven twin of every windowed story in the final
@@ -3624,6 +3804,110 @@ export function composeRoutePlan(
     if (!twin || twin.id === e.unit.id || sequenceUnitIds.has(twin.id)) return undefined;
     return twin;
   };
+  // F3 material is resolved BEFORE the version swap below:
+  // lateTwinFor keys on the BASE id, and after a swap the
+  // entry's unit is the twin — the lookup would silently
+  // find nothing and the conversion would die for exactly
+  // the dense-corridor stories it was built for.
+  const lateTwinMaterial = new Map<SeqEntry, LibraryUnit>();
+  for (const e of sequence) {
+    const t = lateTwinFor(e);
+    if (t) lateTwinMaterial.set(e, t);
+  }
+
+  // Short-cut version assignment (Nov 12, 2026 — Erik's
+  // ruling: "density sets the cut"). In sequence space,
+  // after EVERY promise-relevant computation: seating is
+  // final (the tiling, climax, hops, placement safety, the
+  // owed-protection pass all read full durations and are
+  // untouched), settleDoom is settled (it prices FULL
+  // lengths; a short cut only shrinks sounding time, so a
+  // story window-protected at full length is protected at
+  // short length — the promise discipline prices the worst
+  // case and a swap can never break it; doom is NOT
+  // recomputed), and the F3 material above is resolved.
+  // What the swap changes is only which row's audio sounds
+  // at each seat — and every downstream surface that names
+  // stories names PLACE NAMES, which the two versions
+  // share, so the preview, the sell, and the bridges are
+  // version-invisible by construction.
+  const shortTwins = shortCutTwinsByBase(units.filter(u => !opts.heardKeys.has(u.id)));
+  // Forward supply per progress decile over the canonical
+  // geo pool (twins never enter geoAll — partition saw to
+  // that — so counts are per-story, never per-row).
+  const decileSupply: number[] = new Array(FAIRNESS_BUCKETS).fill(0);
+  for (const u of geoAll) decileSupply[progressBucket(prog(u))] += 1;
+  const geoWindows = geoAll.map(u => ({ id: u.id, win: storyWindow(prog(u), u.durationSec, driveDur) }));
+  // The forward gap after a seat: expected seconds from the
+  // seat's window end to the next canonical candidate's
+  // window release FORWARD of the seat's own release (the
+  // soundingSpans interval model applied to the candidate
+  // pool); with no candidate following, the gap runs to the
+  // drive's end. Strictly forward: anchors quantize to
+  // segment midpoints, so a neighbor can share the seat's
+  // exact release — that neighbor sounds in the seat's own
+  // window, not after it, and counting it would zero every
+  // gap on quantized ground (the SC-2 veto sim caught this:
+  // a tied release is not dead road ahead, it is company).
+  const forwardGapSecFor = (e: SeqEntry): number => {
+    const anchor =
+      climaxUnitId !== null && e.unit.id === climaxUnitId && climaxSequenced && climaxAnchor !== null
+        ? climaxAnchor
+        : prog(e.unit);
+    const win = storyWindow(anchor, e.unit.durationSec, driveDur);
+    let nextRelease = Number.POSITIVE_INFINITY;
+    for (const { id, win: w } of geoWindows) {
+      if (id === e.unit.id) continue;
+      if (w.release > win.release && w.release < nextRelease) nextRelease = w.release;
+    }
+    const gapEnd = Number.isFinite(nextRelease) ? nextRelease : 1;
+    return Math.max(0, (gapEnd - win.expire) * driveDur);
+  };
+  // Keystone seats always play FULL: the climax (any mode),
+  // any story on destination ground, and the anchor cast of
+  // an anchored thread (destination / onroute / origin /
+  // feature). A pure topic thread has no geographic anchor
+  // cast — its members are the bulk cast, and density rules
+  // them.
+  const isKeystoneSeat = (e: SeqEntry): boolean =>
+    (climaxUnitId !== null && e.unit.id === climaxUnitId) ||
+    e.portalClimax === true ||
+    isDestinationArea(e.unit, destination) ||
+    (thread !== null && thread.anchorKind !== 'topic' && threadMemberIds.has(e.unit.id));
+  const shortVerdictByBaseId = new Map<string, boolean>();
+  for (const e of sequence) {
+    if (e.portal === true || e.portalClimax === true || e.unit.angle === 'filler_hosted') continue;
+    const twin = shortTwins.get(e.unit.id);
+    if (!twin || twin.id === e.unit.id || sequenceUnitIds.has(twin.id)) {
+      shortVerdictByBaseId.set(e.unit.id, false);
+      continue;
+    }
+    const short = shortCutVerdict({
+      keystone: isKeystoneSeat(e),
+      forwardSupply: decileSupply[progressBucket(prog(e.unit))],
+      forwardGapSec: forwardGapSecFor(e),
+    });
+    shortVerdictByBaseId.set(e.unit.id, short);
+    if (short) {
+      e.baseUnitId = e.unit.id;
+      e.unit = servedShortCutUnit(e.unit, twin);
+      e.shortCut = true;
+    }
+  }
+  // Portal hops are windowless and sound right after their
+  // parent; a hop takes its PARENT seat's verdict (its local
+  // density is its parent's segment — it has no ground of
+  // its own). The portal climax is a climax seat: never
+  // swapped.
+  for (const e of sequence) {
+    if (e.portal !== true || !e.portalParentId) continue;
+    if (shortVerdictByBaseId.get(e.portalParentId) !== true) continue;
+    const twin = shortTwins.get(e.unit.id);
+    if (!twin || twin.id === e.unit.id || sequenceUnitIds.has(twin.id)) continue;
+    e.baseUnitId = e.unit.id;
+    e.unit = servedShortCutUnit(e.unit, twin);
+    e.shortCut = true;
+  }
 
   // Interleave plan-time bridges + sparing reactions,
   // and stamp each story with its release window.
@@ -3727,7 +4011,9 @@ export function composeRoutePlan(
     ? sequence.filter(
         e =>
           e.unit.angle !== 'filler_hosted' &&
-          thread.memberIds.includes(e.unit.id) &&
+          // Base-id keying: memberIds are base ids; a swapped
+          // member's unit id is its twin's (see entryProtected).
+          thread.memberIds.includes(e.baseUnitId ?? e.unit.id) &&
           entryProtected(e),
       )
     : [];
@@ -3869,7 +4155,8 @@ export function composeRoutePlan(
       ...(isClimax ? { climax: true } : {}),
       ...(entry.portal ? { portal: true, portalParentId: entry.portalParentId } : {}),
       ...(entry.portalClimax ? { portalClimax: true } : {}),
-      ...(!isFiller && lateTwinFor(entry) ? { lateTwin: lateTwinFor(entry) } : {}),
+      ...(!isFiller && lateTwinMaterial.get(entry) ? { lateTwin: lateTwinMaterial.get(entry) } : {}),
+      ...(entry.shortCut ? { shortCut: true, versionOf: entry.baseUnitId } : {}),
     });
     // Planned silence seating (Nov 11, 2026): directly after
     // the story whose seam it is, ahead of any reaction tissue.
@@ -4307,6 +4594,12 @@ export function wovenMemberCandidates(
     .filter(
       u =>
         u.angle.startsWith('landmark') &&
+        // Short cuts are never members (defense in depth:
+        // candidacy already requires wovenEligible, which a
+        // twin never carries — the explicit predicate keeps
+        // the rule true even if a presence regen ever
+        // derives twin entries).
+        !isShortCutAngle(u.angle) &&
         u.wovenEligible === true &&
         u.topics.includes(args.topic) &&
         !args.heardKeys.has(u.id) &&
@@ -4466,6 +4759,18 @@ export function seatWovenMembers(
     plan.items.filter(i => i.kind === 'bridge' && typeof i.text === 'string').map(i => i.text as string),
   );
   const seated: LibraryUnit[] = [...alreadySeated];
+  // Short cuts (Nov 12, 2026): the member-form density
+  // inputs — the pass's twin pool (unheard only, mirroring
+  // the composer's construction) and the plan's sounding
+  // supply per progress decile (its story spans; the road's
+  // own material is the supply a member joins).
+  const memberTwins = shortCutTwinsByBase(units.filter(u => !opts.heardKeys.has(u.id)));
+  const spanSupply: number[] = new Array(FAIRNESS_BUCKETS).fill(0);
+  for (const span of soundingSpans(plan.items, driveSec)) {
+    if (span.item.kind === 'story') {
+      spanSupply[progressBucket(Math.min(0.999, span.start / driveSec))] += 1;
+    }
+  }
   // The thread-carried climax designation (this pass only):
   // the strongest member reserved for the final third when
   // the road crowned nothing. Null in normal mode, and
@@ -4494,16 +4799,41 @@ export function seatWovenMembers(
   // the hop off the road is framed as one (offRoute), never
   // as ground ahead.
   const insertIntoGap = (cand: LibraryUnit, gap: MemberGap, asClimax: boolean): void => {
+    // Version assignment (short cuts, Nov 12, 2026): a
+    // member seats into a SILENT gap — sparse context by
+    // construction, so the verdict resolves FULL in
+    // essentially every real case, which is the doctrine
+    // (a sparse stretch → a long carries). The rule still
+    // runs, in its member form: forward supply = the plan's
+    // sounding stories in the gap's decile; forward gap =
+    // the silent span itself. The thread-carried member
+    // climax is a climax seat — always full (asClimax skips
+    // the swap entirely).
+    let served = cand;
+    let short = false;
+    if (!asClimax) {
+      const twin = memberTwins.get(cand.id);
+      if (twin && twin.id !== cand.id && !usedIds.has(twin.id)) {
+        const supply = spanSupply[progressBucket(Math.min(0.999, gap.start / driveSec))] ?? 0;
+        if (
+          shortCutVerdict({ keystone: false, forwardSupply: supply, forwardGapSec: gap.end - gap.start })
+        ) {
+          served = servedShortCutUnit(cand, twin);
+          short = true;
+        }
+      }
+    }
     const memberItem: PlanItem = {
       kind: 'story',
-      id: cand.id,
-      label: cand.placeName,
-      durationSec: cand.durationSec,
-      unit: cand,
+      id: served.id,
+      label: served.placeName,
+      durationSec: served.durationSec,
+      unit: served,
       ready: true,
       anchorProgress: gap.start / driveSec,
       woven: true,
       ...(asClimax ? { climax: true } : {}),
+      ...(short ? { shortCut: true, versionOf: cand.id } : {}),
     };
     const bridgeTarget = (fromAnchorSec: number, fromDur: number, toAnchorSec: number): number =>
       Math.max(
@@ -4523,7 +4853,7 @@ export function seatWovenMembers(
         ? buildBridgeContext({
             earlier: earlierUnits(gap.next),
             prev,
-            next: cand,
+            next: served,
             thread,
             isClimaxBridge: true,
             climaxLast: true,
@@ -4534,7 +4864,7 @@ export function seatWovenMembers(
         : buildBridgeContext({
             earlier: earlierUnits(gap.next),
             prev,
-            next: cand,
+            next: served,
             thread,
             isClimaxBridge: false,
             promiseMade: false,
@@ -4546,14 +4876,14 @@ export function seatWovenMembers(
         prev.durationSec,
         memberAnchorSec,
       );
-      const text = bridgeTextFor(prev, cand, { targetSec: target, context, episode: bridgeLedger });
+      const text = bridgeTextFor(prev, served, { targetSec: target, context, episode: bridgeLedger });
       insert.push({
         kind: 'bridge',
-        id: `bridge:${prev.id}>${cand.id}`,
-        label: `Bridge — ${prev.placeName} to ${cand.placeName}`,
+        id: `bridge:${prev.id}>${served.id}`,
+        label: `Bridge — ${prev.placeName} to ${served.placeName}`,
         durationSec: spokenSec(text),
         prevUnitId: prev.id,
-        nextUnitId: cand.id,
+        nextUnitId: served.id,
         text,
         ready: true,
         targetDurationSec: target,
@@ -4586,8 +4916,8 @@ export function seatWovenMembers(
         gap.next.releaseProgress !== undefined &&
         planDoomedStoryIds(prospective, driveSec).includes(next.id);
       const context = buildBridgeContext({
-        earlier: [...earlierUnits(gap.next), cand],
-        prev: cand,
+        earlier: [...earlierUnits(gap.next), served],
+        prev: served,
         next,
         thread,
         isClimaxBridge: isClimaxNext,
@@ -4604,16 +4934,16 @@ export function seatWovenMembers(
       });
       const target = bridgeTarget(
         memberAnchorSec,
-        cand.durationSec,
+        served.durationSec,
         (gap.next.anchorProgress ?? 0) * driveSec,
       );
-      const text = bridgeTextFor(cand, next, { targetSec: target, context, episode: bridgeLedger });
+      const text = bridgeTextFor(served, next, { targetSec: target, context, episode: bridgeLedger });
       insert.push({
         kind: 'bridge',
-        id: `bridge:${cand.id}>${next.id}`,
-        label: `Bridge — ${cand.placeName} to ${next.placeName}`,
+        id: `bridge:${served.id}>${next.id}`,
+        label: `Bridge — ${served.placeName} to ${next.placeName}`,
         durationSec: spokenSec(text),
-        prevUnitId: cand.id,
+        prevUnitId: served.id,
         nextUnitId: next.id,
         text,
         ready: true,
@@ -4636,8 +4966,11 @@ export function seatWovenMembers(
       }
     }
     items.splice(at, 0, ...insert);
-    seated.push(cand);
+    seated.push(served);
     usedIds.add(cand.id);
+    // A swapped member spends BOTH ids: the twin can never
+    // seat again as a second telling of the same story.
+    if (short) usedIds.add(served.id);
     usedPlaces.add(cand.placeKey);
   };
 

@@ -49,9 +49,15 @@ import {
   estimateDurationSec,
   familyHardExcluded,
   familyRankOf,
+  FAIRNESS_BUCKETS,
   haversineM,
+  isShortCutAngle,
   LANDMARK_PATH_RADIUS_M,
   progressAlongPath,
+  progressBucket,
+  servedShortCutUnit,
+  SHORT_CUT_SUFFIX,
+  shortCutVerdict,
   storyWindow,
   type GeoPoint,
   type LibraryUnit,
@@ -575,7 +581,12 @@ function gapPlaceKey(name: string): string {
 }
 
 /** Build a plan story item exactly as the composer builds a geographic story item. */
-function storyItemFor(unit: LibraryUnit, anchorProgress: number, driveSec: number): PlanItem {
+function storyItemFor(
+  unit: LibraryUnit,
+  anchorProgress: number,
+  driveSec: number,
+  versionOf?: string,
+): PlanItem {
   const win = storyWindow(anchorProgress, unit.durationSec, driveSec);
   return {
     kind: 'story',
@@ -587,6 +598,7 @@ function storyItemFor(unit: LibraryUnit, anchorProgress: number, driveSec: numbe
     anchorProgress,
     releaseProgress: win.release,
     expireProgress: win.expire,
+    ...(versionOf ? { shortCut: true, versionOf } : {}),
   };
 }
 
@@ -744,6 +756,21 @@ export async function fillRouteGaps(
   // the rating is a boundary, tone steers inside it. In a
   // Standard build both terms are exactly today's.
   const family = ctx.input.audience === 'family';
+  // Short cuts (Nov 12, 2026): this pass's twin pool (keyed
+  // by base id, from the fetched set) and its forward-supply
+  // histogram — canonical, unheard fetched stories per
+  // progress decile (twin rows never count: they are version
+  // material, not supply).
+  const fillTwins = new Map<string, LibraryUnit>();
+  const fillSupply: number[] = new Array(FAIRNESS_BUCKETS).fill(0);
+  for (const u of ctx.fetchedUnits) {
+    if (isShortCutAngle(u.angle)) {
+      fillTwins.set(`${u.placeKey}|${u.angle.slice(0, -SHORT_CUT_SUFFIX.length)}`, u);
+      continue;
+    }
+    if (ctx.heardKeys.has(u.id)) continue;
+    fillSupply[progressBucket(progressAlongPath({ lat: u.lat, lng: u.lng }, plan.path))] += 1;
+  }
   const steerTone = effectiveRouteTone(ctx.input);
   const toneRank = (u: LibraryUnit): number =>
     steerTone && (u.tone === steerTone || u.toneSecondary === steerTone) ? 0 : 1;
@@ -766,6 +793,11 @@ export async function fillRouteGaps(
     for (const u of ctx.fetchedUnits) {
       if (plannedIds.has(u.id) || ctx.heardKeys.has(u.id)) continue;
       if (u.angle === 'neighborhood_intro_greet' || u.angle === 'filler' || u.angle === 'filler_hosted') continue;
+      // Short cuts (Nov 12, 2026): a twin row is version
+      // material for its base, never a fill candidate in its
+      // own right — the version decision happens at the
+      // insert site below, on the base the ranking chose.
+      if (isShortCutAngle(u.angle)) continue;
       // Family hard-exclusion (Nov 5, 2026): the guarantee's
       // pool reads the fetched set DIRECTLY (intros included),
       // never the composer's partition — so the predicate
@@ -818,8 +850,33 @@ export async function fillRouteGaps(
         const cand = bestShelfCandidate(sub);
         if (!cand) continue;
         const anchor = progressAlongPath({ lat: cand.lat, lng: cand.lng }, plan.path);
-        insertStoryItem(items, storyItemFor(cand, anchor, driveSec));
+        // Short-cut version (Nov 12, 2026): the composer's
+        // verdict, this pass's geometry — forward supply =
+        // canonical fetched stories in the anchor's decile;
+        // forward gap = the dead stretch being filled,
+        // which is ≥ the gap threshold by construction, so
+        // the verdict resolves FULL in practice (a fill
+        // exists because this road is sparse, and the full
+        // version is the dead-space instrument). The rule
+        // runs uniformly so the day the geometry disagrees,
+        // the behavior is the doctrine's, not an accident.
+        let served = cand;
+        let versionOf: string | undefined;
+        const twin = fillTwins.get(cand.id);
+        if (twin && !plannedIds.has(twin.id) && !ctx.heardKeys.has(twin.id)) {
+          const short = shortCutVerdict({
+            keystone: false,
+            forwardSupply: fillSupply[progressBucket(anchor)],
+            forwardGapSec: sub.gapSec,
+          });
+          if (short) {
+            served = servedShortCutUnit(cand, twin);
+            versionOf = cand.id;
+          }
+        }
+        insertStoryItem(items, storyItemFor(served, anchor, driveSec, versionOf));
         plannedIds.add(cand.id);
+        if (versionOf) plannedIds.add(served.id);
         shelfInserted = true;
         firstFillSubject = firstFillSubject ?? cand.placeName;
         placed = true;

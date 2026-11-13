@@ -181,6 +181,18 @@ export interface CapturedItem {
   humor: boolean;
   humorBankId: string | null;
   /**
+   * Short cuts (Nov 12, 2026; additive — schema stays 2):
+   * which VERSION of the story this item serves. 'short'
+   * when the item plays the story's short cut, 'full' for
+   * every other story/filler item — always present, like
+   * woven, rather than optional. versionOf is the BASE unit
+   * id when version is 'short', else null: the item's own
+   * unitId carries the served (twin) id, so versionOf is
+   * the join key that pairs the two lengths in analysis.
+   */
+  version: 'full' | 'short';
+  versionOf: string | null;
+  /**
    * Audio in hand when the plan row was filed (at opening
    * settle). False no longer means dropped: under the
    * render-ahead pipeline the piece may still render ahead of
@@ -313,6 +325,8 @@ export function assemblePlanItems(plan: RoutePlan, renderedItemIds: ReadonlySet<
       voice: it.voice ?? null,
       humor: it.humor === true,
       humorBankId: it.humorBankId ?? null,
+      version: it.shortCut === true ? 'short' : 'full',
+      versionOf: it.shortCut === true ? (it.versionOf ?? null) : null,
       rendered: renderedItemIds.has(it.id),
       fromSubject: it.prevUnitId ? (subjectByUnitId.get(it.prevUnitId) ?? null) : null,
       toSubject: it.nextUnitId ? (subjectByUnitId.get(it.nextUnitId) ?? null) : null,
@@ -341,6 +355,8 @@ export function assemblePlanItems(plan: RoutePlan, renderedItemIds: ReadonlySet<
       voice: null,
       humor: false,
       humorBankId: null,
+      version: 'full',
+      versionOf: null,
       rendered: renderedItemIds.has('wrap-up'),
       fromSubject: null,
       toSubject: null,
@@ -398,6 +414,13 @@ export interface RouteEpisodePlanPayload {
    */
   humor_pieces: number;
   humor_bank_ids: string[];
+  /**
+   * Short cuts (Nov 12, 2026; additive — schema stays 2):
+   * how many of the plan's story items serve a short cut —
+   * the density rule's draw at plan level, auditable
+   * against the items' own version fields.
+   */
+  short_cut_pieces: number;
   budget_sec: number;
   route_duration_sec: number | null;
   route_distance_m: number;
@@ -485,6 +508,7 @@ export function assemblePlanCapture(args: {
     color_pieces: args.items.filter(i => i.voice === 'color-puck').length,
     humor_pieces: args.items.filter(i => i.humor).length,
     humor_bank_ids: args.items.filter(i => i.humor && i.humorBankId).map(i => i.humorBankId as string),
+    short_cut_pieces: args.items.filter(i => i.version === 'short').length,
     budget_sec: plan.budgetSec,
     route_duration_sec: plan.driveSec,
     route_distance_m: Math.round(pathLengthM(plan.path)),
