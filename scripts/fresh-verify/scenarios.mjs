@@ -1886,6 +1886,12 @@ export async function runScenarios(Tour, extras) {
     tour.endTour();
   }
 
+  // (Fixture renamed Nov 14, 2026: the subject was "Munk
+  // House" — under portal-or-nothing a house-named live
+  // subject with no unheard payload in range must NOT
+  // generate at all, which is a different suite's claim
+  // (HP-4). The salvage mechanics tested here are
+  // name-independent.)
   suite('SL-06 salvage: a judge-dropped live story serves later from its banked text');
   {
     resetLocalStorage();
@@ -1899,34 +1905,34 @@ export async function runScenarios(Tour, extras) {
     const audio = new FakeAudio(world.clock, okPolicy({ library: 30_000, synth: 12_000 }));
     const { tour } = await healthyOpening(world, audio);
     const labels = watchLabels(world, tour);
-    // Alpha (30 s) is playing. The Munk House story generates and
+    // Alpha (30 s) is playing. The Munk Observatory story generates and
     // slots behind it.
-    world.candidates = [makeCandidate('Munk House', { lat: UTC.lat, lng: UTC.lng })];
+    world.candidates = [makeCandidate('Munk Observatory', { lat: UTC.lat, lng: UTC.lng })];
     tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
     await world.clock.advance(2_000);
     check('the live story was generated once',
-      promptsFor(world, 'Munk House').length === 1, `prompts=${promptsFor(world, 'Munk House').length}`);
+      promptsFor(world, 'Munk Observatory').length === 1, `prompts=${promptsFor(world, 'Munk Observatory').length}`);
     // Teleport 3 km north, heading away: at dequeue the judge
     // drops the story stale-behind, unheard.
     tour.onPosition({ lat: UTC.lat + 0.033, lng: UTC.lng, speedMps: 8, headingDeg: 0 });
     await world.clock.advance(45_000);
     check('the story was judge-dropped stale-behind',
-      dropsFor(world, 'munk house').some(d => d.payload.reason === 'stale-behind'),
-      JSON.stringify(dropsFor(world, 'munk house').map(d => d.payload)));
-    check('the dropped story never sounded', !labels.includes('Munk House'), labels.join(','));
+      dropsFor(world, 'munk observatory').some(d => d.payload.reason === 'stale-behind'),
+      JSON.stringify(dropsFor(world, 'munk observatory').map(d => d.payload)));
+    check('the dropped story never sounded', !labels.includes('Munk Observatory'), labels.join(','));
     check('the dropped subject is not in the heard set',
-      !world.heard.includes('Munk House'), world.heard.join(' | '));
+      !world.heard.includes('Munk Observatory'), world.heard.join(' | '));
     // Re-approach the anchor: the banked text serves — no second
     // generation spend.
     tour.onPosition({ lat: UTC.lat + 0.001, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
     await world.clock.advance(30_000);
     check('no second generation on re-approach',
-      promptsFor(world, 'Munk House').length === 1, `prompts=${promptsFor(world, 'Munk House').length}`);
+      promptsFor(world, 'Munk Observatory').length === 1, `prompts=${promptsFor(world, 'Munk Observatory').length}`);
     check('the salvaged story sounds on re-approach',
-      playbacksFor(world, 'munk house').some(e => e.payload.sounded === true),
-      JSON.stringify(playbacksFor(world, 'munk house').map(e => e.payload)));
+      playbacksFor(world, 'munk observatory').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'munk observatory').map(e => e.payload)));
     check('the subject joins the heard set only once it sounds',
-      world.heard.includes('Munk House'), world.heard.join(' | '));
+      world.heard.includes('Munk Observatory'), world.heard.join(' | '));
     tour.endTour();
   }
 
@@ -2260,37 +2266,43 @@ export async function runScenarios(Tour, extras) {
     tour.endTour();
   }
 
+  // (Fixture renamed Nov 14, 2026: the subject was "Fragile
+  // House" — under portal-or-nothing its re-serve past the
+  // rest radius would need an unheard payload, and its only
+  // shelf neighbor is spent by then, so the recovery this
+  // suite tests could never happen. The rest-radius
+  // mechanics are name-independent.)
   suite('AF-1 an attempts-exhausted drop rests the subject until the driver moves on');
   {
     resetLocalStorage();
     const world = makeWorld(Tour, {
-      candidates: [makeCandidate('Fragile House'), makeCandidate('Steady Park')],
-      library: ['Fragile House', 'Steady Park'],
+      candidates: [makeCandidate('Fragile Tower'), makeCandidate('Steady Park')],
+      library: ['Fragile Tower', 'Steady Park'],
     });
     let failFragile = true;
     const audio = new FakeAudio(world.clock, ({ cls, src }) =>
-      failFragile && cls === 'library' && typeof src === 'string' && src.includes('fragile-house')
+      failFragile && cls === 'library' && typeof src === 'string' && src.includes('fragile-tower')
         ? { action: 'reject', name: 'NotSupportedError' }
         : { action: 'ok', durationMs: DUR[cls] ?? 5000 });
     const { tour } = await healthyOpening(world, audio);
     await world.clock.advance(30_000);
     check('the failing story dropped attempts-exhausted',
-      dropsFor(world, 'fragile house').some(d => d.payload.reason === 'attempts-exhausted'),
-      JSON.stringify(dropsFor(world, 'fragile house').map(d => d.payload)));
+      dropsFor(world, 'fragile tower').some(d => d.payload.reason === 'attempts-exhausted'),
+      JSON.stringify(dropsFor(world, 'fragile tower').map(d => d.payload)));
     check('the rested subject was committed exactly once at this spot',
-      world.eventsOf('story_played').filter(e => e.payload.subject === 'fragile house').length === 1,
+      world.eventsOf('story_played').filter(e => e.payload.subject === 'fragile tower').length === 1,
       JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
     check('the other candidate served in its place',
       playbacksFor(world, 'steady park').some(e => e.payload.sounded === true),
       JSON.stringify(playbacksFor(world, 'steady park').map(e => e.payload)));
     check('the failed subject is not heard-filed',
-      !world.heard.includes('Fragile House'), world.heard.join(' | '));
+      !world.heard.includes('Fragile Tower'), world.heard.join(' | '));
     // A nudge that triggers serve cycles but stays inside the
     // 250 m rest radius: the subject must remain rested.
     tour.onPosition({ lat: UTC.lat + 0.002, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
     await world.clock.advance(30_000);
     check('still rested after in-radius serve cycles',
-      world.eventsOf('story_played').filter(e => e.payload.subject === 'fragile house').length === 1,
+      world.eventsOf('story_played').filter(e => e.payload.subject === 'fragile tower').length === 1,
       JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
     // Beyond the radius, with the failure gone, the subject is
     // eligible again and lands.
@@ -2298,13 +2310,13 @@ export async function runScenarios(Tour, extras) {
     tour.onPosition({ lat: UTC.lat + 0.005, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
     await world.clock.advance(60_000);
     check('past the radius the subject serves again',
-      world.eventsOf('story_played').filter(e => e.payload.subject === 'fragile house').length === 2,
+      world.eventsOf('story_played').filter(e => e.payload.subject === 'fragile tower').length === 2,
       JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
     check('the recovered serve sounds to completion',
-      playbacksFor(world, 'fragile house').some(e => e.payload.sounded === true),
-      JSON.stringify(playbacksFor(world, 'fragile house').map(e => e.payload)));
+      playbacksFor(world, 'fragile tower').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'fragile tower').map(e => e.payload)));
     check('the subject is heard-filed only after it sounds',
-      world.heard.includes('Fragile House'), world.heard.join(' | '));
+      world.heard.includes('Fragile Tower'), world.heard.join(' | '));
     tour.endTour();
   }
 
@@ -3463,6 +3475,200 @@ export async function runScenarios(Tour, extras) {
       JSON.stringify(libPlays.map(e => e.src)));
     check('the twin audio never played',
       !audio.log.some(e => typeof e.src === 'string' && e.src.includes('(short cut)')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    tour.endTour();
+  }
+
+  // ---------------------------------------------------------- HP: houses are portal-or-nothing (Erik's ruling, Nov 14, 2026)
+  // Day 10's afternoon session served Alice Lee Residence
+  // (library) and A.H. Sweet Residences (live) back-to-back —
+  // F1's demotion never governed the serve decision. The rule
+  // now does: a house candidate serves ONLY when an unheard,
+  // non-house shelf story the linkage ties to it (subject
+  // link, or its own ground within 1,000 m) is in serve range,
+  // and that payload is then queued immediately after it via
+  // the portal obligation. No payload → no serve, in every
+  // lane (library, live, cache, prefetch).
+  const storySubjects = world =>
+    world
+      .eventsOf('story_played')
+      .map(e => e.payload.subject)
+      .filter(
+        s =>
+          typeof s === 'string' &&
+          !s.startsWith('welcome:') &&
+          !s.startsWith('area:') &&
+          !s.startsWith('corridor:'),
+      );
+  const starvePrefetch = world => {
+    world.seams.discoverCandidates = async pt =>
+      Math.abs(pt.lat - UTC.lat) < 0.0001 && Math.abs(pt.lng - UTC.lng) < 0.0001
+        ? world.candidates
+        : [];
+  };
+
+  suite('HP-1 portal-or-nothing: a house with a payload serves, and the payload is the very next story');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Gill House'), makeCandidate('Grand Museum')],
+      library: [
+        { name: 'Gill House', angles: ['landmark_origin'] },
+        { name: 'Grand Museum', angles: ['landmark_origin'] },
+      ],
+    });
+    starvePrefetch(world);
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    for (let i = 0; i < 80 && storySubjects(world).length < 2; i++) await world.clock.advance(5_000);
+    await world.clock.advance(45_000); // let both stories actually sound (15 s apiece)
+    const subjects = storySubjects(world);
+    check('the house served (a payload stands on its ground)', subjects.includes('gill house'),
+      JSON.stringify(subjects));
+    check('the payload sounds immediately after the house — no story between them',
+      subjects.indexOf('gill house') >= 0 && subjects.indexOf('grand museum') === subjects.indexOf('gill house') + 1,
+      JSON.stringify(subjects));
+    check('the house audio is what played first of the pair',
+      audio.plays('library').some(e => typeof e.src === 'string' && e.src.includes('library/gill-house/landmark_origin.wav')),
+      JSON.stringify(audio.plays('library').map(e => e.src)));
+    check('the payload audio played too',
+      audio.plays('library').some(e => typeof e.src === 'string' && e.src.includes('library/grand-museum/landmark_origin.wav')),
+      JSON.stringify(audio.plays('library').map(e => e.src)));
+    tour.endTour();
+  }
+
+  suite('HP-2 portal-or-nothing: a house with no reachable payload does not serve; the slot goes to the next candidate');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Lonely House'), makeCandidate('Open Park')],
+      // The house IS on the shelf — its absence from the tour
+      // is the gate's doing, not a missing row. Nothing else
+      // is on the shelf: no payload exists anywhere.
+      library: [{ name: 'Lonely House', angles: ['landmark_origin'] }],
+    });
+    starvePrefetch(world);
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    for (let i = 0; i < 60 && !storySubjects(world).includes('open park'); i++) {
+      await world.clock.advance(5_000);
+    }
+    await world.clock.advance(60_000); // room for the house to misbehave late
+    check('the next eligible non-house candidate took the slot (live)',
+      storySubjects(world).includes('open park'), JSON.stringify(storySubjects(world)));
+    check('the house never committed',
+      !world.eventsOf('story_played').some(e => e.payload.subject === 'lonely house'),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    check('the house audio never played',
+      !audio.log.some(e => typeof e.src === 'string' && e.src.includes('lonely-house')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    tour.endTour();
+  }
+
+  suite('HP-3 portal-or-nothing: a house whose only payload is already heard (cross-day) does not serve');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Gill House'), makeCandidate('Other Place')],
+      library: [
+        { name: 'Gill House', angles: ['landmark_origin'] },
+        { name: 'Grand Museum', angles: ['landmark_origin'] },
+      ],
+    });
+    // The payload stands on the house's ground — but the
+    // listener heard it on a previous day. A heard payload
+    // is no payload: the follow-on cannot play, so the
+    // house cannot either.
+    world.seams.fetchHeardTopics = async () => ['Grand Museum'];
+    starvePrefetch(world);
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    for (let i = 0; i < 60 && !storySubjects(world).includes('other place'); i++) {
+      await world.clock.advance(5_000);
+    }
+    await world.clock.advance(60_000);
+    check('the ordinary candidate served instead',
+      storySubjects(world).includes('other place'), JSON.stringify(storySubjects(world)));
+    check('the house never committed',
+      !world.eventsOf('story_played').some(e => e.payload.subject === 'gill house'),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    check('the heard payload never committed either',
+      !world.eventsOf('story_played').some(e => e.payload.subject === 'grand museum'),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    tour.endTour();
+  }
+
+  suite('HP-4 portal-or-nothing: the live lane refuses a house subject when portal conditions fail');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Spec House'), makeCandidate('Open Park')],
+      library: [],
+    });
+    starvePrefetch(world);
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    for (let i = 0; i < 60 && !storySubjects(world).includes('open park'); i++) {
+      await world.clock.advance(5_000);
+    }
+    await world.clock.advance(60_000);
+    check('no generation was ever commissioned for the house',
+      !world.genStoryPrompts.some(p => p.includes('Spec House')),
+      JSON.stringify(world.genStoryPrompts.map(p => p.slice(0, 60))));
+    check('the house never committed',
+      !world.eventsOf('story_played').some(e => e.payload.subject === 'spec house'),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    check('the non-house candidate generated and served live instead',
+      world.eventsOf('story_played').some(e => e.payload.subject === 'open park' && e.payload.source === 'live'),
+      JSON.stringify(world.eventsOf('story_played').map(e => [e.payload.subject, e.payload.source])));
+    tour.endTour();
+  }
+
+  suite('HP-4b portal-or-nothing: a live house WITH a shelf payload serves live, payload queued after (the A.H. Sweet shape, licensed)');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Spec House')],
+      library: [{ name: 'Grand Museum', angles: ['landmark_origin'] }],
+    });
+    starvePrefetch(world);
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    for (let i = 0; i < 80 && storySubjects(world).length < 2; i++) await world.clock.advance(5_000);
+    const subjects = storySubjects(world);
+    check('the house generated live (its payload licensed the serve)',
+      world.eventsOf('story_played').some(e => e.payload.subject === 'spec house' && e.payload.source === 'live'),
+      JSON.stringify(world.eventsOf('story_played').map(e => [e.payload.subject, e.payload.source])));
+    check('the shelf payload is the very next story',
+      subjects.indexOf('spec house') >= 0 && subjects.indexOf('grand museum') === subjects.indexOf('spec house') + 1,
+      JSON.stringify(subjects));
+    tour.endTour();
+  }
+
+  suite('HP-5 portal-or-nothing: back-to-back houses are impossible — the second house has no unheard payload left');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha House'), makeCandidate('Beta House')],
+      library: [
+        { name: 'Alpha House', angles: ['landmark_origin'] },
+        { name: 'Beta House', angles: ['landmark_origin'] },
+        { name: 'Grand Museum', angles: ['landmark_origin'] },
+      ],
+    });
+    starvePrefetch(world);
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    for (let i = 0; i < 100 && storySubjects(world).length < 2; i++) await world.clock.advance(5_000);
+    await world.clock.advance(60_000); // room for Beta to misbehave late
+    check('the tour told exactly the house and its payload, in order',
+      JSON.stringify(storySubjects(world)) === JSON.stringify(['alpha house', 'grand museum']),
+      JSON.stringify(storySubjects(world)));
+    check('the second house never committed',
+      !world.eventsOf('story_played').some(e => e.payload.subject === 'beta house'),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    check('the second house audio never played',
+      !audio.log.some(e => typeof e.src === 'string' && e.src.includes('beta-house')),
       JSON.stringify(audio.log.map(e => e.src)));
     tour.endTour();
   }

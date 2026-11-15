@@ -8668,7 +8668,7 @@ check('planned silence: the composer seats composed beats at named seams only (N
     assert.equal(rm.isHouseStory({ placeName: 'Coronado Bridge', angle: 'landmark_origin', topics: ['Engineering'] }), false, 'an ordinary landmark');
   });
 
-  check('fieldfix F1: the member-chain guard — one house member per episode, non-houses seat first, never back-to-back', () => {
+  check('fieldfix F1: the member-chain guard — non-houses seat first, never back-to-back; a house member seats only as a portal (HP, Nov 14, 2026)', () => {
     const stage = units => {
       const plan = rm.composeRoutePlan(
         units,
@@ -8694,17 +8694,28 @@ check('planned silence: the composer seats composed beats at named seams only (N
       ]),
     );
     assert.ok(memberIds(mixed).includes('delta|landmark_history'), 'the non-house member seats ahead of longer houses');
+    // Portal-or-nothing (Erik's ruling, Nov 14, 2026)
+    // supersedes F1's one-house-member allowance: a house
+    // member seats ONLY into a gap whose next story is its
+    // portal payload. These member candidates sit ~90 km
+    // from every geo story with no subject link to any of
+    // them, so NO house member qualifies — the F1 backstops
+    // (non-houses first, never back-to-back, ≤1 house) now
+    // hold vacuously underneath the stricter rule. The
+    // positive case (a house member WITH its payload after
+    // the gap) is HP H6b below.
     assert.deepEqual(
       mixed.items.filter(i => i.woven && rm.isHouseStory(i.unit)).map(i => i.id),
-      ['alpha|landmark_history'],
-      'exactly one house member — the strongest house',
+      [],
+      'no house member seats without its payload as the next story',
     );
     const seq = ffStories(mixed);
     for (let i = 1; i < seq.length; i++) {
       assert.ok(!(rm.isHouseStory(seq[i - 1].unit) && rm.isHouseStory(seq[i].unit)), 'house stories never sit back-to-back');
     }
-    // A thread only houses can carry seats its single
-    // strongest and fills the rest from the geo pool.
+    // A thread only houses can carry seats NO member now:
+    // a chain of houses is not a payload, and no geo story
+    // after any gap is one either.
     const housesOnly = stage(
       wFixtureUnits([
         wCand('alpha|landmark_history', 400, { placeName: 'Alpha Spec House' }),
@@ -8712,10 +8723,10 @@ check('planned silence: the composer seats composed beats at named seams only (N
         wCand('gamma|landmark_history', 360, { placeName: 'Gamma Cottage' }),
       ]),
     );
-    assert.deepEqual(memberIds(housesOnly), ['alpha|landmark_history'], 'a houses-only thread seats one member, not a chain');
+    assert.deepEqual(memberIds(housesOnly), [], 'a houses-only thread seats no member under portal-or-nothing');
   });
 
-  check('fieldfix F1: tiling demotion — houses in a decile yield under budget pressure and still seat when there is room', () => {
+  check('fieldfix F1: tiling demotion — houses in a decile yield under budget pressure; portal-or-nothing decides the rest (HP, Nov 14, 2026)', () => {
     const mk = () => [
       unit('h1|landmark_origin', 32.721, { placeName: 'Harbor Spec House' }),
       unit('h2|landmark_origin', 32.723, { placeName: 'Harbor Cottage' }),
@@ -8732,7 +8743,166 @@ check('planned silence: the composer seats composed beats at named seams only (N
       'under pressure the landmark and the event win the decile',
     );
     const loose = ffCompose(mk(), 2000);
-    assert.equal(ffStories(loose).length, 4, 'demotion is not exclusion — with room, the houses seat too');
+    // Portal-or-nothing (Nov 14, 2026) supersedes F1's
+    // "demotion is not exclusion" for houses: the demotion
+    // sort seats both houses BEHIND the landmark and the
+    // event in their shared decile, so in sequence neither
+    // house is followed by a non-house payload — the
+    // trailing house's next story is the other house or
+    // nothing — and the conformance pass removes both.
+    // (The linkage itself is willing: probed directly,
+    // Harbor Cottage → Harbor Light IS a portal target at
+    // 222 m. Sequence position is what refuses them. A
+    // house whose payload genuinely follows it in sequence
+    // seats — HP H6 below.)
+    assert.deepEqual(
+      ffStories(loose).map(s => s.id).sort(),
+      ['lite|landmark_origin', 'reg|landmark_event'],
+      'with room, the houses still fall — neither is followed by its payload in sequence',
+    );
+  });
+
+  check('HP H6: route composition obeys portal-or-nothing — a house seats only with its payload as the very next story', () => {
+    const storiesOf = p => ffStories(p).map(s => s.id);
+    // (a) A house followed by an UNLINKED non-house: the
+    // follow-on is on the route but is not the house's
+    // portal (no subject link, ~4.5 km away) — the house
+    // is removed and the rest of the route is untouched.
+    const unlinked = ffCompose(
+      [
+        unit('first|landmark_origin', 32.71, { placeName: 'First Museum' }),
+        unit('marston house|landmark_origin', 32.75, { placeName: 'George Marston House' }),
+        unit('harbor light|landmark_origin', 32.79, { placeName: 'Harbor Light' }),
+        unit('last|landmark_origin', 32.85, { placeName: 'Final Gallery' }),
+      ],
+      2000,
+    );
+    assert.deepEqual(
+      storiesOf(unlinked),
+      ['first|landmark_origin', 'harbor light|landmark_origin', 'last|landmark_origin'],
+      'the unlinked house is removed; its neighbors are untouched',
+    );
+    // Control: the same anchor renamed a museum seats —
+    // the removal is the portal rule, not the geometry.
+    const control = ffCompose(
+      [
+        unit('first|landmark_origin', 32.71, { placeName: 'First Museum' }),
+        unit('marston house|landmark_origin', 32.75, { placeName: 'George Marston Museum' }),
+        unit('harbor light|landmark_origin', 32.79, { placeName: 'Harbor Light' }),
+        unit('last|landmark_origin', 32.85, { placeName: 'Final Gallery' }),
+      ],
+      2000,
+    );
+    assert.equal(ffStories(control).length, 4, 'control: a non-house at the same anchor seats');
+    // (b) Neighborhood payload: the story right after the
+    // house stands on its ground (667 m, across a decile
+    // seam so the demotion sort cannot reorder the pair) —
+    // the house seats and the payload is the next story.
+    // No subject link exists here ({george, marston} vs
+    // {marston, building} share no subset) — proximity
+    // alone licenses it.
+    const neigh = ffCompose(
+      [
+        unit('first|landmark_origin', 32.71, { placeName: 'First Museum' }),
+        unit('marston house|landmark_origin', 32.758, { placeName: 'George Marston House' }),
+        unit('marston building|landmark_origin', 32.764, { placeName: 'Marston Building' }),
+        unit('last|landmark_origin', 32.85, { placeName: 'Final Gallery' }),
+      ],
+      2000,
+    );
+    const nIds = storiesOf(neigh);
+    assert.ok(nIds.includes('marston house|landmark_origin'), 'the house seats with a neighborhood payload');
+    assert.equal(
+      nIds[nIds.indexOf('marston house|landmark_origin') + 1],
+      'marston building|landmark_origin',
+      'the payload is the very next story',
+    );
+    // (c) Subject payload beyond neighborhood range: the
+    // house's name carries its architect; the architect's
+    // own story is the next story ~1.8 km on — too far for
+    // the neighborhood link, so only the explicit
+    // same-subject link can license the house, and it does.
+    const subj = ffCompose(
+      [
+        unit('first|landmark_origin', 32.71, { placeName: 'First Museum' }),
+        unit('alice lee house|landmark_origin', 32.752, { placeName: 'Alice Lee/ Irving J Gill/ Hazel Wood Waterman House' }),
+        unit('irving gill|landmark_origin', 32.768, { placeName: 'Irving Gill' }),
+        unit('last|landmark_origin', 32.85, { placeName: 'Final Gallery' }),
+      ],
+      2000,
+    );
+    const sIds = storiesOf(subj);
+    assert.ok(sIds.includes('alice lee house|landmark_origin'), 'the house seats with a subject-linked payload');
+    assert.equal(
+      sIds[sIds.indexOf('alice lee house|landmark_origin') + 1],
+      'irving gill|landmark_origin',
+      'the architect story is the very next story',
+    );
+    // (d) A house as the route's final story has no next
+    // story at all — removed, however strong it is.
+    const tail = ffCompose(
+      [
+        unit('first|landmark_origin', 32.71, { placeName: 'First Museum' }),
+        unit('mid|landmark_origin', 32.78, { placeName: 'Mid Gallery' }),
+        unit('solo house|landmark_origin', 32.88, { placeName: 'Solo House' }),
+      ],
+      2000,
+    );
+    assert.deepEqual(
+      storiesOf(tail),
+      ['first|landmark_origin', 'mid|landmark_origin'],
+      'a tail house is removed — there is no payload after it',
+    );
+  });
+
+  check('HP H6b: a woven house member seats only when the story after its gap is its portal payload', () => {
+    const stage = units => {
+      const plan = rm.composeRoutePlan(
+        units,
+        densePath,
+        denseDest,
+        'Dest',
+        { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+        { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 1800, driveSec: 1800 },
+      );
+      plan.driveSec = 1800;
+      plan.budgetSec = 1800;
+      return rm.seatWovenMembers(plan, units, { heardKeys: new Set() });
+    };
+    // One long silent gap before the destination-side
+    // story. The Bailey house names Irving Gill in its
+    // registry name and Gill's own story closes the route
+    // — if the house member seats into the gap, its
+    // payload is the story right after it. The Alpha house
+    // has no link to anything and must never seat.
+    const plan = stage([
+      wGeo('ga|landmark_origin', 32.71, 120, 'Geo A'),
+      wGeo('gb|landmark_origin', 32.73, 120, 'Geo B'),
+      wGeo('irving gill|landmark_origin', 32.88, 500, 'Irving Gill'),
+      wCand('bailey|landmark_history', 200, { placeName: 'Wheeler Bailey/ Irving Gill House' }),
+      wCand('alpha|landmark_history', 200, { placeName: 'Alpha Spec House' }),
+      wCand('delta|landmark_history', 200, { placeName: 'Delta Fort' }),
+    ]);
+    const members = memberIds(plan);
+    assert.ok(members.includes('bailey|landmark_history'), 'the subject-linked house member seats');
+    assert.ok(!members.includes('alpha|landmark_history'), 'the unlinked house member never seats');
+    const seq = ffStories(plan);
+    const baileyIdx = seq.findIndex(s => s.id === 'bailey|landmark_history');
+    assert.ok(baileyIdx >= 0, 'the house member is in the story sequence');
+    assert.equal(
+      seq[baileyIdx + 1]?.id,
+      'irving gill|landmark_origin',
+      'the payload story follows the house member immediately',
+    );
+    // The invariant, stated generally: every woven house
+    // in the plan is followed by a story that is its
+    // portal target.
+    for (let i = 0; i < seq.length; i++) {
+      if (seq[i].woven && rm.isHouseStory(seq[i].unit)) {
+        const next = seq[i + 1];
+        assert.ok(next && rm.isPortalTarget(seq[i].unit, next.unit), 'every seated house member is followed by its payload');
+      }
+    }
   });
 
   check('fieldfix F2a: a serial-doomed mid story is promised nowhere — not in the preview, not in its own bridge', () => {
