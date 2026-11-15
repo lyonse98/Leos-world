@@ -235,8 +235,9 @@ export async function discoverCandidates(center: GeoPoint, radiusM: number): Pro
  * named cottage/mansion/residence) loses HOUSE_SCORE_PENALTY
  * points — enough to sink it below the landmarks, majors and
  * ordinary places it competes with in the serve cycle's
- * ordering, registry boost included. Ordering only: a house
- * that is the only candidate near the driver still serves.
+ * ordering, registry boost included. Ordering only, as a
+ * backstop: the serve cycle's portal-or-nothing gate
+ * (Nov 14, 2026) decides whether a house may serve at all.
  */
 export const HOUSE_SCORE_PENALTY = 50;
 

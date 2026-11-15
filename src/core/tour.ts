@@ -18,6 +18,8 @@ import {
   type SettleRecord,
 } from './player';
 import * as backend from './backend';
+import { isHousePlaceName, isHouseStory } from './houseClass';
+import { findPortalTarget, type PortalStoryRef } from './housePortal';
 import { observeStoryOutcome } from './profile';
 import { tagsFor } from '../data/routeTags';
 import * as gemini from './gemini';
@@ -528,6 +530,17 @@ export class Tour {
   private lastStoryItem: AudibleItem | null = null;
   private lastSubject: string | null = null;
   /**
+   * Portal-or-nothing (Erik's ruling, Nov 14, 2026): when a
+   * house story commits, the stronger story it portals into
+   * is owed the very next story slot. The obligation is set
+   * at the house's commit, discharged by servePortalTarget
+   * while the house sounds, and dies with the house's settle
+   * if it was never discharged. Singular by design: while a
+   * portal is mid-flight, no second house may commit.
+   */
+  private portalObligation: { houseSubject: string; targetKey: string; targetAngle: string } | null =
+    null;
+  /**
    * The tour thread (P3 salvage): this tour's DELIVERED tellings in
    * hearing order, reduced to subject + angle + signature fact —
    * the prompt feed that lets generation connect and contrast
@@ -680,6 +693,22 @@ export class Tour {
         // failure, a hold — is no resume; the grace covers it.
         if (item.kind === 'story' && this.qaPhase === 'awaiting-resume') {
           this.releaseQaLock('story-resumed');
+        }
+        // Portal-or-nothing (Erik's ruling, Nov 14, 2026): the
+        // obligated house just started SOUNDING — discharge its
+        // payload into the empty waiting slot at this edge, not
+        // at the mercy of the next serve cycle. A cycle may not
+        // run during a short telling (GPS-quiet stretch, sim
+        // stillness), and the obligation dies when the house
+        // settles; the sound-start is the one moment that is
+        // guaranteed to arrive while the house plays with the
+        // slot free. Serve cycles retry it as a backstop.
+        if (
+          item.kind === 'story' &&
+          this.portalObligation &&
+          item.subject === this.portalObligation.houseSubject
+        ) {
+          void this.servePortalTarget();
         }
       },
       onWaiting: item => this.presynthWaiting(item),
@@ -2286,6 +2315,19 @@ export class Tour {
       this.inflight.delete(subject);
       return;
     }
+    // Portal-or-nothing (Nov 14, 2026): while a house sounds
+    // with its payload still owed, a corridor story must not
+    // take the waiting slot ahead of the payload — the
+    // payload is the very next story, or the house's serve
+    // was never licensed. The segment's eligibility persists,
+    // so a later trigger serves it once the portal resolves.
+    if (
+      this.portalObligation &&
+      this.player.current?.subject === this.portalObligation.houseSubject
+    ) {
+      this.inflight.delete(subject);
+      return;
+    }
     const entry = this.libraryIndex.find(
       e =>
         e.place_key === backend.placeKeyOf(segment.displayName) &&
@@ -2361,6 +2403,11 @@ export class Tour {
     this.cycling = true;
     this.lastCyclePos = this.position;
     try {
+      // Portal discharge (Nov 14, 2026): while a house
+      // sounds, its payload owns the next story slot — the
+      // cycle's first business is that debt, ahead of any
+      // new candidate.
+      if (this.portalObligation && (await this.servePortalTarget())) return;
       const pos = this.position;
       const radius = this.modeName() === 'walking' ? 700 : 1600;
       const candidates = await this.seams.discoverCandidates(
@@ -2372,6 +2419,21 @@ export class Tour {
       for (let i = 0; i < top.length; i++) {
         const candidate = top[i];
         if (this.subjectBlocked(backend.placeKeyOf(candidate.name), candidate)) continue;
+        // Portal-or-nothing (Erik's ruling, Nov 14, 2026):
+        // a house candidate serves ONLY with its portal
+        // payload identified — an unheard, non-house shelf
+        // story the linkage ties to it, in serve range now,
+        // which the obligation below queues immediately
+        // after it. No payload, no serve: the cycle moves
+        // on and the slot goes to ordinary material. While
+        // another house's portal is mid-flight, no second
+        // house commits.
+        let portalTarget: backend.LibraryIndexEntry | null = null;
+        if (this.candidateIsHouse(candidate)) {
+          if (this.portalObligation) continue;
+          portalTarget = this.portalTargetFor(candidate);
+          if (!portalTarget) continue;
+        }
         // Every candidate is served and offered: the player's
         // displacement ruling (Q3/Q6) decides what an occupied
         // slot does with it, and a generated item that lands
@@ -2406,6 +2468,13 @@ export class Tour {
           this.player.abandon(item);
           if (!top.slice(i + 1).some(c => c.tier1)) break;
           continue;
+        }
+        if (portalTarget) {
+          this.portalObligation = {
+            houseSubject: backend.placeKeyOf(candidate.name),
+            targetKey: portalTarget.place_key,
+            targetAngle: portalTarget.angle,
+          };
         }
         served = true;
         break;
@@ -2463,6 +2532,170 @@ export class Tour {
     return seen.size;
   }
 
+  /**
+   * Build the audible item for one library index entry. The
+   * version assignment (short cuts, Nov 12, 2026 — "density
+   * sets the cut", freeform form) rides along: when the
+   * index carries the entry's short cut and the ground here
+   * is dense, the cut serves; on sparse ground the full
+   * version carries. Null when the row itself cannot be
+   * read. Shared by the serve cycle's candidate path and the
+   * portal discharge, so a portal payload sounds exactly as
+   * it would have sounded on its own serve.
+   */
+  private async libraryItemForEntry(
+    entry: backend.LibraryIndexEntry,
+    tier1: boolean,
+  ): Promise<AudibleItem | null> {
+    const key = entry.place_key;
+    const dealt = this.dealtAngles.get(key) ?? new Set<string>();
+    let serveEntry = entry;
+    const twinEntry = this.libraryIndex.find(
+      e => e.place_key === key && e.angle === entry.angle + SHORT_CUT_SUFFIX && !dealt.has(e.angle),
+    );
+    if (twinEntry && this.shortCutDensityHere() >= SHORT_CUT_DENSE_FREEFORM_MIN) {
+      serveEntry = twinEntry;
+    }
+    const row = await this.seams.fetchLibraryRow(serveEntry.place_key, serveEntry.angle);
+    if (!row) return null;
+    const item = this.makeItem({
+      kind: 'story',
+      label: row.place_name,
+      source: { kind: 'url', url: this.seams.bucketUrl(row.audio_path) },
+      durationSec:
+        shortCutDurationSecFor(row.place_key, row.angle) ?? estimateSpeechDurationS(row.story_text),
+      onSettle: rec => this.onStorySettle(item, rec),
+      story: {
+        subject: key,
+        angleOf: serveEntry.angle,
+        storySource: 'library',
+        anchor: { lat: row.lat, lng: row.lng },
+        generatedAt: this.clock.now(),
+        text: row.story_text,
+        tier1,
+      },
+    });
+    return item;
+  }
+
+  /** The F1 house classification for one library index entry (name signal, or the Architecture topic tag). */
+  private isHouseEntry(e: backend.LibraryIndexEntry): boolean {
+    return isHouseStory({ placeName: e.place_name, topics: tagsFor(e.place_key, e.angle).topics });
+  }
+
+  /**
+   * Is this discovery candidate a registry house? By its own
+   * name (the F1 freeform signal), or by the shelf row the
+   * serve would actually draw — the two names are the same
+   * place in different dialects, and the gate judges the
+   * place, not the spelling.
+   */
+  private candidateIsHouse(candidate: facts.Candidate): boolean {
+    if (isHousePlaceName(candidate.name)) return true;
+    const key = backend.placeKeyOf(candidate.name);
+    return this.libraryIndex.some(e => e.place_key === key && this.isHouseEntry(e));
+  }
+
+  /**
+   * The portal payload a house candidate would owe: the
+   * strongest unheard non-house library story in serve range
+   * that housePortal's linkage ties to the house (a subject
+   * link first, then the house's own ground). Null when no
+   * payload can follow — and then the house does not serve
+   * (portal-or-nothing, Nov 14, 2026). Payloads are shelf
+   * stories: the follow-on must be as certain as the shelf
+   * can make it, so the live lane never mints a payload.
+   */
+  private portalTargetFor(candidate: facts.Candidate): backend.LibraryIndexEntry | null {
+    if (!this.position) return null;
+    const radius = this.modeName() === 'walking' ? 700 : 1600;
+    const houseRef: PortalStoryRef = {
+      placeKey: backend.placeKeyOf(candidate.name),
+      placeName: candidate.name,
+      angle: '',
+      topics: [],
+      lat: candidate.lat,
+      lng: candidate.lng,
+    };
+    const refs: { ref: PortalStoryRef; entry: backend.LibraryIndexEntry }[] = [];
+    for (const e of this.libraryIndex) {
+      if (
+        e.angle === 'filler' ||
+        INTRO_ANGLES.has(e.angle) ||
+        isWovenTwinAngle(e.angle) ||
+        isShortCutAngle(e.angle)
+      )
+        continue;
+      if (calculateDistance(this.position.lat, this.position.lng, e.lat, e.lng) > radius) continue;
+      if (this.heardTopics.has(e.place_key)) continue;
+      if ((this.toldCount.get(e.place_key) ?? 0) > 0) continue;
+      if (this.dealtAngles.get(e.place_key)?.has(e.angle)) continue;
+      if (this.subjectBlocked(e.place_key, null)) continue;
+      refs.push({
+        ref: {
+          placeKey: e.place_key,
+          placeName: e.place_name,
+          angle: e.angle,
+          topics: tagsFor(e.place_key, e.angle).topics,
+          lat: e.lat,
+          lng: e.lng,
+        },
+        entry: e,
+      });
+    }
+    const found = findPortalTarget(houseRef, refs.map(r => r.ref));
+    if (!found) return null;
+    return refs.find(r => r.ref === found.target)?.entry ?? null;
+  }
+
+  /**
+   * Discharge the portal obligation while the house sounds:
+   * the payload takes the (empty) waiting slot, so it is the
+   * very next story. Returns true when this cycle's work is
+   * the portal's — either the payload was offered, or the
+   * slot is being held for it (another story must not slip
+   * in ahead of the payload while the house still sounds).
+   * False when no portal is mid-flight at the sounding edge.
+   */
+  private async servePortalTarget(): Promise<boolean> {
+    const ob = this.portalObligation;
+    if (!ob) return false;
+    const current = this.player.current;
+    if (!current || current.subject !== ob.houseSubject) return false;
+    if (this.player.waitingStory) return true; // the slot is spoken for; hold the line
+    const entry = this.libraryIndex.find(
+      e => e.place_key === ob.targetKey && e.angle === ob.targetAngle,
+    );
+    if (!entry || this.subjectBlocked(ob.targetKey, null)) {
+      // The payload became unservable after the house
+      // committed (dealt elsewhere, dropped, row gone). The
+      // gate did its work at commit time; release the slot
+      // rather than stall the tour behind a dead debt.
+      this.diag('portal', 'payload-unavailable', `${ob.houseSubject} -> ${ob.targetKey}`);
+      this.portalObligation = null;
+      return false;
+    }
+    const item = await this.libraryItemForEntry(entry, false);
+    if (!item) {
+      this.diag('portal', 'payload-unbuildable', `${ob.houseSubject} -> ${ob.targetKey}`);
+      this.portalObligation = null;
+      return false;
+    }
+    this.inflight.add(item.subject as string);
+    const landed = this.player.offerStory(item, false);
+    if (landed === 'buffer') {
+      // Raced at the slot: abandon quietly and retry on the
+      // next cycle while the house still sounds.
+      this.inflight.delete(item.subject as string);
+      item.silent = true;
+      this.player.abandon(item);
+      return true;
+    }
+    this.diag('portal', 'payload-served', `${ob.houseSubject} -> ${ob.targetKey}`);
+    this.portalObligation = null;
+    return true;
+  }
+
   /** library → on-device/shared cache → buffered prefetch text → live (S4/S5). */
   private async serveCandidate(
     candidate: facts.Candidate,
@@ -2484,47 +2717,24 @@ export class Tour {
         !dealt.has(e.angle),
     );
     if (entry) {
-      // Version assignment (short cuts, Nov 12, 2026 —
-      // "density sets the cut", freeform form): when the
-      // index carries the chosen angle's short cut and the
-      // ground here is dense, serve the cut; on sparse
-      // ground the full version carries. The candidate
-      // order (facts' seating) is untouched — only the
-      // length of the telling changes.
-      let serveEntry = entry;
-      const twinEntry = this.libraryIndex.find(
-        e => e.place_key === key && e.angle === entry.angle + SHORT_CUT_SUFFIX && !dealt.has(e.angle),
-      );
-      if (twinEntry && this.shortCutDensityHere() >= SHORT_CUT_DENSE_FREEFORM_MIN) {
-        serveEntry = twinEntry;
-      }
-      const row = await this.seams.fetchLibraryRow(serveEntry.place_key, serveEntry.angle);
-      if (row) {
-        const item = this.makeItem({
-          kind: 'story',
-          label: row.place_name,
-          source: { kind: 'url', url: this.seams.bucketUrl(row.audio_path) },
-          durationSec:
-            shortCutDurationSecFor(row.place_key, row.angle) ?? estimateSpeechDurationS(row.story_text),
-          onSettle: rec => this.onStorySettle(item, rec),
-          story: {
-            subject: key,
-            angleOf: serveEntry.angle,
-            storySource: 'library',
-            anchor: { lat: row.lat, lng: row.lng },
-            generatedAt: this.clock.now(),
-            text: row.story_text,
-            tier1: candidate.tier1,
-          },
-        });
-        return item;
-      }
+      const item = await this.libraryItemForEntry(entry, candidate.tier1);
+      if (item) return item;
+      // The row vanished between the index and the fetch:
+      // fall through to the cache / live lanes, as before.
     }
     // Shared on-device/ephemeral cache (tour_stories via the backend function).
     const cached = await this.seams
       .findCachedStory(candidate.lat, candidate.lng, 300, LEO_PERSONA_VERSION)
       .catch(() => null);
-    if (cached && !this.subjectBlocked(backend.placeKeyOf(cached.topic), candidate)) {
+    // Portal-or-nothing (Nov 14, 2026): the cache lane is a
+    // re-serve of generated material — a cached telling whose
+    // subject is a house is a standalone house serve wearing
+    // another candidate's coat, and it does not serve either.
+    if (
+      cached &&
+      !this.subjectBlocked(backend.placeKeyOf(cached.topic), candidate) &&
+      !isHousePlaceName(cached.topic)
+    ) {
       const cachedAt = cached.created_at ? Date.parse(cached.created_at) : NaN;
       const item = this.makeItem({
         kind: 'story',
@@ -2956,6 +3166,17 @@ export class Tour {
   private onStorySettle(item: AudibleItem, rec: SettleRecord): void {
     const subject = item.subject ?? '';
     this.inflight.delete(subject);
+    // Portal-or-nothing (Nov 14, 2026): the obligation dies
+    // with its house's settle, discharged or not — a house
+    // that settled unsounded owes nothing, and one whose
+    // payload was queued cleared the debt at the offer. A
+    // debt still live at this point is a miss worth seeing
+    // in the field logs: the payload never took the slot
+    // (occupied at every edge, or the house never sounded).
+    if (this.portalObligation && subject === this.portalObligation.houseSubject) {
+      this.diag('portal', 'payload-missed', `${subject} -> ${this.portalObligation.targetKey}`);
+      this.portalObligation = null;
+    }
     // Pass-by conversion records (Nov 5) die with the item's
     // settle — any settle, sounded or silent: the offered-
     // welcome record must never point at an item the player no
@@ -3839,6 +4060,11 @@ export class Tour {
         for (const candidate of candidates.slice(0, 3)) {
           const key = backend.placeKeyOf(candidate.name);
           if (this.buffer.has(key) || this.subjectBlocked(key, candidate)) continue;
+          // Portal-or-nothing (Nov 14, 2026): prefetch never
+          // banks a house telling — banked text re-enters the
+          // serve path as a standalone serve, which is exactly
+          // what the ruling forbids.
+          if (isHousePlaceName(candidate.name)) continue;
           if (this.libraryIndex.some(e => e.place_key === key)) continue; // banked beats generated
           // Fit check (Nov 1): banked text is a generation spend
           // too — do not bank a story whose projected start (one

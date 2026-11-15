@@ -26,6 +26,13 @@
 // it applies — a house story still seats when it is the
 // destination, the portal, or the only candidate; it simply
 // sorts to the bottom of every competition it enters.
+//
+// Portal-or-nothing (Erik's ruling, Nov 14, 2026) now stands
+// ABOVE this demotion at every serve decision: a house may
+// take a slot only as a portal into a stronger story that
+// plays immediately after it (housePortal.ts). The demotion
+// remains what it always was — the ordering backstop inside
+// every competition a house is still licensed to enter.
 
 const NON_RESIDENCE_COMPOUNDS = [
   'playhouse',

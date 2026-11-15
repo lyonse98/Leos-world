@@ -51,6 +51,7 @@ import {
   familyRankOf,
   FAIRNESS_BUCKETS,
   haversineM,
+  isHouseStory,
   isShortCutAngle,
   LANDMARK_PATH_RADIUS_M,
   progressAlongPath,
@@ -67,6 +68,7 @@ import {
 } from './routeMode';
 import { FAMILY_GAP_STORY_RULES } from './narration';
 import { registryNear } from './facts';
+import { isHousePlaceName } from './houseClass';
 import { MAJOR_PLACES } from '../content/majorPlaces';
 import { tagsFor } from '../data/routeTags';
 import { presenceFor } from '../data/routePresence';
@@ -461,6 +463,12 @@ export async function discoverGapSubjects(
     }
   }
   return [...byName.values()]
+    // Portal-or-nothing (Nov 14, 2026): a generated gap story
+    // is a standalone telling by construction — no payload can
+    // be queued behind it — so a residence-subject candidate
+    // (a named house from Places, a registry house record) is
+    // never a generation subject here.
+    .filter(s => !isHousePlaceName(s.name))
     .sort((a, b) => b.score - a.score)
     .slice(0, 8)
     .map(({ score: _score, ...subject }) => subject);
@@ -803,6 +811,11 @@ export async function fillRouteGaps(
       // never the composer's partition — so the predicate
       // applies here, at this pool's own gate.
       if (family && familyHardExcluded(u)) continue;
+      // Portal-or-nothing (Nov 14, 2026): a house never tiles
+      // as a gap fill — the fill's seat is wherever the silence
+      // is, and nothing here can promise the house's portal
+      // payload sounds immediately after it.
+      if (isHouseStory(u)) continue;
       if (!inCorridor(u)) continue; // geographic only — a fetched portal candidate never becomes a gap fill
       const anchor = progressAlongPath({ lat: u.lat, lng: u.lng }, plan.path);
       if (anchor < sub.startProgress - 1e-9 || anchor > sub.endProgress + 1e-9) continue;

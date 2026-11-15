@@ -21,9 +21,11 @@
 //
 import { normalizePlaceName, selectPriorDrive, type RouteDriveRecord } from './routeHistory';
 import { houseRank, houseRankForPlaceKey, isHouseStory } from './houseClass';
+import { isPortalTarget } from './housePortal';
 import { SHORT_CUT_DURATION_SEC } from '../data/shortCuts';
 
 export { isHouseStory } from './houseClass';
+export { findPortalTarget, houseSubjectLink, isPortalTarget } from './housePortal';
 
 // The place-name normalizer is part of this module's caller
 // contract (ComposeOptions.corridorTellingCounts is keyed by
@@ -3461,6 +3463,11 @@ export function composeRoutePlan(
             !shadowedByTwin(u, climaxTwins) &&
             !chosenIds.has(u.id) &&
             !opts.heardKeys.has(u.id) &&
+            // Portal-or-nothing (Nov 14, 2026): a house is
+            // never the portal climax — the climax rides the
+            // sequence's tail, and nothing follows the tail
+            // to be a house's payload.
+            !isHouseStory(u) &&
             u.angle.startsWith('landmark') &&
             u.topics.includes(portalTopic) &&
             // Family (Nov 5, 2026): climax-only candidates
@@ -3751,6 +3758,60 @@ export function composeRoutePlan(
         const hopIdx = sequence.findIndex((e, i) => i < idx && e.portal === true);
         if (hopIdx === -1) break;
         sequence.splice(hopIdx, 1);
+      }
+    }
+  }
+
+  // House portal-or-nothing (Erik's ruling, Nov 14, 2026 —
+  // housePortal.ts carries the doctrine and the linkage):
+  // a house story seats in a plan ONLY as a portal — the
+  // next story in the sequence must be the stronger story it
+  // opens onto (a subject link, or a non-house story on the
+  // house's own ground inside the neighborhood radius), and
+  // that story sounds immediately after it as the payload.
+  // A house followed by anything else — another house, an
+  // unlinked story, or nothing at all (the plan's tail; the
+  // climax seat included) — comes out of the sequence here,
+  // before every promise computation below reads it. Removal,
+  // not relocation: a house is garnish, never coverage, and
+  // the repair passes above already own the plan's shape.
+  // Hops parented to a removed house lose their parent and
+  // come out with it. A removed climax simply leaves the
+  // plan undesigned — the closing story is read off the
+  // sequence as usual.
+  {
+    const storyAfter = (idx: number): SeqEntry | null => {
+      for (let j = idx + 1; j < sequence.length; j++) {
+        if (sequence[j].unit.angle !== 'filler_hosted') return sequence[j];
+      }
+      return null;
+    };
+    const removedIds = new Set<string>();
+    for (let i = sequence.length - 1; i >= 0; i--) {
+      const e = sequence[i];
+      if (e.unit.angle === 'filler_hosted' || !isHouseStory(e.unit)) continue;
+      const next = storyAfter(i);
+      if (next && isPortalTarget(e.unit, next.unit)) continue;
+      sequence.splice(i, 1);
+      removedIds.add(e.baseUnitId ?? e.unit.id);
+      total -= e.unit.durationSec;
+      if (climaxUnitId !== null && (e.baseUnitId ?? e.unit.id) === climaxUnitId) {
+        climaxUnitId = null;
+        climaxSubject = null;
+        climaxMode = 'natural';
+        climaxSequenced = false;
+        climaxAnchor = null;
+        climaxDistanceKm = null;
+        portalClimaxUnit = null;
+      }
+    }
+    if (removedIds.size > 0) {
+      for (let i = sequence.length - 1; i >= 0; i--) {
+        const e = sequence[i];
+        if (e.portal === true && e.portalParentId && removedIds.has(e.portalParentId)) {
+          sequence.splice(i, 1);
+          total -= e.unit.durationSec;
+        }
       }
     }
   }
@@ -4974,6 +5035,25 @@ export function seatWovenMembers(
     usedPlaces.add(cand.placeKey);
   };
 
+  // Portal-or-nothing (Nov 14, 2026): the silent span
+  // between a house story and the payload it portals into
+  // is RESERVED — no member (and no carried climax) may
+  // seat there, or the payload would no longer be the
+  // next story after the house. Bridges and composed
+  // tissue still cross the span; only a story
+  // interposition breaks the rule. Evaluated on the live
+  // gap objects, so it holds as seating splits gaps.
+  const portalSpan = (g: MemberGap): boolean => {
+    const prev = g.prev?.unit;
+    const next = g.next?.unit;
+    return (
+      prev !== undefined &&
+      next !== undefined &&
+      isHouseStory(prev) &&
+      isPortalTarget(prev, next)
+    );
+  };
+
   // The climax designation (thread-carried mode only, and
   // only when the road crowned nothing): reserve the
   // strongest member BEFORE general seating and place it
@@ -4987,17 +5067,18 @@ export function seatWovenMembers(
     plan.climaxUnitId === null &&
     candidates.length > 0 &&
     seated.length < cap &&
-    // House guard (F1): a house is never designated the climax
-    // of an episode that already carries a house story — the
-    // member-chain rules below govern its seating instead.
-    !(
-      isHouseStory(candidates[0]) &&
-      plan.items.some(i => i.kind === 'story' && i.unit && isHouseStory(i.unit))
-    )
+    // House guard (portal-or-nothing, Nov 14, 2026 — this
+    // subsumes F1's narrower guard): a house is never
+    // designated the carried climax. The climax closes the
+    // episode; nothing follows it, so a house there could
+    // never carry its payload. The member rules below govern
+    // a house's seating instead.
+    !isHouseStory(candidates[0])
   ) {
     const cand = candidates[0];
     const zoneStartSec = CLIMAX_ZONE_START * driveSec;
     const fits = memberGaps(items, driveSec, true)
+      .filter(g => !portalSpan(g))
       .map(g => {
         // In the tail gap the member takes the closing
         // position proper — it ENDS where the drive ends,
@@ -5027,15 +5108,21 @@ export function seatWovenMembers(
     }
   }
 
-  // House member-chain guard (field fix F1, Nov 12, 2026):
-  // at most ONE house/architecture member per episode, and
-  // never back-to-back with another house story — the Nov 12
-  // episode chained four registry spec houses as members, and
-  // Erik's ruling is that the class sits at the bottom of the
-  // score, thread membership notwithstanding. A house-only
-  // thread still seats its single strongest house (candidacy
-  // order, houses last); the rest of the episode fills from
-  // the geo pool and non-house members as usual.
+  // House member rules (field fix F1, Nov 12, 2026, as
+  // superseded by portal-or-nothing, Nov 14, 2026): at most
+  // ONE house/architecture member per episode (the F1
+  // backstop stands), and — the Nov 14 rule — a house member
+  // seats ONLY into a gap whose next story is the stronger
+  // story it portals into (housePortal's linkage: a subject
+  // link, or the house's own ground inside the neighborhood
+  // radius): the member sounds inside the gap and its
+  // payload is the very next story the episode tells. A gap
+  // at the plan's tail, or before any other story, seats no
+  // house — a house-only thread therefore seats NO member
+  // (its houses have nothing to open onto inside the plan),
+  // where F1 once seated its strongest. The rest of the
+  // episode fills from the geo pool and non-house members
+  // as usual.
   const houseMembersSeated = (): number => seated.filter(u => isHouseStory(u)).length;
   for (const cand of candidates) {
     if (seated.length >= cap) break;
@@ -5047,17 +5134,17 @@ export function seatWovenMembers(
     // gaps with the departure edge open: a member may
     // anchor the episode's start.
     const gaps = memberGaps(items, driveSec, carried)
-      .filter(g => g.end - g.start >= cand.durationSec)
+      .filter(g => g.end - g.start >= cand.durationSec && !portalSpan(g))
       .sort((a, b) => b.end - b.start - (a.end - a.start) || a.start - b.start);
     let gap: MemberGap | null = gaps[0] ?? null;
     if (isHouseStory(cand)) {
       if (houseMembersSeated() >= 1) continue;
       gap =
-        gaps.find(
-          g =>
-            !(g.prev?.unit && isHouseStory(g.prev.unit)) &&
-            !(g.next?.unit && isHouseStory(g.next.unit)),
-        ) ?? null;
+        gaps.find(g => {
+          if (g.prev?.unit && isHouseStory(g.prev.unit)) return false;
+          const nextUnit = g.next?.unit;
+          return nextUnit !== undefined && isPortalTarget(cand, nextUnit);
+        }) ?? null;
       if (!gap) continue;
     }
     if (!gap) continue;
