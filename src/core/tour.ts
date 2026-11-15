@@ -62,6 +62,7 @@ import {
 import {
   CORRIDOR_SEGMENTS,
   matchCorridor,
+  nearestPointOnSegment,
   type CorridorSegment,
 } from '../data/corridors';
 import {
@@ -2351,6 +2352,17 @@ export class Tour {
       return;
     }
     const exit = segment.polyline[segment.polyline.length - 1];
+    // Anchor at the driver's nearest point ON the segment, taken
+    // now — at offer time, after the row fetch (corridor fix 1,
+    // Nov 14, 2026). The anchor used to be the segment's ENTRY
+    // (polyline[0]): the 'fresher' displacement test measures a
+    // newcomer from its anchor, so mid-segment the item read
+    // 1–3 km stale and lost to nearly any nearby waiter. No
+    // position (a serve raced ahead of the first fix) keeps the
+    // entry anchor as the floor.
+    const anchorPoint = this.position
+      ? nearestPointOnSegment(segment, this.position)
+      : segment.polyline[0];
     const item = this.makeItem({
       kind: 'story',
       label: segment.displayName,
@@ -2360,7 +2372,7 @@ export class Tour {
       story: {
         subject,
         storySource: 'corridor',
-        anchor: { lat: segment.polyline[0].lat, lng: segment.polyline[0].lng },
+        anchor: { lat: anchorPoint.lat, lng: anchorPoint.lng },
         regionAnchored: true,
         corridorSegmentId: segment.id,
         segmentExit: { lat: exit.lat, lng: exit.lng },

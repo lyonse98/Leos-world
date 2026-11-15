@@ -456,6 +456,13 @@ export const CORRIDOR_SEGMENTS: CorridorSegment[] = [
     ],
   },
   // ------------------------------------------------------------- SR-163
+  // Densified Nov 14, 2026 (corridor fixes 1+2): the four SR-163
+  // legs were 3–4 points over 3–4.1 km — chords up to 1.9 km that
+  // cut the Balboa Park / canyon bends by ~180 m, inside striking
+  // distance of the 250 m buffer once a driver's own lateral error
+  // is added. Points now run every ~190 m along the road's path;
+  // endpoints are unchanged (segment chaining keys on them) and
+  // the northbound legs are the exact reverses, as before.
   {
     id: 'sr-163-sb-mission-valley-hillcrest',
     freeway: 'SR-163',
@@ -466,7 +473,12 @@ export const CORRIDOR_SEGMENTS: CorridorSegment[] = [
     lengthKm: 3,
     designSpeedMph: 50,
     polyline: [
-      P(32.781, -117.168), P(32.772, -117.163), P(32.756, -117.156),
+      P(32.781, -117.168), P(32.77946, -117.16708), P(32.7779, -117.16613),
+      P(32.77632, -117.1652), P(32.77471, -117.16436), P(32.77309, -117.16354),
+      P(32.77148, -117.16272), P(32.7699, -117.1619), P(32.76829, -117.16115),
+      P(32.76666, -117.16045), P(32.76504, -117.15977), P(32.76343, -117.15903),
+      P(32.76183, -117.15831), P(32.7602, -117.1576), P(32.75858, -117.15692),
+      P(32.75729, -117.15646), P(32.756, -117.156),
     ],
     areas: [
       A('Mission Valley', 32.775, -117.16),
@@ -483,8 +495,14 @@ export const CORRIDOR_SEGMENTS: CorridorSegment[] = [
     lengthKm: 4.1,
     designSpeedMph: 50,
     polyline: [
-      P(32.756, -117.156), P(32.74, -117.151), P(32.73, -117.152),
-      P(32.721, -117.158),
+      P(32.756, -117.156), P(32.75433, -117.15534), P(32.75276, -117.15452),
+      P(32.75126, -117.15354), P(32.74976, -117.15245), P(32.74821, -117.15156),
+      P(32.74654, -117.15099), P(32.74482, -117.15075), P(32.74307, -117.15054),
+      P(32.74136, -117.15062), P(32.73969, -117.15104), P(32.73796, -117.15115),
+      P(32.73621, -117.15128), P(32.73445, -117.15143), P(32.73274, -117.15157),
+      P(32.73103, -117.15177), P(32.7293, -117.15225), P(32.72771, -117.15301),
+      P(32.72619, -117.15403), P(32.7248, -117.15526), P(32.72345, -117.15655),
+      P(32.72222, -117.15728), P(32.721, -117.158),
     ],
     areas: [
       A('Hillcrest', 32.75, -117.155),
@@ -502,8 +520,14 @@ export const CORRIDOR_SEGMENTS: CorridorSegment[] = [
     lengthKm: 4.1,
     designSpeedMph: 50,
     polyline: [
-      P(32.721, -117.158), P(32.73, -117.152), P(32.74, -117.151),
-      P(32.756, -117.156),
+      P(32.721, -117.158), P(32.72222, -117.15728), P(32.72345, -117.15655),
+      P(32.7248, -117.15526), P(32.72619, -117.15403), P(32.72771, -117.15301),
+      P(32.7293, -117.15225), P(32.73103, -117.15177), P(32.73274, -117.15157),
+      P(32.73445, -117.15143), P(32.73621, -117.15128), P(32.73796, -117.15115),
+      P(32.73969, -117.15104), P(32.74136, -117.15062), P(32.74307, -117.15054),
+      P(32.74482, -117.15075), P(32.74654, -117.15099), P(32.74821, -117.15156),
+      P(32.74976, -117.15245), P(32.75126, -117.15354), P(32.75276, -117.15452),
+      P(32.75433, -117.15534), P(32.756, -117.156),
     ],
     areas: [
       A('Downtown San Diego', 32.721, -117.16),
@@ -521,7 +545,12 @@ export const CORRIDOR_SEGMENTS: CorridorSegment[] = [
     lengthKm: 3,
     designSpeedMph: 50,
     polyline: [
-      P(32.756, -117.156), P(32.772, -117.163), P(32.781, -117.168),
+      P(32.756, -117.156), P(32.75729, -117.15646), P(32.75858, -117.15692),
+      P(32.7602, -117.1576), P(32.76183, -117.15831), P(32.76343, -117.15903),
+      P(32.76504, -117.15977), P(32.76666, -117.16045), P(32.76829, -117.16115),
+      P(32.7699, -117.1619), P(32.77148, -117.16272), P(32.77309, -117.16354),
+      P(32.77471, -117.16436), P(32.77632, -117.1652), P(32.7779, -117.16613),
+      P(32.77946, -117.16708), P(32.781, -117.168),
     ],
     areas: [
       A('Hillcrest', 32.75, -117.155),
@@ -4602,6 +4631,34 @@ export function corridorProgressM(
     overshootM,
     distanceM: best ? best.distanceM : Number.POSITIVE_INFINITY,
   };
+}
+
+// The point ON a segment's polyline nearest a position — the
+// projection of the position onto its closest leg, interpolated
+// in the module's flat local frame. The serve layer anchors a
+// corridor item here (at the driver's own ground) rather than at
+// the segment's entry: the 'fresher' displacement test measures a
+// newcomer from its anchor, and an entry anchor sits 1–3 km
+// behind a mid-segment driver, so a corridor story the driver is
+// physically on lost "fresher" to nearly anything nearby
+// (corridor fixes 1+2, Nov 14, 2026).
+export function nearestPointOnSegment(
+  segment: CorridorSegment,
+  pos: { lat: number; lng: number }
+): { lat: number; lng: number } {
+  const pts = segment.polyline;
+  let best: { lat: number; lng: number } | null = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i];
+    const b = pts[i + 1];
+    const { distanceM, t } = pointToSegmentM(pos, a, b);
+    if (distanceM < bestDist) {
+      bestDist = distanceM;
+      best = { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t };
+    }
+  }
+  return best ?? { lat: pts[0].lat, lng: pts[0].lng };
 }
 
 // The segment that FOLLOWS a given one on the same freeway run —

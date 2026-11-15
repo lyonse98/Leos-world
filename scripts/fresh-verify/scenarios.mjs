@@ -439,6 +439,96 @@ export async function runScenarios(Tour, extras) {
     tour.endTour();
   }
 
+  // ---------------------------------------------------------- CF-1 corridor anchor (fix 1, Nov 14, 2026)
+  // The 'fresher' displacement test measures a newcomer from its
+  // anchor. A corridor item used to anchor at its segment's ENTRY:
+  // mid-segment that reads 1–3 km stale, so a corridor story the
+  // driver is physically ON lost to nearly any nearby waiter (the
+  // I-8 / SR-163 shutout's mechanism #3). The item now anchors at
+  // the driver's nearest point on the segment. This fixture holds
+  // every other fresher input fixed — the waiter is ~500 m away
+  // and was minted seconds before the corridor item, so the
+  // recency clause cannot decide it — and shows the SAME fixture
+  // flipping on the anchor alone: the entry-anchor arithmetic
+  // provably fails the test the shipped behaviour passes.
+  suite('CF-1 corridor anchor: mid-segment fresher displacement');
+  {
+    resetLocalStorage();
+    const MPD_LAT = 111_320;
+    const mpdLng = lat => MPD_LAT * Math.cos((lat * Math.PI) / 180);
+    const distM = (a, b) => Math.hypot((b.lat - a.lat) * MPD_LAT, (b.lng - a.lng) * mpdLng(a.lat));
+    const segLen = s => s.polyline.reduce((acc, p, i) => (i === 0 ? 0 : acc + distM(p, s.polyline[i - 1])), 0);
+    const seg = CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
+    // The point at ~50% along-track, with its leg's bearing.
+    const alongPoint = (s, frac) => {
+      const total = segLen(s);
+      let acc = 0;
+      for (let i = 1; i < s.polyline.length; i++) {
+        const a = s.polyline[i - 1];
+        const b = s.polyline[i];
+        const leg = distM(b, a);
+        if (acc + leg >= total * frac) {
+          const t = (total * frac - acc) / leg;
+          return {
+            lat: a.lat + (b.lat - a.lat) * t,
+            lng: a.lng + (b.lng - a.lng) * t,
+            heading: ((Math.atan2((b.lng - a.lng) * mpdLng(a.lat), (b.lat - a.lat) * MPD_LAT) * 180) / Math.PI + 360) % 360,
+          };
+        }
+        acc += leg;
+      }
+      const last = s.polyline[s.polyline.length - 1];
+      return { lat: last.lat, lng: last.lng, heading: 180 };
+    };
+    const mid = alongPoint(seg, 0.5);
+    // The waiter: a shelf story anchored 500 m east of the mid point.
+    const waiterPos = { lat: mid.lat, lng: mid.lng + 500 / mpdLng(mid.lat) };
+    const dnOld = distM(mid, seg.polyline[0]);
+    const dw = distM(mid, waiterPos);
+    check('fixture: the entry anchor loses the fresher distance test', dnOld + 150 >= dw, `dnOld=${Math.round(dnOld)} dw=${Math.round(dw)}`);
+    check('fixture: a nearest-point anchor (~0 m) wins it', 150 < dw, `dw=${Math.round(dw)}`);
+
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: seg.polyline[0].lat, lng: seg.polyline[0].lng, distanceM: 100 })],
+      library: [
+        { name: 'Alpha Park', lat: seg.polyline[0].lat, lng: seg.polyline[0].lng },
+        seg.displayName,
+        { name: 'Waiter Place', lat: waiterPos.lat, lng: waiterPos.lng },
+      ],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 90_000 }));
+    const tour = await startAt(world, audio, seg.polyline[0], 8, mid.heading);
+    const soundedLabels = watchLabels(world, tour);
+    await world.clock.advance(40_000); // greeting + opener + welcome; Alpha playing (90 s)
+    // Slot the waiter behind Alpha: the driver waits at the
+    // waiter's own anchor, 500 m off the segment — outside the
+    // corridor buffer, so no corridor trigger fires while it mints.
+    world.candidates = [makeCandidate('Waiter Place', { lat: waiterPos.lat, lng: waiterPos.lng, distanceM: 60 })];
+    tour.onPosition({ lat: waiterPos.lat, lng: waiterPos.lng, speedMps: 8, headingDeg: mid.heading });
+    await world.clock.advance(3_000);
+    const committed1 = world.eventsOf('story_played').map(e => e.payload.subject);
+    check('waiter slotted behind the playing story', committed1.includes('waiter place'), committed1.join(','));
+    // Step onto the segment at its midpoint at freeway speed: the
+    // corridor trigger fires and the offer meets the waiter.
+    tour.onPosition({ lat: mid.lat, lng: mid.lng, speedMps: 27, headingDeg: mid.heading });
+    await world.clock.advance(3_000);
+    const drops = world.eventsOf('story_dropped');
+    check('corridor item displaces the waiter (displaced-fresher)', drops.some(d => d.payload.reason === 'displaced-fresher'), JSON.stringify(drops.map(d => d.payload)));
+    const committed2 = world.eventsOf('story_played');
+    const corridorCommit = committed2.find(e => e.payload.subject === `corridor:${seg.id}`);
+    check('corridor story committed', Boolean(corridorCommit), committed2.map(e => e.payload.subject).join(','));
+    const waiterCommit = committed2.find(e => e.payload.subject === 'waiter place');
+    check(
+      'recency could not have decided it (mints <30 s apart)',
+      Boolean(waiterCommit && corridorCommit) && corridorCommit.at - waiterCommit.at < 30_000,
+      `gap=${corridorCommit && waiterCommit ? corridorCommit.at - waiterCommit.at : 'n/a'}`,
+    );
+    await world.clock.advance(120_000); // Alpha ends; the corridor story sounds
+    check('corridor story sounds after the playing story', soundedLabels.includes(seg.displayName), soundedLabels.join(','));
+    check('displaced waiter never sounded', !soundedLabels.includes('Waiter Place'), soundedLabels.join(','));
+    tour.endTour();
+  }
+
   // ---------------------------------------------------------- S-10 filler lane
   suite('S-10 filler lane (F1/F2/F5/F9/F10/F12)');
   {
