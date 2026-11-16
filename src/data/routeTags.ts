@@ -1,6 +1,6 @@
 // GENERATED — do not hand-edit. Built by
 // scripts/route-mode/build-route-tags.mjs from story-tags.csv
-// (4223 rows, Nov 1 tone/topic tagging). The route
+// (4233 rows, Nov 1 tone/topic tagging). The route
 // composer joins library-index rows to this map at runtime, so no
 // DB change is needed for route mode to see tone/topic tags.
 
@@ -4235,6 +4235,16 @@ export const ROUTE_TAGS: Record<string, RouteTagEntry> = {
   "north park|neighborhood_intro (short cut)": { topics: ["Food & Drink"], tone: "warm", toneSecondary: "light" },
   "borrego springs|neighborhood_intro (short cut)": { topics: ["Desert"], tone: "grand", toneSecondary: "reflective" },
   "college area|neighborhood_intro (short cut)": { topics: ["Rail"], tone: "grand", toneSecondary: "warm" },
+  "tony hawk house|landmark_origin": { topics: ["skateboarding,sports,encinitas"], tone: "light", toneSecondary: "warm" },
+  "wisteria cottage|landmark_origin": { topics: ["irving gill,architecture,scripps,historic preservation,la jolla"], tone: "warm", toneSecondary: "reflective" },
+  "razor house|landmark_origin": { topics: ["architecture,modernism,celebrity homes,la jolla"], tone: "grand", toneSecondary: "reflective" },
+  "romney house|landmark_origin": { topics: ["politics,civic history,architecture,la jolla"], tone: "light", toneSecondary: "reflective" },
+  "geisel house|landmark_origin": { topics: ["dr seuss,literature,authors,mount soledad,la jolla"], tone: "warm", toneSecondary: "reflective" },
+  "raymond chandler house|landmark_origin": { topics: ["literature,noir,authors,la jolla"], tone: "reflective", toneSecondary: "somber" },
+  "rancho paseana|landmark_origin": { topics: ["horses,equestrian,thoroughbreds,rancho santa fe"], tone: "warm", toneSecondary: "reflective" },
+  "jonas salk house|landmark_origin": { topics: ["architecture,modernism,science,la jolla"], tone: "reflective", toneSecondary: "warm" },
+  "darlington house|landmark_origin": { topics: ["architecture,historic preservation,philanthropy,la jolla"], tone: "warm", toneSecondary: "reflective" },
+  "south molton villa ii|landmark_origin": { topics: ["irving gill,architecture,scripps,museums,la jolla"], tone: "reflective", toneSecondary: "warm" },
 };
 
 export function tagsFor(placeKey: string, angle: string): RouteTagEntry {

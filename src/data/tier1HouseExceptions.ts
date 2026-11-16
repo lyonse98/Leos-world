@@ -22,10 +22,16 @@
 // evening.) The list is the union of the two Nov 15 audits:
 // the v2 strike list's 15 KEEPs among the National-Register
 // houses, plus the importance audit's 9 PROMOTEs hiding among
-// the local-register houses — 24 places. The full evidence for
-// every key lives in tier1-house-exceptions-checklist-v2-
-// 2026-11-15.md and house-importance-audit-2026-11-15.md; the
-// scores behind the verdicts ship as data in houseImportance.ts.
+// the local-register houses — 24 places. A third section joined
+// Nov 16, 2026: the 10 buildable houses from the famous-houses
+// census (famous-houses-census-2026-11-15.md) — famous San Diego
+// residences the registry-only audits could never see (too new
+// or never designated), produced as a tranche that day and
+// registered PROMOTE on the same bar. 34 places in all. The full
+// evidence for every key lives in tier1-house-exceptions-
+// checklist-v2-2026-11-15.md, house-importance-audit-2026-11-15.md
+// and famous-houses-census-2026-11-15.md; the scores behind the
+// verdicts ship as data in houseImportance.ts.
 //
 // Keys are library place_keys (the writer's dialect: lowercase,
 // periods/apostrophes removed — backend.normalizePlaceKey), the
@@ -132,6 +138,47 @@ export const TIER1_HOUSE_EXCEPTION_KEYS: readonly string[] = [
   // Wheeler Bailey/Irving Gill House — Gill, with a subject
   // portal to his own story.
   'wheeler bailey/irving gill house',
+
+  // — The famous-houses tranche (census Nov 15, produced Nov 16, 10) —
+  // Razor House — Wallace Cunningham's bankruptcy-interrupted
+  // bluff sculpture on La Jolla Farms Road; the reported Iron Man
+  // inspiration; Keys/Beatz bought it in 2019. Built 2007 — far
+  // too new for any register, which is why the audits never saw it.
+  'razor house',
+  // Geisel House — Dr. Seuss's Mt. Soledad tower house, where 42
+  // of his 68 books were written; subject portal to Geisel's own
+  // person stories. This is the HOUSE place (7301 Encelia Dr);
+  // the person place stays pinned at UCSD and is untouched.
+  'geisel house',
+  // Tony Hawk House — Hawk's Encinitas backyard: a 4,000 sq ft
+  // skate park permitted as a koi pond, on his own account.
+  'tony hawk house',
+  // Romney House — the 311 Dunemere rebuild whose garage car
+  // lift became a 2012 campaign symbol; public record only.
+  'romney house',
+  // Wisteria Cottage — Virginia Scripps's Irving Gill-remodeled
+  // guest cottage on Prospect; saved from condo demolition in
+  // 1981, today the La Jolla Historical Society's home.
+  'wisteria cottage',
+  // Raymond Chandler House — the only house Chandler ever
+  // bought, in Lower Hermosa; The Long Goodbye was written there.
+  'raymond chandler house',
+  // South Molton Villa II — Ellen Browning Scripps's 1916 Gill
+  // fireproof-concrete masterwork; survives as the core of the
+  // Museum of Contemporary Art San Diego, at these coordinates.
+  'south molton villa ii',
+  // Rancho Paseana — the 229-acre Klein/Craig thoroughbred
+  // training ranch Bill Gates bought in 2014 to keep it a horse
+  // place; now Evergate Stables. Public record only.
+  'rancho paseana',
+  // Darlington House — Sybil Darlington's Palmer/Requa/Shepherd
+  // villa (Historic Site No. 327); its event rentals fund the
+  // senior housing next door.
+  'darlington house',
+  // Jonas Salk House — the Loch Crane (Taliesin) Norman Holter
+  // house Salk bought and extended on Ellentown Road; the
+  // domestic counterpoint to Kahn's Institute.
+  'jonas salk house',
 ];
 
 const EXCEPTION_SET: ReadonlySet<string> = new Set(TIER1_HOUSE_EXCEPTION_KEYS);

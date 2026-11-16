@@ -1,18 +1,23 @@
-// House importance data (Erik's tour-importance audits, Nov 15, 2026).
+// House importance data (Erik's tour-importance audits, Nov 15, 2026;
+// famous-houses tranche added Nov 16, 2026).
 //
 // GENERATED — do not hand-edit. Regenerate with:
 //   node ~/workspace/leos-world/house-importance-wiring-2026-11-15/generate.mjs
 // Sources: the house-importance audit's evidence.csv (562
-// non-national registry-house records) and the v2 strike list's
+// non-national registry-house records), the v2 strike list's
 // 35 National-Register houses, hand-scored under the audit's
 // channel definitions (national35.csv in the run dir carries the
-// rubric and per-house reasons).
+// rubric and per-house reasons), and the famous-houses tranche
+// (famous-houses-2026-11-16.csv in the run dir: the 10 buildable
+// houses from the Nov 15 famous-houses census, produced Nov 16,
+// all PROMOTE, scored from the census + production briefs under
+// the same channels).
 //
 // Every audited house place carries the audit's verdict and its
 // story / people / portal scores (0–2 each):
 //   PROMOTE     — tour-important: a great story, a person of real
 //                 weight, or a subject portal onto that person's
-//                 own stories. The 24 PROMOTE places are also the
+//                 own stories. The 34 PROMOTE places are also the
 //                 Tier-1 exception list (tier1HouseExceptions.ts).
 //   SOLID       — earns its place on score: at least one concrete
 //                 asset (overwhelmingly a notable architect or
@@ -244,6 +249,7 @@ const HOUSE_IMPORTANCE_DATA: Readonly<Record<string, readonly [HouseImportanceVe
   'daniel and anna boone house': ['DEAD WEIGHT', 0, 0, 1],
   'daniel and clara deacon house': ['DEAD WEIGHT', 0, 0, 1],
   'daniel mcconnell / herbert bathrick house': ['DEAD WEIGHT', 0, 0, 1],
+  'darlington house': ['PROMOTE', 2, 1, 1],
   'david a and emma loebenstein house': ['DEAD WEIGHT', 0, 0, 1],
   'david and beverly reed house': ['DEAD WEIGHT', 0, 0, 1],
   'david drake house': ['DEAD WEIGHT', 0, 0, 1],
@@ -325,6 +331,7 @@ const HOUSE_IMPORTANCE_DATA: Readonly<Record<string, readonly [HouseImportanceVe
   'frederick and helen thompson/charles h tifal house': ['SOLID', 1, 1, 1],
   'frederick and marianne liebhardt house': ['DEAD WEIGHT', 0, 0, 1],
   'fredrick and ada sedgwick/pear pearson house': ['DEAD WEIGHT', 0, 0, 1],
+  'geisel house': ['PROMOTE', 2, 2, 2],
   'genevieve howard house': ['DEAD WEIGHT', 0, 0, 1],
   'george & helen corbit spec house no 1': ['DEAD WEIGHT', 0, 0, 1],
   'george and alice hazzard house': ['DEAD WEIGHT', 0, 0, 1],
@@ -451,6 +458,7 @@ const HOUSE_IMPORTANCE_DATA: Readonly<Record<string, readonly [HouseImportanceVe
   'john snyder/ralph e hurlburt and charles h tifal spec house #2': ['SOLID', 1, 1, 1],
   'john snyder/ralph e hurlburt and charles h tifal spec house #3': ['SOLID', 1, 1, 1],
   'john steven mcgroarty spec house #1': ['DEAD WEIGHT', 0, 0, 1],
+  'jonas salk house': ['PROMOTE', 1, 2, 2],
   'jose captain joe machado medina house': ['DEAD WEIGHT', 0, 0, 1],
   'jose “captain joe” machado medina house': ['DEAD WEIGHT', 0, 0, 1],
   'joseph and esten shreve house': ['DEAD WEIGHT', 0, 0, 1],
@@ -581,10 +589,13 @@ const HOUSE_IMPORTANCE_DATA: Readonly<Record<string, readonly [HouseImportanceVe
   'ralph hurlburt/ alexander schreiber spec house #2': ['SOLID', 1, 1, 1],
   'ralph hurlburt/alexander schreiber spec house #4': ['SOLID', 1, 1, 1],
   'ralph hurlburt/alexander schrieber spec house #3': ['SOLID', 1, 1, 1],
+  'rancho paseana': ['PROMOTE', 2, 2, 1],
   'ray and clytie kahler/ dennstedt company house': ['SOLID', 1, 1, 1],
   'raymond and doris worrell house': ['DEAD WEIGHT', 0, 0, 1],
   'raymond and margaret taylor house': ['DEAD WEIGHT', 0, 0, 1],
+  'raymond chandler house': ['PROMOTE', 2, 2, 2],
   'raymond, jr and avery spicer/sim bruce richards house': ['SOLID', 1, 1, 0],
+  'razor house': ['PROMOTE', 2, 1, 1],
   'red rest and red roost cottages': ['PROMOTE', 2, 1, 1],
   'rice, lilian jenette, house': ['PROMOTE', 1, 2, 2],
   'richard and viola requa house': ['SOLID', 1, 1, 1],
@@ -596,6 +607,7 @@ const HOUSE_IMPORTANCE_DATA: Readonly<Record<string, readonly [HouseImportanceVe
   'robert kelly house': ['DEAD WEIGHT', 0, 0, 1],
   'robert p and eugenie s sedlock house': ['DEAD WEIGHT', 0, 0, 1],
   'rodney eales/sim bruce richards house': ['SOLID', 1, 1, 1],
+  'romney house': ['PROMOTE', 2, 2, 1],
   'rose vollmer / richard lareau rental house': ['DEAD WEIGHT', 0, 0, 1],
   'roy and anna ridgeway house': ['DEAD WEIGHT', 0, 0, 1],
   'ruby snell cottage': ['DEAD WEIGHT', 0, 0, 1],
@@ -614,6 +626,7 @@ const HOUSE_IMPORTANCE_DATA: Readonly<Record<string, readonly [HouseImportanceVe
   'sherman-doig house': ['DEAD WEIGHT', 0, 0, 1],
   'silberhorn / hord residence': ['DEAD WEIGHT', 0, 0, 1],
   'sim bruce richards house i': ['SOLID', 1, 1, 1],
+  'south molton villa ii': ['PROMOTE', 2, 2, 2],
   'southern building company spec house #1': ['DEAD WEIGHT', 0, 0, 1],
   'stephen b and fannie marks house': ['DEAD WEIGHT', 0, 0, 1],
   'stough-beckett cottage': ['DEAD WEIGHT', 0, 0, 1],
@@ -656,6 +669,7 @@ const HOUSE_IMPORTANCE_DATA: Readonly<Record<string, readonly [HouseImportanceVe
   'thomas j and rosa lee gester house': ['DEAD WEIGHT', 0, 0, 1],
   'thomas shepherd house': ['SOLID', 1, 1, 1],
   'tillie genter house': ['DEAD WEIGHT', 0, 0, 1],
+  'tony hawk house': ['PROMOTE', 2, 2, 1],
   'tudor rodgers/martin v melhorn house': ['SOLID', 1, 1, 1],
   'united states holding company spec house': ['DEAD WEIGHT', 0, 0, 1],
   'uriah and clara barkey house': ['DEAD WEIGHT', 0, 0, 1],
@@ -702,6 +716,7 @@ const HOUSE_IMPORTANCE_DATA: Readonly<Record<string, readonly [HouseImportanceVe
   'william templeton johnson spec house #1': ['SOLID', 1, 1, 1],
   'william templeton johnson/ harry brawner rental house': ['SOLID', 1, 1, 1],
   'wills and jane fletcher/ ralph l frank and milton sessions house': ['SOLID', 1, 1, 1],
+  'wisteria cottage': ['PROMOTE', 2, 1, 2],
   'wj chadwick spec house #1': ['DEAD WEIGHT', 0, 0, 1],
 };
 

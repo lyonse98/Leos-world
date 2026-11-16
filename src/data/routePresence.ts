@@ -1,6 +1,6 @@
 // GENERATED — do not hand-edit. Built by
 // scripts/route-mode/build-route-presence.mjs from
-// presence-classes.csv (3598 rows, the Nov 4, 2026
+// presence-classes.csv (3608 rows, the Nov 4, 2026
 // presence audit). The route build joins library rows to this
 // map at runtime, so no DB change is needed for route mode to
 // know a story's presence register.
@@ -3338,6 +3338,16 @@ export const ROUTE_PRESENCE: Record<string, RoutePresenceEntry> = {
   "carmel valley|landmark_sports": { presence: "safe", protected: false },
   "adobe falls|landmark_origin": { presence: "safe", protected: false },
   "rancho penasquitos|landmark_origin": { presence: "safe", protected: false },
+  "tony hawk house|landmark_origin": { presence: "safe", protected: false },
+  "wisteria cottage|landmark_origin": { presence: "safe", protected: false },
+  "razor house|landmark_origin": { presence: "safe", protected: false },
+  "romney house|landmark_origin": { presence: "safe", protected: false },
+  "geisel house|landmark_origin": { presence: "safe", protected: false },
+  "raymond chandler house|landmark_origin": { presence: "safe", protected: false },
+  "rancho paseana|landmark_origin": { presence: "safe", protected: false },
+  "jonas salk house|landmark_origin": { presence: "safe", protected: false },
+  "darlington house|landmark_origin": { presence: "safe", protected: false },
+  "south molton villa ii|landmark_origin": { presence: "safe", protected: false },
   "sr-75 north: imperial beach to coronado cays|corridor-woven-v1": { presence: "safe", protected: false },
   "sr-75 north: coronado cays to coronado|corridor-woven-v1": { presence: "safe", protected: false },
   "coronado ferry landing|landmark_event-woven-v1": { presence: "safe", protected: false },
