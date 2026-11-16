@@ -44,6 +44,11 @@ const extras = {
   facts: {
     discoverCandidates: engine.discoverCandidates,
     isTier1HouseException: engine.isTier1HouseException,
+    applyHouseDemotion: engine.applyHouseDemotion,
+    houseImportanceFor: engine.houseImportanceFor,
+    HOUSE_SCORE_PENALTY: engine.HOUSE_SCORE_PENALTY,
+    HOUSE_SCORE_PENALTY_SOLID: engine.HOUSE_SCORE_PENALTY_SOLID,
+    HOUSE_SCORE_PENALTY_DEAD: engine.HOUSE_SCORE_PENALTY_DEAD,
   },
   CORRIDOR_SEGMENTS: engine.CORRIDOR_SEGMENTS,
   CORRIDOR_BUFFER_M: engine.CORRIDOR_BUFFER_M,

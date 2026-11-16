@@ -9,6 +9,7 @@
 import registryData from '../data/sd-historic-registry.json';
 import { MAJOR_PLACES } from '../content/majorPlaces';
 import { isTier1HouseException } from '../data/tier1HouseExceptions';
+import { houseImportanceFor } from '../data/houseImportance';
 import { isHousePlaceName } from './houseClass';
 import { findNamedArea } from '../services/namedAreas';
 import { calculateDistance } from '../utils/geo';
@@ -150,17 +151,23 @@ function isNational(rec: RegistryRecord): boolean {
  * evidence was National-Register houses riding the Tier-1
  * pending lane and displacement protection like landmark
  * stories. The score boost is untouched (a national house still
- * out-scores a local one); only the tier privilege goes. The
- * curated destination houses in tier1HouseExceptions keep
- * Tier-1 — the exception is judged on either name the candidate
- * carries (the Places display name or the registry's own), the
- * same two-dialect rule the portal gate judges a place by.
+ * out-scores a local one); only the tier privilege goes.
+ *
+ * For a house, the curated exception list is the ONLY road to
+ * Tier-1, whatever its register: the Nov 15 tour-importance
+ * audits judged houses on story, people and portal value, not
+ * on register class — and nine of the 24 exceptions are
+ * local-register houses the audits promoted (the Whaley House
+ * among them: a National Historic Landmark in reality, carried
+ * as local-only by this dataset). The exception is judged on
+ * either name the candidate carries (the Places display name or
+ * the registry's own), the same two-dialect rule the portal
+ * gate judges a place by.
  */
 function registryConfersTier1(candidateName: string, rec: RegistryRecord): boolean {
-  if (!isNational(rec)) return false;
   const house = isHousePlaceName(candidateName) || isHousePlaceName(rec.name);
-  if (!house) return true;
-  return isTier1HouseException(candidateName) || isTier1HouseException(rec.name);
+  if (house) return isTier1HouseException(candidateName) || isTier1HouseException(rec.name);
+  return isNational(rec);
 }
 
 const REGISTRY_BOOST_CAP = 25;
@@ -254,18 +261,54 @@ export async function discoverCandidates(center: GeoPoint, radiusM: number): Pro
  * House demotion in freeform discovery (field fix F1, Nov 12,
  * 2026 — the same Erik ruling the route composer applies):
  * a residence-subject candidate (a registry spec house, a
- * named cottage/mansion/residence) loses HOUSE_SCORE_PENALTY
- * points — enough to sink it below the landmarks, majors and
- * ordinary places it competes with in the serve cycle's
- * ordering, registry boost included. Ordering only, as a
- * backstop: the serve cycle's portal-or-nothing gate
- * (Nov 14, 2026) decides whether a house may serve at all.
+ * named cottage/mansion/residence) loses points — enough to
+ * sink it below the landmarks, majors and ordinary places it
+ * competes with in the serve cycle's ordering, registry boost
+ * included. Ordering only, as a backstop: the serve cycle's
+ * portal-or-nothing gate (Nov 14, 2026) decides whether a house
+ * may serve at all. Nothing here ever removes a candidate —
+ * the serve cycle falls through the ordered list, so a sunk
+ * house still serves when it is the only licensed story in
+ * range.
+ *
+ * Since Nov 15, 2026 the penalty is graduated by the
+ * tour-importance audits (houseImportance.ts), because the
+ * flat F1 penalty could not tell houses apart: in a dense pool
+ * every house took the same −50, so dead-weight houses ordered
+ * among themselves by distance alone and surfaced exactly as
+ * often as solid ones (the Day-10 Alice Lee Residence serve —
+ * audit DEAD WEIGHT, style prose, anonymous owner). Now:
+ *   SOLID audited houses       −30 (closer to ordinary places)
+ *   unaudited houses           −50 (the flat F1 penalty, exact)
+ *   DEAD WEIGHT audited houses −70 (last resort among houses)
+ * The 20-point steps are sized against the distance term
+ * (−1 point per 90 m): a step is worth ~1.8 km of distance,
+ * more than the serve radius spans, so in a pool the
+ * importance class — not a few hundred metres — decides
+ * house-vs-house order, while distance still orders within a
+ * class. Tier-1 exception houses are untouched by the
+ * graduation: their F1 −50 stands exactly as the tier build
+ * left it (their privilege is the tier lane, not score). A
+ * PROMOTE-class record without an exception grant (none exist
+ * by construction — all 24 PROMOTEs are exceptions) would take
+ * the SOLID step rather than sink unaudited.
  */
 export const HOUSE_SCORE_PENALTY = 50;
+export const HOUSE_SCORE_PENALTY_SOLID = 30;
+export const HOUSE_SCORE_PENALTY_DEAD = 70;
+
+function houseScorePenalty(c: Candidate): number {
+  if (isTier1HouseException(c.name) || (c.registry && isTier1HouseException(c.registry.name))) {
+    return HOUSE_SCORE_PENALTY;
+  }
+  const imp = houseImportanceFor(c.name) ?? (c.registry ? houseImportanceFor(c.registry.name) : null);
+  if (!imp) return HOUSE_SCORE_PENALTY;
+  return imp.verdict === 'DEAD WEIGHT' ? HOUSE_SCORE_PENALTY_DEAD : HOUSE_SCORE_PENALTY_SOLID;
+}
 
 export function applyHouseDemotion(candidates: Candidate[]): void {
   for (const c of candidates) {
-    if (isHousePlaceName(c.name)) c.score -= HOUSE_SCORE_PENALTY;
+    if (isHousePlaceName(c.name)) c.score -= houseScorePenalty(c);
   }
 }
 

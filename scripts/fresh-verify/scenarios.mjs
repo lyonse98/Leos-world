@@ -4590,7 +4590,7 @@ export async function runScenarios(Tour, extras) {
     }
   }
 
-  suite('FP-2 houses out of Tier-1: the curated destination exception keeps Tier-1 (both discovery paths)');
+  suite('FP-2 houses out of Tier-1: the curated tour-importance exception keeps Tier-1 (both discovery paths)');
   {
     resetLocalStorage();
     const restore = fpStubFetch([]);
@@ -4600,12 +4600,24 @@ export async function runScenarios(Tour, extras) {
       const around = await facts.discoverCandidates({ lat: 32.741362, lng: -117.157981 }, 100);
       const marston = around.find(c => c.name === 'George Marston House');
       check('the Marston candidate is discovered', Boolean(marston), around.map(c => c.name).join(','));
-      check('George Marston House (excepted destination) keeps Tier-1', marston?.tier1 === true, `tier1=${marston?.tier1}`);
+      check('George Marston House (excepted, tour-important) keeps Tier-1', marston?.tier1 === true, `tier1=${marston?.tier1}`);
+      // Burnham-Marston flipped when the exception list grew to
+      // the full Nov 15 audits: struck under the withdrawn
+      // visitability bar, kept under tour importance (the
+      // Prairie School landmark in the Gill/Waterman/Marston
+      // cluster). It now keeps Tier-1 on its own ground.
       const burnhamAround = await facts.discoverCandidates({ lat: 32.742716, lng: -117.157343 }, 100);
       const burnham = burnhamAround.find(c => c.name === 'Burnham-Marston House');
       check('Burnham-Marston House is discovered on its own ground', Boolean(burnham), burnhamAround.map(c => c.name).join(','));
-      check('Burnham-Marston (national house, NOT excepted) is not Tier-1', burnham?.tier1 === false, `tier1=${burnham?.tier1}`);
-      check('the predicate names the seeded exception', facts.isTier1HouseException('George Marston House') === true);
+      check('Burnham-Marston (national house, excepted under the v2 list) keeps Tier-1', burnham?.tier1 === true, `tier1=${burnham?.tier1}`);
+      // The negative control moved to Brawn: a national house
+      // the v2 list struck (audit DEAD WEIGHT), alone on its
+      // Vista ground — no fold partners within 100 m.
+      const brawnAround = await facts.discoverCandidates({ lat: 33.186239, lng: -117.248023 }, 100);
+      const brawn = brawnAround.find(c => c.name === 'Brawn, Charles A., House');
+      check('Brawn, Charles A., House is discovered on its own ground', Boolean(brawn), brawnAround.map(c => c.name).join(','));
+      check('Brawn (national house, NOT excepted) is not Tier-1', brawn?.tier1 === false, `tier1=${brawn?.tier1}`);
+      check('the predicate names an exception', facts.isTier1HouseException('George Marston House') === true);
       check('the predicate names nothing else on the street', facts.isTier1HouseException('A.H. Sweet Residences') === false);
     } finally {
       restore();
@@ -4636,15 +4648,18 @@ export async function runScenarios(Tour, extras) {
   {
     resetLocalStorage();
     // The candidate below is exactly what discovery returns
-    // for a national house after FP-1 (tier1: false). Its
-    // payload stands on its ground — the gate would license
-    // the serve if it could take a slot.
+    // for a national house after FP-1 (tier1: false) — the
+    // fixture house is A.H. Sweet Residences, FP-1's own case
+    // (Burnham-Marston held the role until the v2 exception
+    // list made it Tier-1; FP-2 pins that flip). Its payload
+    // stands on its ground — the gate would license the serve
+    // if it could take a slot.
     const world = makeWorld(Tour, {
       candidates: [makeCandidate('Alpha Park')],
       library: [
         'Alpha Park',
         { name: 'Waiter Place', lat: UTC.lat + 0.004, lng: UTC.lng },
-        { name: 'Burnham-Marston House', lat: UTC.lat + 0.0045, lng: UTC.lng },
+        { name: 'A.H. Sweet Residences', lat: UTC.lat + 0.0045, lng: UTC.lng },
         { name: 'Grand Museum', lat: UTC.lat + 0.0045, lng: UTC.lng },
         // The part-2 displacer rides the shelf: a live
         // candidate would be refused by the generation fit
@@ -4665,24 +4680,24 @@ export async function runScenarios(Tour, extras) {
     world.candidates = [makeCandidate('Waiter Place', { lat: UTC.lat + 0.004, lng: UTC.lng, distanceM: 60 })];
     tour.onPosition({ lat: UTC.lat + 0.002, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
     await world.clock.advance(3_000); // waiter slotted behind Alpha
-    world.candidates = [makeCandidate('Burnham-Marston House', { tier1: false, lat: UTC.lat + 0.0045, lng: UTC.lng })];
+    world.candidates = [makeCandidate('A.H. Sweet Residences', { tier1: false, lat: UTC.lat + 0.0045, lng: UTC.lng })];
     tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
     await world.clock.advance(6_000); // the house is offered and lands 'buffer', repeatedly
     check('the national house never committed behind an ordinary waiter',
-      !world.eventsOf('story_played').some(e => e.payload.subject === 'burnham-marston house'),
+      !world.eventsOf('story_played').some(e => e.payload.subject === 'a.h. sweet residences'),
       JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
     // Part 2: with the slot free the house MAY slot (portal
     // license in hand) — but it waits unprotected: a fresher
     // ordinary newcomer displaces it like any ordinary story.
     world.candidates = [];
     await world.clock.advance(100_000); // Alpha ends; the waiter sounds (90 s)
-    world.candidates = [makeCandidate('Burnham-Marston House', { tier1: false, lat: UTC.lat + 0.0045, lng: UTC.lng })];
+    world.candidates = [makeCandidate('A.H. Sweet Residences', { tier1: false, lat: UTC.lat + 0.0045, lng: UTC.lng })];
     // A >200 m move so the serve cycle actually runs (the
     // house's own anchor is its row, not the driver's feet).
     tour.onPosition({ lat: UTC.lat + 0.009, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
     await world.clock.advance(3_000); // the house slots behind the waiter
     check('the house slotted once the slot was free (the gate licenses it)',
-      world.eventsOf('story_played').some(e => e.payload.subject === 'burnham-marston house'),
+      world.eventsOf('story_played').some(e => e.payload.subject === 'a.h. sweet residences'),
       JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
     // A fresh ordinary candidate at the driver's feet is the
     // displacer (the waiter itself is already told).
@@ -4693,7 +4708,7 @@ export async function runScenarios(Tour, extras) {
     check('a fresher ordinary newcomer displaces the waiting house (no tier protection)',
       drops.some(d => d.payload.reason === 'displaced-fresher'),
       JSON.stringify(drops.map(d => d.payload)));
-    check('the displaced house never sounded', !soundedLabels.includes('Burnham-Marston House'), soundedLabels.join(','));
+    check('the displaced house never sounded', !soundedLabels.includes('A.H. Sweet Residences'), soundedLabels.join(','));
     check('its payload never sounded either (the obligation died with the commit)',
       !soundedLabels.includes('Grand Museum'), soundedLabels.join(','));
     tour.endTour();
@@ -5063,15 +5078,15 @@ export async function runScenarios(Tour, extras) {
   suite('FP-9 portal regression: a national house serves only as a portal, payload next (the gate is unchanged by the tier change)');
   {
     resetLocalStorage();
-    // Burnham-Marston House is a national house whose
-    // discovery candidate is now tier1: false (FP-2). The
+    // A.H. Sweet Residences is a national house whose
+    // discovery candidate is tier1: false (FP-1). The
     // gate never consulted the tier: licensed by its payload,
     // it serves — and the payload is the very next story,
     // exactly as HP-1 proved for an ordinary house.
     const world = makeWorld(Tour, {
-      candidates: [makeCandidate('Burnham-Marston House', { tier1: false }), makeCandidate('Grand Museum')],
+      candidates: [makeCandidate('A.H. Sweet Residences', { tier1: false }), makeCandidate('Grand Museum')],
       library: [
-        { name: 'Burnham-Marston House', angles: ['landmark_origin'] },
+        { name: 'A.H. Sweet Residences', angles: ['landmark_origin'] },
         { name: 'Grand Museum', angles: ['landmark_origin'] },
       ],
     });
@@ -5081,12 +5096,160 @@ export async function runScenarios(Tour, extras) {
     for (let i = 0; i < 80 && storySubjects(world).length < 2; i++) await world.clock.advance(5_000);
     await world.clock.advance(45_000);
     const subjects = storySubjects(world);
-    check('the national house served (a payload stands on its ground)', subjects.includes('burnham-marston house'),
+    check('the national house served (a payload stands on its ground)', subjects.includes('a.h. sweet residences'),
       JSON.stringify(subjects));
     check('the payload sounds immediately after the house — no story between them',
-      subjects.indexOf('burnham-marston house') >= 0 &&
-        subjects.indexOf('grand museum') === subjects.indexOf('burnham-marston house') + 1,
+      subjects.indexOf('a.h. sweet residences') >= 0 &&
+        subjects.indexOf('grand museum') === subjects.indexOf('a.h. sweet residences') + 1,
       JSON.stringify(subjects));
     tour.endTour();
+  }
+
+  // ---------------------------------------------------------------
+  // HI suites (Nov 15, 2026): importance-ordered house scoring.
+  // The flat F1 −50 could not tell houses apart; the penalty is
+  // now graduated by the tour-importance audits (SOLID −30,
+  // unaudited −50 exact, DEAD WEIGHT −70), with Tier-1 exception
+  // houses untouched at the flat −50. Synthetic candidates feed
+  // applyHouseDemotion directly (it reads name/registry/score
+  // only); discovery suites stub Places like the FP suites.
+  const hiCandidate = (name, score = 100) => ({
+    name, lat: 0, lng: 0, source: 'registry', types: ['historic_site'],
+    rating: null, userRatings: null, address: null, tier1: false, score, registry: null, distanceM: 0,
+  });
+
+  suite('HI-1 graduated penalty: at equal base, solid beats unaudited beats dead weight');
+  {
+    const solid = hiCandidate('Lillie and James North Houses');
+    const unaudited = hiCandidate('A.H. Sweet Residences');
+    const dead = hiCandidate('Alice Lee Residence');
+    facts.applyHouseDemotion([solid, unaudited, dead]);
+    check('the penalty constants are the ruled steps (30 / 50 / 70)',
+      facts.HOUSE_SCORE_PENALTY_SOLID === 30 && facts.HOUSE_SCORE_PENALTY === 50 && facts.HOUSE_SCORE_PENALTY_DEAD === 70,
+      `${facts.HOUSE_SCORE_PENALTY_SOLID}/${facts.HOUSE_SCORE_PENALTY}/${facts.HOUSE_SCORE_PENALTY_DEAD}`);
+    check('a SOLID audited house loses only 30', solid.score === 70, `score=${solid.score}`);
+    check('an unaudited house loses exactly the flat 50', unaudited.score === 50, `score=${unaudited.score}`);
+    check('a DEAD WEIGHT house loses 70 — last resort among houses', dead.score === 30, `score=${dead.score}`);
+    check('the order at equal base is solid > unaudited > dead',
+      solid.score > unaudited.score && unaudited.score > dead.score,
+      `${solid.score}/${unaudited.score}/${dead.score}`);
+  }
+
+  suite('HI-2 no silence desert: a dead-weight house alone in range is still discovered and returned');
+  {
+    resetLocalStorage();
+    const restore = fpStubFetch([]);
+    try {
+      // Brawn is a named portal-desert house (v2): no story
+      // places within 1,000 m. Discovery must still return it —
+      // the graduated penalty orders, it never filters.
+      const around = await facts.discoverCandidates({ lat: 33.186239, lng: -117.248023 }, 100);
+      const brawn = around.find(c => c.name === 'Brawn, Charles A., House');
+      check('the dead-weight house is discovered on its desert ground', Boolean(brawn), around.map(c => c.name).join(','));
+      check('it is the only candidate in range (the desert is real)', around.length === 1, `${around.length}`);
+      check('its score carries the full dead-weight step (20 + 45 national − 70 − distance)',
+        Boolean(brawn) && Math.abs(brawn.score - (65 - 70 - brawn.distanceM / 90)) < 0.01,
+        `score=${brawn?.score} distanceM=${brawn?.distanceM}`);
+      const lone = hiCandidate('Brawn, Charles A., House');
+      const list = [lone];
+      facts.applyHouseDemotion(list);
+      check('demotion never removes a candidate — the list still holds it', list.length === 1 && list[0] === lone && lone.score === 30,
+        `len=${list.length} score=${lone.score}`);
+    } finally {
+      restore();
+    }
+  }
+
+  suite('HI-3 unaudited houses are byte-identical to the flat-F1 world');
+  {
+    const sweet = hiCandidate('A.H. Sweet Residences');
+    const invented = hiCandidate('Zzyzx Family House');
+    const marston = hiCandidate('George Marston House');
+    facts.applyHouseDemotion([sweet, invented, marston]);
+    check('A.H. Sweet Residences (in neither audit — it fell between the two populations when the plural fix widened the national count) loses exactly 50',
+      sweet.score === 50, `score=${sweet.score}`);
+    check('a wholly unaudited house name loses exactly 50', invented.score === 50, `score=${invented.score}`);
+    check('an exception house is untouched by the graduation — its flat 50 stands', marston.score === 50, `score=${marston.score}`);
+    resetLocalStorage();
+    const restore = fpStubFetch([]);
+    try {
+      // Discovery-level identity: Sweet on its own ground,
+      // Places stubbed — 20 base + 45 national boost − 50 flat,
+      // distance 0. The exact pre-graduation number.
+      const around = await facts.discoverCandidates({ lat: 32.738374, lng: -117.167262 }, 100);
+      const found = around.find(c => c.name === 'A.H. Sweet Residences');
+      check('Sweet’s discovered score is exactly the flat-F1 score (15)',
+        Boolean(found) && Math.abs(found.score - 15) < 1e-9, `score=${found?.score}`);
+    } finally {
+      restore();
+    }
+  }
+
+  suite('HI-4 a PROMOTE exception is Tier-1 via the exception list even on a local register (the Whaley case)');
+  {
+    check('the predicate names the Whaley House under both dialects',
+      facts.isTier1HouseException('Whaley House Museum') === true && facts.isTier1HouseException('Whaley House') === true);
+    check('the importance data carries the Whaley promote',
+      facts.houseImportanceFor('Whaley House Museum')?.verdict === 'PROMOTE');
+    resetLocalStorage();
+    const restore = fpStubFetch([]);
+    try {
+      // The registry carries the Whaley House as LOCAL-only
+      // (the dataset anomaly the audit flagged) — before the
+      // exception list grew, no local house could be Tier-1.
+      // Its ground folds with the Derby-Pendleton House 6 m
+      // away; whichever record headlines the candidate, the
+      // Whaley record rides it and the exception confers.
+      const around = await facts.discoverCandidates({ lat: 32.752816, lng: -117.194421 }, 250);
+      const whaley = around.find(c => c.name.includes('Whaley') || c.registry?.name.includes('Whaley'));
+      check('the Whaley ground is discovered', Boolean(whaley), around.map(c => c.name).join(','));
+      check('the Whaley candidate is Tier-1 via the exception (local register notwithstanding)',
+        whaley?.tier1 === true, `tier1=${whaley?.tier1}`);
+      check('no other candidate on that Old Town ground is Tier-1',
+        around.filter(c => c !== whaley).every(c => c.tier1 === false),
+        around.map(c => `${c.name}:${c.tier1}`).join(','));
+    } finally {
+      restore();
+    }
+  }
+
+  suite('HI-5 the two Alice Lees: the people are the difference');
+  {
+    // At equal base, synthetic and exact: the Gill/Waterman
+    // Alice Lee is a PROMOTE exception (flat −50, untouched);
+    // the plain Alice Lee Residence is audit DEAD WEIGHT (−70);
+    // the nearby solid North Houses take the reduced −30.
+    const deadAlice = hiCandidate('Alice Lee Residence');
+    const gillAlice = hiCandidate('Alice Lee/ Irving J. Gill/ Hazel Wood Waterman House');
+    const solid = hiCandidate('Lillie and James North Houses');
+    facts.applyHouseDemotion([deadAlice, gillAlice, solid]);
+    check('the dead Alice Lee loses 70', deadAlice.score === 30, `score=${deadAlice.score}`);
+    check('the Gill/Waterman Alice Lee is PROMOTE in the data and keeps the flat 50 as an exception',
+      facts.houseImportanceFor('Alice Lee/ Irving J. Gill/ Hazel Wood Waterman House')?.verdict === 'PROMOTE' && gillAlice.score === 50,
+      `score=${gillAlice.score}`);
+    check('the order is solid > Gill/Waterman > dead Alice Lee',
+      solid.score > gillAlice.score && gillAlice.score > deadAlice.score,
+      `${solid.score}/${gillAlice.score}/${deadAlice.score}`);
+    resetLocalStorage();
+    const restore = fpStubFetch([]);
+    try {
+      // On the real ground the two Alice Lees (31 m apart) and
+      // Teats House No. 1 (59 m) fold into ONE discovery
+      // candidate — GPS cannot tell houses 31 m apart apart
+      // either. The fold pins the shared-ground doctrine: the
+      // Gill record's exception confers the tier at fold time;
+      // the headline name (the dead Alice Lee Residence, first
+      // record on the ground) carries the dead-weight penalty.
+      // Score: 20 + 25×3 folded boosts − 70, distance 0.
+      const around = await facts.discoverCandidates({ lat: 32.742967, lng: -117.158709 }, 100);
+      const alice = around.find(c => c.name === 'Alice Lee Residence');
+      check('the shared Alice Lee ground is one folded candidate', Boolean(alice), around.map(c => c.name).join(','));
+      check('the folded candidate is Tier-1 (the Gill/Waterman exception governs the ground)',
+        alice?.tier1 === true, `tier1=${alice?.tier1}`);
+      check('its score carries the headline name’s dead-weight step (95 − 70 = 25)',
+        Boolean(alice) && Math.abs(alice.score - 25) < 0.01, `score=${alice?.score}`);
+    } finally {
+      restore();
+    }
   }
 }
