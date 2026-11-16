@@ -44,12 +44,8 @@ import {
   eligibleIntroForms,
   fallbackIntroForm,
   pickIntroForm,
-  composeCallbackText,
-  callbackAssetFresh,
   buildHookPrompt,
   validateHookText,
-  type CallbackAsset,
-  type CloseoutRecord,
   type GreetingAxis,
   type IntroForm,
 } from './introForms';
@@ -413,14 +409,15 @@ export class Tour {
   // Intro forms (Nov 11, 2026): the opener is a FORM picked at
   // greeting settle, not a clip picked at the tap. The greeting
   // axis is decided at start (the greeting is the first sound);
-  // the form, the hook race, and the callback asset resolve over
-  // the greeting's ~4.5 s. Every form degrades rung-by-rung to
-  // the plain path; the fields below are that machinery's state.
+  // the form and the hook race resolve over the greeting's
+  // ~4.5 s. Every form degrades rung-by-rung to the plain path;
+  // the fields below are that machinery's state. (The callback
+  // form that once preempted the pick was killed Nov 16, 2026 —
+  // every start is fresh.)
   private greetingAxis: GreetingAxis = 'standard';
   private daypartToday: Daypart | null = null;
   private introFormDecided = false;
   private prevStartAtMs: number | null = null;
-  private callbackAssetPending: CallbackAsset | null = null;
   private hookState: 'idle' | 'pending' | 'ready' | 'failed' | 'discarded' = 'idle';
   private hookText: string | null = null;
   private hookCommissioned = false;
@@ -887,11 +884,10 @@ export class Tour {
     this.opening = 'priming';
 
     // Intro-form state for this start (Nov 11, 2026): the
-    // previous start's timestamp (the regular's gate) and the
-    // callback asset the previous tour's closeout pre-rendered
-    // are read BEFORE this start writes its own. Both are
-    // synchronous local reads — the greeting's attempt below is
-    // still the tap's first media action.
+    // previous start's timestamp (the regular's gate) is read
+    // BEFORE this start writes its own — a synchronous local
+    // read, so the greeting's attempt below is still the tap's
+    // first media action.
     this.introFormDecided = false;
     this.hookState = 'idle';
     this.hookText = null;
@@ -904,14 +900,10 @@ export class Tour {
     const prevStartRaw = backend.lsJson<number>('lastTourStartAt');
     this.prevStartAtMs = typeof prevStartRaw === 'number' ? prevStartRaw : null;
     backend.lsJsonSet('lastTourStartAt', Date.now());
-    const cbRaw = backend.lsJson<CallbackAsset>('callbackNext');
-    this.callbackAssetPending =
-      !resume && callbackAssetFresh(cbRaw, Date.now()) ? cbRaw : null;
 
     // The greeting axis: resume keeps the re-entry lines exactly;
     // a fresh start may take a DAYPART greeting when the
-    // day-aware form is off cooldown and no callback is waiting
-    // (the callback form pairs with a standard greeting).
+    // day-aware form is off cooldown.
     let line: GreetingLine;
     if (resume) {
       this.greetingAxis = 'reentry';
@@ -919,7 +911,7 @@ export class Tour {
     } else {
       this.greetingAxis = 'standard';
       line = this.pickGreeting(false);
-      if (!this.callbackAssetPending) {
+      {
         const history = backend.lsJson<string[]>('introFormHistory') ?? [];
         if (!history.slice(-3).includes('day-aware') && Math.random() < 0.6) {
           const dp = daypartOf(new Date());
@@ -1135,10 +1127,10 @@ export class Tour {
   }
 
   /**
-   * A synthesized opener item (the callback and hook-question
-   * forms): the text IS the clip — pre-rendered into the synth
-   * cache at closeout (callback) or during the greeting (hook),
-   * so resolution is a cache hit and the slot spends no latency.
+   * A synthesized opener item (the hook-question form): the text
+   * IS the clip — rendered into the synth cache during the
+   * greeting, so resolution is a cache hit and the slot spends
+   * no latency.
    */
   private makeSynthOpenerItem(
     text: string,
@@ -1211,26 +1203,19 @@ export class Tour {
   }
 
   /**
-   * Choose and serve this start's opener form. The callback
-   * asset holds PRIORITY outside the rotation (it is spent
-   * once, here, whether or not its item sounds — a crashed
-   * start must not replay yesterday's memory forever). The
-   * rotation itself never repeats a form within 3 starts; an
-   * exhausted pool lands on greeting-only for a regular (R2)
-   * or on the least-recently-served form for anyone else. No
-   * path through here can silence the opening: every rung ends
-   * in a served opener or the greeting-only floor.
+   * Choose and serve this start's opener form. The rotation
+   * never repeats a form within 3 starts; an exhausted pool
+   * lands on greeting-only for a regular (R2) or on the
+   * least-recently-served form for anyone else. No path through
+   * here can silence the opening: every rung ends in a served
+   * opener or the greeting-only floor. Nothing preempts the
+   * rotation (the callback asset that once did was killed
+   * Nov 16, 2026 — a 'leo_callback_next' key still sitting in a
+   * device's storage is simply never read again).
    */
   private selectIntroForm(): void {
     if (this.introFormDecided) return;
     this.introFormDecided = true;
-    const asset = this.callbackAssetPending;
-    this.callbackAssetPending = null;
-    if (asset) {
-      backend.lsDel('callbackNext');
-      this.serveIntroClip(null, asset.text, 'callback', null);
-      return;
-    }
     const history = backend.lsJson<string[]>('introFormHistory') ?? [];
     const regular =
       this.prevStartAtMs !== null && Date.now() - this.prevStartAtMs < 48 * 3600_000;
@@ -1293,12 +1278,7 @@ export class Tour {
   ): void {
     const item = clip
       ? this.makeOpenerItem(clip, true, { form, fallbackRung })
-      : this.makeSynthOpenerItem(
-          synthText ?? '',
-          form === 'callback' ? 'callback-next' : 'hook-question',
-          form,
-          fallbackRung,
-        );
+      : this.makeSynthOpenerItem(synthText ?? '', 'hook-question', form, fallbackRung);
     if (clip) this.openerPrimaryClipId = clip.id;
     const history = backend.lsJson<string[]>('introFormHistory') ?? [];
     history.push(form);
@@ -4262,9 +4242,8 @@ export class Tour {
   /**
    * The synth cache key for a text (see resolveUrl): persona +
    * TTS model + voice + a dual hash. Shared by the resolver and
-   * the two pre-render lanes (the hook commission, the callback
-   * closeout render) so a pre-rendered line is exactly the entry
-   * the resolver looks up.
+   * the hook commission's pre-render lane, so a pre-rendered
+   * line is exactly the entry the resolver looks up.
    */
   private synthCacheKeyFor(text: string): string {
     return `synth-${hashString(
@@ -5199,13 +5178,9 @@ export class Tour {
 
   endTour(): void {
     if (this.phase !== 'active') return;
-    // Intro forms (Nov 11, 2026): freeform files a CLOSEOUT
-    // RECORD before anything else — the facts the next start's
-    // callback form may speak — and pre-renders that callback
-    // clip on the live lane, so the next start spends zero
-    // latency on it. Best-effort by construction: a failed
-    // record or render degrades the next start to the rotation.
-    this.writeCloseoutRecord();
+    // No closeout record is filed (Nov 16, 2026): the callback
+    // opener it fed was killed — every tour starts fresh, and
+    // closeout commissions no render spend for the next start.
     if (this.hookWaiterTimer !== null) {
       this.clock.clearTimeout(this.hookWaiterTimer);
       this.hookWaiterTimer = null;
@@ -5248,46 +5223,6 @@ export class Tour {
     // telemetry sink stayed open.
     this.emitSealed = true;
     this.notify();
-  }
-
-  /**
-   * The freeform closeout record (Nov 11, 2026): last area, last
-   * story, owed welcome — recorded facts only, composed into the
-   * callback line by the pure composer (a record with nothing in
-   * it writes nothing). The line is pre-rendered into the synth
-   * cache under its resolver key; the spend is one live-lane
-   * synthesis (~$0.01–0.02), inside the live budget, never shelf
-   * accounting. Skipped outright when the TTS quota has tripped.
-   */
-  private writeCloseoutRecord(): void {
-    try {
-      const last = this.lastStoryItem;
-      const lastIsWelcome = (last?.subject ?? '').startsWith('welcome:');
-      const record: CloseoutRecord = {
-        areaName: this.area.neighborhood ?? this.area.city ?? null,
-        lastStoryLabel: last && !lastIsWelcome ? last.label : null,
-        owedName: this.owedWelcome?.name ?? null,
-        endedAt: Date.now(),
-      };
-      const text = composeCallbackText(record);
-      if (!text) {
-        backend.lsDel('callbackNext');
-        return;
-      }
-      const asset: CallbackAsset = { text, record, createdAt: Date.now() };
-      backend.lsJsonSet('callbackNext', asset);
-      if (this.seams.ttsQuotaTripped()) return;
-      void (async () => {
-        try {
-          const blob = await this.seams.synthesize(text);
-          await this.seams.audioCachePut(this.synthCacheKeyFor(text), blob);
-        } catch {
-          /* the next start resolves the callback by live synthesis, or rotates on */
-        }
-      })();
-    } catch {
-      /* closeout is best-effort; the tour ends regardless */
-    }
   }
 
   /** Whether a resumable tour marker exists (the 30-minute window, contract D). */

@@ -36,8 +36,6 @@ const extras = {
     daypartOf: engine.daypartOf,
     eligibleIntroForms: engine.eligibleIntroForms,
     fallbackIntroForm: engine.fallbackIntroForm,
-    composeCallbackText: engine.composeCallbackText,
-    callbackAssetFresh: engine.callbackAssetFresh,
     validateHookText: engine.validateHookText,
   },
   routeInterItemGapMs: engine.routeInterItemGapMs,

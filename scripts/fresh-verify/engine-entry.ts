@@ -15,8 +15,6 @@ export {
   daypartOf,
   eligibleIntroForms,
   fallbackIntroForm,
-  composeCallbackText,
-  callbackAssetFresh,
   validateHookText,
 } from '../../src/core/introForms';
 export { routeInterItemGapMs } from '../../src/core/routePlayback';

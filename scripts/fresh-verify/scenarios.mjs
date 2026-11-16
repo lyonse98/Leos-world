@@ -4127,7 +4127,7 @@ export async function runScenarios(Tour, extras) {
   }
 
   // ---------------------------------------------------------- IB-01 intro-form pure helpers
-  suite('IB-01 intro forms: daypart, rotation pool, callback composer, hook validation');
+  suite('IB-01 intro forms: daypart, rotation pool, hook validation');
   {
     check('daypart bands from the device clock', intro.daypartOf(new Date(2026, 10, 11, 7, 30)) === 'early' &&
       intro.daypartOf(new Date(2026, 10, 11, 12, 0)) === 'midday' &&
@@ -4146,15 +4146,9 @@ export async function runScenarios(Tour, extras) {
     check('a failed hook leaves the pool', !intro.eligibleIntroForms({ ...base, hookFailed: true }).includes('hook-question'));
     check('exhausted pool falls back to the least-recently-served form',
       intro.fallbackIntroForm({ recentForms: ['plain', 'wandering', 'hook-question'], daypartGreeting: false, hookFailed: true, regular: false }) === 'plain');
-    const owed = intro.composeCallbackText({ areaName: 'University City', lastStoryLabel: 'Balboa Park', owedName: 'North Park', endedAt: 0 });
-    check('callback: an owed welcome outranks a plain memory', typeof owed === 'string' && owed.includes('North Park') && owed.includes("haven't forgotten"), owed ?? 'null');
-    const memory = intro.composeCallbackText({ areaName: 'University City', lastStoryLabel: 'Balboa Park', owedName: null, endedAt: 0 });
-    check('callback: composed from recorded facts only', typeof memory === 'string' && memory.includes('University City') && memory.includes('Balboa Park'), memory ?? 'null');
-    check('callback: an empty record composes nothing', intro.composeCallbackText({ areaName: null, lastStoryLabel: null, owedName: null, endedAt: 0 }) === null);
-    check('callback asset freshness window (14 days)',
-      intro.callbackAssetFresh({ text: 'Welcome back.', record: {}, createdAt: 1_000_000 }, 1_000_000 + 13 * 24 * 3600_000) === true &&
-      intro.callbackAssetFresh({ text: 'Welcome back.', record: {}, createdAt: 1_000_000 }, 1_000_000 + 15 * 24 * 3600_000) === false &&
-      intro.callbackAssetFresh(null, 0) === false);
+    check('the rotation pool never contains the killed callback form',
+      !intro.eligibleIntroForms(base).includes('callback') &&
+      !intro.eligibleIntroForms({ ...base, regular: true, daypartGreeting: true }).includes('callback'));
     check('hook validation: one honest question passes',
       intro.validateHookText('Why does the old ferry landing still lean toward the bay?') !== null);
     check('hook validation: statements, multi-questions and rambling fail',
@@ -4169,10 +4163,6 @@ export async function runScenarios(Tour, extras) {
     resetLocalStorage();
     const forms = [];
     for (let n = 0; n < 6; n += 1) {
-      // The callback asset is cleared per start: this suite
-      // isolates the ROTATION (the callback holds priority
-      // outside it and is exercised in IB-03).
-      localStorage.removeItem('leo_callback_next');
       const world = makeWorld(Tour, {
         candidates: [makeCandidate('Balboa Park')],
         library: ['Balboa Park'],
@@ -4192,11 +4182,19 @@ export async function runScenarios(Tour, extras) {
       if (new Set(window3).size !== 3) rotationOk = false;
     }
     check('no form repeats within any 3 consecutive starts', rotationOk, forms.join(','));
+    check('the killed callback form is never selected', !forms.includes('callback'), forms.join(','));
     check('forms carry the axis + rung telemetry', forms.every(f => typeof f === 'string' && f.length > 0), forms.join(','));
   }
 
-  // ---------------------------------------------------------- IB-03 callback: closeout → next start
-  suite('IB-03 intro forms: callback pre-rendered at closeout, spent once at the next start');
+  // ---------------------------------------------------------- IB-03 callback: KILLED (Nov 16, 2026)
+  // Erik's Day-12 verdict on the recap opener: "a little weird…
+  // I'd rather just start from fresh." The form is out of the
+  // rotation, closeout no longer composes or pre-renders a
+  // callback clip (no render spend on a form that can never
+  // play), and an asset already sitting in a device's storage
+  // is simply never selected — no migration, it just dies
+  // unread. These checks pin all three.
+  suite('IB-03 intro forms: callback killed — closeout commissions nothing, a planted asset is never selected');
   {
     resetLocalStorage();
     const world1 = makeWorld(Tour, {
@@ -4208,16 +4206,20 @@ export async function runScenarios(Tour, extras) {
     await world1.clock.advance(60_000);
     const cacheBeforeEnd = new Set(world1.cache.keys());
     tour1.endTour();
-    await world1.clock.advance(5_000); // the closeout pre-render lands
-    const raw = localStorage.getItem('leo_callback_next');
-    const asset = raw ? JSON.parse(raw) : null;
-    check('closeout wrote a callback asset', asset !== null && typeof asset.text === 'string', raw ?? 'null');
-    check('the callback line speaks only recorded facts (area + last story)',
-      asset !== null && asset.text.includes('University City') && asset.text.includes('Balboa Park'), asset?.text ?? 'null');
-    const newSynthKeys = [...world1.cache.keys()].filter(k => k.startsWith('synth-') && !cacheBeforeEnd.has(k));
-    check('the callback clip was pre-rendered into the audio cache at closeout',
-      newSynthKeys.length >= 1, JSON.stringify(newSynthKeys));
+    await world1.clock.advance(5_000); // any closeout commission would land here
+    check('closeout wrote NO callback asset', localStorage.getItem('leo_callback_next') === null,
+      localStorage.getItem('leo_callback_next') ?? 'null');
+    const newCacheKeys = [...world1.cache.keys()].filter(k => !cacheBeforeEnd.has(k));
+    check('closeout commissioned NO render (no new audio cache entries after end)',
+      newCacheKeys.length === 0, JSON.stringify(newCacheKeys));
 
+    // A device that still holds a fresh, valid asset from
+    // before the kill: the next start ignores it entirely.
+    localStorage.setItem('leo_callback_next', JSON.stringify({
+      text: 'Welcome back. Last time out we were around University City, and Balboa Park was the story that stuck. Let\'s see what today\'s streets have got.',
+      record: { areaName: 'University City', lastStoryLabel: 'Balboa Park', owedName: null, endedAt: Date.now() },
+      createdAt: Date.now(),
+    }));
     const world2 = makeWorld(Tour, {
       candidates: [makeCandidate('Balboa Park')],
       library: ['Balboa Park'],
@@ -4226,12 +4228,18 @@ export async function runScenarios(Tour, extras) {
     const tour2 = await startAt(world2, audio2, UTC);
     const runs2 = watchKinds(world2, tour2);
     await world2.clock.advance(60_000);
-    const cb = world2.eventsOf('opener_clip').filter(e => e.payload.form === 'callback');
-    check('the next start serves the callback form', cb.length === 1 && cb[0].payload.opener_id === 'callback-next' && cb[0].payload.sounded === true,
-      JSON.stringify(world2.eventsOf('opener_clip').map(e => e.payload)));
+    const clips2 = world2.eventsOf('opener_clip');
+    check('opener_clip never reports the callback form',
+      !clips2.some(e => e.payload.form === 'callback'),
+      JSON.stringify(clips2.map(e => e.payload)));
+    const primaries = clips2.filter(e => e.payload.segment === 'primary' || e.payload.segment === 'none');
+    check('a rotation form (or the greeting-only floor) served instead',
+      primaries.length === 1 && primaries[0].payload.form !== 'callback',
+      JSON.stringify(clips2.map(e => e.payload)));
     const seq2 = kindSeq(runs2);
-    check('order preserved: greeting → callback opener → welcome', seq2[0] === 'greeting' && seq2[1] === 'opener' && seq2[2] === 'story', seq2.join(','));
-    check('the asset is spent once — gone after the start that used it', localStorage.getItem('leo_callback_next') === null);
+    check('order preserved: greeting → opener → welcome', seq2[0] === 'greeting' && seq2[1] === 'opener' && seq2[2] === 'story', seq2.join(','));
+    check('the welcome still sounds (the start is fresh, not broken)',
+      world2.eventsOf('story_played').some(e => typeof e.payload.subject === 'string' && e.payload.subject.startsWith('welcome:')));
     tour2.endTour();
   }
 
