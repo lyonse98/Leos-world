@@ -153,8 +153,10 @@ const durOf = pairs.map(p => `  ${JSON.stringify(p.twinId)}: ${p.sec},`).join('\
 
 const out = `// GENERATED — do not hand-edit. Built by
 // scripts/route-mode/build-short-cuts.mjs from the short-cuts
-// program's manifest + production ledger
-// (short-cuts-2026-11-12/: ${pairs.length} pairs, Nov 12, 2026).
+// programs' combined manifest + production ledgers
+// (short-cuts-2026-11-12/ + welcome-cuts-2026-11-15/work/
+// combined-manifest.csv + combined-ledger.csv: ${pairs.length}
+// pairs, Nov 12 + Nov 15, 2026).
 //
 // Short cuts (Nov 12, 2026, Erik's ruling): the same story at
 // a second length — a library row whose angle is the base

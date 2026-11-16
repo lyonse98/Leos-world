@@ -4144,7 +4144,7 @@ check('woven data regen: deterministic, and the committed routePresence.ts is in
 const TWIN_SUFFIX = '-woven-v1';
 const twinKeysOf = map => Object.keys(map).filter(k => k.split('|')[1]?.endsWith(TWIN_SUFFIX));
 check('woven twins (data): the tag map carries all 282 twins with topics inherited from their sources', () => {
-  assert.equal(Object.keys(rtg.ROUTE_TAGS).length, 4067, 'one tag row per shelf story (1,405 Phase 0+1 wiring + 20 Wave C-2 + 836 Vertex Phase 3 T1 + 62 Vertex Phase 4 T2 + 699 Vertex Phase 5 T3 + 214 Vertex Phase 6 T4 + 46 city-works remainder + 181 woven twins wave 2, wrap-ins Nov 11 + 119 gap-fill Nov 11 + 3 Phase 7 mop-up Nov 11 + 13 rural/suburban top-up Nov 11 + 469 short cuts Nov 12)');
+  assert.equal(Object.keys(rtg.ROUTE_TAGS).length, 4223, 'one tag row per shelf story (1,405 Phase 0+1 wiring + 20 Wave C-2 + 836 Vertex Phase 3 T1 + 62 Vertex Phase 4 T2 + 699 Vertex Phase 5 T3 + 214 Vertex Phase 6 T4 + 46 city-works remainder + 181 woven twins wave 2, wrap-ins Nov 11 + 119 gap-fill Nov 11 + 3 Phase 7 mop-up Nov 11 + 13 rural/suburban top-up Nov 11 + 469 short cuts Nov 12 + 156 welcome cuts Nov 15)');
   const twins = twinKeysOf(rtg.ROUTE_TAGS);
   assert.equal(twins.length, 282, 'the completed tranche twins (100) plus woven twins wave 2 (181, wrap-ins Nov 11) plus the Fallbrook twin (Phase 7 mop-up Nov 11) are index-visible');
   let coast = 0;
@@ -9549,20 +9549,21 @@ check('short cuts SC-7: measured durations price the windows — never the 55–
     Math.abs((over.expireProgress ?? 0) - expectedExpire) < 1e-9,
     `the window expires on the served duration (${over.expireProgress} vs ${expectedExpire})`,
   );
-  // The bundled duration map's own shape: 469 measured
-  // values, the over-90 s tail carried verbatim.
+  // The bundled duration map's own shape: 625 measured
+  // values (469 Nov 12 + 156 welcome cuts Nov 15), the
+  // over-90 s tail carried verbatim.
   const durs = Object.values(rsc.SHORT_CUT_DURATION_SEC);
-  assert.equal(durs.length, 469);
+  assert.equal(durs.length, 625);
   assert.equal(Math.max(...durs), 100.7);
   assert.equal(Math.min(...durs), 37.0);
-  assert.equal(durs.filter(d => d > 90).length, 43, 'the over-target tail is real data, carried verbatim');
-  assert.equal(durs.filter(d => d < 55).length, 1);
+  assert.equal(durs.filter(d => d > 90).length, 44, 'the over-target tail is real data, carried verbatim');
+  assert.equal(durs.filter(d => d < 55).length, 2);
 });
 
-check('short cuts (data): the bundled map carries all 469 production pairs, wired to tags and presence', () => {
+check('short cuts (data): the bundled map carries all 625 production pairs, wired to tags and presence', () => {
   const pairs = Object.entries(rsc.SHORT_CUT_TWIN_OF);
-  assert.equal(pairs.length, 469, 'one pair per production manifest row');
-  assert.equal(Object.keys(rsc.SHORT_CUT_BASE_OF).length, 469);
+  assert.equal(pairs.length, 625, 'one pair per production manifest row');
+  assert.equal(Object.keys(rsc.SHORT_CUT_BASE_OF).length, 625);
   for (const [baseId, twinId] of pairs) {
     assert.equal(rsc.SHORT_CUT_BASE_OF[twinId], baseId, `${twinId} maps back`);
     assert.equal(rm.canonicalStoryId(twinId), baseId, 'canonicalStoryId strips the suffix');
@@ -9607,7 +9608,16 @@ check('short cuts (capture): the plan records which version each item serves', (
 
 check('short cuts (data): the generator reproduces the committed module byte for byte', () => {
   const before = readFileSync(join(repoRoot, 'src/data/shortCuts.ts'), 'utf8');
-  execFileSync('node', [join(repoRoot, 'scripts/route-mode/build-short-cuts.mjs')], { cwd: repoRoot, stdio: 'pipe' });
+  // Canonical sources are the two batches' COMBINED manifest + ledger
+  // (Nov 12 short cuts + Nov 15 welcome cuts), assembled in the Nov 15
+  // run dir — the generator's no-arg defaults remain the Nov 12 files.
+  const wsRoot = join(repoRoot, '..');
+  execFileSync('node', [
+    join(repoRoot, 'scripts/route-mode/build-short-cuts.mjs'),
+    join(wsRoot, 'welcome-cuts-2026-11-15/work/combined-manifest.csv'),
+    join(wsRoot, 'welcome-cuts-2026-11-15/work/combined-ledger.csv'),
+    join(wsRoot, 'story-tags.csv'),
+  ], { cwd: repoRoot, stdio: 'pipe' });
   assert.equal(readFileSync(join(repoRoot, 'src/data/shortCuts.ts'), 'utf8'), before, 'regen is deterministic and the committed file is in sync');
 });
 
