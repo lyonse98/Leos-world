@@ -297,6 +297,10 @@ export function makeWorld(Tour, opts = {}) {
   }
   // Banked neighborhood intros: rows keyed (A-normalized name,
   // 'neighborhood_intro') — the fixture speaks the writer's dialect.
+  // An entry may carry lat/lng to pin the row on its own ground
+  // (Nov 16, 2026: the Day-12 staleness gate judges a welcome
+  // against its row's pin, so a fixture that drives elsewhere
+  // must say where its intro actually sits).
   const introRows = new Map();
   for (const entry of opts.intros ?? []) {
     const name = typeof entry === 'string' ? entry : entry.name;
@@ -310,8 +314,8 @@ export function makeWorld(Tour, opts = {}) {
         typeof entry === 'string'
           ? `library/${key.replace(/\s+/g, '-')}/neighborhood_intro.wav`
           : (entry.audioPath ?? `library/${key.replace(/\s+/g, '-')}/neighborhood_intro.wav`),
-      lat: 32.853,
-      lng: -117.18,
+      lat: typeof entry === 'string' ? 32.853 : entry.lat ?? 32.853,
+      lng: typeof entry === 'string' ? -117.18 : entry.lng ?? -117.18,
     });
   }
   // Greeting-variant intros (Nov 1): sibling rows keyed (name,

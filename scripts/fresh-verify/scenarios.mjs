@@ -2851,18 +2851,23 @@ export async function runScenarios(Tour, extras) {
     tour.endTour();
   }
 
-  suite('A5 fit gate scope: shelf welcome exempt at speed; opening doctrine unchanged');
+  suite('A5 fit gate scope: shelf welcome exempt from the live fit gate inside its window; opening doctrine unchanged');
   {
     // The A3 geometry with a SHELF welcome: it waits behind the
-    // same 60 s story at the same 21.6 m/s and is judged ~900 m
+    // same 60 s story at the same 21.6 m/s and is judged ~1,000 m
     // from its pin — and sounds, because a shelf welcome is
-    // instant and anchored; the gate binds live generation only.
+    // instant and anchored; the fit gate binds live generation
+    // only. Nov 16, 2026 (Day-12): the exemption is now bounded
+    // by the serve window — beyond 1,600 m the staleness gate
+    // drops a shelf welcome like any other (D12-1). The intro
+    // is pinned at the entry point, on the driven ground, so
+    // this fixture judges the welcome inside its window.
     resetLocalStorage();
     const LJ = { lat: 32.85, lng: -117.25 };
     const world = makeWorld(Tour, {
       candidates: [makeCandidate('Alpha Park', { lat: LJ.lat, lng: LJ.lng })],
       library: [{ name: 'Alpha Park', lat: LJ.lat, lng: LJ.lng }],
-      intros: ['Clairemont'],
+      intros: [{ name: 'Clairemont', lat: LJ.lat + 0.01, lng: LJ.lng }],
     });
     const audio = new FakeAudio(world.clock, okPolicy({ library: 60_000, synth: 12_000 }));
     const { tour } = await healthyOpening(world, audio, LJ);
@@ -2879,6 +2884,9 @@ export async function runScenarios(Tour, extras) {
         e => e.payload.sounded === true && e.payload.source === 'library',
       ),
       JSON.stringify(playbacksFor(world, 'welcome:clairemont').map(e => e.payload)));
+    check('the staleness gate never fired (inside the window)',
+      world.eventsOf('welcome_stale_dropped').length === 0,
+      JSON.stringify(world.eventsOf('welcome_stale_dropped').map(e => e.payload)));
     tour.endTour();
   }
   {
@@ -3241,7 +3249,11 @@ export async function runScenarios(Tour, extras) {
     const world = makeWorld(Tour, {
       candidates: [makeCandidate('Alpha Park', { lat: LJ.lat, lng: LJ.lng })],
       library: [{ name: 'Alpha Park', lat: LJ.lat, lng: LJ.lng }],
-      intros: ['Clairemont'],
+      // The intro is pinned on the driven ground, inside its
+      // serve window when it sounds (Nov 16, 2026: beyond the
+      // window a shelf welcome meets the staleness gate, D12-1
+      // — conversion was never its risk, and still is not).
+      intros: [{ name: 'Clairemont', lat: LJ.lat + 0.018, lng: LJ.lng }],
     });
     world.genStoryBehavior = pbBehavior(world);
     const audio = new FakeAudio(world.clock, okPolicy({ library: 90_000, synth: 12_000 }));
@@ -3721,8 +3733,16 @@ export async function runScenarios(Tour, extras) {
     tour.endTour();
   }
 
-  suite('HP-4b portal-or-nothing: a live house WITH a shelf payload serves live, payload queued after (the A.H. Sweet shape, licensed)');
+  suite('HP-4b houses are shelf-only: a live house WITH a shelf payload no longer serves (Nov 16, 2026 — the Day-12 reversal of the A.H. Sweet license)');
   {
+    // The Nov 14 license let a house with a payload mint a LIVE
+    // telling. Day 12 (Nov 16) showed the cost: two live houses
+    // generated in a drive's first minutes, displaced within
+    // seconds — pure churn. Erik's ruling the same day: houses
+    // are shelf-only. The portal gate still passes this house
+    // (its payload stands on its ground); serveCandidate's live
+    // lane is where the commission dies. Portal-or-nothing
+    // continues to govern SHELF house serves (HP-1) unchanged.
     resetLocalStorage();
     const world = makeWorld(Tour, {
       candidates: [makeCandidate('Spec House')],
@@ -3731,14 +3751,16 @@ export async function runScenarios(Tour, extras) {
     starvePrefetch(world);
     const audio = new FakeAudio(world.clock, okPolicy());
     const tour = await startAt(world, audio, UTC);
-    for (let i = 0; i < 80 && storySubjects(world).length < 2; i++) await world.clock.advance(5_000);
-    const subjects = storySubjects(world);
-    check('the house generated live (its payload licensed the serve)',
-      world.eventsOf('story_played').some(e => e.payload.subject === 'spec house' && e.payload.source === 'live'),
-      JSON.stringify(world.eventsOf('story_played').map(e => [e.payload.subject, e.payload.source])));
-    check('the shelf payload is the very next story',
-      subjects.indexOf('spec house') >= 0 && subjects.indexOf('grand museum') === subjects.indexOf('spec house') + 1,
-      JSON.stringify(subjects));
+    for (let i = 0; i < 80; i++) await world.clock.advance(5_000);
+    check('no generation was ever commissioned for the house (payload notwithstanding)',
+      !world.genStoryPrompts.some(p => p.includes('Tell the story of Spec House')),
+      JSON.stringify(world.genStoryPrompts.map(p => p.slice(0, 60))));
+    check('the house never committed',
+      !world.eventsOf('story_played').some(e => e.payload.subject === 'spec house'),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    check('the payload never committed as a portal follow-on (no house serve, no obligation)',
+      !world.eventsOf('story_played').some(e => e.payload.subject === 'grand museum'),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
     tour.endTour();
   }
 
@@ -5251,5 +5273,142 @@ export async function runScenarios(Tour, extras) {
     } finally {
       restore();
     }
+  }
+
+  // ---------------------------------------------------------- D12: Day-12 field fixes (Nov 16, 2026)
+  // Field evidence (tour 2186c515, Nov 16): the LIBRARY welcome
+  // to Old Town committed at 12:04:39 PST and sounded at
+  // 12:08:38, 7,525 m past its subject — held ~4 min in the
+  // waiting slot, then served stale at full length, cutting the
+  // I-5 corridor story's tail 1 s later. Library welcomes were
+  // judge-exempt at dequeue (reserved + region-anchored, and the
+  // Nov 2 fit gate is live-only): no test measured the distance
+  // at sound time. The gate now does — beyond the 1,600 m serve
+  // window the welcome drops at dequeue, discharged like a
+  // fit-gate welcome (never heard, no story_dropped) but filed
+  // as welcome_stale_dropped so the field can see it. Converted
+  // pass-by welcomes are exempt (PB-1/PB-2 pin that lane: its
+  // converted telling sounds ~5 km past its anchor and must
+  // keep sounding).
+
+  suite('D12-1 welcome staleness gate: a library welcome held in queue past its window drops at sound time');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      library: [
+        { name: 'Balboa Park', lat: UTC.lat + 0.003, lng: UTC.lng },
+        { name: 'Grand Museum', lat: UTC.lat + 0.035, lng: UTC.lng },
+      ],
+      intros: ['Old Town'],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 90_000, synth: 12_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    // A long library story takes the channel (a >200 m move is
+    // what makes the serve cycle fire).
+    world.candidates = [makeCandidate('Balboa Park', { lat: UTC.lat + 0.003, lng: UTC.lng })];
+    tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    for (let i = 0; i < 24 && tour.view().nowPlaying?.label !== 'Balboa Park'; i++) {
+      await world.clock.advance(5_000);
+    }
+    check('the long story is playing', tour.view().nowPlaying?.label === 'Balboa Park',
+      tour.view().nowPlaying?.label ?? 'none');
+    world.candidates = [];
+    // Enter Old Town beside its intro anchor (the fixture banks
+    // the intro at UTC): the entry welcome registers owed and is
+    // held behind Balboa (the deferral the field drive showed).
+    world.area = { neighborhood: 'Old Town', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(3_000);
+    // The Day-12 move: the driver leaves the welcome's ground
+    // while it waits — ~3.5 km past its anchor at freeway speed.
+    tour.onPosition({ lat: UTC.lat + 0.032, lng: UTC.lng, speedMps: 25, headingDeg: 0 });
+    await world.clock.advance(180_000); // Balboa ends; the welcome is offered and reaches dequeue
+    check('the Old Town welcome committed (it took the waiting slot)',
+      welcomePlayed(world, 'welcome:old town').length === 1,
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    const stale = world.eventsOf('welcome_stale_dropped').filter(e => e.payload.subject === 'welcome:old town');
+    check('welcome_stale_dropped fired exactly once', stale.length === 1,
+      JSON.stringify(world.eventsOf('welcome_stale_dropped').map(e => e.payload)));
+    check('the telemetry carries the sound-time distance, beyond the 1,600 m window',
+      (stale[0]?.payload.distance_m ?? 0) > 1600, `distance_m=${stale[0]?.payload.distance_m}`);
+    check('the welcome never sounded (no sounded playback for it)',
+      !playbacksFor(world, 'welcome:old town').some(p => p.payload.sounded),
+      JSON.stringify(playbacksFor(world, 'welcome:old town').map(p => p.payload)));
+    check('no story_dropped filed for the welcome (discharge discipline, as with welcome-outrun)',
+      dropsFor(world, 'welcome:old town').length === 0,
+      JSON.stringify(dropsFor(world, 'welcome:old town').map(d => d.payload)));
+    check('the banked intro audio never played',
+      !audio.log.some(e => typeof e.src === 'string' && e.src.includes('old-town')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    check('the place was NOT marked heard', !world.heard.includes('Welcome to Old Town'),
+      world.heard.join(' | '));
+    // The freed slot serves the next story, which plays through
+    // uncut — the Day-12 corridor story's fate, reversed. (The
+    // >200 m step is what makes the serve cycle fire.)
+    world.candidates = [makeCandidate('Grand Museum', { lat: UTC.lat + 0.035, lng: UTC.lng })];
+    tour.onPosition({ lat: UTC.lat + 0.035, lng: UTC.lng, speedMps: 25, headingDeg: 0 });
+    await world.clock.advance(120_000);
+    const gm = playbacksFor(world, 'grand museum');
+    check('the story behind it plays through uncut (sounded + completed)',
+      gm.some(p => p.payload.sounded && p.payload.completed),
+      JSON.stringify(gm.map(p => p.payload)));
+    tour.endTour();
+  }
+
+  suite('D12-2 welcome staleness gate: a welcome still inside its window at sound time plays normally');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      library: [{ name: 'Balboa Park', lat: UTC.lat + 0.003, lng: UTC.lng }],
+      intros: ['Old Town'],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 30_000, synth: 12_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    world.candidates = [makeCandidate('Balboa Park', { lat: UTC.lat + 0.003, lng: UTC.lng })];
+    tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    for (let i = 0; i < 24 && tour.view().nowPlaying?.label !== 'Balboa Park'; i++) {
+      await world.clock.advance(5_000);
+    }
+    check('the long story is playing', tour.view().nowPlaying?.label === 'Balboa Park',
+      tour.view().nowPlaying?.label ?? 'none');
+    world.candidates = [];
+    world.area = { neighborhood: 'Old Town', city: 'San Diego' };
+    // A ≥300 m step from the last area resolution is what makes
+    // the entry register; the driver ends ~779 m from the intro
+    // anchor — inside the window.
+    tour.onPosition({ lat: UTC.lat + 0.007, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    // No teleport: the driver stays there while Balboa ends and
+    // the held welcome's turn comes.
+    await world.clock.advance(120_000);
+    check('the Old Town welcome committed (it took the waiting slot)',
+      welcomePlayed(world, 'welcome:old town').length === 1,
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    const pb = playbacksFor(world, 'welcome:old town');
+    check('the welcome sounded', pb.some(p => p.payload.sounded),
+      JSON.stringify(pb.map(p => p.payload)));
+    check('the heard ledger filed it', world.heard.includes('Welcome to Old Town'),
+      world.heard.join(' | '));
+    check('the gate never fired', world.eventsOf('welcome_stale_dropped').length === 0,
+      JSON.stringify(world.eventsOf('welcome_stale_dropped').map(e => e.payload)));
+    tour.endTour();
+  }
+
+  suite('D12-3 welcome staleness gate: the reserved opening welcome at tour start (~0 m) is unaffected');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: [] });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    const played = welcomePlayed(world, 'welcome:university city');
+    check('the opening welcome committed', played.length === 1,
+      JSON.stringify(played.map(e => e.payload)));
+    const pb = playbacksFor(world, 'welcome:university city');
+    check('the opening welcome sounded', pb.some(p => p.payload.sounded),
+      JSON.stringify(pb.map(p => p.payload)));
+    check('the gate never fired', world.eventsOf('welcome_stale_dropped').length === 0,
+      JSON.stringify(world.eventsOf('welcome_stale_dropped').map(e => e.payload)));
+    tour.endTour();
   }
 }

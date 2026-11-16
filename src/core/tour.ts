@@ -223,6 +223,16 @@ function leadFactFromText(text: string): string | null {
 const BACKSTOP_MS = 180_000;
 const WELCOME_COOLDOWN_MS = 180_000;
 /**
+ * The welcome serve window (Nov 16, 2026): the driving radius
+ * inside which welcomes are discovered and offered (the serve
+ * cycle's own 1,600 m). judgeStory's staleness gate drops a
+ * welcome that reaches its turn beyond this distance from its
+ * anchor — a backstop against a held welcome sounding on
+ * ground the driver has long left, not a per-mode fit test
+ * (the live fit gate below keeps the fine geometry).
+ */
+const WELCOME_SERVE_RADIUS_M = 1600;
+/**
  * The hook race's placeholder debt id (Nov 11, 2026): while the
  * hook-question form waits out its slot deadline, this sentinel
  * holds the opener's place in the opening debt — the welcome
@@ -2973,6 +2983,19 @@ export class Tour {
         buffered.signatureFact ?? null,
       );
     }
+    // Houses are shelf-only (Nov 16, 2026 — Day-12 field fix):
+    // the live lane never commissions a house telling. A house
+    // candidate that reaches this point has no undealt shelf
+    // row (the library lane above dealt it, portal obligation
+    // and all); minting its telling live was pure churn in the
+    // field — two houses generated in the Day-12 drive's first
+    // minutes and displaced within seconds — and every other
+    // generated lane already refuses to stand a house up alone
+    // (the cache lane above, the prefetch bank). The candidate
+    // is simply skipped as a live candidate; the cycle moves
+    // on. Portal-or-nothing continues to govern the shelf
+    // serve, unchanged.
+    if (this.candidateIsHouse(candidate)) return null;
     // Live generation stands down while a failure economy stands
     // (E3/E6): banked material above is the tour's voice meanwhile.
     if (this.liveStandDown()) return null;
@@ -3413,7 +3436,10 @@ export class Tour {
     // O15: an unheard WELCOME remains owed, on the 180 s cooldown.
     if (subject.startsWith('welcome:')) {
       this.welcomeOffered = false;
-      if (!rec.sounded && rec.dropReason === 'welcome-outrun') {
+      if (
+        !rec.sounded &&
+        (rec.dropReason === 'welcome-outrun' || rec.dropReason === 'welcome-stale')
+      ) {
         // Fit discharge (Nov 2): a live welcome turned away by
         // the play-time fit gate (judgeStory 'welcome-outrun')
         // is DISCHARGED, not re-armed — the driver has left the
@@ -3425,6 +3451,34 @@ export class Tour {
         // staleness is judged like any other live welcome): the
         // tour opens without its first hello rather than
         // sounding it a mile behind.
+        // Staleness discharge (Nov 16, 2026): the Day-12 gate's
+        // 'welcome-stale' discharges identically — the driver
+        // is beyond the serve window, so re-arming the owed
+        // record would only re-offer a welcome whose moment
+        // has passed (the retry is not distance-gated) — with
+        // one difference: it FILES. welcome_stale_dropped is
+        // the field's record that the gate fired, with the
+        // distance that condemned the telling; the discharge
+        // itself still files no story_dropped, counts no drop,
+        // and marks nothing heard.
+        if (rec.dropReason === 'welcome-stale') {
+          this.emit('welcome_stale_dropped', {
+            subject,
+            topic: item.label,
+            source: item.storySource ?? 'live',
+            distance_m:
+              item.anchor && this.position
+                ? Math.round(
+                    calculateDistance(
+                      this.position.lat,
+                      this.position.lng,
+                      item.anchor.lat,
+                      item.anchor.lng,
+                    ),
+                  )
+                : null,
+          });
+        }
         const name = subject.slice('welcome:'.length);
         this.welcomed.add(name);
         this.owedWelcome = null;
@@ -3832,6 +3886,40 @@ export class Tour {
       }
     }
     const subject = item.subject ?? '';
+    // Welcome staleness gate (Nov 16, 2026 — Day-12 field fix):
+    // a welcome whose moment has passed must not sound. The
+    // fit gate below judges a LIVE welcome against its own
+    // reach (duration × speed), but a LIBRARY welcome is exempt
+    // from it (source) and from every test further down
+    // (reserved, region-anchored) — the Day-12 drive held one
+    // ~4 min in the waiting slot and sounded it 7,525 m past
+    // Old Town, cutting the corridor story behind it. The test
+    // here is the serve window itself: a welcome is discovered
+    // and offered inside WELCOME_SERVE_RADIUS_M of its anchor;
+    // beyond that window at dequeue its moment has passed,
+    // whatever its source. Converted pass-by welcomes are
+    // exempt (framing 'passby' — a pass-by telling is true at
+    // any distance, the Nov 5 doctrine), and the conversion
+    // checkpoint acts on waiting live items before dequeue, so
+    // a welcome that could convert already has: this gate is
+    // the backstop for the ones that never could (shelf
+    // welcomes never convert). Discharge semantics live in
+    // onStorySettle ('welcome-stale'): the pass is spent, the
+    // place is NOT heard, and the drop files as
+    // welcome_stale_dropped so the field can see it — the one
+    // discharge that is not silent, because the Day-12 harm
+    // was a stale welcome nobody could see in the logs.
+    if (subject.startsWith('welcome:') && item.anchor && item.framing !== 'passby') {
+      const dist = calculateDistance(
+        this.position.lat,
+        this.position.lng,
+        item.anchor.lat,
+        item.anchor.lng,
+      );
+      if (dist > WELCOME_SERVE_RADIUS_M) {
+        return { ok: false, reason: 'welcome-stale' };
+      }
+    }
     // Live-welcome fit gate (Nov 2): welcomes are judge-exempt
     // below (reserved) because a SHELF welcome is instant and
     // anchored — but a LIVE welcome (a zero-row area, or the
