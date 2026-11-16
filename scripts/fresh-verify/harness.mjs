@@ -300,7 +300,11 @@ export function makeWorld(Tour, opts = {}) {
   // An entry may carry lat/lng to pin the row on its own ground
   // (Nov 16, 2026: the Day-12 staleness gate judges a welcome
   // against its row's pin, so a fixture that drives elsewhere
-  // must say where its intro actually sits).
+  // must say where its intro actually sits). An entry may also
+  // carry `text` to set the row's body — the gate judges by
+  // duration × speed, so a fixture that replays a field case
+  // must be able to give its welcome the field telling's
+  // duration (Nov 16, 2026, the Day-12 correction sims).
   const introRows = new Map();
   for (const entry of opts.intros ?? []) {
     const name = typeof entry === 'string' ? entry : entry.name;
@@ -309,7 +313,9 @@ export function makeWorld(Tour, opts = {}) {
       place_key: key,
       place_name: name,
       angle: 'neighborhood_intro',
-      story_text: `The banked intro to ${name}, its streets and its story. `.repeat(30),
+      story_text:
+        (typeof entry === 'string' ? undefined : entry.text) ??
+        `The banked intro to ${name}, its streets and its story. `.repeat(30),
       audio_path:
         typeof entry === 'string'
           ? `library/${key.replace(/\s+/g, '-')}/neighborhood_intro.wav`

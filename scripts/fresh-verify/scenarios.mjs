@@ -1865,7 +1865,22 @@ export async function runScenarios(Tour, extras) {
     resetLocalStorage();
     const world = makeWorld(Tour, {
       candidates: [],
-      intros: ['Costa Verde', 'University City'],
+      // The parent's intro is pinned on the parent's own entry
+      // ground (+0.008, where this drive enters University
+      // City), NOT at the shared default point: the Nov 16,
+      // 2026 Day-12 correction judges a shelf welcome by
+      // duration × speed from its pin, and the old fixture
+      // conflated the child anchor and the parent pin at one
+      // point — at maturity the driver is ~1,336 m from that
+      // point, beyond a ~148 s telling's reach at 8 m/s
+      // (~1,181 m), so the reach gate discharged a welcome the
+      // deferral doctrine exists to serve. The deferral's
+      // geometry is distance-from-CHILD (the nesting radius);
+      // the parent pin belongs on parent ground. (The sharp
+      // edge is real and recorded in the Day-12 report: a
+      // production parent pin sitting on the child's ground
+      // would expose the same discharge at surface pace.)
+      intros: ['Costa Verde', { name: 'University City', lat: UTC.lat + 0.008, lng: UTC.lng }],
     });
     // The parent's generic area lane is down for this drive, so
     // the deferred WELCOME is the orientation voice under test
@@ -2851,17 +2866,22 @@ export async function runScenarios(Tour, extras) {
     tour.endTour();
   }
 
-  suite('A5 fit gate scope: shelf welcome exempt from the live fit gate inside its window; opening doctrine unchanged');
+  suite('A5 fit gate scope: shelf welcome judged by the same reach as a live one — inside it at this geometry; opening doctrine unchanged');
   {
     // The A3 geometry with a SHELF welcome: it waits behind the
-    // same 60 s story at the same 21.6 m/s and is judged ~1,000 m
-    // from its pin — and sounds, because a shelf welcome is
-    // instant and anchored; the fit gate binds live generation
-    // only. Nov 16, 2026 (Day-12): the exemption is now bounded
-    // by the serve window — beyond 1,600 m the staleness gate
-    // drops a shelf welcome like any other (D12-1). The intro
-    // is pinned at the entry point, on the driven ground, so
-    // this fixture judges the welcome inside its window.
+    // same 60 s story at the same 21.6 m/s and is judged >1 km
+    // from its pin — and sounds. As built in Nov 2 the doctrine
+    // was exemption ("a shelf welcome is instant and anchored;
+    // the fit gate binds live generation only"); Nov 16, 2026
+    // (Day-12 correction) replaced exemption with ONE reach
+    // geometry for every welcome: this fixture's ~136 s telling
+    // at 21.6 m/s reaches ~2,940 m, so the welcome is judged by
+    // the same test that discharges a live one and is inside
+    // it. (391e470's flat 1,600 m cut would also have passed
+    // it; D12-1/D12-4 pin where the two rules differ.) The
+    // intro is pinned at the entry point, on the driven
+    // ground, so this fixture judges the welcome inside its
+    // reach.
     resetLocalStorage();
     const LJ = { lat: 32.85, lng: -117.25 };
     const world = makeWorld(Tour, {
@@ -2884,7 +2904,7 @@ export async function runScenarios(Tour, extras) {
         e => e.payload.sounded === true && e.payload.source === 'library',
       ),
       JSON.stringify(playbacksFor(world, 'welcome:clairemont').map(e => e.payload)));
-    check('the staleness gate never fired (inside the window)',
+    check('the staleness gate never fired (inside its reach)',
       world.eventsOf('welcome_stale_dropped').length === 0,
       JSON.stringify(world.eventsOf('welcome_stale_dropped').map(e => e.payload)));
     tour.endTour();
@@ -3031,6 +3051,19 @@ export async function runScenarios(Tour, extras) {
       JSON.stringify(dropsFor(world, 'welcome:bay ho').map(e => e.payload)));
     check('the pass counts as welcomed (the converted telling was heard)',
       world.heard.includes('Welcome to Bay Ho'), world.heard.join(' | '));
+    // Scope pin for the Day-12 correction's pierce (Nov 16,
+    // 2026): production constructs reserved:true at exactly
+    // two sites, both welcomes (the live item and the shelf
+    // item in tour.ts), so no non-welcome reserved item exists
+    // to simulate — the pierce is keyed on the welcome subject
+    // and the non-passby framing, and this reserved item,
+    // sounding ~5 km past its anchor under the pass-by
+    // framing, is the constructible proof that the reserved
+    // exemption still governs everything the pierce does not
+    // name: the staleness arm never fired on it.
+    check('the staleness pierce never fired on the reserved pass-by item',
+      world.eventsOf('welcome_stale_dropped').length === 0,
+      JSON.stringify(world.eventsOf('welcome_stale_dropped').map(e => e.payload)));
     tour.endTour();
   }
 
@@ -3250,9 +3283,11 @@ export async function runScenarios(Tour, extras) {
       candidates: [makeCandidate('Alpha Park', { lat: LJ.lat, lng: LJ.lng })],
       library: [{ name: 'Alpha Park', lat: LJ.lat, lng: LJ.lng }],
       // The intro is pinned on the driven ground, inside its
-      // serve window when it sounds (Nov 16, 2026: beyond the
-      // window a shelf welcome meets the staleness gate, D12-1
-      // — conversion was never its risk, and still is not).
+      // reach when it sounds (Nov 16, 2026, Day-12 correction:
+      // a shelf welcome is judged by duration × speed — this
+      // ~136 s telling at 29.8 m/s reaches ~4,060 m — and
+      // beyond reach it meets the staleness gate, D12-1;
+      // conversion was never its risk, and still is not).
       intros: [{ name: 'Clairemont', lat: LJ.lat + 0.018, lng: LJ.lng }],
     });
     world.genStoryBehavior = pbBehavior(world);
@@ -5286,20 +5321,32 @@ export async function runScenarios(Tour, extras) {
   // ---------------------------------------------------------- D12: Day-12 field fixes (Nov 16, 2026)
   // Field evidence (tour 2186c515, Nov 16): the LIBRARY welcome
   // to Old Town committed at 12:04:39 PST and sounded at
-  // 12:08:38, 7,525 m past its subject — held ~4 min in the
-  // waiting slot, then served stale at full length, cutting the
-  // I-5 corridor story's tail 1 s later. Library welcomes were
-  // judge-exempt at dequeue (reserved + region-anchored, and the
-  // Nov 2 fit gate is live-only): no test measured the distance
-  // at sound time. The gate now does — beyond the 1,600 m serve
-  // window the welcome drops at dequeue, discharged like a
-  // fit-gate welcome (never heard, no story_dropped) but filed
-  // as welcome_stale_dropped so the field can see it. Converted
-  // pass-by welcomes are exempt (PB-1/PB-2 pin that lane: its
-  // converted telling sounds ~5 km past its anchor and must
-  // keep sounding).
+  // 12:08:38, 7,525 m past its subject — 93 s in queue at
+  // 35 m/s behind a ~150 s telling, then served stale at full
+  // length, cutting the I-5 corridor story's tail 1 s later.
+  // Library welcomes were judge-exempt at dequeue (reserved +
+  // region-anchored, and the Nov 2 fit gate is live-only): no
+  // test measured the distance at sound time. The gate now
+  // does, with the judge's own reach geometry — duration ×
+  // speed: beyond its reach a shelf welcome drops at dequeue,
+  // discharged like a fit-gate welcome (never heard, no
+  // story_dropped) but filed as welcome_stale_dropped so the
+  // field can see it. Converted pass-by welcomes are exempt
+  // (PB-1/PB-2 pin that lane: its converted telling sounds
+  // ~5 km past its anchor and must keep sounding).
+  //
+  // Correction (same day, Erik's ruling): 391e470 first built
+  // this gate as a flat 1,600 m cut. That number is the serve
+  // cycle's candidate-DISCOVERY radius, not a serve window —
+  // no such constant existed — and the flat cut discharged
+  // the deferral doctrine's own case (D12-4: a welcome owed
+  // behind two long stories at surface pace, ~1,900 m out
+  // with a ~2,100 m reach). The flat gate was removed within
+  // the day. D12-1 replays the field geometry; D12-4 pins the
+  // case the flat rule killed; D12-6 pins that a live welcome
+  // is judged once, by the outrun arm alone.
 
-  suite('D12-1 welcome staleness gate: a library welcome held in queue past its window drops at sound time');
+  suite('D12-1 welcome staleness gate: the Day-12 replay — a library welcome held in queue beyond its reach drops at sound time');
   {
     resetLocalStorage();
     const world = makeWorld(Tour, {
@@ -5308,7 +5355,15 @@ export async function runScenarios(Tour, extras) {
         { name: 'Balboa Park', lat: UTC.lat + 0.003, lng: UTC.lng },
         { name: 'Grand Museum', lat: UTC.lat + 0.035, lng: UTC.lng },
       ],
-      intros: ['Old Town'],
+      // The field telling ran ~1,950 chars ≈ 150 s. The
+      // fixture body is the banked sentence repeated 34×
+      // (1,938 chars → ~149 s by chars/13), so at the field
+      // speed the sim's reach is the field's reach:
+      // ~149 × 35 ≈ 5,220 m (field: 150 × 35 = 5,250 m).
+      intros: [{
+        name: 'Old Town',
+        text: 'The banked intro to Old Town, its streets and its story. '.repeat(34),
+      }],
     });
     const audio = new FakeAudio(world.clock, okPolicy({ library: 90_000, synth: 12_000 }));
     const { tour } = await healthyOpening(world, audio);
@@ -5328,9 +5383,11 @@ export async function runScenarios(Tour, extras) {
     world.area = { neighborhood: 'Old Town', city: 'San Diego' };
     tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
     await world.clock.advance(3_000);
-    // The Day-12 move: the driver leaves the welcome's ground
-    // while it waits — ~3.5 km past its anchor at freeway speed.
-    tour.onPosition({ lat: UTC.lat + 0.032, lng: UTC.lng, speedMps: 25, headingDeg: 0 });
+    // The Day-12 move, at the field's own numbers: when the
+    // welcome's turn comes the driver is 7,525 m past its
+    // anchor at 35 m/s (0.0676° of latitude ≈ 7,525 m) — beyond
+    // the ~5,220 m reach of its ~149 s telling.
+    tour.onPosition({ lat: UTC.lat + 0.0676, lng: UTC.lng, speedMps: 35, headingDeg: 0 });
     await world.clock.advance(180_000); // Balboa ends; the welcome is offered and reaches dequeue
     check('the Old Town welcome committed (it took the waiting slot)',
       welcomePlayed(world, 'welcome:old town').length === 1,
@@ -5338,8 +5395,8 @@ export async function runScenarios(Tour, extras) {
     const stale = world.eventsOf('welcome_stale_dropped').filter(e => e.payload.subject === 'welcome:old town');
     check('welcome_stale_dropped fired exactly once', stale.length === 1,
       JSON.stringify(world.eventsOf('welcome_stale_dropped').map(e => e.payload)));
-    check('the telemetry carries the sound-time distance, beyond the 1,600 m window',
-      (stale[0]?.payload.distance_m ?? 0) > 1600, `distance_m=${stale[0]?.payload.distance_m}`);
+    check('the telemetry carries the sound-time distance, beyond the telling\'s reach (~5,250 m at 35 m/s)',
+      (stale[0]?.payload.distance_m ?? 0) > 5250, `distance_m=${stale[0]?.payload.distance_m}`);
     check('the welcome never sounded (no sounded playback for it)',
       !playbacksFor(world, 'welcome:old town').some(p => p.payload.sounded),
       JSON.stringify(playbacksFor(world, 'welcome:old town').map(p => p.payload)));
@@ -5364,7 +5421,7 @@ export async function runScenarios(Tour, extras) {
     tour.endTour();
   }
 
-  suite('D12-2 welcome staleness gate: a welcome still inside its window at sound time plays normally');
+  suite('D12-2 welcome staleness gate: a welcome still inside its reach at sound time plays normally');
   {
     resetLocalStorage();
     const world = makeWorld(Tour, {
@@ -5385,7 +5442,8 @@ export async function runScenarios(Tour, extras) {
     world.area = { neighborhood: 'Old Town', city: 'San Diego' };
     // A ≥300 m step from the last area resolution is what makes
     // the entry register; the driver ends ~779 m from the intro
-    // anchor — inside the window.
+    // anchor — inside the fixture telling's reach (~131 s at
+    // 8 m/s ≈ 1,052 m).
     tour.onPosition({ lat: UTC.lat + 0.007, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
     // No teleport: the driver stays there while Balboa ends and
     // the held welcome's turn comes.
@@ -5395,6 +5453,9 @@ export async function runScenarios(Tour, extras) {
       JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
     const pb = playbacksFor(world, 'welcome:old town');
     check('the welcome sounded', pb.some(p => p.payload.sounded),
+      JSON.stringify(pb.map(p => p.payload)));
+    check('it sounded inside its reach (~779 m < ~1,052 m = ~131 s × 8 m/s)',
+      pb.some(p => p.payload.sounded && (p.payload.distance_m ?? Infinity) < 1052),
       JSON.stringify(pb.map(p => p.payload)));
     check('the heard ledger filed it', world.heard.includes('Welcome to Old Town'),
       world.heard.join(' | '));
@@ -5417,6 +5478,263 @@ export async function runScenarios(Tour, extras) {
       JSON.stringify(pb.map(p => p.payload)));
     check('the gate never fired', world.eventsOf('welcome_stale_dropped').length === 0,
       JSON.stringify(world.eventsOf('welcome_stale_dropped').map(e => e.payload)));
+    tour.endTour();
+  }
+
+  suite('D12-4 welcome reach gate: the deferral case — a welcome owed behind two long stories at surface pace SERVES beyond the old flat cut');
+  {
+    // The case 391e470's flat 1,600 m gate killed, and the
+    // correction exists for. A shelf welcome registers beside
+    // its anchor; a Tier-1 landmark defers it (SL-01's
+    // mechanics); behind a 120 s library story and a 120 s
+    // landmark telling the driver covers ~1.9 km at 10 m/s
+    // before its turn comes. The welcome's own telling runs
+    // ~211 s (the fixture body is the banked sentence repeated
+    // 48×: 2,736 chars ≈ 211 s), so its reach is ~2,110 m: it
+    // SERVES. Under the flat cut (1,900 > 1,600) it discharged.
+    // The witness is the driver's own position when the
+    // welcome takes the channel, asserted inside (1,600,
+    // 2,110) — beyond the flat cut, inside the reach. That
+    // interval is the demonstrated difference between the two
+    // rules. (story_playback's distance_m is settle-time —
+    // measured when the telling ENDS — so it cannot witness
+    // the dequeue geometry; the step loop captures the sound
+    // moment instead.)
+    //
+    // The landmark is a BANKED Tier-1 (it carries a shelf
+    // row): displacement is the player's ruling and is
+    // source-agnostic, but a GENERATED challenger never gets
+    // minted behind a long waiter — generationWouldLand
+    // projects the waiting story whole into a candidate's
+    // start, so the fit gate refuses the spend before the
+    // player can rule. Banked-first is the shelf's doctrine
+    // anyway; the fixture follows it.
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park', { lat: UTC.lat, lng: UTC.lng })],
+      library: [
+        { name: 'Balboa Park', lat: UTC.lat, lng: UTC.lng },
+        { name: 'Tier Tower', lat: UTC.lat + 0.004, lng: UTC.lng },
+      ],
+      intros: [{
+        name: 'Old Town',
+        lat: UTC.lat + 0.004,
+        lng: UTC.lng,
+        text: 'The banked intro to Old Town, its streets and its story. '.repeat(48),
+      }],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 120_000, synth: 120_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    const labels = watchLabels(world, tour);
+    // Balboa (120 s library) takes the channel (it waits out
+    // the opening welcome first).
+    for (let i = 0; i < 40 && tour.view().nowPlaying?.label !== 'Balboa Park'; i++) {
+      await world.clock.advance(5_000);
+    }
+    check('the first long story is playing', tour.view().nowPlaying?.label === 'Balboa Park',
+      tour.view().nowPlaying?.label ?? 'none');
+    // Drive north at surface pace (5 s steps of 50 m at
+    // 10 m/s). Nine steps in, the driver is 450 m from the
+    // opening's resolution point — far enough for the Old Town
+    // entry to register, on the intro's own pinned ground.
+    // Offers land on serve cycles, and a cycle fires on >200 m
+    // of movement (tour.ts onPosition), so each wait below
+    // steps until the slot actually shows the item.
+    let lat = UTC.lat;
+    const step = async () => {
+      await world.clock.advance(5_000);
+      lat += 0.00045;
+      tour.onPosition({ lat, lng: UTC.lng, speedMps: 10, headingDeg: 0 });
+    };
+    for (let i = 0; i < 9; i++) await step();
+    world.area = { neighborhood: 'Old Town', city: 'San Diego' };
+    tour.onPosition({ lat, lng: UTC.lng, speedMps: 10, headingDeg: 0 });
+    for (let i = 0; i < 10 && tour.view().upNext !== 'Welcome to Old Town'; i++) await step();
+    check('the welcome waits behind the playing story',
+      tour.view().upNext === 'Welcome to Old Town', `upNext=${tour.view().upNext}`);
+    // A Tier-1 landmark on the same ground takes the waiting
+    // slot — the welcome is deferred, not dropped (SL-01).
+    world.candidates = [makeCandidate('Tier Tower', { tier1: true, lat: UTC.lat + 0.004, lng: UTC.lng })];
+    for (let i = 0; i < 10 && tour.view().upNext !== 'Tier Tower'; i++) await step();
+    check('the landmark takes the waiting slot; the welcome defers',
+      tour.view().upNext === 'Tier Tower', `upNext=${tour.view().upNext}`);
+    world.candidates = [];
+    // Keep driving: the two stories burn ~240 s of clock from
+    // Balboa's start; the welcome's turn comes with the driver
+    // ~1.9 km past the welcome's anchor. Capture the driver's
+    // position at the moment the welcome takes the channel —
+    // the dequeue the gate judged.
+    let soundDist = -1;
+    for (let i = 0; i < 56 && tour.view().nowPlaying?.label !== 'Welcome to Old Town'; i++) {
+      await step();
+      if (tour.view().nowPlaying?.label === 'Welcome to Old Town') {
+        soundDist = Math.round((lat - (UTC.lat + 0.004)) * 111_320);
+      }
+    }
+    check('the deferred welcome took the channel', soundDist >= 0,
+      `nowPlaying=${tour.view().nowPlaying?.label ?? 'none'}`);
+    // Let the telling finish without moving, so its playback
+    // files (the settle also files the heard ledger).
+    await world.clock.advance(240_000);
+    const order = labels.slice(labels.indexOf('Balboa Park'), labels.indexOf('Balboa Park') + 3).join(',');
+    check('play order: library story, landmark, then the deferred welcome',
+      order === 'Balboa Park,Tier Tower,Welcome to Old Town', labels.join(','));
+    // The deferred welcome commits twice (offer, deferral,
+    // re-offer), so commitment-order pairing mis-assigns its
+    // playback; select it by the subject its payload carries.
+    const pb = world.eventsOf('story_playback').filter(e => e.payload.subject === 'welcome:old town');
+    check('the deferred welcome sounded', pb.some(p => p.payload.sounded),
+      JSON.stringify(pb.map(p => p.payload)));
+    check('it sounded beyond the old flat cut (1,600 m) but inside its reach (~2,110 m) — the demonstrated difference',
+      soundDist > 1600 && soundDist < 2110, `sound distance ≈ ${soundDist} m`);
+    check('the staleness gate never fired', world.eventsOf('welcome_stale_dropped').length === 0,
+      JSON.stringify(world.eventsOf('welcome_stale_dropped').map(e => e.payload)));
+    check('the heard ledger filed it', world.heard.includes('Welcome to Old Town'),
+      world.heard.join(' | '));
+    tour.endTour();
+  }
+
+  suite('D12-5 welcome reach gate: walking pace — a queued shelf welcome serves inside its reach');
+  {
+    // At walking speed the reach shrinks with the pace — and
+    // the binding wait is the serve cycle's, not a story's:
+    // offers ride cycles, and a cycle fires on >200 m of
+    // movement (tour.ts onPosition), so at 1.2 m/s a walking
+    // welcome's first dequeue can sit ~200 m past its anchor
+    // whatever it waited behind. Duration × speed must clear
+    // that granularity for the serve to hold. This fixture's
+    // telling runs ~175 s (the banked sentence repeated 40×:
+    // 2,280 chars ≈ 175 s), reach ~210 m: judged ~168 m past
+    // its pin (the position captured when it takes the
+    // channel), it SERVES. The boundary is the formula's, not
+    // the fixture's, and it is recorded honestly: this suite's
+    // first run used the default ~131 s fixture body (reach
+    // ~158 m) in the identical construction, the welcome was
+    // judged at the same ~165 m, and the gate DISCHARGED it —
+    // a short walking telling whose reach is smaller than the
+    // cycle granularity can be turned away on foot. (The
+    // Day-12 report carries the qualification.)
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      library: [{ name: 'Balboa Park', lat: UTC.lat + 0.004, lng: UTC.lng }],
+      intros: [{
+        name: 'Old Town',
+        lat: UTC.lat + 0.004,
+        lng: UTC.lng,
+        text: 'The banked intro to Old Town, its streets and its story. '.repeat(40),
+      }],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 45_000, synth: 12_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    // Walk north at 1.2 m/s (5 s steps of 6 m). Balboa is
+    // offered as the walker nears its ground; the Old Town
+    // entry registers at +0.004 (445 m from the opening's
+    // resolution point, past the ≥300 m entry step) with
+    // Balboa playing.
+    let lat = UTC.lat;
+    let offered = false;
+    let soundDist = -1;
+    for (let i = 0; i < 130 && !playbacksFor(world, 'welcome:old town').some(p => p.payload.sounded); i++) {
+      await world.clock.advance(5_000);
+      lat += 0.000054;
+      if (!offered && lat >= UTC.lat + 0.0038) {
+        world.candidates = [makeCandidate('Balboa Park', { lat: UTC.lat + 0.004, lng: UTC.lng })];
+        offered = true;
+      }
+      if (lat >= UTC.lat + 0.004 && world.area?.neighborhood !== 'Old Town') {
+        world.area = { neighborhood: 'Old Town', city: 'San Diego' };
+      }
+      tour.onPosition({ lat, lng: UTC.lng, speedMps: 1.2, headingDeg: 0 });
+      if (soundDist < 0 && tour.view().nowPlaying?.label === 'Welcome to Old Town') {
+        soundDist = Math.round((lat - (UTC.lat + 0.004)) * 111_320);
+      }
+    }
+    const pb = playbacksFor(world, 'welcome:old town');
+    check('the walking welcome sounded', pb.some(p => p.payload.sounded),
+      JSON.stringify(pb.map(p => p.payload)));
+    check('it took the channel inside the long telling\'s reach (~168 m observed; ~210 m = ~175 s × 1.2 m/s) — past a short telling\'s ~158 m, where the identical construction discharged',
+      soundDist > 158 && soundDist < 210, `sound distance ≈ ${soundDist} m`);
+    check('the staleness gate never fired', world.eventsOf('welcome_stale_dropped').length === 0,
+      JSON.stringify(world.eventsOf('welcome_stale_dropped').map(e => e.payload)));
+    check('the heard ledger filed it', world.heard.includes('Welcome to Old Town'),
+      world.heard.join(' | '));
+    tour.endTour();
+  }
+
+  suite('D12-6 welcome reach gate: a live welcome is judged once, by the outrun arm alone');
+  {
+    // A3's shape with the channel held twice as long, so the
+    // live welcome is judged ~2 km past its anchor — the
+    // ground where 391e470's flat gate (which sat in front of
+    // the live arm and applied to every welcome) stole the
+    // verdict and filed it as welcome_stale_dropped. Under
+    // the merged gate the live arm owns the item: the outrun
+    // discharge is silent, and the stale filing never fires.
+    // The discharge files no playback, so the geometry
+    // witness is the driver's own position at the moment the
+    // channel frees — the only moment the waiting welcome can
+    // be judged — captured from the step loop below.
+    resetLocalStorage();
+    const LJ = { lat: 32.85, lng: -117.25 };
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: LJ.lat, lng: LJ.lng })],
+      library: [{ name: 'Alpha Park', lat: LJ.lat, lng: LJ.lng }],
+      intros: [],
+    });
+    world.genStoryBehavior = prompt => {
+      if (prompt.includes('NEIGHBORHOOD WELCOME') && prompt.includes('Bay Ho')) {
+        return new Promise(res =>
+          world.clock.setTimeout(
+            () =>
+              res(
+                'Welcome to Bay Ho, a small bayside neighborhood above the bay, ' +
+                  'where the streets step down toward the water and the evening light comes in low over the marina.',
+              ),
+            25_000,
+          ),
+        );
+      }
+      return 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+    };
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 120_000, synth: 12_000 }));
+    const { tour } = await healthyOpening(world, audio, LJ);
+    world.area = { neighborhood: 'Bay Ho', city: 'San Diego' };
+    let lat = LJ.lat + 0.01;
+    tour.onPosition({ lat, lng: LJ.lng, speedMps: 21.6, headingDeg: 180 });
+    // Step until Alpha Park leaves the channel: that
+    // transition is the waiting welcome's dequeue moment.
+    let sawAlpha = false;
+    let judgeLat = lat;
+    for (let i = 0; i < 48; i++) {
+      await world.clock.advance(5_000);
+      lat += 0.00097; // 21.6 m/s × 5 s ≈ 108 m per step
+      tour.onPosition({ lat, lng: LJ.lng, speedMps: 21.6, headingDeg: 180 });
+      if (tour.view().nowPlaying?.label === 'Alpha Park') sawAlpha = true;
+      else if (sawAlpha) { judgeLat = lat; break; }
+    }
+    for (let i = 0; i < 6; i++) {
+      await world.clock.advance(5_000);
+      lat += 0.00097;
+      tour.onPosition({ lat, lng: LJ.lng, speedMps: 21.6, headingDeg: 180 });
+    }
+    check('the live welcome was generated exactly once (no retry loop after discharge)',
+      welcomePromptsFor(world, 'Bay Ho').length === 1,
+      `prompts=${welcomePromptsFor(world, 'Bay Ho').length}`);
+    check('the outrun welcome never sounded',
+      !playbacksFor(world, 'welcome:bay ho').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'welcome:bay ho').map(e => e.payload)));
+    check('it was judged beyond the old flat cut (driver > 1,600 m past the anchor when the channel freed)',
+      (judgeLat - (LJ.lat + 0.01)) * 111_320 > 1600,
+      `judge distance ≈ ${Math.round((judgeLat - (LJ.lat + 0.01)) * 111_320)} m`);
+    check('the stale filing never fired — the live arm owned the verdict',
+      world.eventsOf('welcome_stale_dropped').length === 0,
+      JSON.stringify(world.eventsOf('welcome_stale_dropped').map(e => e.payload)));
+    check('the discharge filed no story_dropped for the welcome',
+      dropsFor(world, 'welcome:bay ho').length === 0,
+      JSON.stringify(dropsFor(world, 'welcome:bay ho').map(e => e.payload)));
+    check('the welcome is not heard-marked',
+      !world.heard.includes('Welcome to Bay Ho'), world.heard.join(' | '));
     tour.endTour();
   }
 }

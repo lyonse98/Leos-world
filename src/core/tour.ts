@@ -219,16 +219,6 @@ function leadFactFromText(text: string): string | null {
 const BACKSTOP_MS = 180_000;
 const WELCOME_COOLDOWN_MS = 180_000;
 /**
- * The welcome serve window (Nov 16, 2026): the driving radius
- * inside which welcomes are discovered and offered (the serve
- * cycle's own 1,600 m). judgeStory's staleness gate drops a
- * welcome that reaches its turn beyond this distance from its
- * anchor — a backstop against a held welcome sounding on
- * ground the driver has long left, not a per-mode fit test
- * (the live fit gate below keeps the fine geometry).
- */
-const WELCOME_SERVE_RADIUS_M = 1600;
-/**
  * The hook race's placeholder debt id (Nov 11, 2026): while the
  * hook-question form waits out its slot deadline, this sentinel
  * holds the opener's place in the opening debt — the welcome
@@ -3433,9 +3423,10 @@ export class Tour {
         // sounding it a mile behind.
         // Staleness discharge (Nov 16, 2026): the Day-12 gate's
         // 'welcome-stale' discharges identically — the driver
-        // is beyond the serve window, so re-arming the owed
-        // record would only re-offer a welcome whose moment
-        // has passed (the retry is not distance-gated) — with
+        // is beyond the telling's own reach (duration × speed),
+        // so re-arming the owed record would only re-offer a
+        // welcome whose moment has passed (the retry is not
+        // distance-gated) — with
         // one difference: it FILES. welcome_stale_dropped is
         // the field's record that the gate fired, with the
         // distance that condemned the telling; the discharge
@@ -3866,29 +3857,60 @@ export class Tour {
       }
     }
     const subject = item.subject ?? '';
-    // Welcome staleness gate (Nov 16, 2026 — Day-12 field fix):
-    // a welcome whose moment has passed must not sound. The
-    // fit gate below judges a LIVE welcome against its own
-    // reach (duration × speed), but a LIBRARY welcome is exempt
-    // from it (source) and from every test further down
-    // (reserved, region-anchored) — the Day-12 drive held one
-    // ~4 min in the waiting slot and sounded it 7,525 m past
-    // Old Town, cutting the corridor story behind it. The test
-    // here is the serve window itself: a welcome is discovered
-    // and offered inside WELCOME_SERVE_RADIUS_M of its anchor;
-    // beyond that window at dequeue its moment has passed,
-    // whatever its source. Converted pass-by welcomes are
-    // exempt (framing 'passby' — a pass-by telling is true at
-    // any distance, the Nov 5 doctrine), and the conversion
-    // checkpoint acts on waiting live items before dequeue, so
-    // a welcome that could convert already has: this gate is
-    // the backstop for the ones that never could (shelf
-    // welcomes never convert). Discharge semantics live in
-    // onStorySettle ('welcome-stale'): the pass is spent, the
-    // place is NOT heard, and the drop files as
-    // welcome_stale_dropped so the field can see it — the one
-    // discharge that is not silent, because the Day-12 harm
-    // was a stale welcome nobody could see in the logs.
+    // Welcome reach gate — ONE geometry for every welcome,
+    // judged at dequeue, piercing the reserved exemption below
+    // for welcome items only. The test is this judge's own
+    // reach: the item's duration at the current speed is the
+    // ground a telling may span from its anchor (the same
+    // expression the reach test below applies to anchored
+    // stories, with the same duration floor). No parallel
+    // thresholds.
+    //
+    // Live welcomes (Nov 2 fit gate): a LIVE welcome (a
+    // zero-row area, or the cross-day alternate) was generated
+    // for the ground the driver stood on when generation
+    // began, and a slow pipeline plus a fast driver strands
+    // it — the Bay Ho field case sounded 1,616 m past its
+    // subject at 21.6 m/s. Beyond its reach it discharges
+    // 'welcome-outrun' (onStorySettle: silent — the pass is
+    // spent, no filing).
+    //
+    // Shelf welcomes (Nov 16, 2026 — Day-12 correction): the
+    // reserved return below exempts welcomes on the theory
+    // that a SHELF welcome is "instant and anchored", but a
+    // held shelf welcome is neither: the Day-12 drive held
+    // Old Town's library welcome ~4 min in the waiting slot
+    // and sounded it 7,525 m past its subject (93 s in queue,
+    // 35 m/s, a ~150 s telling — a ~5,250 m reach it had long
+    // outrun), cutting the corridor story behind it. So the
+    // same reach test pierces the exemption for non-live
+    // welcomes: beyond reach it discharges 'welcome-stale'
+    // (onStorySettle: the pass is spent, the place is NOT
+    // heard — and it FILES welcome_stale_dropped with the
+    // distance, the one discharge that is not silent, because
+    // the Day-12 harm was a stale welcome nobody could see in
+    // the logs). A welcome is judged once, by the arm its
+    // source selects; the two arms share this block, so no
+    // welcome can be judged twice.
+    //
+    // Correction (Nov 16, 2026, Erik's ruling): the Day-12 fix
+    // as first built (391e470) tested shelf welcomes against a
+    // flat 1,600 m — but 1,600 m is the serve cycle's
+    // candidate-DISCOVERY radius, not a serve window; no such
+    // constant existed, and the flat cut discharged the
+    // deferral doctrine's own case (a welcome owed behind two
+    // long stories at surface pace: SL-01's shape, D12-4's
+    // sim). The flat gate is gone; duration × speed governs
+    // both arms.
+    //
+    // Pass-by exemption (Nov 5, mechanism — not
+    // recalibration): a CONVERTED welcome (framing 'passby')
+    // is true at any distance — "you passed this place" does
+    // not expire as the driver continues — so neither arm may
+    // kill it. The conversion checkpoint acts on waiting live
+    // items before dequeue, so a welcome that could convert
+    // already has; shelf welcomes never convert. The reach
+    // formula itself is untouched.
     if (subject.startsWith('welcome:') && item.anchor && item.framing !== 'passby') {
       const dist = calculateDistance(
         this.position.lat,
@@ -3896,42 +3918,10 @@ export class Tour {
         item.anchor.lat,
         item.anchor.lng,
       );
-      if (dist > WELCOME_SERVE_RADIUS_M) {
-        return { ok: false, reason: 'welcome-stale' };
-      }
-    }
-    // Live-welcome fit gate (Nov 2): welcomes are judge-exempt
-    // below (reserved) because a SHELF welcome is instant and
-    // anchored — but a LIVE welcome (a zero-row area, or the
-    // cross-day alternate) was generated for the ground the
-    // driver stood on when generation began, and a slow pipeline
-    // plus a fast driver strands it: the Bay Ho field case
-    // sounded 1,616 m past its subject at 21.6 m/s. The test is
-    // this judge's own reach geometry — the item's duration at
-    // the current speed is the ground a telling may span from
-    // its anchor (the same expression the reach test below
-    // applies to anchored stories, with the same duration
-    // floor). No parallel thresholds. Discharge semantics live
-    // in onStorySettle (silent: the pass is spent, no filing).
-    // Pass-by exemption (Nov 5, mechanism — not recalibration):
-    // a CONVERTED welcome (framing 'passby') is true at any
-    // distance — "you passed this place" does not expire as
-    // the driver continues — so the outrun discharge must not
-    // kill it. The reach formula itself is untouched.
-    if (
-      item.storySource === 'live' &&
-      subject.startsWith('welcome:') &&
-      item.anchor &&
-      item.framing !== 'passby'
-    ) {
-      const dist = calculateDistance(
-        this.position.lat,
-        this.position.lng,
-        item.anchor.lat,
-        item.anchor.lng,
-      );
       if (dist > Math.max(item.durationSec, 5) * speed) {
-        return { ok: false, reason: 'welcome-outrun' };
+        return item.storySource === 'live'
+          ? { ok: false, reason: 'welcome-outrun' }
+          : { ok: false, reason: 'welcome-stale' };
       }
     }
     // Orientation race discharge (Nov 2): a LIVE area story
