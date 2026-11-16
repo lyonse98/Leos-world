@@ -542,6 +542,19 @@ export class Tour {
   private portalObligation: { houseSubject: string; targetKey: string; targetAngle: string } | null =
     null;
   /**
+   * Corridor-pending (Erik's ruling, Nov 15, 2026 — the
+   * speed-regime priority that absorbs corridor fix 3): ONE
+   * retained corridor item, held when its at-speed offer lands
+   * 'buffer' behind a waiter it may not displace. At the next
+   * story transition it is promoted into the waiting slot ahead
+   * of uncommitted Tier-1 pendings — but only while the driver
+   * is still on its segment and still at speed; otherwise it is
+   * dropped (corridor_pending_dropped) and the segment's claim
+   * is released. Below FREEWAY_MPS nothing is ever retained:
+   * the historical buffer-and-retry behavior is untouched.
+   */
+  private corridorPending: { segment: CorridorSegment; item: AudibleItem } | null = null;
+  /**
    * The tour thread (P3 salvage): this tour's DELIVERED tellings in
    * hearing order, reduced to subject + angle + signature fact —
    * the prompt feed that lets generation connect and contrast
@@ -675,6 +688,7 @@ export class Tour {
       onSlotEmpty: () => {
         if (this.phase === 'active') void this.runServeCycle('slot-empty');
       },
+      priorityRefillItem: () => this.takeCorridorPendingForRefill(),
       onStoryCommitted: item => this.onStoryCommitted(item),
       onSoundStart: item => {
         // P1 salvage: stamp the sound start (queue wait + lateness
@@ -1882,21 +1896,46 @@ export class Tour {
     heardIntro = false,
   ): Promise<AudibleItem | null> {
     const rows = await this.seams.fetchIntroRows(name);
-    const row = heardIntro
+    const chosen = heardIntro
       ? rows.greet
         ? rows.plain
         : null
       : (rows.greet ?? rows.plain);
-    if (!row || !row.audio_path) return null;
+    if (!chosen || !chosen.audio_path) return null;
+    let row = chosen;
+    // Version assignment (Nov 15, 2026): the welcome lane
+    // shares the serve cycle's density rule via versionedEntry
+    // — where the shelf holds a short cut of the chosen intro
+    // variant and the ground here is dense, the CUT is the
+    // welcome that serves. The variant choice above is
+    // untouched (greeting vs plain is the heard-state's call);
+    // the version choice applies to whichever variant won.
+    // Where no twin exists — 174 of 188 welcome places today —
+    // the chosen row serves exactly as before.
+    const baseEntry = this.libraryIndex.find(
+      e => e.place_key === chosen.place_key && e.angle === chosen.angle,
+    );
+    if (baseEntry) {
+      const serveEntry = this.versionedEntry(baseEntry);
+      if (serveEntry.angle !== chosen.angle) {
+        const twinRow = await this.seams.fetchLibraryRow(serveEntry.place_key, serveEntry.angle);
+        if (twinRow && twinRow.audio_path) row = twinRow;
+      }
+    }
     const item = this.makeItem({
       kind: 'story',
       label: `Welcome to ${name}`,
       source: { kind: 'url', url: this.seams.bucketUrl(row.audio_path) },
-      durationSec: estimateSpeechDurationS(row.story_text),
+      durationSec:
+        shortCutDurationSecFor(row.place_key, row.angle) ?? estimateSpeechDurationS(row.story_text),
       onSettle: rec => this.onStorySettle(item, rec),
       story: {
         subject: `welcome:${name.toLowerCase()}`,
-        angleOf: row.angle === 'neighborhood_intro_greet' ? 'neighborhood_intro_greet' : 'neighborhood_intro',
+        // The row's own angle, honestly: a base variant on the
+        // historical path (fetchIntroRows returns only the two
+        // base angles, so this is the old ternary's value), the
+        // twin's ' (short cut)' angle when a cut serves.
+        angleOf: row.angle,
         storySource: 'library',
         anchor: { lat: row.lat, lng: row.lng },
         regionAnchored: true,
@@ -2285,6 +2324,21 @@ export class Tour {
   private checkCorridorTrigger(pos: Position): void {
     if (this.phase !== 'active') return;
     const match = matchCorridor({ lat: pos.lat, lng: pos.lng, heading: pos.headingDeg });
+    // Corridor-pending perishability (Nov 15, 2026): the
+    // retained at-speed item is judged on every fix, on this
+    // tick's own match — off its segment (or off every segment)
+    // it dies here as segment-exit; still on it but below the
+    // regime line it dies as speed. Judging at promotion time
+    // alone would let a dead item squat through a long story
+    // and be discovered only at the transition it was meant
+    // to serve.
+    if (this.corridorPending) {
+      if (!match || match.segment.id !== this.corridorPending.segment.id) {
+        this.dropCorridorPending('segment-exit');
+      } else if (pos.speedMps < FREEWAY_MPS) {
+        this.dropCorridorPending('speed');
+      }
+    }
     if (!match) return;
     const segment = match.segment;
     if (pos.speedMps >= FREEWAY_MPS) {
@@ -2381,8 +2435,116 @@ export class Tour {
       },
     });
     this.inflight.add(subject);
-    const landed = this.player.offerStory(item, false);
-    if (landed === 'buffer') this.inflight.delete(subject);
+    // Speed-regime priority (Erik's ruling, Nov 15, 2026): at
+    // or above FREEWAY_MPS the corridor is the biggest
+    // bang-for-buck story on a fast artery, so its offer is
+    // priority-class against ordinary waiters, and a 'buffer'
+    // landing is RETAINED (corridor-pending) instead of
+    // dropped — at the next transition it claims the slot
+    // ahead of uncommitted Tier-1 pendings while the driver is
+    // still on the segment. Below the line nothing changes:
+    // non-priority offer, buffer drops, later ticks retry —
+    // Erik's Nov 5 no-corridor-priority ruling survives intact
+    // at surface pace.
+    const atSpeed = (this.position?.speedMps ?? 0) >= FREEWAY_MPS;
+    const landed = this.player.offerStory(item, false, { priorityClass: atSpeed });
+    if (landed === 'buffer') {
+      if (atSpeed) {
+        this.retainCorridorPending(segment, item);
+      } else {
+        this.inflight.delete(subject);
+      }
+    }
+  }
+
+  /**
+   * Retain a corridor item whose at-speed offer landed
+   * 'buffer' (Nov 15, 2026). One deep, newest wins: any
+   * previously retained item is dropped as replaced (two
+   * corridor serves can be in flight across an interchange;
+   * the later buffer landing is the fresher claim). The
+   * segment's inflight claim is HELD while retained — the
+   * trigger must not mint a duplicate serve for a segment
+   * whose story is already built and waiting.
+   */
+  private retainCorridorPending(segment: CorridorSegment, item: AudibleItem): void {
+    if (this.corridorPending) this.dropCorridorPending('replaced');
+    this.corridorPending = { segment, item };
+    this.inflight.add(`corridor:${segment.id}`);
+  }
+
+  /**
+   * Drop the retained corridor item (Nov 15, 2026): the claim
+   * is released (the segment may serve again on a later pass)
+   * and the never-committed item settles silently, exactly
+   * once — it files no §8 terminal, only the
+   * corridor_pending_dropped marker, so field logs can verdict
+   * the lane's perishability honestly.
+   */
+  private dropCorridorPending(reason: string): void {
+    const pending = this.corridorPending;
+    if (!pending) return;
+    this.corridorPending = null;
+    this.inflight.delete(`corridor:${pending.segment.id}`);
+    this.emit('corridor_pending_dropped', { segment_id: pending.segment.id, reason });
+    pending.item.silent = true;
+    this.player.abandon(pending.item);
+  }
+
+  /**
+   * Why the retained corridor item may no longer serve, judged
+   * on the current fix — or null when it may. Mirrors the
+   * per-fix judgments in checkCorridorTrigger (the eager path
+   * usually drops first; this is the same law read at the
+   * promotion edge, for fixes that arrived while no trigger
+   * ran). The stale judge (>450 m past the segment exit) is
+   * NOT duplicated here: a promoted item carries its segment
+   * geometry into judgeStory at dequeue, which kills it there
+   * if it has run too far — and that drop consumes the
+   * segment, as a committed corridor drop should.
+   */
+  private corridorPendingDropReason(): string | null {
+    const pending = this.corridorPending;
+    if (!pending) return null;
+    if (!this.position) return 'segment-exit';
+    if (this.corridorConsumed.has(pending.segment.id)) return 'consumed';
+    if (this.position.speedMps < FREEWAY_MPS) return 'speed';
+    const match = matchCorridor({
+      lat: this.position.lat,
+      lng: this.position.lng,
+      heading: this.position.headingDeg,
+    });
+    if (!match || match.segment.id !== pending.segment.id) return 'segment-exit';
+    return null;
+  }
+
+  /**
+   * The player's priority refill hook (Nov 15, 2026): hand
+   * over the retained corridor item for the empty waiting
+   * slot, or null. A failed perishability check drops the
+   * item here and falls through to the Tier-1 pending lane.
+   * While a house's portal payload is owed the next slot, the
+   * item stands down WITHOUT dropping (returns null, stays
+   * retained) — the payload's claim is the one obligation in
+   * the engine that outranks this lane.
+   */
+  private takeCorridorPendingForRefill(): AudibleItem | null {
+    const pending = this.corridorPending;
+    if (!pending) return null;
+    if (
+      this.portalObligation &&
+      this.player.current?.subject === this.portalObligation.houseSubject
+    ) {
+      return null;
+    }
+    const drop = this.corridorPendingDropReason();
+    if (drop) {
+      this.dropCorridorPending(drop);
+      return null;
+    }
+    this.corridorPending = null;
+    this.emit('corridor_pending_promoted', { segment_id: pending.segment.id });
+    return pending.item;
   }
 
   // ------------------------------------------------------------ serve cycles (§4)
@@ -2420,6 +2582,20 @@ export class Tour {
       // cycle's first business is that debt, ahead of any
       // new candidate.
       if (this.portalObligation && (await this.servePortalTarget())) return;
+      // Corridor-pending promotion (Nov 15, 2026): a retained
+      // at-speed corridor item claims an empty waiting slot
+      // ahead of fresh candidates, the same claim the player's
+      // refill hook gives it at story transitions. (Refills
+      // cover the transitions; a cycle can also find the slot
+      // empty mid-story — e.g. the waiter was withdrawn — and
+      // the retained item's claim is senior to a new discovery.)
+      if (!this.player.waitingStory) {
+        const promoted = this.takeCorridorPendingForRefill();
+        if (promoted) {
+          this.player.offerStory(promoted, false);
+          return;
+        }
+      }
       const pos = this.position;
       const radius = this.modeName() === 'walking' ? 700 : 1600;
       const candidates = await this.seams.discoverCandidates(
@@ -2545,11 +2721,37 @@ export class Tour {
   }
 
   /**
+   * The version assignment (short cuts, Nov 12, 2026 —
+   * "density sets the cut", freeform form), factored into one
+   * helper Nov 15, 2026 so every lane that builds an item from
+   * a shelf entry applies the ONE rule: when the index carries
+   * the entry's short-cut twin (undealt) and the ground here
+   * is dense, the twin serves; on sparse ground — or where no
+   * twin exists — the entry itself serves, unchanged. Used by
+   * the serve cycle / portal discharge (libraryItemForEntry)
+   * and by the welcome lane (shelfIntroItem): before Nov 15
+   * the welcome lane built its item straight from the intro
+   * rows and could never reach a twin at all (the Nov 15
+   * scoring audit's Q6 — 14 of 188 welcome places hold cuts
+   * the lane structurally could not use).
+   */
+  private versionedEntry(entry: backend.LibraryIndexEntry): backend.LibraryIndexEntry {
+    const key = entry.place_key;
+    const dealt = this.dealtAngles.get(key) ?? new Set<string>();
+    const twinEntry = this.libraryIndex.find(
+      e => e.place_key === key && e.angle === entry.angle + SHORT_CUT_SUFFIX && !dealt.has(e.angle),
+    );
+    if (twinEntry && this.shortCutDensityHere() >= SHORT_CUT_DENSE_FREEFORM_MIN) {
+      return twinEntry;
+    }
+    return entry;
+  }
+
+  /**
    * Build the audible item for one library index entry. The
-   * version assignment (short cuts, Nov 12, 2026 — "density
-   * sets the cut", freeform form) rides along: when the
-   * index carries the entry's short cut and the ground here
-   * is dense, the cut serves; on sparse ground the full
+   * version assignment rides along via versionedEntry: when
+   * the index carries the entry's short cut and the ground
+   * here is dense, the cut serves; on sparse ground the full
    * version carries. Null when the row itself cannot be
    * read. Shared by the serve cycle's candidate path and the
    * portal discharge, so a portal payload sounds exactly as
@@ -2559,15 +2761,7 @@ export class Tour {
     entry: backend.LibraryIndexEntry,
     tier1: boolean,
   ): Promise<AudibleItem | null> {
-    const key = entry.place_key;
-    const dealt = this.dealtAngles.get(key) ?? new Set<string>();
-    let serveEntry = entry;
-    const twinEntry = this.libraryIndex.find(
-      e => e.place_key === key && e.angle === entry.angle + SHORT_CUT_SUFFIX && !dealt.has(e.angle),
-    );
-    if (twinEntry && this.shortCutDensityHere() >= SHORT_CUT_DENSE_FREEFORM_MIN) {
-      serveEntry = twinEntry;
-    }
+    const serveEntry = this.versionedEntry(entry);
     const row = await this.seams.fetchLibraryRow(serveEntry.place_key, serveEntry.angle);
     if (!row) return null;
     const item = this.makeItem({
@@ -2578,7 +2772,7 @@ export class Tour {
         shortCutDurationSecFor(row.place_key, row.angle) ?? estimateSpeechDurationS(row.story_text),
       onSettle: rec => this.onStorySettle(item, rec),
       story: {
-        subject: key,
+        subject: serveEntry.place_key,
         angleOf: serveEntry.angle,
         storySource: 'library',
         anchor: { lat: row.lat, lng: row.lng },
@@ -4948,6 +5142,11 @@ export class Tour {
       orphan.silent = true;
       this.player.abandon(orphan);
     }
+    // A retained corridor item (Nov 15, 2026) is likewise
+    // engine-held and unknown to the player's teardown: drop
+    // it here, so it settles exactly once and its marker
+    // files before the emit seal, like every teardown settle.
+    if (this.corridorPending) this.dropCorridorPending('teardown');
     this.player.teardown();
     backend.lsDel('activeSession');
     // Seal the emit path now that the end's own teardown

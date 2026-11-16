@@ -105,7 +105,7 @@ async function healthyOpening(world, audio, pos = UTC, speed = 8) {
 }
 
 export async function runScenarios(Tour, extras) {
-  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile } = extras;
+  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, facts } = extras;
 
   // ---------------------------------------------------------- S-01 healthy start
   suite('S-01 healthy start / opener order');
@@ -513,7 +513,14 @@ export async function runScenarios(Tour, extras) {
     tour.onPosition({ lat: mid.lat, lng: mid.lng, speedMps: 27, headingDeg: mid.heading });
     await world.clock.advance(3_000);
     const drops = world.eventsOf('story_dropped');
-    check('corridor item displaces the waiter (displaced-fresher)', drops.some(d => d.payload.reason === 'displaced-fresher'), JSON.stringify(drops.map(d => d.payload)));
+    // Nov 15, 2026 (speed-regime priority): at 27 m/s this
+    // offer is priority-class, so the displacement now files
+    // as displaced-priority — the anchor arithmetic above is
+    // still the fixture's math, and FP-6b re-proves the
+    // fresher/anchor path behaviorally below the regime line,
+    // where the offer is judged exactly as it was when this
+    // suite was written.
+    check('corridor item displaces the waiter (displaced-priority at speed)', drops.some(d => d.payload.reason === 'displaced-priority'), JSON.stringify(drops.map(d => d.payload)));
     const committed2 = world.eventsOf('story_played');
     const corridorCommit = committed2.find(e => e.payload.subject === `corridor:${seg.id}`);
     check('corridor story committed', Boolean(corridorCommit), committed2.map(e => e.payload.subject).join(','));
@@ -4479,5 +4486,607 @@ export async function runScenarios(Tour, extras) {
       'the rejected import changed nothing',
       profile.getProfile().tastes.activities.join() === 'live-music,markets',
     );
+  }
+
+  // ---------------------------------------------------------- FP: the freeform priority package (Erik's ruling, Nov 15, 2026)
+  // Three changes, one package:
+  //  (1) Houses out of Tier-1 — discovery no longer lets a
+  //      National Register listing confer Tier-1 on a
+  //      house-class candidate; the curated destination-house
+  //      exceptions (tier1HouseExceptions) keep it. The portal
+  //      gate is unchanged: a house may still serve, as a
+  //      portal — it just carries no tier privilege.
+  //  (2) Speed-regime priority — at or above FREEWAY_MPS a
+  //      corridor offer is priority-class against ordinary
+  //      waiters, and a 'buffer' landing is retained one-deep
+  //      (corridor-pending) for promotion at the next story
+  //      transition, ahead of uncommitted Tier-1 pendings,
+  //      while the driver is still on-segment at speed. Below
+  //      the line the corridor lane is byte-identical to the
+  //      Nov 5 ruling's shape. (Absorbs corridor fix 3.)
+  //  (3) The welcome lane shares the serve cycle's
+  //      density-sets-the-cut rule via versionedEntry: where
+  //      an intro twin exists and the ground is dense, the
+  //      cut is the welcome that serves.
+  const fpMpdLat = 111_320;
+  const fpMpdLng = lat => fpMpdLat * Math.cos((lat * Math.PI) / 180);
+  const fpDistM = (a, b) => Math.hypot((b.lat - a.lat) * fpMpdLat, (b.lng - a.lng) * fpMpdLng(a.lat));
+  const fpSegLen = s => s.polyline.reduce((acc, p, i) => (i === 0 ? 0 : acc + fpDistM(p, s.polyline[i - 1])), 0);
+  // The longest real segment, resolved through the matcher
+  // itself (overlapping segments share pavement — bank
+  // whichever segment the matcher returns at the start point).
+  const fpPickSeg = () => {
+    const picked = CORRIDOR_SEGMENTS.filter(s => fpSegLen(s) > 4000).reduce((a, b) => (fpSegLen(a) > fpSegLen(b) ? a : b));
+    const start = picked.polyline[0];
+    const second = picked.polyline[1];
+    const heading = ((Math.atan2((second.lng - start.lng) * fpMpdLng(start.lat), (second.lat - start.lat) * fpMpdLat) * 180) / Math.PI + 360) % 360;
+    const seg = matchCorridor({ lat: start.lat, lng: start.lng, heading })?.segment ?? picked;
+    return { seg, start: seg.polyline[0], heading };
+  };
+  const fpAlong = (s, frac) => {
+    const total = fpSegLen(s);
+    let acc = 0;
+    for (let i = 1; i < s.polyline.length; i++) {
+      const a = s.polyline[i - 1];
+      const b = s.polyline[i];
+      const leg = fpDistM(b, a);
+      if (acc + leg >= total * frac) {
+        const t = (total * frac - acc) / leg;
+        return {
+          lat: a.lat + (b.lat - a.lat) * t,
+          lng: a.lng + (b.lng - a.lng) * t,
+          heading: ((Math.atan2((b.lng - a.lng) * fpMpdLng(a.lat), (b.lat - a.lat) * fpMpdLat) * 180) / Math.PI + 360) % 360,
+        };
+      }
+      acc += leg;
+    }
+    const last = s.polyline[s.polyline.length - 1];
+    return { lat: last.lat, lng: last.lng, heading: 180 };
+  };
+  // Places is the one live-shaped seam inside discovery; stub
+  // fetch so the suite makes zero network calls (the registry
+  // half of discovery is bundled data and runs for real).
+  const fpStubFetch = places => {
+    const real = globalThis.fetch;
+    globalThis.fetch = async () => ({ ok: true, json: async () => ({ places }) });
+    return () => {
+      globalThis.fetch = real;
+    };
+  };
+  const fpPlace = (name, lat, lng) => ({
+    displayName: { text: name },
+    location: { latitude: lat, longitude: lng },
+    rating: 4.8,
+    userRatingCount: 120,
+    types: ['tourist_attraction'],
+    formattedAddress: '1 Test Way',
+  });
+
+  suite('FP-1 houses out of Tier-1: a national house is not Tier-1 in discovery; a non-house national landmark still is');
+  {
+    resetLocalStorage();
+    const restore = fpStubFetch([]);
+    try {
+      // Radius 100: Sweet's ground is isolated at that range
+      // (the nearest other record is 102 m out), so the
+      // candidate is Sweet's own, unfolded.
+      const around = await facts.discoverCandidates({ lat: 32.738374, lng: -117.167262 }, 100);
+      const sweet = around.find(c => c.name === 'A.H. Sweet Residences');
+      check('the national house candidate is discovered', Boolean(sweet), around.map(c => c.name).join(','));
+      check('A.H. Sweet Residences (national, house) is NOT Tier-1', sweet?.tier1 === false, `tier1=${sweet?.tier1}`);
+      check('its registry record still rides the candidate (the boost path is untouched)', Boolean(sweet?.registry));
+      // The Gaslamp cluster folds several national non-house
+      // records onto one candidate; whichever name it carries,
+      // that ground is Tier-1.
+      const downtown = await facts.discoverCandidates({ lat: 32.714025, lng: -117.161348 }, 250);
+      const theatre =
+        downtown.find(c => c.registry?.name === 'Balboa Theatre') ??
+        downtown.reduce((best, c) =>
+          !best || fpDistM(c, { lat: 32.714025, lng: -117.161348 }) < fpDistM(best, { lat: 32.714025, lng: -117.161348 }) ? c : best, null);
+      check('the non-house national landmark ground is discovered', Boolean(theatre), downtown.map(c => c.name).join(','));
+      check('Balboa Theatre ground (national, not a house) is still Tier-1', theatre?.tier1 === true, `tier1=${theatre?.tier1}`);
+    } finally {
+      restore();
+    }
+  }
+
+  suite('FP-2 houses out of Tier-1: the curated destination exception keeps Tier-1 (both discovery paths)');
+  {
+    resetLocalStorage();
+    const restore = fpStubFetch([]);
+    try {
+      // Radius 100 keeps each house's ground unfolded (the
+      // nearest neighbours are 102 m+ out for both).
+      const around = await facts.discoverCandidates({ lat: 32.741362, lng: -117.157981 }, 100);
+      const marston = around.find(c => c.name === 'George Marston House');
+      check('the Marston candidate is discovered', Boolean(marston), around.map(c => c.name).join(','));
+      check('George Marston House (excepted destination) keeps Tier-1', marston?.tier1 === true, `tier1=${marston?.tier1}`);
+      const burnhamAround = await facts.discoverCandidates({ lat: 32.742716, lng: -117.157343 }, 100);
+      const burnham = burnhamAround.find(c => c.name === 'Burnham-Marston House');
+      check('Burnham-Marston House is discovered on its own ground', Boolean(burnham), burnhamAround.map(c => c.name).join(','));
+      check('Burnham-Marston (national house, NOT excepted) is not Tier-1', burnham?.tier1 === false, `tier1=${burnham?.tier1}`);
+      check('the predicate names the seeded exception', facts.isTier1HouseException('George Marston House') === true);
+      check('the predicate names nothing else on the street', facts.isTier1HouseException('A.H. Sweet Residences') === false);
+    } finally {
+      restore();
+    }
+    // The Places-fold path: a Places candidate merged with the
+    // registry record must reach the same verdict — including
+    // when Google's display name carries the middle initial
+    // and only the registry's own name matches the key.
+    const restore2 = fpStubFetch([
+      fpPlace('A.H. Sweet Residences', 32.738374, -117.167262),
+      fpPlace('George W. Marston House', 32.741362, -117.157981),
+    ]);
+    try {
+      const sweet = (await facts.discoverCandidates({ lat: 32.738374, lng: -117.167262 }, 250)).find(
+        c => c.name === 'A.H. Sweet Residences',
+      );
+      check('the Places-folded national house is not Tier-1 either', sweet?.tier1 === false, `tier1=${sweet?.tier1}`);
+      const marston = (await facts.discoverCandidates({ lat: 32.741362, lng: -117.157981 }, 250)).find(
+        c => c.name === 'George W. Marston House',
+      );
+      check('the Places-folded Marston (W. form) keeps Tier-1 via the registry name', marston?.tier1 === true, `tier1=${marston?.tier1}`);
+    } finally {
+      restore2();
+    }
+  }
+
+  suite('FP-3 houses out of Tier-1: no pending-lane claim and no displacement protection for a national house');
+  {
+    resetLocalStorage();
+    // The candidate below is exactly what discovery returns
+    // for a national house after FP-1 (tier1: false). Its
+    // payload stands on its ground — the gate would license
+    // the serve if it could take a slot.
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park')],
+      library: [
+        'Alpha Park',
+        { name: 'Waiter Place', lat: UTC.lat + 0.004, lng: UTC.lng },
+        { name: 'Burnham-Marston House', lat: UTC.lat + 0.0045, lng: UTC.lng },
+        { name: 'Grand Museum', lat: UTC.lat + 0.0045, lng: UTC.lng },
+        // The part-2 displacer rides the shelf: a live
+        // candidate would be refused by the generation fit
+        // gate (the queue ahead of it is minutes long), never
+        // reaching the displacement ruling under test.
+        { name: 'Fresh Plaza', lat: UTC.lat, lng: UTC.lng },
+      ],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 90_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    const soundedLabels = watchLabels(world, tour);
+    // Part 1: an ordinary waiter holds the slot. A Tier-1
+    // house would displace it by priority or wait it out in
+    // the pending lane; a non-Tier-1 house can do neither —
+    // the fresher test is its only road in, and it fails it:
+    // the waiter sits on the driver's own ground (~0 m), the
+    // house ~55 m off, and the mint gap is seconds, not 30 s.
+    world.candidates = [makeCandidate('Waiter Place', { lat: UTC.lat + 0.004, lng: UTC.lng, distanceM: 60 })];
+    tour.onPosition({ lat: UTC.lat + 0.002, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(3_000); // waiter slotted behind Alpha
+    world.candidates = [makeCandidate('Burnham-Marston House', { tier1: false, lat: UTC.lat + 0.0045, lng: UTC.lng })];
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(6_000); // the house is offered and lands 'buffer', repeatedly
+    check('the national house never committed behind an ordinary waiter',
+      !world.eventsOf('story_played').some(e => e.payload.subject === 'burnham-marston house'),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    // Part 2: with the slot free the house MAY slot (portal
+    // license in hand) — but it waits unprotected: a fresher
+    // ordinary newcomer displaces it like any ordinary story.
+    world.candidates = [];
+    await world.clock.advance(100_000); // Alpha ends; the waiter sounds (90 s)
+    world.candidates = [makeCandidate('Burnham-Marston House', { tier1: false, lat: UTC.lat + 0.0045, lng: UTC.lng })];
+    // A >200 m move so the serve cycle actually runs (the
+    // house's own anchor is its row, not the driver's feet).
+    tour.onPosition({ lat: UTC.lat + 0.009, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(3_000); // the house slots behind the waiter
+    check('the house slotted once the slot was free (the gate licenses it)',
+      world.eventsOf('story_played').some(e => e.payload.subject === 'burnham-marston house'),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    // A fresh ordinary candidate at the driver's feet is the
+    // displacer (the waiter itself is already told).
+    world.candidates = [makeCandidate('Fresh Plaza', { lat: UTC.lat, lng: UTC.lng, distanceM: 10 })];
+    tour.onPosition({ lat: UTC.lat, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(4_000);
+    const drops = world.eventsOf('story_dropped');
+    check('a fresher ordinary newcomer displaces the waiting house (no tier protection)',
+      drops.some(d => d.payload.reason === 'displaced-fresher'),
+      JSON.stringify(drops.map(d => d.payload)));
+    check('the displaced house never sounded', !soundedLabels.includes('Burnham-Marston House'), soundedLabels.join(','));
+    check('its payload never sounded either (the obligation died with the commit)',
+      !soundedLabels.includes('Grand Museum'), soundedLabels.join(','));
+    tour.endTour();
+  }
+
+  suite('FP-4 speed regime: an at-speed corridor offer displaces an ordinary waiter by priority (fresher cannot decide it)');
+  {
+    resetLocalStorage();
+    const { seg, start, heading } = fpPickSeg();
+    const mid = fpAlong(seg, 0.5);
+    // Fixture math: the waiter sits ON the midpoint — its
+    // anchor is ~0 m from the driver, the corridor item's
+    // nearest-point anchor is ~0 m too, and the waiter was
+    // minted seconds before the offer. Both fresher prongs
+    // (150 m closer, 30 s newer) fail by construction; only
+    // priority can move this waiter.
+    check('fixture: the fresher distance prong cannot decide it', !(0 + 150 < 0), 'dn≈0 dw≈0');
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: start.lat, lng: start.lng, distanceM: 100 })],
+      library: [
+        { name: 'Alpha Park', lat: start.lat, lng: start.lng },
+        seg.displayName,
+        { name: 'Waiter Place', lat: mid.lat, lng: mid.lng },
+      ],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 90_000 }));
+    const tour = await startAt(world, audio, start, 8, heading);
+    const soundedLabels = watchLabels(world, tour);
+    await world.clock.advance(40_000); // greeting + opener + welcome; Alpha playing (90 s)
+    world.candidates = [makeCandidate('Waiter Place', { lat: mid.lat, lng: mid.lng, distanceM: 0 })];
+    tour.onPosition({ lat: mid.lat, lng: mid.lng, speedMps: 8, headingDeg: mid.heading });
+    await world.clock.advance(3_000); // waiter slotted behind Alpha
+    check('waiter slotted behind the playing story',
+      world.eventsOf('story_played').some(e => e.payload.subject === 'waiter place'),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    tour.onPosition({ lat: mid.lat, lng: mid.lng, speedMps: 27, headingDeg: mid.heading });
+    await world.clock.advance(3_000); // the at-speed corridor offer meets the waiter
+    const drops = world.eventsOf('story_dropped');
+    check('the waiter is displaced by priority, not fresher',
+      drops.some(d => d.payload.reason === 'displaced-priority') &&
+        !drops.some(d => d.payload.reason === 'displaced-fresher'),
+      JSON.stringify(drops.map(d => d.payload)));
+    check('the corridor story committed',
+      world.eventsOf('story_played').some(e => e.payload.subject === `corridor:${seg.id}`),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    await world.clock.advance(150_000); // Alpha ends; the corridor story sounds
+    check('the corridor story sounds after the playing story', soundedLabels.includes(seg.displayName), soundedLabels.join(','));
+    check('the displaced waiter never sounded', !soundedLabels.includes('Waiter Place'), soundedLabels.join(','));
+    tour.endTour();
+  }
+
+  suite('FP-5 speed regime: a buffered at-speed corridor item is retained and promoted ahead of a Tier-1 pending');
+  {
+    resetLocalStorage();
+    const { seg, start, heading } = fpPickSeg();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: start.lat, lng: start.lng, distanceM: 100 })],
+      library: [
+        { name: 'Alpha Park', lat: start.lat, lng: start.lng },
+        seg.displayName,
+        { name: 'Tier One Museum', lat: start.lat, lng: start.lng },
+        { name: 'Tier Two Castle', lat: start.lat, lng: start.lng },
+      ],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 45_000 }));
+    const tour = await startAt(world, audio, start, 8, heading);
+    const soundedLabels = watchLabels(world, tour);
+    await world.clock.advance(40_000); // opening done; Alpha playing (45 s)
+    const p1 = fpAlong(seg, 0.05);
+    world.candidates = [makeCandidate('Tier One Museum', { tier1: true, lat: start.lat, lng: start.lng })];
+    tour.onPosition({ lat: p1.lat, lng: p1.lng, speedMps: 8, headingDeg: p1.heading });
+    await world.clock.advance(3_000); // Tier One slotted as the waiter
+    const p2 = fpAlong(seg, 0.12);
+    world.candidates = [makeCandidate('Tier Two Castle', { tier1: true, lat: start.lat, lng: start.lng })];
+    tour.onPosition({ lat: p2.lat, lng: p2.lng, speedMps: 8, headingDeg: p2.heading });
+    await world.clock.advance(3_000); // Tier Two offered → pending lane
+    check('Tier Two waits in the pending lane (not committed)',
+      !world.eventsOf('story_played').some(e => e.payload.subject === 'tier two castle'),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    // The at-speed corridor offer meets the Tier-1 waiter:
+    // priority cannot displace it, so the item is retained.
+    tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 27, headingDeg: heading });
+    await world.clock.advance(3_000);
+    check('the corridor item is not committed yet (retained, not slotted)',
+      !world.eventsOf('story_played').some(e => e.payload.subject === `corridor:${seg.id}`),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    check('no corridor-pending marker has fired yet',
+      world.eventsOf('corridor_pending_promoted').length === 0 && world.eventsOf('corridor_pending_dropped').length === 0,
+      JSON.stringify([...world.eventsOf('corridor_pending_promoted'), ...world.eventsOf('corridor_pending_dropped')].map(e => e.payload)));
+    // Alpha ends → Tier One dequeues → the refill promotes
+    // the retained corridor item into the slot AHEAD of the
+    // pending Tier Two.
+    await world.clock.advance(45_000);
+    const promoted = world.eventsOf('corridor_pending_promoted');
+    check('the promotion marker fired for this segment',
+      promoted.length === 1 && promoted[0].payload.segment_id === seg.id,
+      JSON.stringify(promoted.map(e => e.payload)));
+    const commits = world.eventsOf('story_played').map(e => e.payload.subject);
+    check('the corridor item committed before the pending Tier Two',
+      commits.indexOf(`corridor:${seg.id}`) >= 0 &&
+        (commits.indexOf('tier two castle') === -1 || commits.indexOf(`corridor:${seg.id}`) < commits.indexOf('tier two castle')),
+      commits.join(','));
+    await world.clock.advance(200_000); // everything plays out
+    const order = ['Alpha Park', 'Tier One Museum', seg.displayName, 'Tier Two Castle'].map(l => soundedLabels.indexOf(l));
+    check('sounding order: Alpha → Tier One → corridor → Tier Two',
+      order.every(i => i >= 0) && order[0] < order[1] && order[1] < order[2] && order[2] < order[3],
+      soundedLabels.join(','));
+    tour.endTour();
+  }
+
+  suite('FP-5b speed regime: the retained item is dropped on segment exit');
+  {
+    resetLocalStorage();
+    const { seg, start, heading } = fpPickSeg();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: start.lat, lng: start.lng, distanceM: 100 })],
+      library: [
+        { name: 'Alpha Park', lat: start.lat, lng: start.lng },
+        seg.displayName,
+        { name: 'Tier One Museum', lat: start.lat, lng: start.lng },
+      ],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 45_000 }));
+    const tour = await startAt(world, audio, start, 8, heading);
+    const soundedLabels = watchLabels(world, tour);
+    await world.clock.advance(40_000);
+    const p1 = fpAlong(seg, 0.05);
+    world.candidates = [makeCandidate('Tier One Museum', { tier1: true, lat: start.lat, lng: start.lng })];
+    tour.onPosition({ lat: p1.lat, lng: p1.lng, speedMps: 8, headingDeg: p1.heading });
+    await world.clock.advance(3_000); // Tier One slotted
+    tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 27, headingDeg: heading });
+    await world.clock.advance(3_000); // corridor offer buffers → retained
+    // Drive off the segment (4+ km perpendicular), still fast.
+    tour.onPosition({ lat: start.lat, lng: start.lng + 0.05, speedMps: 27, headingDeg: heading });
+    await world.clock.advance(2_000);
+    const dropped = world.eventsOf('corridor_pending_dropped');
+    check('the drop marker fired with reason segment-exit',
+      dropped.length === 1 && dropped[0].payload.segment_id === seg.id && dropped[0].payload.reason === 'segment-exit',
+      JSON.stringify(dropped.map(e => e.payload)));
+    await world.clock.advance(200_000);
+    check('no promotion ever fired', world.eventsOf('corridor_pending_promoted').length === 0);
+    check('the corridor story never committed or sounded',
+      !world.eventsOf('story_played').some(e => e.payload.subject === `corridor:${seg.id}`) &&
+        !soundedLabels.includes(seg.displayName),
+      soundedLabels.join(','));
+    tour.endTour();
+  }
+
+  suite('FP-5c speed regime: the retained item is dropped when speed falls below the line');
+  {
+    resetLocalStorage();
+    const { seg, start, heading } = fpPickSeg();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: start.lat, lng: start.lng, distanceM: 100 })],
+      library: [
+        { name: 'Alpha Park', lat: start.lat, lng: start.lng },
+        seg.displayName,
+        { name: 'Tier One Museum', lat: start.lat, lng: start.lng },
+      ],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 45_000 }));
+    const tour = await startAt(world, audio, start, 8, heading);
+    const soundedLabels = watchLabels(world, tour);
+    await world.clock.advance(40_000);
+    const p1 = fpAlong(seg, 0.05);
+    world.candidates = [makeCandidate('Tier One Museum', { tier1: true, lat: start.lat, lng: start.lng })];
+    tour.onPosition({ lat: p1.lat, lng: p1.lng, speedMps: 8, headingDeg: p1.heading });
+    await world.clock.advance(3_000); // Tier One slotted
+    tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 27, headingDeg: heading });
+    await world.clock.advance(3_000); // corridor offer buffers → retained
+    // Slow down ON the segment: the regime ends, the item dies.
+    tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 8, headingDeg: heading });
+    await world.clock.advance(2_000);
+    const dropped = world.eventsOf('corridor_pending_dropped');
+    check('the drop marker fired with reason speed',
+      dropped.length === 1 && dropped[0].payload.segment_id === seg.id && dropped[0].payload.reason === 'speed',
+      JSON.stringify(dropped.map(e => e.payload)));
+    // Leave the ground so no ordinary-lane re-serve can occur.
+    tour.onPosition({ lat: start.lat, lng: start.lng + 0.05, speedMps: 8, headingDeg: heading });
+    await world.clock.advance(200_000);
+    check('no promotion ever fired', world.eventsOf('corridor_pending_promoted').length === 0);
+    check('the corridor story never committed or sounded',
+      !world.eventsOf('story_played').some(e => e.payload.subject === `corridor:${seg.id}`) &&
+        !soundedLabels.includes(seg.displayName),
+      soundedLabels.join(','));
+    tour.endTour();
+  }
+
+  suite('FP-6 speed regime: below the line the corridor lane is unchanged (buffer drops, no retention, segment unconsumed)');
+  {
+    resetLocalStorage();
+    const { seg, start, heading } = fpPickSeg();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: start.lat, lng: start.lng, distanceM: 100 })],
+      library: [
+        { name: 'Alpha Park', lat: start.lat, lng: start.lng },
+        seg.displayName,
+        { name: 'Tier One Museum', lat: start.lat, lng: start.lng },
+      ],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 45_000 }));
+    const tour = world.makeTour(audio);
+    const soundedLabels = watchLabels(world, tour);
+    tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 8, headingDeg: heading });
+    tour.start(false);
+    // Earn eligibility with a fast tick while the opening gate
+    // still bars corridor serves (the serve aborts, the
+    // eligibility banks) — the only way to reach a below-speed
+    // offer on an eligible segment.
+    tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 27, headingDeg: heading });
+    await world.clock.advance(2_000);
+    await world.clock.advance(40_000); // opening done; Alpha playing
+    const p1 = fpAlong(seg, 0.05);
+    world.candidates = [makeCandidate('Tier One Museum', { tier1: true, lat: start.lat, lng: start.lng })];
+    // Slot Tier One from OFF the segment: the segment is
+    // already eligible (banked above), so an on-segment nudge
+    // would fire serveCorridor into the still-empty slot
+    // before the cycle can stock the waiter.
+    tour.onPosition({ lat: p1.lat, lng: p1.lng + 0.005, speedMps: 8, headingDeg: p1.heading });
+    await world.clock.advance(3_000); // Tier One slotted
+    world.candidates = [];
+    // The below-speed offer meets the Tier-1 waiter and lands
+    // 'buffer' — historically the end of it.
+    tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 8, headingDeg: heading });
+    await world.clock.advance(3_000);
+    check('no corridor-pending marker fired below the line',
+      world.eventsOf('corridor_pending_promoted').length === 0 && world.eventsOf('corridor_pending_dropped').length === 0,
+      JSON.stringify([...world.eventsOf('corridor_pending_promoted'), ...world.eventsOf('corridor_pending_dropped')].map(e => e.payload)));
+    await world.clock.advance(150_000); // Alpha and Tier One play out
+    check('the buffered corridor story never committed or sounded (no retention below the line)',
+      !world.eventsOf('story_played').some(e => e.payload.subject === `corridor:${seg.id}`) &&
+        !soundedLabels.includes(seg.displayName),
+      soundedLabels.join(','));
+    // The segment was never consumed by the drop: a later
+    // at-speed pass serves it through the ordinary lane.
+    tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 27, headingDeg: heading });
+    await world.clock.advance(3_000);
+    check('the segment serves on a later pass (the buffer drop consumed nothing)',
+      world.eventsOf('story_played').some(e => e.payload.subject === `corridor:${seg.id}`),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    await world.clock.advance(60_000);
+    check('and it sounds', soundedLabels.includes(seg.displayName), soundedLabels.join(','));
+    tour.endTour();
+  }
+
+  suite('FP-6b speed regime: below the line the fresher/anchor law still governs displacement (corridor fix 1, unregimented)');
+  {
+    resetLocalStorage();
+    const { seg, start, heading } = fpPickSeg();
+    const mid = fpAlong(seg, 0.5);
+    const waiterPos = { lat: mid.lat, lng: mid.lng + 500 / fpMpdLng(mid.lat) };
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: start.lat, lng: start.lng, distanceM: 100 })],
+      library: [
+        { name: 'Alpha Park', lat: start.lat, lng: start.lng },
+        seg.displayName,
+        { name: 'Waiter Place', lat: waiterPos.lat, lng: waiterPos.lng },
+      ],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 90_000 }));
+    const tour = world.makeTour(audio);
+    const soundedLabels = watchLabels(world, tour);
+    tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 8, headingDeg: mid.heading });
+    tour.start(false);
+    // Bank eligibility during the gated opening, as in FP-6.
+    tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 27, headingDeg: mid.heading });
+    await world.clock.advance(2_000);
+    await world.clock.advance(40_000); // opening done; Alpha playing (90 s)
+    world.candidates = [makeCandidate('Waiter Place', { lat: waiterPos.lat, lng: waiterPos.lng, distanceM: 60 })];
+    tour.onPosition({ lat: waiterPos.lat, lng: waiterPos.lng, speedMps: 8, headingDeg: mid.heading });
+    await world.clock.advance(3_000); // waiter slotted (off-segment: no trigger fires)
+    // Step onto the midpoint BELOW the line: the offer is the
+    // historical one — fresher, measured from the nearest
+    // point on the segment (fix 1), and it wins.
+    tour.onPosition({ lat: mid.lat, lng: mid.lng, speedMps: 8, headingDeg: mid.heading });
+    await world.clock.advance(3_000);
+    const drops = world.eventsOf('story_dropped');
+    check('below the line the corridor item displaces by fresher, not priority',
+      drops.some(d => d.payload.reason === 'displaced-fresher') &&
+        !drops.some(d => d.payload.reason === 'displaced-priority'),
+      JSON.stringify(drops.map(d => d.payload)));
+    check('the corridor story committed',
+      world.eventsOf('story_played').some(e => e.payload.subject === `corridor:${seg.id}`),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    await world.clock.advance(150_000);
+    check('the corridor story sounds after the playing story', soundedLabels.includes(seg.displayName), soundedLabels.join(','));
+    tour.endTour();
+  }
+
+  suite('FP-7 welcome versions: on dense ground the welcome lane serves the intro short cut');
+  {
+    resetLocalStorage();
+    const pos2 = { lat: UTC.lat + 0.004, lng: UTC.lng };
+    const density = ['Density One', 'Density Two', 'Density Three', 'Density Four', 'Density Five', 'Density Six', 'Density Seven'].map(
+      name => ({ name, lat: pos2.lat, lng: pos2.lng }),
+    );
+    const world = makeWorld(Tour, {
+      candidates: [],
+      intros: ['Kearny Mesa'],
+      library: [{ name: 'Kearny Mesa', angles: ['neighborhood_intro (short cut)'], lat: pos2.lat, lng: pos2.lng }, ...density],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Kearny Mesa', city: 'San Diego' };
+    tour.onPosition({ lat: pos2.lat, lng: pos2.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    const played = welcomePlayed(world, 'welcome:kearny mesa');
+    check('welcome committed exactly once', played.length === 1, `n=${played.length}`);
+    check('the served welcome is the short cut (telemetry angle)',
+      played[0]?.payload.angle === 'neighborhood_intro (short cut)', JSON.stringify(played[0]?.payload));
+    check('the cut audio is what played',
+      audio.log.some(e => typeof e.src === 'string' && e.src.includes('neighborhood_intro (short cut).wav')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    check('the full intro audio never played',
+      !audio.log.some(e => typeof e.src === 'string' && e.src.endsWith('/neighborhood_intro.wav')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    tour.endTour();
+  }
+
+  suite('FP-8 welcome versions: on thin ground the full intro serves even when a cut exists; without a cut, dense ground changes nothing');
+  {
+    resetLocalStorage();
+    const pos2 = { lat: UTC.lat + 0.004, lng: UTC.lng };
+    const world = makeWorld(Tour, {
+      candidates: [],
+      intros: ['Kearny Mesa'],
+      library: [
+        { name: 'Kearny Mesa', angles: ['neighborhood_intro (short cut)'], lat: pos2.lat, lng: pos2.lng },
+        { name: 'Density One', lat: pos2.lat, lng: pos2.lng },
+        { name: 'Density Two', lat: pos2.lat, lng: pos2.lng },
+      ],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Kearny Mesa', city: 'San Diego' };
+    tour.onPosition({ lat: pos2.lat, lng: pos2.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    const played = welcomePlayed(world, 'welcome:kearny mesa');
+    check('thin ground: the FULL intro serves', played[0]?.payload.angle === 'neighborhood_intro', JSON.stringify(played[0]?.payload));
+    check('thin ground: the cut audio never played',
+      !audio.log.some(e => typeof e.src === 'string' && e.src.includes('(short cut)')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    tour.endTour();
+  }
+  {
+    resetLocalStorage();
+    const pos2 = { lat: UTC.lat + 0.004, lng: UTC.lng };
+    const density = ['Density One', 'Density Two', 'Density Three', 'Density Four', 'Density Five', 'Density Six', 'Density Seven'].map(
+      name => ({ name, lat: pos2.lat, lng: pos2.lng }),
+    );
+    const world = makeWorld(Tour, {
+      candidates: [],
+      intros: ['Kearny Mesa'],
+      library: [...density],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    world.area = { neighborhood: 'Kearny Mesa', city: 'San Diego' };
+    tour.onPosition({ lat: pos2.lat, lng: pos2.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    const played = welcomePlayed(world, 'welcome:kearny mesa');
+    check('dense ground, no cut on the shelf: the full intro serves exactly as before',
+      played[0]?.payload.angle === 'neighborhood_intro', JSON.stringify(played[0]?.payload));
+    tour.endTour();
+  }
+
+  suite('FP-9 portal regression: a national house serves only as a portal, payload next (the gate is unchanged by the tier change)');
+  {
+    resetLocalStorage();
+    // Burnham-Marston House is a national house whose
+    // discovery candidate is now tier1: false (FP-2). The
+    // gate never consulted the tier: licensed by its payload,
+    // it serves — and the payload is the very next story,
+    // exactly as HP-1 proved for an ordinary house.
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Burnham-Marston House', { tier1: false }), makeCandidate('Grand Museum')],
+      library: [
+        { name: 'Burnham-Marston House', angles: ['landmark_origin'] },
+        { name: 'Grand Museum', angles: ['landmark_origin'] },
+      ],
+    });
+    starvePrefetch(world);
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    for (let i = 0; i < 80 && storySubjects(world).length < 2; i++) await world.clock.advance(5_000);
+    await world.clock.advance(45_000);
+    const subjects = storySubjects(world);
+    check('the national house served (a payload stands on its ground)', subjects.includes('burnham-marston house'),
+      JSON.stringify(subjects));
+    check('the payload sounds immediately after the house — no story between them',
+      subjects.indexOf('burnham-marston house') >= 0 &&
+        subjects.indexOf('grand museum') === subjects.indexOf('burnham-marston house') + 1,
+      JSON.stringify(subjects));
+    tour.endTour();
   }
 }

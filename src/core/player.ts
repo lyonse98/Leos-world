@@ -179,6 +179,19 @@ export interface PlayerHooks {
   onDeferred(item: AudibleItem): void;
   /** The waiting slot emptied and nothing is pending: a serve cycle may refill it (S2). */
   onSlotEmpty(): void;
+  /**
+   * Corridor-pending promotion (Nov 15, 2026): consulted at
+   * every slot refill BEFORE the Tier-1 pending lane — the
+   * engine's retained at-speed corridor item claims the empty
+   * slot ahead of uncommitted Tier-1 pendings when its
+   * perishability checks still pass (the engine drops it
+   * engine-side when they don't). Returns the item to slot —
+   * the player commits it as it takes the slot, exactly like a
+   * pending Tier-1 — or null to fall through to the pending
+   * lane. Optional: route mode never installs it, so its refill
+   * order is untouched.
+   */
+  priorityRefillItem?: () => AudibleItem | null;
   /** A location story has been committed (§8 story_played): it took the waiting slot or the element. Fires exactly once per committed story. */
   onStoryCommitted(item: AudibleItem): void;
   /** An item's sound has actually started (its play() resolved). */
@@ -406,8 +419,21 @@ export class Player {
    * Offer a location story. Returns where it landed:
    * 'slotted' (the one waiting slot), 'pending' (Tier-1 awaiting the
    * slot), or 'buffer' (the engine keeps it as a prefetch candidate).
+   *
+   * `priorityClass` (Nov 15, 2026): an at-speed corridor offer —
+   * the newcomer is judged for displacement as priority-class
+   * (the Q6 'priority' ruling, which itself bars reserved and
+   * Tier-1 waiters), but it is NOT Tier-1: it never defers a
+   * welcome, and when it cannot take the slot it lands 'buffer'
+   * for the engine's own retention lane instead of joining
+   * pendingPriority. Below the speed line the engine passes no
+   * flag and the offer is exactly the historical one.
    */
-  offerStory(item: AudibleItem, tier1: boolean): 'slotted' | 'pending' | 'buffer' {
+  offerStory(
+    item: AudibleItem,
+    tier1: boolean,
+    opts?: { priorityClass?: boolean },
+  ): 'slotted' | 'pending' | 'buffer' {
     if (this.tornDown) {
       this.settleItem(item, {
         sounded: false,
@@ -428,6 +454,29 @@ export class Player {
       this.pump();
       this.hooks.onState();
       return 'slotted';
+    }
+    if (!tier1 && opts?.priorityClass) {
+      // Priority-class displacement (Nov 15, 2026): the Q6
+      // 'priority' ruling against an ordinary waiter, nothing
+      // more — mayDisplace itself refuses reserved (welcome)
+      // and Tier-1 waiters, and the deferral branch below is a
+      // Tier-1 newcomer's right, never a corridor item's. A
+      // failed ruling lands 'buffer': the engine retains the
+      // item in its corridor-pending slot; it does NOT join
+      // pendingPriority. ('priority' subsumes 'fresher' here:
+      // every bar that refuses priority refuses fresher too,
+      // and against an ordinary waiter priority needs no
+      // distance or recency proof.)
+      if (!this.holdActive() && this.hooks.mayDisplace(this.waitingStory, item, 'priority')) {
+        const waiter = this.waitingStory;
+        this.waitingStory = item;
+        this.commitStory(item);
+        this.hooks.onWaiting(item);
+        this.settleItem(waiter, this.dropRecord('displaced-priority'));
+        this.hooks.onState();
+        return 'slotted';
+      }
+      return 'buffer';
     }
     if (tier1) {
       // Deferral (Nov 1): a deferrable waiter (the mid-tour
@@ -915,7 +964,23 @@ export class Player {
   }
 
   private refillSlotFromPending(): void {
-    if (!this.waitingStory && this.pendingPriority.length > 0) {
+    if (this.waitingStory) return;
+    // Corridor-pending promotion (Nov 15, 2026): ahead of the
+    // Tier-1 pending lane, the engine's retained at-speed
+    // corridor item claims the empty slot when its checks pass.
+    // It displaces nobody — the slot is empty by construction —
+    // and uncommitted Tier-1 pendings simply wait one story
+    // longer, exactly as they would behind any refill.
+    const priority = this.hooks.priorityRefillItem?.() ?? null;
+    if (priority) {
+      this.waitingStory = priority;
+      // Taking the slot is the promoted item's commitment (§8),
+      // the same edge a pending Tier-1 commits at.
+      this.commitStory(priority);
+      this.hooks.onWaiting(priority);
+      return;
+    }
+    if (this.pendingPriority.length > 0) {
       this.waitingStory = this.pendingPriority.shift() as AudibleItem;
       // Taking the slot is the pending Tier-1's commitment (Q4/§8).
       this.commitStory(this.waitingStory);

@@ -2,6 +2,8 @@
 // Bundled with esbuild (platform=node) by run.mjs; never shipped.
 export { Tour } from '../../src/core/tour';
 export { Player, makePrimeUrl } from '../../src/core/player';
+export { discoverCandidates } from '../../src/core/facts';
+export { isTier1HouseException } from '../../src/data/tier1HouseExceptions';
 export {
   daypartOf,
   eligibleIntroForms,

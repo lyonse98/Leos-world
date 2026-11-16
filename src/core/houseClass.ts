@@ -70,7 +70,16 @@ const NON_RESIDENCE_COMPOUNDS = [
 ];
 
 const RESIDENCE_WORDS =
-  /\bspec house\b|\bhouse\b|\bcottages?\b|\bresidence\b|\bmansions?\b|\bbungalows?\b|\bvillas?\b/;
+  /\bspec houses?\b|\bhouses?\b|\bcottages?\b|\bresidences?\b|\bmansions?\b|\bbungalows?\b|\bvillas?\b/;
+// Plural consistency (Nov 15, 2026): every word above already
+// carried its plural except house/residence — so the class's
+// own headline case, "A.H. Sweet Residences" (the
+// National-Register house whose Tier-1 serve motivated the
+// portal ruling), classified as NOT a house, and the Lillie
+// and James North Houses with it. Those three registry
+// records are the entire measured widening; the compound
+// exclusions above run first, so playhouses/warehouses and
+// their plurals stay excluded exactly as before.
 
 /** True when a place name names a residence (see the header for the exact class). */
 export function isHousePlaceName(name: string): boolean {

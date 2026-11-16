@@ -41,6 +41,10 @@ const extras = {
     validateHookText: engine.validateHookText,
   },
   routeInterItemGapMs: engine.routeInterItemGapMs,
+  facts: {
+    discoverCandidates: engine.discoverCandidates,
+    isTier1HouseException: engine.isTier1HouseException,
+  },
   CORRIDOR_SEGMENTS: engine.CORRIDOR_SEGMENTS,
   CORRIDOR_BUFFER_M: engine.CORRIDOR_BUFFER_M,
   matchCorridor: engine.matchCorridor,

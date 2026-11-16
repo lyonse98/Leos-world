@@ -8,6 +8,7 @@
 
 import registryData from '../data/sd-historic-registry.json';
 import { MAJOR_PLACES } from '../content/majorPlaces';
+import { isTier1HouseException } from '../data/tier1HouseExceptions';
 import { isHousePlaceName } from './houseClass';
 import { findNamedArea } from '../services/namedAreas';
 import { calculateDistance } from '../utils/geo';
@@ -141,6 +142,27 @@ function isNational(rec: RegistryRecord): boolean {
   return rec.registers.includes('national');
 }
 
+/**
+ * Does this registry record confer Tier-1 on the candidate it
+ * folds onto? A national listing does — UNLESS the candidate is
+ * a house (Erik's ruling, Nov 15, 2026): a registered residence
+ * is a residence however it is listed, and the Nov 14 field
+ * evidence was National-Register houses riding the Tier-1
+ * pending lane and displacement protection like landmark
+ * stories. The score boost is untouched (a national house still
+ * out-scores a local one); only the tier privilege goes. The
+ * curated destination houses in tier1HouseExceptions keep
+ * Tier-1 — the exception is judged on either name the candidate
+ * carries (the Places display name or the registry's own), the
+ * same two-dialect rule the portal gate judges a place by.
+ */
+function registryConfersTier1(candidateName: string, rec: RegistryRecord): boolean {
+  if (!isNational(rec)) return false;
+  const house = isHousePlaceName(candidateName) || isHousePlaceName(rec.name);
+  if (!house) return true;
+  return isTier1HouseException(candidateName) || isTier1HouseException(rec.name);
+}
+
 const REGISTRY_BOOST_CAP = 25;
 
 /**
@@ -169,7 +191,7 @@ export async function discoverCandidates(center: GeoPoint, radiusM: number): Pro
       const c = byGround.get(existingKey) as Candidate;
       c.registry = rec;
       c.score += boost;
-      if (national) c.tier1 = true;
+      if (registryConfersTier1(c.name, rec)) c.tier1 = true;
     } else {
       byGround.set(rec.name.toLowerCase().trim(), {
         name: rec.name,
@@ -180,7 +202,7 @@ export async function discoverCandidates(center: GeoPoint, radiusM: number): Pro
         rating: null,
         userRatings: null,
         address: rec.address,
-        tier1: national,
+        tier1: registryConfersTier1(rec.name, rec),
         score: 20 + boost,
         registry: rec,
         distanceM: dist,
