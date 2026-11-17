@@ -93,7 +93,15 @@
 // Player.enqueueNext), and the plan resumes at the next unplayed
 // item. One question at a time, mirroring freeform's lock.
 
-import { GAP_MS, Player, type AudibleItem, type AudioPort, type LatchState, systemClock } from './player';
+import {
+  GAP_MS,
+  Player,
+  type AudibleItem,
+  type AudioPort,
+  type LatchState,
+  type SettleRecord,
+  systemClock,
+} from './player';
 import { bucketUrl } from './backend';
 import type { RouteDriveRecord } from './routeHistory';
 import {
@@ -117,9 +125,11 @@ import {
   haversineM,
   isDestinationArea,
   isOffCorridor,
+  isShortCutAngle,
   neutralSeamTextFor,
   owedLine,
   progressAlongPath,
+  SHORT_CUT_SUFFIX,
   type BridgeContext,
   type BridgeEpisodeState,
   type GeoPoint,
@@ -128,6 +138,8 @@ import {
   type PlanItem,
   type RoutePlan,
 } from './routeMode';
+import { observeStoryOutcome, ROUTE_OUTCOME_PROVENANCE, type ProfileStore } from './profile';
+import { tagsFor } from '../data/routeTags';
 import {
   AmbientBedController,
   isUrbanAreaName,
@@ -592,6 +604,18 @@ export interface RouteRunnerDeps {
    * never cached.
    */
   placeMemoryRecords?: () => RouteDriveRecord[];
+  /**
+   * Profile inference store (v16.2 Slice 7): route-episode
+   * story outcomes feed the profile's inferred layer through
+   * this store (see the inference block in onItemSettle).
+   * Unlike the gated deps above, absence is NOT a gate: with
+   * no dep the runner observes through the profile's shipped
+   * localStorage store, exactly as freeform's settle wiring
+   * does — inference is simply part of playback. The dep
+   * exists so harnesses can observe the writes, and so a
+   * future non-localStorage binding has exactly one seam.
+   */
+  profileStore?: ProfileStore;
   /** Best-effort heard recording for a sounded story (App wires backend.recordHeard). */
   onStoryHeard?: (unit: LibraryUnit) => void;
   /**
@@ -2848,7 +2872,7 @@ export class RoutePlanRunner {
 
   private async toAudibleItem(it: PlanItem): Promise<AudibleItem | null> {
     const id = `route-${++runnerSeq}`;
-    const onSettle = (rec: { sounded: boolean; skipped: boolean }) => this.onItemSettle(it, rec);
+    const onSettle = (rec: SettleRecord) => this.onItemSettle(it, rec);
     if (it.kind === 'silence') {
       // Planned silence (Nov 11, 2026): no audio to render — the
       // Player item carries the composed duration and occupies
@@ -2928,7 +2952,7 @@ export class RoutePlanRunner {
     }
   }
 
-  private onItemSettle(it: PlanItem, rec: { sounded: boolean; skipped: boolean }): void {
+  private onItemSettle(it: PlanItem, rec: SettleRecord): void {
     const sounded = rec.sounded;
     // Ambient bed tap (Nov 5, 2026): a settle is a story
     // boundary — a due bed adoption lands here when it can,
@@ -2986,6 +3010,48 @@ export class RoutePlanRunner {
       this.playedStoryIds.add(it.unit.id);
       this.lastSoundedStoryId = it.id;
       this.deps.onStoryHeard?.(it.unit);
+      // Profile inference (v16.2 Slice 7, Nov 16, 2026): a
+      // sounded library story's outcome is the same taste
+      // signal freeform's settles feed the profile — a
+      // completion gains its tag topics a little confidence;
+      // a real listen cut short (the listener's skip, or the
+      // tour ending mid-story: the Player's sounded-but-not-
+      // completed settle, which freeform reads identically)
+      // loses a little — under ROUTE provenance, so the
+      // profile's record keeps the two engines' evidence
+      // distinguishable. Same weights, same ≥10 s floor,
+      // same fences as tour.ts's wiring: best-effort and
+      // fully try/caught (the observation can never disturb
+      // playback), the short-cut suffix stripped before the
+      // tag join just as freeform strips it, untagged stories
+      // teach nothing, and the profile module itself no-ops
+      // while paused. The item set is deliberately the heard
+      // block's own — kind 'story' with a unit, sounded:
+      // hosted fillers and tissue are not place stories and
+      // teach nothing, exactly as they are not heard-recorded,
+      // and a story the feed gate dropped stale never sounds,
+      // so it never settles here at all (the road took it —
+      // not a rejection). Stories an episode never reaches
+      // file nothing: there is no outcome to observe.
+      try {
+        const baseAngle = isShortCutAngle(it.unit.angle)
+          ? it.unit.angle.slice(0, -SHORT_CUT_SUFFIX.length)
+          : it.unit.angle;
+        const topics = tagsFor(it.unit.placeKey, baseAngle).topics;
+        if (topics.length > 0) {
+          observeStoryOutcome(
+            {
+              topics,
+              completed: rec.completed,
+              soundedMs: rec.soundedMs,
+              provenance: ROUTE_OUTCOME_PROVENANCE,
+            },
+            this.deps.profileStore,
+          );
+        }
+      } catch {
+        /* inference is a nicety — never a playback failure */
+      }
     }
     // The preview is not a story (consolidation §2): it is
     // never heard-recorded and never owed — its only trace is
