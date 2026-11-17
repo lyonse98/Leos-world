@@ -58,7 +58,15 @@
 // still charged — the governor sits at the layer's seam and
 // cannot see inside the provider. At pilot scale both
 // errors lean the same way: the cap trips a little early
-// rather than a little late.
+// rather than a little late. (3) An ask is the layer's
+// LOGICAL request for one anchor: the provider's key walk
+// (currentEvents.ts, Nov 17, 2026) may put several HTTP
+// attempts on the wire for it — one per configured key,
+// plus a single retry pass — but the walk stops at the
+// first key that answers, and restriction-denied or
+// transport-failed attempts never become billable Google
+// requests, so one ask yields at most one billable request
+// and is charged exactly once, here at the seam.
 //
 // DEGRADATION, NEVER SILENCE.
 // When the month's ledger reaches the cap, governed asks

@@ -6198,6 +6198,107 @@ export async function runScenarios(Tour, extras) {
       currentEvents.kindForTypes(['restaurant', 'bar']) === 'drink');
   }
 
+  // CE-7 (Nov 17, 2026, v16.2 audit fix): the key walk. The
+  // layer's Places calls walk every configured key — a 403
+  // restriction block (or any failure) moves to the next key,
+  // a key that answers is definitive, and a no-answer walk
+  // earns one retry pass after the maps backoff — the
+  // route-mode discipline. Before the fix the provider took
+  // a single key and returned [] on its first error, so a
+  // restriction-blocked first key silently emptied the pool.
+  // The spend pins: the whole walk for one anchor is ONE
+  // metered ask — key attempts are not separate dispatches.
+  suite('CE-7 the key walk: a blocked key moves to the next, an answering key is definitive, one retry pass, one charge per ask');
+  {
+    const ce7Wire = {
+      id: 'ce7-place', displayName: { text: 'Ce7 Walk Tacos' },
+      location: { latitude: 32.853, longitude: -117.18 },
+      rating: 4.5, userRatingCount: 100, types: ['restaurant'],
+      formattedAddress: '1 Walk Way', businessStatus: 'OPERATIONAL',
+      utcOffsetMinutes: -480,
+      regularOpeningHours: { periods: ceDaily(9, 21) },
+    };
+    const ce7Res = (status, body = {}) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
+    const ce7Fetch = behavior => {
+      const calls = [];
+      const fn = async (url, init) => {
+        const key = init.headers['X-Goog-Api-Key'];
+        calls.push(key);
+        return behavior(key, calls.filter(k => k === key).length);
+      };
+      fn.calls = calls;
+      return fn;
+    };
+    const noSleep = async () => {};
+
+    const walk1 = ce7Fetch(key => (key === 'key-blocked' ? ce7Res(403, { error: { status: 'PERMISSION_DENIED' } }) : ce7Res(200, { places: [ce7Wire] })));
+    const walked = await currentEvents.fetchPlacesWithKeyWalk(CE_ANCHOR, 1200, ['key-blocked', 'key-open', 'key-third'], walk1, { sleep: noSleep });
+    check('a 403 on the first key moves to the next key, whose answer serves the call',
+      walked.length === 1 && walked[0].name === 'Ce7 Walk Tacos', JSON.stringify(walked.map(p => p.placeId)));
+    check('the walk stops at the answering key (the third key is never tried)',
+      JSON.stringify(walk1.calls) === JSON.stringify(['key-blocked', 'key-open']), JSON.stringify(walk1.calls));
+
+    const walk2 = ce7Fetch(() => ce7Res(200, { places: [] }));
+    const empty = await currentEvents.fetchPlacesWithKeyWalk(CE_ANCHOR, 1200, ['key-a', 'key-b'], walk2, { sleep: noSleep });
+    check('a key that answers with zero places is definitive — no further keys, no retry pass',
+      empty.length === 0 && walk2.calls.length === 1, JSON.stringify(walk2.calls));
+
+    const sleeps = [];
+    const walk3 = ce7Fetch((key, nth) => {
+      if (key === 'key-open') return nth >= 2 ? ce7Res(200, { places: [ce7Wire] }) : ce7Res(500);
+      if (key === 'key-blocked') return ce7Res(403);
+      throw new Error('transport down');
+    });
+    const retried = await currentEvents.fetchPlacesWithKeyWalk(CE_ANCHOR, 1200, ['key-blocked', 'key-open', 'key-throws'], walk3, {
+      sleep: async ms => { sleeps.push(ms); },
+    });
+    check('when no key answers, one retry pass after the 1.2 s maps backoff finds the recovered key',
+      retried.length === 1 && JSON.stringify(sleeps) === JSON.stringify([1200]) && walk3.calls.length === 5,
+      `places=${retried.length} sleeps=${JSON.stringify(sleeps)} calls=${walk3.calls.length}`);
+
+    const walk4 = ce7Fetch(() => ce7Res(403));
+    const dead = await currentEvents.fetchPlacesWithKeyWalk(CE_ANCHOR, 1200, ['key-a', 'key-b'], walk4, { sleep: noSleep });
+    check('every key failing both passes fails soft to empty — never an exception',
+      dead.length === 0 && walk4.calls.length === 4, `calls=${walk4.calls.length}`);
+
+    const walk5 = ce7Fetch(() => ce7Res(200, { places: [ce7Wire] }));
+    const noKeys = await currentEvents.fetchPlacesWithKeyWalk(CE_ANCHOR, 1200, [], walk5, { sleep: noSleep });
+    check('no configured keys never walks at all', noKeys.length === 0 && walk5.calls.length === 0);
+
+    // The shipped provider through discovery, with the
+    // bundle's env keys (fake-places → fake-maps →
+    // fake-gemini): the first is restriction-blocked, the
+    // second answers. Two HTTP attempts, ONE metered ask.
+    const realFetch = globalThis.fetch;
+    const envCalls = [];
+    globalThis.fetch = async (url, init) => {
+      const key = init.headers['X-Goog-Api-Key'];
+      envCalls.push(key);
+      if (key === 'fake-places') return ce7Res(403, { error: { status: 'PERMISSION_DENIED' } });
+      if (key === 'fake-maps') return ce7Res(200, { places: [ce7Wire] });
+      throw new Error('the walk should never reach the third key');
+    };
+    try {
+      const spendStore = ceMemStore();
+      const spendEvents = [];
+      const pool = await currentEvents.discoverEventCandidates([CE_ANCHOR], {
+        nowMs: CE_NOW, match: CE_NO_MATCH, constraints: CE_NO_CONSTRAINTS, cache: null,
+        spendStore, onSpendEvent: (type, payload) => spendEvents.push({ type, payload }),
+      });
+      check('through discovery, the shipped provider walks past the blocked env key and the pool is NOT empty',
+        pool.length === 1 && pool[0].placeId === 'ce7-place', JSON.stringify(pool.map(c => c.placeId)));
+      check('the walk made exactly two HTTP attempts and stopped at the answering key',
+        JSON.stringify(envCalls) === JSON.stringify(['fake-places', 'fake-maps']), JSON.stringify(envCalls));
+      const asks = spendEvents.filter(e => e.type === 'live_spend_ask');
+      check('the whole walk is ONE metered ask: one live_spend_ask, one $0.040 charge for the anchor',
+        asks.length === 1 && liveSpend.monthSpend(spendStore, CE_NOW).microUsd === 40_000 &&
+        liveSpend.monthSpend(spendStore, CE_NOW).asks === 1,
+        JSON.stringify(spendEvents.map(e => e.type)));
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+
   // ---------------------------------------------------------------
   // PC suites (Nov 16, 2026): profile in the composer, v16.2
   // Slice 3. The stored taste profile (declared + inferred

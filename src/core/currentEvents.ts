@@ -28,8 +28,11 @@
 // Data sources, honestly:
 //   - Places (New) searchNearby over eat/drink/do types, with
 //     regular/current opening hours + UTC offset in the field
-//     mask — the same API key and fail-soft posture as
-//     facts.ts discovery. Hours are cached on-device (below)
+//     mask. Every call walks all configured Google keys (the
+//     route-mode discipline — the keys' restriction lists
+//     differ per key), with one retry pass when no key
+//     answers; the layer fails soft to an empty pool.
+//     Hours are cached on-device (below)
 //     so a place's schedule is not re-fetched every cycle, and
 //     so a provider outage can fall back to cached records —
 //     which still must pass the freshness gate at serve time.
@@ -55,6 +58,8 @@
 // monthly ledger, and not dispatched at all once the month's
 // cap stands — discovery then serves from the hours cache
 // below, which is the designed degradation, not an error.
+// One ask is one anchor's fetch, however many keys its walk
+// tries internally (see fetchPlacesWithKeyWalk).
 
 import {
   assessEvent,
@@ -76,6 +81,11 @@ import {
   type SpendEventSink,
   type SpendLedgerStore,
 } from './liveSpend';
+import {
+  configuredKeys,
+  MAPS_RETRY_DELAY_MS,
+  type MapsCallOptions,
+} from './routeMode';
 import { calculateDistance } from '../utils/geo';
 
 // ------------------------------------------------------------ candidate model
@@ -157,10 +167,26 @@ export const NO_EVENTS_FEED: EventsFeedProvider = {
   },
 };
 
-const placesKey = (): string =>
-  (import.meta.env.VITE_GOOGLE_PLACES_API_KEY as string | undefined) ??
-  (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined) ??
-  '';
+/**
+ * The configured Google keys for this layer's Places calls,
+ * in the App's route-mode order (Places, Maps, Gemini),
+ * deduped with blanks dropped — the list the key walk below
+ * tries, per call (routeMode.configuredKeys). The bundle's
+ * keys carry DIFFERENT API-restriction lists (Nov 3, 2026,
+ * probe-verified), so no single key can be "the" Places key:
+ * the key named Places may be restriction-blocked for a call
+ * another key answers. (facts.ts keeps its own single-key
+ * copy for freeform discovery — a separate, pre-existing
+ * posture, not shared with this layer.)
+ */
+const placesKeys = (): string[] =>
+  configuredKeys(
+    [
+      import.meta.env.VITE_GOOGLE_PLACES_API_KEY as string | undefined,
+      import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined,
+      import.meta.env.VITE_GEMINI_API_KEY as string | undefined,
+    ].filter((k): k is string => typeof k === 'string'),
+  );
 
 /** Eat/drink/do types the layer asks Places about (story types stay facts.ts's list). */
 const CANDIDATE_TYPES = [
@@ -239,13 +265,31 @@ function mapWirePlace(p: PlacesResultWire, fetchedAt: number): RawPlace | null {
   };
 }
 
-/** The real provider: Places (New), same key + fail-soft posture as facts.ts. */
-export const googlePlacesHoursProvider: PlaceHoursProvider = {
-  async fetchPlaces(anchor, radiusM) {
-    const key = placesKey();
-    if (!key) return [];
+const placesSleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+
+/**
+ * ONE pass of the searchNearby key walk: every configured
+ * key in order until one ANSWERS. A key that answers — even
+ * with zero places — is definitive: the service itself
+ * judged the query, so later keys are not tried for it. A
+ * non-OK response (a 403 restriction block above all) or a
+ * transport failure moves to the next key, never fails the
+ * call. This is routeMode's geocodePass discipline, carried
+ * to this layer's call (v16.2 audit fix, Nov 17, 2026 — the
+ * layer previously took a single key and returned [] on the
+ * first error, so a restriction-blocked first key silently
+ * emptied the pool on every drive).
+ */
+async function searchNearbyPass(
+  anchor: EventAnchor,
+  radiusM: number,
+  keys: string[],
+  fetchFn: typeof fetch,
+): Promise<{ places: RawPlace[]; answered: boolean }> {
+  for (const key of keys) {
+    let res: Response;
     try {
-      const res = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
+      res = await fetchFn('https://places.googleapis.com/v1/places:searchNearby', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -265,18 +309,66 @@ export const googlePlacesHoursProvider: PlaceHoursProvider = {
           },
         }),
       });
-      if (!res.ok) return [];
-      const parsed = (await res.json()) as { places?: PlacesResultWire[] };
-      const fetchedAt = Date.now();
-      const out: RawPlace[] = [];
-      for (const p of parsed.places ?? []) {
-        const mapped = mapWirePlace(p, fetchedAt);
-        if (mapped) out.push(mapped);
-      }
-      return out;
     } catch {
-      return [];
+      continue; // transport failure → the next key
     }
+    if (!res.ok) continue; // blocked / failed key → the next key
+    let parsed: { places?: PlacesResultWire[] };
+    try {
+      parsed = (await res.json()) as { places?: PlacesResultWire[] };
+    } catch {
+      continue;
+    }
+    const fetchedAt = Date.now();
+    const out: RawPlace[] = [];
+    for (const p of parsed.places ?? []) {
+      const mapped = mapWirePlace(p, fetchedAt);
+      if (mapped) out.push(mapped);
+    }
+    return { places: out, answered: true };
+  }
+  return { places: [], answered: false };
+}
+
+/**
+ * The layer's Places fetch: the key walk above, with ONE
+ * retry pass after the maps backoff when NO key answered —
+ * geocodeDestination's discipline verbatim (a non-definitive
+ * outcome may be one transient failure on the one working
+ * key, merged with a standing 403 from a blocked one;
+ * definitive outcomes never retry, and no keys never walk).
+ * Fail-soft throughout: every key failing both passes is
+ * simply an empty result, never an exception.
+ *
+ * Spend accounting (liveSpend.ts): the governor charges
+ * ONE ask per call to this function — the key attempts and
+ * the retry pass inside it are NOT separate metered asks.
+ * The walk stops at the first key that answers, and denied
+ * (403) or transport-failed attempts never become billable
+ * Google requests, so one call yields at most one billable
+ * request; the per-ask estimate stays the ledger's upper
+ * bound (see the liveSpend header).
+ */
+export async function fetchPlacesWithKeyWalk(
+  anchor: EventAnchor,
+  radiusM: number,
+  apiKeys: string[],
+  fetchFn: typeof fetch = fetch,
+  opts: MapsCallOptions = {},
+): Promise<RawPlace[]> {
+  const keys = configuredKeys(apiKeys);
+  if (keys.length === 0) return [];
+  const first = await searchNearbyPass(anchor, radiusM, keys, fetchFn);
+  if (first.answered) return first.places;
+  await (opts.sleep ?? placesSleep)(opts.retryDelayMs ?? MAPS_RETRY_DELAY_MS);
+  const second = await searchNearbyPass(anchor, radiusM, keys, fetchFn);
+  return second.places;
+}
+
+/** The real provider: Places (New), walking every configured key (above). */
+export const googlePlacesHoursProvider: PlaceHoursProvider = {
+  async fetchPlaces(anchor, radiusM) {
+    return fetchPlacesWithKeyWalk(anchor, radiusM, placesKeys());
   },
 };
 
