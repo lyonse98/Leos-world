@@ -380,6 +380,7 @@ const TRAY_REASON_LABELS: Record<string, string> = {
   'top-rated': 'Top-rated nearby',
   nearby: 'Right nearby',
   'open-now': 'Open now',
+  'place-memory': 'A story you passed, still unheard',
 };
 
 /**
@@ -388,6 +389,20 @@ const TRAY_REASON_LABELS: Record<string, string> = {
  * expired entry never renders as a live claim.
  */
 function trayTimeLabel(record: ProposalRecord, expired: boolean): string {
+  // A place-memory entry (Slice 6) has no hours to expire —
+  // its claim is the unheard story. Heard since = caught up;
+  // still unheard = the pass fact, in the pass's own month.
+  if (record.flavor === 'place-memory') {
+    if (expired) return 'You heard this story on a later drive — all caught up';
+    if (record.passedAt !== null) {
+      const passed = new Date(record.passedAt);
+      const month = new Intl.DateTimeFormat('en-US', { month: 'long' }).format(passed);
+      const when =
+        passed.getFullYear() === new Date().getFullYear() ? `in ${month}` : `in ${month} ${passed.getFullYear()}`;
+      return `Passed on a drive ${when} — its story is still unheard`;
+    }
+    return 'A story you passed — still unheard';
+  }
   if (record.closesAtMs !== null) {
     const until = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(
       new Date(record.closesAtMs),
@@ -422,8 +437,28 @@ function SuggestionTray({
     const t = setInterval(() => setNowMs(Date.now()), 30_000);
     return () => clearInterval(t);
   }, [refreshKey]);
+  // Place-memory entries expire on heard evidence, not
+  // hours (Slice 6): the tray reads the heard ledger's place
+  // names (best-effort, like every ledger read in the shell)
+  // and hands their normalized keys to the display judge.
+  // Until the read lands — or if it fails — callbacks render
+  // unexpired rather than vanishing.
+  const [heardNameKeys, setHeardNameKeys] = useState<ReadonlySet<string> | undefined>(undefined);
+  useEffect(() => {
+    let live = true;
+    fetchHeardTopics(deviceKey())
+      .then(topics => {
+        if (live) setHeardNameKeys(new Set(topics.map(t => normalizePlaceName(t))));
+      })
+      .catch(() => {
+        /* the ledger is a filter, not a dependency */
+      });
+    return () => {
+      live = false;
+    };
+  }, [refreshKey]);
   const entries = loadProposalRecords(localProposalStore)
-    .map(record => ({ record, judgment: judgeTrayRecord(record, nowMs) }))
+    .map(record => ({ record, judgment: judgeTrayRecord(record, nowMs, heardNameKeys) }))
     .filter(e => e.judgment.visible);
   if (entries.length === 0) return null;
   return (
@@ -915,6 +950,11 @@ function MilesApp() {
         audio: createBrowserAudio(),
         clipUrls: engineRef.current?.clipUrls,
         declaredMode: () => rideModeRef.current,
+        // Place-memory callbacks (v16.2 Slice 6): the
+        // drive-record supply; the flavor still cannot fire
+        // with the suggestion gate closed (the seam engine
+        // sits behind declaredMode, as every proposal does).
+        placeMemoryRecords: () => loadDriveRecords(driveRecordStore),
       });
       engineRef.current = fresh;
       setEngine(fresh);
@@ -1105,6 +1145,9 @@ function MilesApp() {
       // The suggestion gate's input (Slice 4): the latched
       // declared mode, read at ask time.
       declaredMode: () => rideModeRef.current,
+      // Place-memory callbacks (v16.2 Slice 6): see the
+      // freeform-tail construction — same supply, same gate.
+      placeMemoryRecords: () => loadDriveRecords(driveRecordStore),
     });
     engineRef.current = fresh;
     setEngine(fresh);
@@ -1314,6 +1357,10 @@ function MilesApp() {
       ...(suggestionGateOpen(ROUTE_MODE_ENABLED, tourMode)
         ? {
             suggestionCandidates: async (anchors: EventAnchor[]) => discoverEventCandidates(anchors, {}),
+            // Place-memory callbacks (v16.2 Slice 6): the
+            // drive-record supply rides the SAME gate as the
+            // candidate supply — wired together or not at all.
+            placeMemoryRecords: () => loadDriveRecords(driveRecordStore),
           }
         : {}),
       onStoryHeard: unit => {
@@ -2904,6 +2951,7 @@ function MilesApp() {
       outcome,
       place_id: record.placeId,
       surface: 'tray',
+      flavor: record.flavor,
     }, { lat: position?.lat ?? null, lng: position?.lng ?? null, movementMode: rideMode });
     setTrayVersion(v => v + 1);
   };
