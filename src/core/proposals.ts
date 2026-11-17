@@ -78,23 +78,42 @@
 // App on the same path with surface 'tray'):
 //   proposal_offered    { place_id, candidate_kind,
 //                         reason_codes, primary_reason,
-//                         sponsored, detour_minutes }
-//   proposal_playback   { completed, sounded_ms, place_id }
-//   proposal_suppressed { reason, place_id }
+//                         sponsored, detour_minutes, flavor }
+//   proposal_playback   { completed, sounded_ms, place_id,
+//                         flavor }
+//   proposal_suppressed { reason, place_id, flavor }
 //   proposal_dropped    { reason: 'stale-at-speak' |
-//                         'closed-at-speak', place_id }
-//   proposal_trayed     { place_id }
+//                         'closed-at-speak' |
+//                         'heard-at-speak', place_id, flavor }
+//   proposal_trayed     { place_id, flavor }
 //   proposal_outcome    { outcome: 'accepted' | 'dismissed',
-//                         place_id, surface: 'drive' | 'tray' }
+//                         place_id, surface: 'drive' | 'tray',
+//                         flavor }
 // Offered / playback / trayed / outcome are what make the
 // policy's acceptance rate measurable. MEASUREMENT ONLY:
 // the brief's automatic demotion of proactive mode under a
 // low acceptance rate is NOT implemented in v1 — no code
 // here or in the engines reads the rate back into behavior.
+//
+// FLAVORS (v16.2 Slice 6). A proposal is one of two flavors:
+// 'place' — this slice's original, a freshness-verified stop
+// from the current-events pool — and 'place-memory' — a
+// callback to a story the listener passed on an earlier
+// drive and never heard (placeMemory.ts). The flavor rides
+// every event above so the two acceptance rates are
+// separately computable under the one demotion metric. The
+// flavors share the seam judge, the cap, and this tray; they
+// differ in their speak-time re-judgment (a place is judged
+// on its hours, a callback on its heard state) and in how a
+// tray entry expires (below).
 
 import { FRESHNESS_STANDARD } from './freshness';
 import type { EventCandidate } from './currentEvents';
+import { normalizePlaceName } from './routeHistory';
 import type { SuggestionReasonCode } from './suggestions';
+
+/** Which flavor of proposal a record / event belongs to. */
+export type ProposalFlavor = 'place' | 'place-memory';
 
 // ------------------------------------------------------------ the cap + fences
 
@@ -222,7 +241,12 @@ export type ProposalRecordState = 'spoken' | 'accepted' | 'dismissed';
 export interface ProposalRecord {
   placeId: string;
   name: string;
-  kind: EventCandidate['kind'];
+  /**
+   * The candidate's kind: a place flavor carries its pool
+   * kind (eat / drink / do); a place-memory callback carries
+   * 'story' — the thing being proposed is a telling.
+   */
+  kind: EventCandidate['kind'] | 'story';
   primaryReason: SuggestionReasonCode;
   closesAtMs: number | null;
   hoursFetchedAt: number;
@@ -230,6 +254,14 @@ export interface ProposalRecord {
   /** The drive that offered it (the outcome event's session), when known. */
   sessionId: string | null;
   state: ProposalRecordState;
+  /** The proposal's flavor (Slice 6). Records written before the flavor existed read as 'place'. */
+  flavor: ProposalFlavor;
+  /**
+   * Place-memory only: when the drive that passed the place
+   * concluded — the tray's "passed back in {month}" fact.
+   * Null on every place record.
+   */
+  passedAt: number | null;
 }
 
 export interface ProposalStore {
@@ -274,11 +306,15 @@ function cleanRecord(raw: unknown): ProposalRecord | null {
   const r = raw as Record<string, unknown>;
   if (typeof r.placeId !== 'string' || r.placeId.length === 0) return null;
   if (typeof r.name !== 'string' || r.name.length === 0) return null;
-  if (r.kind !== 'eat' && r.kind !== 'drink' && r.kind !== 'do') return null;
+  if (r.kind !== 'eat' && r.kind !== 'drink' && r.kind !== 'do' && r.kind !== 'story') return null;
   if (typeof r.primaryReason !== 'string' || r.primaryReason.length === 0) return null;
   if (r.closesAtMs !== null && typeof r.closesAtMs !== 'number') return null;
   if (typeof r.hoursFetchedAt !== 'number' || typeof r.offeredAt !== 'number') return null;
   if (r.state !== 'spoken' && r.state !== 'accepted' && r.state !== 'dismissed') return null;
+  // Flavor + passedAt are Slice 6 fields: a record written
+  // before they existed is a place record with no pass date.
+  if (r.flavor !== undefined && r.flavor !== 'place' && r.flavor !== 'place-memory') return null;
+  if (r.passedAt !== undefined && r.passedAt !== null && typeof r.passedAt !== 'number') return null;
   return {
     placeId: r.placeId,
     name: r.name,
@@ -289,6 +325,8 @@ function cleanRecord(raw: unknown): ProposalRecord | null {
     offeredAt: r.offeredAt,
     sessionId: typeof r.sessionId === 'string' ? r.sessionId : null,
     state: r.state,
+    flavor: (r.flavor as ProposalFlavor | undefined) ?? 'place',
+    passedAt: (r.passedAt as number | null | undefined) ?? null,
   };
 }
 
@@ -373,12 +411,31 @@ export interface TrayJudgment {
  * Judge one record for display, at display time — the same
  * freshness discipline as speech, applied to the screen:
  * what the tray shows must be true when it is shown.
+ *
+ * Expiry is flavor-shaped. A PLACE entry expires on its
+ * hours: its open-until passed, or its hours aged past the
+ * standard. A PLACE-MEMORY entry has no hours and no closing
+ * time — its claim is "this story is still unheard", so it
+ * expires exactly when that stops being true: the place
+ * stands in the caller's heard-name set (normalized keys).
+ * A caller that cannot supply heard evidence passes no set,
+ * and a callback then renders unexpired — fail-open toward
+ * showing the entry, because the tray's heard fetch is
+ * best-effort everywhere else in the shell too; the entry it
+ * might wrongly keep actionable is a story the listener can
+ * simply dismiss.
  */
-export function judgeTrayRecord(record: ProposalRecord, nowMs: number): TrayJudgment {
+export function judgeTrayRecord(
+  record: ProposalRecord,
+  nowMs: number,
+  heardNameKeys?: ReadonlySet<string>,
+): TrayJudgment {
   if (record.state === 'dismissed') return { visible: false, expired: false, actionable: false };
   const expired =
-    (record.closesAtMs !== null && record.closesAtMs <= nowMs) ||
-    nowMs - record.hoursFetchedAt > FRESHNESS_STANDARD.hoursMaxCacheAgeMs;
+    record.flavor === 'place-memory'
+      ? heardNameKeys !== undefined && heardNameKeys.has(normalizePlaceName(record.name))
+      : (record.closesAtMs !== null && record.closesAtMs <= nowMs) ||
+        nowMs - record.hoursFetchedAt > FRESHNESS_STANDARD.hoursMaxCacheAgeMs;
   return {
     visible: true,
     expired,
@@ -390,8 +447,9 @@ export function judgeTrayRecord(record: ProposalRecord, nowMs: number): TrayJudg
 export function trayEntries(
   store: ProposalStore,
   nowMs: number,
+  heardNameKeys?: ReadonlySet<string>,
 ): { record: ProposalRecord; judgment: TrayJudgment }[] {
   return loadProposalRecords(store)
-    .map(record => ({ record, judgment: judgeTrayRecord(record, nowMs) }))
+    .map(record => ({ record, judgment: judgeTrayRecord(record, nowMs, heardNameKeys) }))
     .filter(e => e.judgment.visible);
 }

@@ -126,6 +126,12 @@ export type SuggestionReasonCode =
   | 'top-rated'
   | 'nearby'
   | 'open-now'
+  // The place-memory callback flavor's reason (v16.2 Slice
+  // 6, placeMemory.ts): filed as a callback proposal's
+  // primary reason so its acceptance reads in the same
+  // vocabulary. This composer never produces it — a callback
+  // is not composed from the pool.
+  | 'place-memory'
   | 'pool-empty'
   | 'intent-unmatched'
   | 'all-stale'
