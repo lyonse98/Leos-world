@@ -185,7 +185,7 @@ export interface RouteRunnerView {
   suggestion: {
     available: boolean;
     phase: 'idle' | 'answering';
-    pending: { placeId: string; name: string; kind: string } | null;
+    pending: { placeId: string; name: string; kind: string; intent: SuggestionIntent } | null;
   };
   /** Suggestion picks that actually sounded this route tour. */
   suggestionsAnswered: number;
@@ -999,6 +999,7 @@ export class RoutePlanRunner {
               placeId: this.pendingSuggestion.placeId,
               name: this.pendingSuggestion.name,
               kind: this.pendingSuggestion.kind,
+              intent: this.pendingSuggestion.intent,
             }
           : null,
       },

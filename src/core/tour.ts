@@ -196,7 +196,7 @@ export interface TourView {
   suggestion: {
     available: boolean;
     phase: 'idle' | 'answering';
-    pending: { placeId: string; name: string; kind: string } | null;
+    pending: { placeId: string; name: string; kind: string; intent: SuggestionIntent } | null;
   };
   lastStory: { subject: string; label: string; angle: string | null } | null;
   likedSubject: string | null;
@@ -856,6 +856,7 @@ export class Tour {
               placeId: this.pendingSuggestion.placeId,
               name: this.pendingSuggestion.name,
               kind: this.pendingSuggestion.kind,
+              intent: this.pendingSuggestion.intent,
             }
           : null,
       },

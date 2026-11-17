@@ -33,6 +33,7 @@ import {
   routeOptionLabel,
   seatWovenMembers,
   selectMemberFetchEntries,
+  suggestionGateOpen,
   threadOptionLabel,
   toneOptionLabel,
   wovenIndexSupportByTopic,
@@ -61,6 +62,8 @@ import {
   type RouteRunnerView,
 } from './core/routePlayback';
 import { finishLiveRenderBlob } from './core/audioFinish';
+import { discoverEventCandidates, type EventAnchor } from './core/currentEvents';
+import type { SuggestionIntent } from './core/suggestions';
 import {
   DEFAULT_NARRATION_VOICE,
   narrationRequest,
@@ -283,6 +286,82 @@ function QuestionForm({
         Type a question — Miles answers one at a time, then the tour rolls on.
       </p>
     </form>
+  );
+}
+
+/**
+ * The suggestion panel (v16.2 Slice 4) — the solicited-
+ * suggestion surface, rendered ONLY when the suggestion gate
+ * is open (Passenger/Walking), inside the Ask sheet above the
+ * question form. In Driving mode this component never mounts:
+ * no chips, no outcome row, no surface at all. The ask is a
+ * tap, not a text field — three intents, one at a time; a
+ * delivered pick shows its outcome row (Sounds good / Another
+ * / No thanks) until the listener rules on it or asks again.
+ * Deliberately separate from the QuestionForm: suggestions
+ * are not questions, and neither surface borrows the other's
+ * state.
+ */
+function SuggestionPanel({
+  suggestion,
+  onAsk,
+  onResolve,
+}: {
+  suggestion: TourView['suggestion'];
+  onAsk: (intent: SuggestionIntent) => void;
+  onResolve: (outcome: 'accepted' | 'dismissed') => void;
+}) {
+  const busy = suggestion.phase !== 'idle';
+  const chip = (intent: SuggestionIntent, label: string) => (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={() => onAsk(intent)}
+      className="flex-1 whitespace-nowrap rounded-full bg-sage/25 px-3 py-2.5 text-sm font-bold text-ink transition hover:bg-sage/40 active:scale-[0.99] disabled:opacity-50"
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div className="mb-3 border-b border-ink/10 pb-3">
+      <p className="text-xs font-bold uppercase tracking-[0.18em] text-sagedeep">Need a stop?</p>
+      <div className="mt-2 flex gap-2">
+        {chip('food', 'Food')}
+        {chip('drink', 'Drink')}
+        {chip('do', 'Something to do')}
+      </div>
+      {suggestion.pending && (
+        <div className="mt-3 rounded-3xl bg-cream2/80 px-4 py-3">
+          <p className="text-sm font-semibold text-ink">
+            Miles suggested <span className="font-black">{suggestion.pending.name}</span>
+          </p>
+          <div className="mt-2 flex gap-2">
+            <button
+              type="button"
+              onClick={() => onResolve('accepted')}
+              className="flex-1 whitespace-nowrap rounded-full bg-ink px-3 py-2 text-sm font-bold text-cream transition hover:bg-sagedeep active:scale-[0.99]"
+            >
+              Sounds good
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => suggestion.pending && onAsk(suggestion.pending.intent)}
+              className="flex-1 whitespace-nowrap rounded-full bg-sage/25 px-3 py-2 text-sm font-bold text-ink transition hover:bg-sage/40 active:scale-[0.99] disabled:opacity-50"
+            >
+              Another
+            </button>
+            <button
+              type="button"
+              onClick={() => onResolve('dismissed')}
+              className="flex-1 whitespace-nowrap rounded-full bg-cream px-3 py-2 text-sm font-bold text-ink transition hover:bg-sage/25 active:scale-[0.99]"
+            >
+              No thanks
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -576,8 +655,21 @@ function MilesApp() {
   // becomes 'passenger', so a flag-off build can never open the
   // gate. The Ask sheet's open state lives here too.
   const [rideMode, setRideMode] = useState<TourMode>('driving');
+  // The latched mode as a ref, for engine deps constructed
+  // inside the same tap that latches it (the state update has
+  // not rendered yet at construction time; the ref has).
+  const rideModeRef = useRef<TourMode>('driving');
+  const latchRideMode = (mode: TourMode) => {
+    rideModeRef.current = mode;
+    setRideMode(mode);
+  };
   const [askOpen, setAskOpen] = useState(false);
   const qaOpen = qaGateOpen(ROUTE_MODE_ENABLED, rideMode);
+  // Solicited suggestions (v16.2 Slice 4): the sibling gate —
+  // same fence (flag + declared Passenger/Walking), separate
+  // channel. In Driving, suggestionsOpen is false and no
+  // suggestion surface mounts anywhere.
+  const suggestionsOpen = suggestionGateOpen(ROUTE_MODE_ENABLED, rideMode);
   const [routeFormOpen, setRouteFormOpen] = useState(false);
   // Landing steps (Nov 3, 2026 restructure, flag-on only): 'mode'
   // (Driving vs Passenger/Walking) → 'choice' (Freeform vs Route,
@@ -722,7 +814,11 @@ function MilesApp() {
       setResumeOffered(false);
       freeformClaimRef.current = sessionAuthority.claim('freeform-tour', `freeform-tail-${Date.now()}`);
       engineRef.current?.endTour();
-      const fresh = new Tour({ audio: createBrowserAudio(), clipUrls: engineRef.current?.clipUrls });
+      const fresh = new Tour({
+        audio: createBrowserAudio(),
+        clipUrls: engineRef.current?.clipUrls,
+        declaredMode: () => rideModeRef.current,
+      });
       engineRef.current = fresh;
       setEngine(fresh);
       fresh.start(false);
@@ -898,7 +994,7 @@ function MilesApp() {
     engineRef.current?.endTour();
     setResumeOffered(false);
     // Snapshot the declared mode for this ride (phase-2 Q&A gate).
-    setRideMode(tourMode);
+    latchRideMode(tourMode);
     setAskOpen(false);
     // A fresh engine per tour, constructed and started inside the
     // tap: the GREETING's attempt is the handler's first media
@@ -909,6 +1005,9 @@ function MilesApp() {
     const fresh = new Tour({
       audio: createBrowserAudio(),
       clipUrls: engineRef.current?.clipUrls,
+      // The suggestion gate's input (Slice 4): the latched
+      // declared mode, read at ask time.
+      declaredMode: () => rideModeRef.current,
     });
     engineRef.current = fresh;
     setEngine(fresh);
@@ -1106,6 +1205,18 @@ function MilesApp() {
         ? {
             generateAnswer: (prompt: string) => generateAnswerText(prompt),
             answerModelLabel: LEO_QA_MODEL_ID,
+          }
+        : {}),
+      // Solicited suggestions (v16.2 Slice 4): candidate supply
+      // wired ONLY when the suggestion gate is open for this
+      // ride — the dep is the runner's gate, so a Driving route
+      // runner cannot answer a suggestion ask at all. Supply is
+      // the Slice 2 layer's own discovery over the drive's
+      // anchors; the shelf-key bonus is left unwired here (the
+      // freeform Tour injects its own index on its refreshes).
+      ...(suggestionGateOpen(ROUTE_MODE_ENABLED, tourMode)
+        ? {
+            suggestionCandidates: async (anchors: EventAnchor[]) => discoverEventCandidates(anchors, {}),
           }
         : {}),
       onStoryHeard: unit => {
@@ -2159,7 +2270,7 @@ function MilesApp() {
       // same runner, same element, latch already earned inside
       // the gesture window — item 1 now begins as a normal play,
       // not as a prime attempted minutes too late.
-      setRideMode(tourMode);
+      latchRideMode(tourMode);
       setAskOpen(false);
       handedOver = true;
       setRouteRunner(runner);
@@ -2660,6 +2771,27 @@ function MilesApp() {
       setQuestion('');
       setAskOpen(false);
     }
+  };
+
+  // Solicited suggestions (v16.2 Slice 4): the same handler
+  // discipline as the question handlers — the App gate refuses
+  // first, and each engine enforces its own gate behind it
+  // (the Tour's declared-mode dep; the runner's missing supply
+  // dep on a driving ride). An accepted ask closes the sheet
+  // so the answer lands on the tour, not under a card.
+  const submitSuggestionAsk = (intent: SuggestionIntent) => {
+    if (!suggestionsOpen) return;
+    if (engine.submitSuggestionAsk(intent)) setAskOpen(false);
+  };
+  const submitRouteSuggestionAsk = (intent: SuggestionIntent) => {
+    if (!suggestionsOpen) return;
+    if (routeRunnerRef.current?.submitSuggestionAsk(intent)) setAskOpen(false);
+  };
+  const resolveSuggestion = (outcome: 'accepted' | 'dismissed') => {
+    engine.resolveSuggestion(outcome);
+  };
+  const resolveRouteSuggestion = (outcome: 'accepted' | 'dismissed') => {
+    routeRunnerRef.current?.resolveSuggestion(outcome);
   };
 
   /**
@@ -3259,16 +3391,25 @@ function MilesApp() {
                 Tap to hear Miles
               </button>
             )}
-            {qaOpen && askOpen && (
+            {askOpen && (qaOpen || suggestionsOpen) && (
               <div className="mb-2 rounded-[2rem] bg-white/80 p-4 shadow-xl shadow-ink/15 backdrop-blur">
-                <QuestionForm
-                  question={question}
-                  qaLocked={(rView?.qaPhase ?? 'idle') !== 'idle'}
-                  qaPhase={rView?.qaPhase ?? 'idle'}
-                  onQuestionChange={setQuestion}
-                  onFocusChange={setQuestionFocused}
-                  onSubmit={submitRouteQuestion}
-                />
+                {suggestionsOpen && rView && (
+                  <SuggestionPanel
+                    suggestion={rView.suggestion}
+                    onAsk={submitRouteSuggestionAsk}
+                    onResolve={resolveRouteSuggestion}
+                  />
+                )}
+                {qaOpen && (
+                  <QuestionForm
+                    question={question}
+                    qaLocked={(rView?.qaPhase ?? 'idle') !== 'idle'}
+                    qaPhase={rView?.qaPhase ?? 'idle'}
+                    onQuestionChange={setQuestion}
+                    onFocusChange={setQuestionFocused}
+                    onSubmit={submitRouteQuestion}
+                  />
+                )}
               </div>
             )}
             {rView?.phase !== 'ready' && (
@@ -3379,16 +3520,25 @@ function MilesApp() {
             safe-area padding lives on <main> (.safe-bottom), so
             the bar clears the home indicator. */}
         <div className="w-full max-w-xl pb-1" onPointerDown={e => e.stopPropagation()}>
-          {qaOpen && askOpen && (
+          {askOpen && (qaOpen || suggestionsOpen) && (
             <div className="mb-2 rounded-[2rem] bg-white/80 p-4 shadow-xl shadow-ink/15 backdrop-blur">
-              <QuestionForm
-                question={question}
-                qaLocked={view.qaLocked}
-                qaPhase={view.qaPhase}
-                onQuestionChange={setQuestion}
-                onFocusChange={setQuestionFocused}
-                onSubmit={submitQuestion}
-              />
+              {suggestionsOpen && (
+                <SuggestionPanel
+                  suggestion={view.suggestion}
+                  onAsk={submitSuggestionAsk}
+                  onResolve={resolveSuggestion}
+                />
+              )}
+              {qaOpen && (
+                <QuestionForm
+                  question={question}
+                  qaLocked={view.qaLocked}
+                  qaPhase={view.qaPhase}
+                  onQuestionChange={setQuestion}
+                  onFocusChange={setQuestionFocused}
+                  onSubmit={submitQuestion}
+                />
+              )}
             </div>
           )}
           {/* Same wrapping cluster as the route bar (lane C):
