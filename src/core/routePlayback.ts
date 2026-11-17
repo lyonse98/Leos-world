@@ -146,7 +146,16 @@ import {
   recordProposal,
   resolveProposalRecord,
   MAX_UNSOLICITED_PROPOSALS_PER_DRIVE,
+  type ProposalFlavor,
 } from './proposals';
+import {
+  deriveCallbackCandidates,
+  judgeCallbackAtSpeak,
+  CALLBACK_CANDIDATE_KIND,
+  PLACE_MEMORY_REASON,
+  type CallbackCandidate,
+} from './placeMemory';
+import { normalizePlaceName } from './routeHistory';
 import { memorialFor } from '../data/routeMemorial';
 import type { EventAnchor, EventCandidate } from './currentEvents';
 import { getConstraints, matchInputs } from './profile';
@@ -573,6 +582,16 @@ export interface RouteRunnerDeps {
    * a different channel and is not touched by this dep.
    */
   suggestionCandidates?: (anchors: EventAnchor[]) => Promise<readonly EventCandidate[]>;
+  /**
+   * The on-device drive records (v16.2 Slice 6): the
+   * place-memory callback flavor's source — places a prior
+   * drive's plan seated but left unheard. The App wires it
+   * ONLY beside suggestionCandidates, under the same gate:
+   * no supply dep (or a Driving bed) means no callbacks,
+   * exactly as it means no proposals. Read at arm time,
+   * never cached.
+   */
+  placeMemoryRecords?: () => RouteDriveRecord[];
   /** Best-effort heard recording for a sounded story (App wires backend.recordHeard). */
   onStoryHeard?: (unit: LibraryUnit) => void;
   /**
@@ -816,6 +835,8 @@ export class RoutePlanRunner {
     kind: string;
     intent: SuggestionIntent;
     source: 'solicited' | 'proposed';
+    /** Which proposal flavor offered it (Slice 6); 'place' for every solicited pick. */
+    flavor: ProposalFlavor;
   } | null = null;
   private suggestionsAnsweredCount = 0;
   // Unsolicited proposals (v16.2 Slice 5): the seam engine
@@ -830,7 +851,15 @@ export class RoutePlanRunner {
   private proposalsUsed = 0;
   private proposalPlaceIds = new Set<string>();
   private proposalSelecting = false;
-  private armedProposal: { pick: SuggestionPick; url: string } | null = null;
+  // Slice 6: the armed slot carries either flavor — a place
+  // pick or a place-memory callback — each with its line
+  // already rendered (the render-ahead discipline covers
+  // both: a callback's line is composed at arm time and
+  // rendered beside the pick's).
+  private armedProposal:
+    | { flavor: 'place'; pick: SuggestionPick; url: string }
+    | { flavor: 'place-memory'; callback: CallbackCandidate; url: string }
+    | null = null;
   private proposalsSpokenCount = 0;
   /** Tap time (prime) or start() time, whichever came first: the tour's clock for latch telemetry. */
   private startStamp: number | null = null;
@@ -3472,6 +3501,7 @@ export class RoutePlanRunner {
         kind: answer.candidate.kind,
         intent,
         source: 'solicited',
+        flavor: 'place',
       };
     }
     const pickId = answer.kind === 'pick' ? answer.candidate.placeId : null;
@@ -3531,6 +3561,7 @@ export class RoutePlanRunner {
         place_id: pending.placeId,
         intent: pending.intent,
         surface: 'drive',
+        flavor: pending.flavor,
       });
     } else {
       this.deps.onEvent?.('suggestion_outcome', {
@@ -3555,8 +3586,35 @@ export class RoutePlanRunner {
    */
   private trayPendingProposal(): void {
     if (!this.pendingSuggestion || this.pendingSuggestion.source !== 'proposed') return;
-    this.deps.onEvent?.('proposal_trayed', { place_id: this.pendingSuggestion.placeId });
+    this.deps.onEvent?.('proposal_trayed', {
+      place_id: this.pendingSuggestion.placeId,
+      flavor: this.pendingSuggestion.flavor,
+    });
     this.pendingSuggestion = null;
+  }
+
+  /**
+   * The current plan's story subjects as normalized name
+   * keys — the callback flavor's heard evidence in route
+   * mode, in two strengths. ALL seated subjects (played or
+   * not) exclude a candidate at ARM time: today's episode
+   * owns those stories, and proposing one as "still
+   * unheard" while it stands in this drive's own plan would
+   * be wrong-footed even before it sounds. PLAYED subjects
+   * are the SPEAK-time evidence: the story has now actually
+   * been heard. (The cross-drive ledger is applied where it
+   * lives — in derivation, via the records themselves; see
+   * placeMemory.ts rule (b).)
+   */
+  private planSubjectNameKeys(playedOnly: boolean): Set<string> {
+    const out = new Set<string>();
+    if (!this.plan) return out;
+    for (const it of this.plan.items) {
+      if (it.kind !== 'story' || !it.unit) continue;
+      if (playedOnly && !this.playedStoryIds.has(it.unit.id)) continue;
+      out.add(normalizePlaceName(it.unit.placeName));
+    }
+    return out;
   }
 
   /** Memorial or climax: the solemn material a proposal may not neighbor. */
@@ -3611,6 +3669,7 @@ export class RoutePlanRunner {
     if (this.armedProposal) {
       const armed = this.armedProposal;
       this.armedProposal = null;
+      const armedPlaceId = armed.flavor === 'place' ? armed.pick.candidate.placeId : armed.callback.placeId;
       const remainingSec = this.remainingRouteSec();
       const next = this.nextStoryItem(settledItem);
       const verdict = judgeProposalSeam({
@@ -3631,17 +3690,34 @@ export class RoutePlanRunner {
       if (!verdict.ok) {
         this.deps.onEvent?.('proposal_suppressed', {
           reason: verdict.reason,
-          place_id: armed.pick.candidate.placeId,
+          place_id: armedPlaceId,
+          flavor: armed.flavor,
         });
         return;
       }
-      const fresh = judgeCandidateAtSpeak(armed.pick.candidate, Date.now());
-      if (!fresh.ok) {
-        this.deps.onEvent?.('proposal_dropped', {
-          reason: fresh.reason,
-          place_id: armed.pick.candidate.placeId,
-        });
-        return;
+      // The speak-time re-judgment is flavor-shaped: a place
+      // on its hours, a callback on its heard state (the
+      // plan's played subjects are the evidence here).
+      if (armed.flavor === 'place') {
+        const fresh = judgeCandidateAtSpeak(armed.pick.candidate, Date.now());
+        if (!fresh.ok) {
+          this.deps.onEvent?.('proposal_dropped', {
+            reason: fresh.reason,
+            place_id: armedPlaceId,
+            flavor: armed.flavor,
+          });
+          return;
+        }
+      } else {
+        const fresh = judgeCallbackAtSpeak(armed.callback, this.planSubjectNameKeys(true));
+        if (!fresh.ok) {
+          this.deps.onEvent?.('proposal_dropped', {
+            reason: fresh.reason,
+            place_id: armedPlaceId,
+            flavor: armed.flavor,
+          });
+          return;
+        }
       }
       this.speakProposal(armed);
       return;
@@ -3685,10 +3761,36 @@ export class RoutePlanRunner {
         // seam judge's (see evaluateProposalSeam).
         picksUsed: 0,
       });
-      if (answer.kind !== 'pick') return;
-      const url = await this.deps.synthUrl(answer.recommendation);
-      if (this.closed || this.endedKind !== null) return;
-      this.armedProposal = { pick: answer, url };
+      if (answer.kind === 'pick') {
+        const url = await this.deps.synthUrl(answer.recommendation);
+        if (this.closed || this.endedKind !== null) return;
+        this.armedProposal = { flavor: 'place', pick: answer, url };
+        return;
+      }
+      // The priority rule (placeMemory.ts): the callback
+      // flavor arms ONLY when the pool composed no pick — a
+      // perishable place recommendation always outranks an
+      // evergreen memory. (A supply FAILURE is not a
+      // none-answer: it lands in the catch below and arms
+      // nothing, exactly as Slice 5 left it — the callback
+      // fills an honest empty pool, not an outage.) The
+      // derivation's heard evidence here is the plan itself:
+      // every seated subject is excluded, played or not —
+      // today's episode owns those stories.
+      if (this.deps.placeMemoryRecords) {
+        const candidates = deriveCallbackCandidates(
+          this.deps.placeMemoryRecords(),
+          this.planSubjectNameKeys(false),
+          Date.now(),
+          { excludePlaceIds: excluded },
+        );
+        if (candidates.length > 0) {
+          const callback = candidates[0];
+          const url = await this.deps.synthUrl(callback.line);
+          if (this.closed || this.endedKind !== null) return;
+          this.armedProposal = { flavor: 'place-memory', callback, url };
+        }
+      }
     } catch {
       /* selection failed: silence, never a fabricated proposal */
     } finally {
@@ -3707,42 +3809,82 @@ export class RoutePlanRunner {
    * outcome row is its decision surface), and undecided at
    * tour end means the tray, never an inferred verdict.
    */
-  private speakProposal(armed: { pick: SuggestionPick; url: string }): void {
-    const candidate = armed.pick.candidate;
+  private speakProposal(
+    armed:
+      | { flavor: 'place'; pick: SuggestionPick; url: string }
+      | { flavor: 'place-memory'; callback: CallbackCandidate; url: string },
+  ): void {
+    // Both flavors normalize to the one spoken shape (the
+    // freeform engine's speakProposal is the mirror): a
+    // place speaks the composer's recommendation; a callback
+    // speaks its composed memory line and carries no hours,
+    // no detour, no sponsor — passedAt carries the pass.
+    const spoken =
+      armed.flavor === 'place'
+        ? {
+            placeId: armed.pick.candidate.placeId,
+            name: armed.pick.candidate.name,
+            kind: armed.pick.candidate.kind,
+            line: armed.pick.recommendation,
+            primaryReason: armed.pick.primaryReason,
+            reasonCodes: armed.pick.reasonCodes as readonly string[],
+            sponsored: armed.pick.sponsored,
+            detourMinutes: armed.pick.detourMinutes,
+            closesAtMs: armed.pick.candidate.closesAtMs,
+            hoursFetchedAt: armed.pick.candidate.hoursFetchedAt,
+            passedAt: null as number | null,
+          }
+        : {
+            placeId: armed.callback.placeId,
+            name: armed.callback.name,
+            kind: CALLBACK_CANDIDATE_KIND,
+            line: armed.callback.line,
+            primaryReason: PLACE_MEMORY_REASON,
+            reasonCodes: [PLACE_MEMORY_REASON] as readonly string[],
+            sponsored: false,
+            detourMinutes: null as number | null,
+            closesAtMs: null as number | null,
+            hoursFetchedAt: Date.now(),
+            passedAt: armed.callback.lastPassedAt,
+          };
     this.proposalsUsed += 1;
-    this.proposalPlaceIds.add(candidate.placeId);
+    this.proposalPlaceIds.add(spoken.placeId);
     this.pendingSuggestion = {
-      placeId: candidate.placeId,
-      name: candidate.name,
-      kind: candidate.kind,
+      placeId: spoken.placeId,
+      name: spoken.name,
+      kind: spoken.kind,
       intent: 'any',
       source: 'proposed',
+      flavor: armed.flavor,
     };
     recordProposal(localProposalStore, {
-      placeId: candidate.placeId,
-      name: candidate.name,
-      kind: candidate.kind,
-      primaryReason: armed.pick.primaryReason,
-      closesAtMs: candidate.closesAtMs,
-      hoursFetchedAt: candidate.hoursFetchedAt,
+      placeId: spoken.placeId,
+      name: spoken.name,
+      kind: spoken.kind,
+      primaryReason: spoken.primaryReason,
+      closesAtMs: spoken.closesAtMs,
+      hoursFetchedAt: spoken.hoursFetchedAt,
       offeredAt: Date.now(),
       sessionId: this.deps.episodeIds?.tourId ?? null,
       state: 'spoken',
+      flavor: armed.flavor,
+      passedAt: spoken.passedAt,
     });
     this.deps.onEvent?.('proposal_offered', {
-      place_id: candidate.placeId,
-      candidate_kind: candidate.kind,
-      reason_codes: armed.pick.reasonCodes,
-      primary_reason: armed.pick.primaryReason,
-      sponsored: armed.pick.sponsored,
-      detour_minutes: armed.pick.detourMinutes,
+      place_id: spoken.placeId,
+      candidate_kind: spoken.kind,
+      reason_codes: spoken.reasonCodes,
+      primary_reason: spoken.primaryReason,
+      sponsored: spoken.sponsored,
+      detour_minutes: spoken.detourMinutes,
+      flavor: armed.flavor,
     });
     const item: AudibleItem = {
       id: `route-proposal-${++runnerSeq}`,
       kind: 'answer',
-      label: `Suggestion — ${candidate.name}`,
+      label: `Suggestion — ${spoken.name}`,
       source: { kind: 'url', url: armed.url },
-      durationSec: estimateDurationSec(armed.pick.recommendation),
+      durationSec: estimateDurationSec(spoken.line),
       attempts: 0,
       settled: false,
       onSettle: rec => {
@@ -3751,7 +3893,8 @@ export class RoutePlanRunner {
           voice: rec.sounded ? 'gemini' : 'none',
           sounded_ms: Math.round(rec.soundedMs),
           attempts: item.attempts,
-          place_id: candidate.placeId,
+          place_id: spoken.placeId,
+          flavor: armed.flavor,
         });
         if (rec.sounded) this.proposalsSpokenCount += 1;
         this.suggestionPhase = 'idle';
