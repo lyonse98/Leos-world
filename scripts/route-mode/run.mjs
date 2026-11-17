@@ -1944,6 +1944,7 @@ await checkAsync('sg runner: an empty pool composes the honest none-answer — s
     synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
     onEvent: (t, p) => events.push({ t, p }),
     suggestionCandidates: async () => [],
+    bed: passengerBed,
   });
   await runner.start(qaPlan());
   await until(() => audio.played.some(s => s.includes('s1%7Clandmark_origin.wav')), 'first story sounding');
@@ -2206,6 +2207,7 @@ await checkAsync('pm runner: an honest empty pool arms a callback — it speaks 
   const runner = upRunner(audio, events, heard, {
     suggestionCandidates: async () => [],
     placeMemoryRecords: () => pmRecords(),
+    bed: passengerBed,
   });
   await drivePmPlan(runner, heard, events);
   const offered = events.filter(e => e.t === 'proposal_offered');
@@ -2284,6 +2286,10 @@ await checkAsync('pm runner: a place seated in today\'s own plan is never propos
   const runner = upRunner(audio, events, heard, {
     suggestionCandidates: async () => [],
     placeMemoryRecords: () => pmRecords({ owedSubjects: ['s2|landmark_origin'] }),
+    // A declared Passenger ride: the gate is OPEN here, so
+    // the zero below is the in-plan exclusion's doing, not
+    // the gate's.
+    bed: passengerBed,
   });
   await runner.start(qaPlan());
   await driveQaPlan(runner, heard);
