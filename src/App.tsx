@@ -30,6 +30,7 @@ import {
   resolveDestination,
   resolveThreadCandidates,
   resolveToneSuggestion,
+  duoGateOpen,
   routeOptionLabel,
   seatWovenMembers,
   selectMemberFetchEntries,
@@ -110,7 +111,14 @@ import {
   recordHeard,
 } from './core/backend';
 import { deliverEpisodeCapture } from './core/episodeCapture';
-import { generateAnswerText, generateStoryText, synthesizeSpeech } from './core/gemini';
+import {
+  generateAnswerText,
+  generateDuoLinesText,
+  generateStoryText,
+  synthesizeEarlSpeech,
+  synthesizeSpeech,
+} from './core/gemini';
+import { applyDuoToPlan } from './core/duo';
 import { LEO_QA_MODEL_ID } from './services/leoPersona';
 
 /**
@@ -1389,6 +1397,24 @@ function MilesApp() {
             placeMemoryRecords: () => loadDriveRecords(driveRecordStore),
           }
         : {}),
+      // Duo (v16.2 Slice 9): Earl's synthesis seam, wired ONLY
+      // when the duo gate is open for this build (flag on +
+      // audience not Family — the duo fence is the audience,
+      // not the declared mode: Earl rides Passenger and
+      // Driving alike). The dep is the runner's gate: with no
+      // seam wired, a duo item can never sound. Synthesis is
+      // the verified Earl recipe (Algenib + brisk director's
+      // notes + the duration verification gate) — a segment
+      // that fails verification throws here and the runner
+      // drops it, per the skip-fallback doctrine.
+      ...(duoGateOpen(ROUTE_MODE_ENABLED, routeAudience)
+        ? {
+            synthEarlUrl: async (text: string) => {
+              const blob = await synthesizeEarlSpeech(text);
+              return URL.createObjectURL(blob);
+            },
+          }
+        : {}),
       onStoryHeard: unit => {
         void recordHeard(sessionId, deviceKey(), unit.placeName, unit.storyText, unit.lat, unit.lng);
       },
@@ -2345,6 +2371,39 @@ function MilesApp() {
       if (superseded()) {
         discardRunner();
         return;
+      }
+      // Duo staging (v16.2 Slice 9): the plan shape is final
+      // (post-guarantee, post-seating, post-bank) — the duo
+      // pass seats Earl around the woven members, adds his
+      // bridge beats and the standing two-host intro, and
+      // stamps the per-episode duo state on the plan, so the
+      // wrap-up context below, the runner's handover, and the
+      // episode capture all see the duo plan. The pass is
+      // async (per-member line generation through the duo
+      // lane) and fully self-guarding: generation failure
+      // degrades a member to a bank verdict or to solo, and
+      // when nothing is eligible the plan returns UNCHANGED —
+      // solo mode reproduces today's episode exactly. Family
+      // builds never enter (the gate is the audience).
+      if (duoGateOpen(ROUTE_MODE_ENABLED, routeAudience)) {
+        plan = await applyDuoToPlan(plan, {
+          enabled: true,
+          units: [...units, ...memberUnits],
+          heardKeys,
+          generateLines: prompt => generateDuoLinesText(prompt),
+          onEvent: (type, payload) => {
+            const pos = positionRef.current;
+            void emitEvent(sessionId, type, payload, {
+              lat: pos?.lat ?? null,
+              lng: pos?.lng ?? null,
+              movementMode: tourMode,
+            });
+          },
+        });
+        if (superseded()) {
+          discardRunner();
+          return;
+        }
       }
       const plannedIds = new Set(plan.items.map(it => it.id));
       plan.shelfTease =

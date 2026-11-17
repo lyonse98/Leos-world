@@ -145,6 +145,24 @@ export function suggestionGateOpen(flagEnabled: boolean, mode: TourMode): boolea
 }
 
 /**
+ * The Earl duo gate (v16.2 Slice 9, Nov 17, 2026): a SEPARATE
+ * gate for a separate layer, in the sibling shape — but its
+ * fence is the AUDIENCE, not the declared mode. The duo is
+ * episode composition (the standing intro, woven-member
+ * seams, bridge beats), not an interaction channel: it rides
+ * Passenger and Driving episodes alike. Family is the closed
+ * side (design §4.5: duo lines are generated text, and v1
+ * does not widen Family's discipline to cover them), so the
+ * gate is flag on AND audience not Family. The App wires the
+ * runner's Earl synth seam only when this gate is open, and
+ * the staging pass checks the audience again itself — the
+ * dep-absence discipline the Q&A and suggestion gates set.
+ */
+export function duoGateOpen(flagEnabled: boolean, audience: RouteAudience): boolean {
+  return flagEnabled && audience !== 'family';
+}
+
+/**
  * Feature flag. On the v16-route-mode branch it defaults ON so
  * Erik's branch-switch publish shows the mode box with no env
  * fiddling; VITE_ROUTE_MODE=0 (or 'false') restores the exact v15
@@ -1472,6 +1490,37 @@ export interface PlanItem {
    */
   colorForId?: string;
   /**
+   * Duo pieces only (v16.2 Slice 9, Nov 17, 2026): this tissue
+   * item is spoken by EARL, the second chair — the runner
+   * renders it through the Earl synth seam (Algenib + the
+   * brisk director's-notes format) instead of Miles' synth,
+   * and a failed or verification-rejected render drops it
+   * silently (skip-fallback). `role` names the seam it
+   * occupies; `memberId` ties a member's beats to their story.
+   * Absent on every non-duo item. Miles' own intro lines of
+   * the standing two-host open carry no marker — they are
+   * ordinary Miles tissue.
+   */
+  duo?: { speaker: 'earl'; role: 'intro' | 'setup' | 'turn' | 'verdict' | 'bridge-beat'; memberId?: string };
+  /**
+   * Duo dependency (Slice 9): the story/bridge item id this
+   * Earl beat rides on — the colorForId treatment, mirrored:
+   * if that item dropped stale, failed its render, or settled
+   * unplayed, the beat dies with it (die-with-the-story,
+   * design §4.7). The beat may sound only once its anchor has
+   * sounded or is sounding now. Absent on setups (they sound
+   * BEFORE their member) and on the intro.
+   */
+  duoForId?: string;
+  /**
+   * Woven members only (Slice 9): the member's composed duo
+   * script — speaker-tagged segments whose Miles segments are
+   * the shelf text verbatim (duo.ts composeDuoScript). Filed
+   * into the episode capture so a duo episode reads as a
+   * transcript; playback never branches on it.
+   */
+  duoScript?: import('./duo').DuoScript;
+  /**
    * Humor pieces only (Unfiltered, Nov 6, 2026): this color
    * piece was DRAWN FROM THE BANK, not generated — the one
    * distinction the capture, the cooldown, and the audit
@@ -1753,6 +1802,17 @@ export interface RoutePlan {
    * shape.
    */
   wovenMembers: WovenMembers;
+  /**
+   * The duo pass's episode state (v16.2 Slice 9): set ONLY by
+   * applyDuoToPlan (duo.ts) when the duo actually spoke in
+   * this episode — claims, the corrections tally (and Miles'
+   * inflated written version of it), concessions spent, and
+   * the word-share accounting. Absent on every solo plan, so
+   * a plan without it is byte-for-byte a pre-duo plan. The
+   * state lives and dies with the episode: no cross-episode
+   * ledger exists anywhere (persona doctrine).
+   */
+  duoState?: import('./duo').DuoEpisodeState;
   /**
    * Optional shelf tease for the arrival-signoff closeout, set by
    * the App after composing (an unheard, unplanned shelf unit).

@@ -10,6 +10,8 @@
 
 import { LEO_MODEL_ID, LEO_QA_MODEL_ID, LEO_SYSTEM_INSTRUCTION } from '../services/leoPersona';
 import { applyPronunciation } from '../services/pronunciation';
+import { DUO_GENERATION_INSTRUCTION, EARL_TTS_VOICE, earlRenderPayload } from '../services/duoPersona';
+import { earlRenderPlausible } from './duo';
 
 export type Lane = 'story' | 'qa' | 'tts';
 
@@ -256,6 +258,25 @@ export function generateStoryText(userPrompt: string): Promise<string> {
   );
 }
 
+/**
+ * Duo line generation (v16.2 Slice 9): Earl's pair-specific
+ * lines for one woven member, under Miles' own system
+ * instruction PLUS the duo charter (duoPersona) — the model
+ * writes as the two-host desk, and duo.parseDuoLines holds
+ * the output to the mechanical contract (roles, moves, char
+ * cap, concession ration) before anything can sound.
+ */
+export function generateDuoLinesText(userPrompt: string): Promise<string> {
+  return laneEnqueue('live', () =>
+    generateContent(
+      'story',
+      LEO_MODEL_ID,
+      `${LEO_SYSTEM_INSTRUCTION}\n\n${DUO_GENERATION_INSTRUCTION}`,
+      userPrompt,
+    ),
+  );
+}
+
 /** Prefetch story text (lane priority: lowest; never holds the lane ahead of a live serve). */
 export function generatePrefetchText(userPrompt: string): Promise<string> {
   return laneEnqueue('prefetch', () =>
@@ -330,6 +351,17 @@ function pcmToWav(pcm: Int16Array, sampleRate: number): Blob {
  * Throws QuotaError when the TTS lane is tripped or trips.
  */
 export async function synthesizeSpeech(canonicalText: string): Promise<Blob> {
+  return synthesizeSpeechWithVoice(canonicalText, TTS_VOICE);
+}
+
+/**
+ * The voice-parameterized synthesis seam (v16.2 Slice 9):
+ * identical lane, quota and payload discipline to
+ * synthesizeSpeech, with the prebuilt voice chosen per call.
+ * Miles is Puck everywhere by default; only Earl's duo
+ * segments pass another voice (see synthesizeEarlSpeech).
+ */
+export async function synthesizeSpeechWithVoice(canonicalText: string, voiceName: string): Promise<Blob> {
   const lane: Lane = 'tts';
   const model = TTS_MODEL_ID;
   if (quotaTripped(lane, model)) throw new QuotaError(lane, model);
@@ -346,7 +378,7 @@ export async function synthesizeSpeech(canonicalText: string): Promise<Blob> {
           generationConfig: {
             responseModalities: ['AUDIO'],
             speechConfig: {
-              voiceConfig: { prebuiltVoiceConfig: { voiceName: TTS_VOICE } },
+              voiceConfig: { prebuiltVoiceConfig: { voiceName } },
             },
           },
         }),
@@ -383,6 +415,64 @@ export async function synthesizeSpeech(canonicalText: string): Promise<Blob> {
     return new Blob([Uint8Array.from(binary, c => c.charCodeAt(0))], { type: 'audio/wav' });
   }
   return pcmToWav(pcm, sampleRate);
+}
+
+/**
+ * A WAV blob's duration in seconds, read off its own chunks
+ * (data bytes ÷ byte rate) — no decode, no AudioContext. The
+ * synthesis path above always returns WAV (pcmToWav or a wav
+ * passthrough), so this measures every render the lane makes.
+ * Null when the blob is not a readable WAV.
+ */
+export async function wavDurationSec(blob: Blob): Promise<number | null> {
+  try {
+    const buf = await blob.arrayBuffer();
+    if (buf.byteLength < 44) return null;
+    const view = new DataView(buf);
+    const tag = (off: number): string =>
+      String.fromCharCode(view.getUint8(off), view.getUint8(off + 1), view.getUint8(off + 2), view.getUint8(off + 3));
+    if (tag(0) !== 'RIFF' || tag(8) !== 'WAVE') return null;
+    let byteRate = 0;
+    let dataBytes = 0;
+    let off = 12;
+    while (off + 8 <= buf.byteLength) {
+      const id = tag(off);
+      const size = view.getUint32(off + 4, true);
+      if (id === 'fmt ') byteRate = view.getUint32(off + 12, true);
+      if (id === 'data') {
+        dataBytes = Math.min(size, buf.byteLength - (off + 8));
+        break;
+      }
+      off += 8 + size + (size % 2);
+    }
+    if (byteRate <= 0 || dataBytes <= 0) return null;
+    return dataBytes / byteRate;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Synthesize ONE Earl line (v16.2 Slice 9): Algenib under the
+ * structured AUDIO PROFILE / DIRECTOR'S NOTES / TRANSCRIPT
+ * format (duoPersona.earlRenderPayload — an inline preamble
+ * would be SPOKEN; the notes format is the verified working
+ * mechanism), then the VERIFICATION GATE: the render's
+ * measured duration must be plausible for the scripted line
+ * at Earl's brisk pace (duo.earlRenderPlausible). A notes
+ * leak or a truncated render fails the gate and this THROWS —
+ * the runner's skip-fallback drops the segment, and a missing
+ * beat is invisible. The pronunciation lexicon is applied to
+ * the transcript line only, never to the notes.
+ */
+export async function synthesizeEarlSpeech(line: string): Promise<Blob> {
+  const payload = earlRenderPayload(applyPronunciation(line));
+  const blob = await synthesizeSpeechWithVoice(payload, EARL_TTS_VOICE);
+  const measured = await wavDurationSec(blob);
+  if (measured === null || !earlRenderPlausible(line, measured)) {
+    throw new Error(`earl render failed verification (measured ${measured ?? 'unreadable'}s)`);
+  }
+  return blob;
 }
 
 /** True while the TTS (lane, model) breaker stands (E6: presynth stands down). */

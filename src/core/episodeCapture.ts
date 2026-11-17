@@ -181,6 +181,25 @@ export interface CapturedItem {
   humor: boolean;
   humorBankId: string | null;
   /**
+   * Duo pieces only (Slice 9, Nov 17, 2026; additive —
+   * schema stays 2): an Earl item's seam role and the member
+   * item it belongs to (null on the intro's Earl line and on
+   * bridge beats' member-less seats — the beat's duoForId
+   * target is the bridge, not a member). Null role/member on
+   * every non-duo item.
+   */
+  duoRole: string | null;
+  duoMemberId: string | null;
+  /**
+   * Woven members carrying a composed duo script (Slice 9):
+   * the full segment list — Miles' segments are the shelf
+   * text verbatim, Earl's carry their seam role — so the
+   * script layer is auditable against the shelf even where
+   * v1 playback seats Earl's lines around the story item
+   * rather than inside its audio. Null on every other item.
+   */
+  duoScript: { speaker: string; text: string; source: string; role: string | null }[] | null;
+  /**
    * Short cuts (Nov 12, 2026; additive — schema stays 2):
    * which VERSION of the story this item serves. 'short'
    * when the item plays the story's short cut, 'full' for
@@ -325,6 +344,16 @@ export function assemblePlanItems(plan: RoutePlan, renderedItemIds: ReadonlySet<
       voice: it.voice ?? null,
       humor: it.humor === true,
       humorBankId: it.humorBankId ?? null,
+      duoRole: it.duo?.role ?? null,
+      duoMemberId: it.duo?.memberId ?? null,
+      duoScript: it.duoScript
+        ? it.duoScript.segments.map(s => ({
+            speaker: s.speaker,
+            text: s.text,
+            source: s.source,
+            role: s.role ?? null,
+          }))
+        : null,
       version: it.shortCut === true ? 'short' : 'full',
       versionOf: it.shortCut === true ? (it.versionOf ?? null) : null,
       rendered: renderedItemIds.has(it.id),
@@ -355,6 +384,9 @@ export function assemblePlanItems(plan: RoutePlan, renderedItemIds: ReadonlySet<
       voice: null,
       humor: false,
       humorBankId: null,
+      duoRole: null,
+      duoMemberId: null,
+      duoScript: null,
       version: 'full',
       versionOf: null,
       rendered: renderedItemIds.has('wrap-up'),
@@ -421,6 +453,24 @@ export interface RouteEpisodePlanPayload {
    * against the items' own version fields.
    */
   short_cut_pieces: number;
+  /**
+   * Duo (Slice 9, Nov 17, 2026; additive — schema stays 2):
+   * how many Earl pieces the plan carries, and the episode's
+   * duo state as composed (word share, claims, the disputed
+   * correction tally). Null state = the duo pass never ran
+   * (solo plan, Family, or nothing eligible).
+   */
+  duo_pieces: number;
+  duo_state: {
+    earl_words: number;
+    eligible_words: number;
+    members: number;
+    earl_lines: number;
+    claims: string[];
+    corrections: number;
+    corrections_as_written: number;
+    concessions_used: number;
+  } | null;
   budget_sec: number;
   route_duration_sec: number | null;
   route_distance_m: number;
@@ -509,6 +559,19 @@ export function assemblePlanCapture(args: {
     humor_pieces: args.items.filter(i => i.humor).length,
     humor_bank_ids: args.items.filter(i => i.humor && i.humorBankId).map(i => i.humorBankId as string),
     short_cut_pieces: args.items.filter(i => i.version === 'short').length,
+    duo_pieces: args.items.filter(i => i.duoRole !== null).length,
+    duo_state: plan.duoState
+      ? {
+          earl_words: plan.duoState.earlWords,
+          eligible_words: plan.duoState.eligibleWords,
+          members: plan.duoState.members,
+          earl_lines: plan.duoState.earlLines,
+          claims: [...plan.duoState.claims],
+          corrections: plan.duoState.corrections,
+          corrections_as_written: plan.duoState.correctionsAsWritten,
+          concessions_used: plan.duoState.concessionsUsed,
+        }
+      : null,
     budget_sec: plan.budgetSec,
     route_duration_sec: plan.driveSec,
     route_distance_m: Math.round(pathLengthM(plan.path)),

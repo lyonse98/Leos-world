@@ -189,7 +189,7 @@ const pf = await import(pathToFileURL(pfOut).href);
 // the same commit; a run that executes fewer checks than
 // the floor FAILS, whatever its pass rate (enforced at the
 // final tally below).
-const MIN_CHECKS = 392;
+const MIN_CHECKS = 414;
 
 let passed = 0;
 let failed = 0;
@@ -10537,6 +10537,603 @@ check('PF-12 profile: a deleted inferred topic stays deleted until new evidence 
   assert.deepEqual(pf.getProfile(s, PF_T0).inferredTopics, [], 'the forgotten topic no longer surfaces');
   pf.observeStoryOutcome({ topics: ['Sport'], completed: true, soundedMs: 60000 }, s, PF_T0 + 1000);
   assert.equal(pf.getProfile(s, PF_T0 + 1000).inferredTopics.length, 1, 'fresh evidence may re-teach it');
+});
+
+// ── Slice 9: the Earl duo (Nov 17, 2026) ──────────────────
+// The second-persona integration, Path A under Erik's render
+// architecture: the library is NEVER re-voiced — a member's
+// shelf audio plays byte-identical, and Earl's lines are the
+// only new audio, seated as tissue items at the member's
+// seams. The suites below pin: script integrity (Miles'
+// segments concatenate to the shelf text byte-for-byte), the
+// persona's fences (presence / memorial / somber / Protected
+// / climax / Family / preview stay Miles solo), the ≤25%
+// word-share cap (cumulative, intro pre-counted), the
+// short-twin substitution for tight seats, the verification
+// gate's drop behavior at the runner (a failed Earl segment
+// drops — never seam-substituted, never Miles-voiced), the
+// suggestion reaction beat (and its absence without the Earl
+// dep), capture's duo fields, and solo parity (duo off — or
+// duo stripped — reproduces today's episode exactly). Zero
+// live calls: generation and Earl synth are stubs throughout.
+const duoOut = join(mkdtempSync(join(tmpdir(), 'route-duo-')), 'duo.mjs');
+execFileSync(
+  join(repoRoot, 'node_modules', '.bin', 'esbuild'),
+  [
+    join(repoRoot, 'src', 'core', 'duo.ts'),
+    '--bundle',
+    '--format=esm',
+    '--platform=node',
+    '--define:import.meta.env={}',
+    `--outfile=${duoOut}`,
+    '--log-level=warning',
+  ],
+  { stdio: 'inherit' },
+);
+const duo = await import(pathToFileURL(duoOut).href);
+
+// The deterministic generation stub: pair-specific lines
+// keyed off the prompt's STORY line. Woven One earns the
+// episode's single concession and registers the only claim;
+// Woven Two ALSO asks for a concession (the ration must
+// refuse it); everyone else plays the generic set.
+const duoStubGen = async prompt => {
+  const lines = [
+    { role: 'setup', move: 'question', text: 'Wait — it used to be WHAT? Say that part again, slower.' },
+    { role: 'turn', move: 'anachronism', text: 'In my day the trolley stopped for less than that.' },
+    { role: 'verdict', move: 'verdict', text: 'Fine. That one earns its keep.' },
+  ];
+  if (prompt.includes('STORY: Woven One')) {
+    lines[0] = { role: 'setup', move: 'wrong-assumption', text: 'A fort? Son, that hill was empty but for gulls and a goat.' };
+    lines[2] = { role: 'verdict', move: 'concession', text: 'Hmph. I will allow it. Once.' };
+  }
+  if (prompt.includes('STORY: Woven Two')) {
+    lines[2] = { role: 'verdict', move: 'concession', text: 'Fine, fine. That one I allow too.' };
+  }
+  return JSON.stringify(lines);
+};
+const duoFixtureUnits = () =>
+  wFixtureUnits([
+    wCand('w1|landmark_history', 300, { placeName: 'Woven One' }),
+    wCand('w2|landmark_history', 280, { placeName: 'Woven Two' }),
+    wCand('w3|landmark_history', 250, { placeName: 'Woven Three' }),
+    wCand('w4|landmark_history', 200, { placeName: 'Woven Four' }),
+    wCand('w5|landmark_history', 170, { placeName: 'Woven Five' }),
+    wCand('w6|landmark_history', 100, { placeName: 'Woven Six' }),
+  ]);
+const duoSeatedPlan = () => {
+  const units = duoFixtureUnits();
+  const plan = rm.seatWovenMembers(wCompose(units, 1800), units, { heardKeys: new Set() });
+  return { units, plan };
+};
+const duoPass = (plan, units, over = {}) =>
+  duo.applyDuoToPlan(plan, {
+    enabled: true,
+    units,
+    heardKeys: new Set(),
+    generateLines: duoStubGen,
+    ...over,
+  });
+
+check('DUO-1 the duo gate: flag on + any non-Family audience opens it; Family or flag-off closes it', () => {
+  assert.equal(rm.duoGateOpen(true, 'standard'), true);
+  assert.equal(rm.duoGateOpen(true, 'unfiltered'), true);
+  assert.equal(rm.duoGateOpen(true, 'family'), false, 'Family mode = duo off (the audience is the fence)');
+  assert.equal(rm.duoGateOpen(false, 'standard'), false);
+});
+
+check('DUO-2 generated-line validation: roles, moves, the char cap, one line per role, the concession ration', () => {
+  const st = duo.emptyDuoState();
+  assert.deepEqual(duo.parseDuoLines('not json at all', st), [], 'garbage yields no lines');
+  assert.deepEqual(duo.parseDuoLines('{"a":1}', st), [], 'a non-array yields no lines');
+  const ok = duo.parseDuoLines(
+    JSON.stringify([
+      { role: 'setup', move: 'wrong-assumption', text: 'It used to be a goat pasture.' },
+      { role: 'turn', move: 'anachronism', text: 'Where is the ferry bell?' },
+      { role: 'verdict', move: 'verdict', text: 'Hmph. Allowed.' },
+    ]),
+    st,
+  );
+  assert.equal(ok.length, 3, 'a clean set passes whole');
+  const messy = duo.parseDuoLines(
+    JSON.stringify([
+      { role: 'setup', move: 'wrong-assumption', text: 'First setup.' },
+      { role: 'setup', move: 'question', text: 'Second setup — duplicate role.' },
+      { role: 'turn', move: 'bogus-move', text: 'Unknown move coerces.' },
+      { role: 'verdict', move: 'verdict', text: 'x'.repeat(141) },
+      { role: 'chorus', move: 'verdict', text: 'Unknown role.' },
+    ]),
+    st,
+  );
+  assert.equal(messy.length, 2, 'duplicate role, over-cap line, and unknown role all drop');
+  assert.equal(messy[1].move, 'verdict', 'an unknown move coerces to verdict, never a crash');
+  const spent = { ...duo.emptyDuoState(), concessionsUsed: 1 };
+  assert.deepEqual(
+    duo.parseDuoLines(JSON.stringify([{ role: 'verdict', move: 'concession', text: 'I allow it.' }]), spent),
+    [],
+    'a concession with the ration spent is dropped',
+  );
+  const twoConcessions = duo.parseDuoLines(
+    JSON.stringify([
+      { role: 'turn', move: 'concession', text: 'Allowed, I suppose.' },
+      { role: 'verdict', move: 'concession', text: 'And this one too.' },
+    ]),
+    duo.emptyDuoState(),
+  );
+  assert.equal(twoConcessions.length, 1, 'at most one concession survives a single parse');
+});
+
+check('DUO-3 the verification gate band: in-band renders pass, a notes leak and a truncation drop', () => {
+  const line = 'x'.repeat(135); // expected 10.0 s at Earl's brisk 13.5 chars/s
+  assert.equal(duo.earlDurationSec(line), 10);
+  assert.equal(duo.earlRenderPlausible(line, 10), true, 'on-pace passes');
+  assert.equal(duo.earlRenderPlausible(line, 11.1), true, 'inside the absolute slack passes');
+  assert.equal(duo.earlRenderPlausible(line, 28), false, 'the brisk-run notes leak (~28 s on a ~8-10 s line) is far out of band — dropped');
+  assert.equal(duo.earlRenderPlausible(line, 4), false, 'a truncated render runs far short — dropped');
+  assert.equal(duo.earlRenderPlausible(line, 0), false);
+  assert.equal(duo.earlRenderPlausible(line, NaN), false);
+  assert.equal(duo.earlRenderPlausible('Hmph.', 1.5), true, 'a very short line padded with breath is not false-dropped');
+});
+
+check('DUO-4 script composition: Miles verbatim, the turn at the ~55% sentence seam', () => {
+  const s1 = 'One two three four. ';
+  const s2 = 'Five six seven eight. ';
+  const s3 = 'Nine ten eleven twelve. ';
+  const s4 = 'Thirteen fourteen fifteen sixteen seventeen. ';
+  const text = s1 + s2 + s3 + s4;
+  const u = unit('seam|landmark_history', 32.0, { angle: 'landmark_history', storyText: text });
+  const script = duo.composeDuoScript(u, [
+    { role: 'setup', move: 'question', text: 'Used to be WHAT?' },
+    { role: 'turn', move: 'anachronism', text: 'No trolley, I note.' },
+    { role: 'verdict', move: 'verdict', text: 'Allowed.' },
+  ]);
+  assert.deepEqual(
+    script.segments.map(s => s.speaker),
+    ['earl', 'miles', 'earl', 'miles', 'earl'],
+    'setup / story / turn / story / verdict',
+  );
+  const milesText = script.segments.filter(s => s.speaker === 'miles').map(s => s.text).join('');
+  assert.equal(milesText, text, "Miles' segments concatenate to the shelf text byte-for-byte");
+  assert.equal(script.segments[1].text, s1 + s2 + s3, 'the turn seam is the sentence boundary nearest 55%');
+  assert.equal(script.segments[3].text, s4);
+  const solo = duo.composeDuoScript(u, []);
+  assert.deepEqual(solo.segments, [{ speaker: 'miles', text, source: 'shelf' }], 'no lines: the script is the shelf text alone');
+});
+
+check('DUO-5 bank beats (pure): sponsored gets NO Earl; unsponsored picks and callbacks get one beat', () => {
+  assert.equal(duo.earlSuggestionBeat('food', true), null, 'sponsored = Earl absent, by the integration rule');
+  const beat = duo.earlSuggestionBeat('food', false);
+  assert.ok(typeof beat === 'string' && beat.length > 0 && beat.length <= 140, 'an unsponsored pick earns one short beat');
+  assert.ok(typeof duo.earlCallbackBeat() === 'string', 'a place-memory callback earns the grievance beat');
+  assert.ok(typeof duo.earlSuggestionBeat('any', false, 99) === 'string', 'rotation wraps the bank, never invents');
+});
+
+await checkAsync('DUO-6 the duo pass: script integrity, seam seating, shelf objects untouched', async () => {
+  const { units, plan } = duoSeatedPlan();
+  const before = JSON.stringify(plan.items);
+  const events = [];
+  const out = await duoPass(plan, units, { onEvent: (t, p) => events.push({ t, p }) });
+  assert.notEqual(out, plan, 'a duo plan is a new plan');
+  assert.equal(JSON.stringify(plan.items), before, 'the input plan is not mutated');
+  const memberItems = out.items.filter(i => i.woven === true);
+  assert.deepEqual(memberItems.map(i => i.id), ['w1|landmark_history', 'w2|landmark_history', 'w5|landmark_history']);
+  for (const m of memberItems) {
+    const orig = units.find(u => u.id === m.id);
+    assert.equal(m.unit, orig, 'the shelf unit object is untouched — the library is never re-voiced');
+    assert.ok(m.duoScript, 'the member carries its duo script');
+    const milesText = m.duoScript.segments.filter(s => s.speaker === 'miles').map(s => s.text).join('');
+    assert.equal(milesText, orig.storyText, "the script's Miles segments are the shelf text byte-for-byte");
+    const earlSegs = m.duoScript.segments.filter(s => s.speaker === 'earl');
+    assert.ok(earlSegs.length >= 1 && earlSegs.length <= 3, 'at most three Earl lines per member');
+    const at = out.items.indexOf(m);
+    assert.equal(out.items[at - 1]?.duo?.role, 'setup', 'the setup sounds directly before the member');
+    const after = out.items.slice(at + 1, at + 4).filter(i => i.duo);
+    assert.ok(after.every(i => i.kind === 'bridge'), 'Earl sounds as tissue items, never as a story');
+    assert.ok(after.some(i => i.duo.role === 'turn'), 'the turn beat rides the post-story cluster');
+  }
+  assert.ok(out.items.filter(i => i.duo).every(i => i.text.length <= 140), 'line discipline holds on every seated line');
+  assert.ok(
+    out.items.filter(i => i.kind === 'story' && !i.woven).every(i => !i.duoScript),
+    'geo stories — presence register and the climax alike — carry no duo',
+  );
+  assert.equal(out.duoState.members, 3);
+  assert.ok(events.some(e => e.t === 'duo_composed'), 'the duo_composed event files');
+});
+
+await checkAsync('DUO-7 the standing intro: two hosts, template, under 20 s, seated before an untouched preview', async () => {
+  const { units, plan } = duoSeatedPlan();
+  const out = await duoPass(plan, units);
+  const previewAt = out.items.findIndex(i => i.kind === 'preview');
+  assert.ok(previewAt >= 3, 'the intro seats ahead of the preview');
+  const [m1, e1, m2] = out.items.slice(previewAt - 3, previewAt);
+  assert.equal(m1.duo, undefined, 'Miles opens, unmarked');
+  assert.ok(m1.text.startsWith("I'm Miles. This is Earl"), 'the template open');
+  assert.equal(e1.duo?.role, 'intro');
+  assert.equal(e1.text, 'And I call him "son," because it annoys him.');
+  assert.ok(m2.text.includes('Dest') && m2.text.includes('30 minutes'), 'the second Miles line names the destination and the road');
+  assert.ok(m1.durationSec + e1.durationSec + m2.durationSec < 20, 'the whole intro runs under 20 s');
+  const preview = out.items[previewAt];
+  assert.equal(preview.duo, undefined, 'the first-minute preview itself carries no duo — it stays Miles solo');
+  assert.equal(preview, plan.items.find(i => i.kind === 'preview'), 'the preview item object is untouched');
+});
+
+await checkAsync('DUO-8a solo parity at the gate: duo off and Family mode return the plan itself', async () => {
+  const { units, plan } = duoSeatedPlan();
+  const off = await duo.applyDuoToPlan(plan, { enabled: false, units, heardKeys: new Set(), generateLines: duoStubGen });
+  assert.equal(off, plan, 'disabled: the same object back — byte-for-byte today');
+  const familyPlan = { ...plan, audience: 'family' };
+  const fam = await duoPass(familyPlan, units);
+  assert.equal(fam, familyPlan, 'Family: the same object back');
+});
+
+await checkAsync('DUO-8b the memorial-climax fence: a memorial climax silences the whole episode', async () => {
+  const member = unit('f1|landmark_history', 32.0, { lng: -117.05, angle: 'landmark_history', topics: [WT], wovenEligible: true, durationSec: 200 });
+  const climaxUnit = unit('cx|landmark_event', 32.88, { angle: 'landmark_event', memorial: true, durationSec: 300 });
+  const plan = {
+    destinationName: 'Dest', destination: dest, path, driveSec: 1000, budgetSec: 1000, audience: 'standard', totalSec: 520,
+    items: [
+      { kind: 'preview', id: 'preview', label: 'Preview', durationSec: 20, text: 'PREVIEW', ready: true },
+      { kind: 'story', id: member.id, label: 'F1', durationSec: 200, unit: member, ready: true, woven: true, anchorProgress: 0.2 },
+      { kind: 'story', id: climaxUnit.id, label: 'CX', durationSec: 300, unit: climaxUnit, ready: true, climax: true, anchorProgress: 0.8 },
+    ],
+  };
+  const out = await duoPass(plan, [member, climaxUnit]);
+  assert.equal(out, plan, 'even with an eligible member standing, a memorial climax returns the plan untouched');
+});
+
+await checkAsync('DUO-8c member fences: memorial, somber, Protected, climax, and presence members never carry Earl', async () => {
+  const fencePlan = (unitOver, itemOver = {}) => {
+    const u = unit('f1|landmark_history', 32.0, {
+      lng: -117.05, angle: 'landmark_history', topics: [WT], wovenEligible: true, durationSec: 200, ...unitOver,
+    });
+    return {
+      u,
+      plan: {
+        destinationName: 'Dest', destination: dest, path, driveSec: 1000, budgetSec: 1000, audience: 'standard', totalSec: 220,
+        items: [
+          { kind: 'preview', id: 'preview', label: 'Preview', durationSec: 20, text: 'PREVIEW', ready: true },
+          { kind: 'story', id: u.id, label: 'F1', durationSec: 200, unit: u, ready: true, woven: true, anchorProgress: 0.2, ...itemOver },
+        ],
+      },
+    };
+  };
+  for (const [name, unitOver, itemOver] of [
+    ['memorial member', { memorial: true }, {}],
+    ['somber member', { tone: 'spooky' }, {}],
+    ['Protected member', { protectedRegister: true }, {}],
+    ['climax member', {}, { climax: true }],
+    ['presence (non-woven) story', {}, { woven: false }],
+  ]) {
+    const { u, plan } = fencePlan(unitOver, itemOver);
+    const out = await duoPass(plan, [u]);
+    assert.equal(out, plan, `${name}: the plan returns untouched — no Earl, no intro`);
+  }
+});
+
+await checkAsync('DUO-9 the share cap binds cumulatively: lines past 25% of eligible words are refused in seam order', async () => {
+  const microUnit = unit('m1|landmark_history', 32.0, {
+    lng: -117.05, angle: 'landmark_history', topics: [WT], wovenEligible: true,
+    durationSec: 200, storyText: 'word '.repeat(120),
+  });
+  const microPlan = {
+    destinationName: 'Dest', destination: dest, path, driveSec: 1000, budgetSec: 1000, audience: 'standard', totalSec: 220,
+    items: [
+      { kind: 'preview', id: 'preview', label: 'Preview', durationSec: 20, text: 'PREVIEW', ready: true },
+      { kind: 'story', id: microUnit.id, label: 'M1', durationSec: 200, unit: microUnit, ready: true, woven: true, anchorProgress: 0.2 },
+    ],
+  };
+  // Eligible words: 120 (member) + 28 + 12 (the intro's Miles
+  // lines) = 160 → budget 40. The intro's Earl line spends 9;
+  // setup (12) and turn (10) fit at 31; the verdict (13) would
+  // take the share to 44 — refused.
+  const microGen = async () =>
+    JSON.stringify([
+      { role: 'setup', move: 'question', text: 'Wait, it used to be WHAT back then? Tell me again, slower.' },
+      { role: 'turn', move: 'anachronism', text: 'No ferry bell, no trolley wire, no nickel fare either.' },
+      { role: 'verdict', move: 'verdict', text: 'Fine, that one earns its keep, and I do not say that often.' },
+    ]);
+  const out = await duoPass(microPlan, [microUnit], { generateLines: microGen });
+  const st = out.duoState;
+  assert.equal(st.eligibleWords, 160);
+  assert.equal(st.earlWords, 31, 'intro (9) + setup (12) + turn (10); the verdict was refused by the cap');
+  assert.ok(st.earlWords <= Math.floor(st.eligibleWords * duo.DUO_SHARE_CAP), 'the share invariant holds exactly');
+  const roles = out.items.filter(i => i.duo?.memberId === microUnit.id).map(i => i.duo.role);
+  assert.deepEqual(roles, ['setup', 'turn'], 'the refused line never seats');
+  // The invariant on the full fixture, with a wordy stub
+  // asking for far more than the cap allows:
+  const { units, plan } = duoSeatedPlan();
+  const wordy = async () =>
+    JSON.stringify([
+      { role: 'setup', move: 'question', text: 'word '.repeat(23).trim() },
+      { role: 'turn', move: 'anachronism', text: 'word '.repeat(23).trim() },
+      { role: 'verdict', move: 'verdict', text: 'word '.repeat(23).trim() },
+    ]);
+  const big = await duoPass(plan, units, { generateLines: wordy });
+  assert.ok(big.duoState.earlWords > 0, 'the duo still seats under the cap');
+  assert.ok(
+    big.duoState.earlWords <= Math.floor(big.duoState.eligibleWords * duo.DUO_SHARE_CAP),
+    `share ${big.duoState.earlWords} ≤ 25% of ${big.duoState.eligibleWords}`,
+  );
+});
+
+const duoTwinFixture = (nextAnchor, over = {}) => {
+  const base = unit('tw place|landmark_history', 32.0, {
+    lng: -117.05, angle: 'landmark_history', topics: [WT], wovenEligible: true, durationSec: 200, placeName: 'Twin Place',
+  });
+  const twin = {
+    ...base,
+    id: 'tw place|landmark_history (short cut)',
+    angle: 'landmark_history (short cut)',
+    durationSec: 60,
+    storyText: 'short '.repeat(50),
+  };
+  const next = unit('nx|landmark_origin', 32.5, { durationSec: 100 });
+  const plan = {
+    destinationName: 'Dest', destination: dest, path, driveSec: 1000, budgetSec: 1000, audience: 'standard', totalSec: 336,
+    items: [
+      { kind: 'preview', id: 'preview', label: 'Preview', durationSec: 20, text: 'PREVIEW', ready: true },
+      { kind: 'bridge', id: 'tw-bridge-in', label: 'Bridge', durationSec: 8, text: 'BRIDGE IN', prevUnitId: next.id, nextUnitId: base.id, ready: true },
+      { kind: 'story', id: base.id, label: 'TW', durationSec: 200, unit: base, ready: true, woven: true, anchorProgress: 0.1 },
+      { kind: 'bridge', id: 'tw-bridge-out', label: 'Bridge', durationSec: 8, text: 'BRIDGE OUT', prevUnitId: base.id, nextUnitId: next.id, ready: true },
+      { kind: 'story', id: next.id, label: 'NX', durationSec: 100, unit: next, ready: true, anchorProgress: nextAnchor },
+    ],
+  };
+  return { base, twin, next, plan, ...over };
+};
+
+await checkAsync('DUO-10 tight seat: the short-cut twin substitutes and every id reference follows the swap', async () => {
+  const { base, twin, plan } = duoTwinFixture(0.31); // room after the member: 310 − 100 − 200 = 10 s < Earl's ~29 s
+  const out = await duoPass(plan, [base, twin, unit('nx|landmark_origin', 32.5, { durationSec: 100 })]);
+  const member = out.items.find(i => i.woven === true);
+  assert.equal(member.id, twin.id, 'the twin serves the seat');
+  assert.equal(member.shortCut, true);
+  assert.equal(member.versionOf, base.id, 'episode state keys on the base id');
+  assert.equal(member.durationSec, 60, "the duo's seconds come out of the member's own budget");
+  assert.equal(member.unit.wovenEligible, false, 'the served twin inherits the register, never woven eligibility');
+  assert.equal(out.items.find(i => i.id === 'tw-bridge-in').nextUnitId, twin.id, 'the bridge in follows the swap');
+  assert.equal(out.items.find(i => i.id === 'tw-bridge-out').prevUnitId, twin.id, 'the bridge out follows the swap');
+  assert.equal(member.duoScript.memberId, twin.id, 'the script records the served telling');
+});
+
+await checkAsync('DUO-11 twin controls: ample room keeps the full telling; a heard twin never substitutes', async () => {
+  const ample = duoTwinFixture(0.6); // room: 600 − 100 − 200 = 300 s
+  const outAmple = await duoPass(ample.plan, [ample.base, ample.twin, ample.next]);
+  const ampleMember = outAmple.items.find(i => i.woven === true);
+  assert.equal(ampleMember.id, ample.base.id, 'room to spare: the full telling serves');
+  assert.equal(ampleMember.shortCut, undefined);
+  const tight = duoTwinFixture(0.31);
+  const outHeard = await duoPass(tight.plan, [tight.base, tight.twin, tight.next], {
+    heardKeys: new Set([tight.twin.id]),
+  });
+  const heardMember = outHeard.items.find(i => i.woven === true);
+  assert.equal(heardMember.id, tight.base.id, 'a heard twin is not a substitution candidate');
+});
+
+await checkAsync('DUO-12 bridge beats: at most half the eligible bridges earn an Earl beat, in plan order', async () => {
+  const stories = [0.1, 0.25, 0.4, 0.55, 0.7].map((a, i) => {
+    const u = unit(`bs${i}|landmark_origin`, 32.7 + i * 0.04, { durationSec: 100 });
+    return { u, item: { kind: 'story', id: u.id, label: `BS${i}`, durationSec: 100, unit: u, ready: true, anchorProgress: a } };
+  });
+  const items = [{ kind: 'preview', id: 'preview', label: 'Preview', durationSec: 20, text: 'PREVIEW', ready: true }];
+  stories.forEach((s, i) => {
+    items.push(s.item);
+    if (i < 4) {
+      items.push({
+        kind: 'bridge', id: `bb${i}`, label: 'Bridge', durationSec: 8,
+        text: 'word '.repeat(100), prevUnitId: s.u.id, nextUnitId: stories[i + 1].u.id, ready: true,
+      });
+    }
+  });
+  const plan = {
+    destinationName: 'Dest', destination: dest, path, driveSec: 1000, budgetSec: 1000, audience: 'standard',
+    totalSec: items.reduce((s, i) => s + i.durationSec, 0), items,
+  };
+  const out = await duoPass(plan, stories.map(s => s.u));
+  const beats = out.items.filter(i => i.duo?.role === 'bridge-beat');
+  assert.equal(beats.length, 2, 'four eligible bridges → two beats (the ≤½ cap), not four');
+  assert.deepEqual(beats.map(b => b.duoForId), ['bb0', 'bb1'], 'the first eligible bridges in plan order');
+  assert.ok(out.items.some(i => i.duo?.role === 'intro'), 'bridge beats alone still open the two-host intro');
+});
+
+await checkAsync('DUO-13 generation failure degrades to a bank verdict — bank-sourced in the script', async () => {
+  const { units, plan } = duoSeatedPlan();
+  const out = await duoPass(plan, units, {
+    generateLines: async () => {
+      throw new Error('lane down');
+    },
+  });
+  const w1 = out.items.find(i => i.id === 'w1|landmark_history');
+  const w1Duo = out.items.filter(i => i.duo?.memberId === 'w1|landmark_history');
+  assert.equal(w1Duo.length, 1, 'one fallback beat, not a broken member');
+  assert.equal(w1Duo[0].duo.role, 'verdict', 'the fallback is a verdict after the story — never a generic setup before a specific story');
+  const earlSegs = w1.duoScript.segments.filter(s => s.speaker === 'earl');
+  assert.equal(earlSegs.length, 1);
+  assert.equal(earlSegs[0].source, 'bank', 'the script record tells the truth about the source');
+  assert.equal(out.duoState.members, 3, 'every member took the fallback');
+});
+
+await checkAsync('DUO-14 episode state: claims register, Miles inflates the tally in writing, the concession is rationed', async () => {
+  const { units, plan } = duoSeatedPlan();
+  const out = await duoPass(plan, units);
+  const st = out.duoState;
+  assert.deepEqual(st.claims.length, 1, "only Woven One's setup was a wrong assumption");
+  assert.equal(st.corrections, 1);
+  assert.equal(st.correctionsAsWritten, 2, 'Miles writes the tally one higher than the truth — a standing dispute, never settled');
+  assert.equal(st.concessionsUsed, 1, "Woven Two's concession ask was refused: the ration is one per episode");
+  const w2Duo = out.items.filter(i => i.duo?.memberId === 'w2|landmark_history');
+  assert.equal(w2Duo.length, 2, 'Woven Two keeps setup + turn; its concession verdict never seats');
+  const w1Duo = out.items.filter(i => i.duo?.memberId === 'w1|landmark_history');
+  assert.equal(w1Duo.length, 3, 'Woven One carries the full set, concession included');
+});
+
+await checkAsync('DUO-15 solo parity: strip the duo from a duo plan and the original episode returns byte-for-byte', async () => {
+  const { units, plan } = duoSeatedPlan();
+  const out = await duoPass(plan, units);
+  const stripped = out.items
+    .filter(i => !i.id.startsWith('duo:'))
+    .map(i => {
+      const c = { ...i };
+      delete c.duoScript;
+      return c;
+    });
+  assert.equal(JSON.stringify(stripped), JSON.stringify(plan.items), 'every non-duo item is the original item, in the original order');
+});
+
+const duoRunnerPlan = () => {
+  const base = qaPlan();
+  const at = base.items.findIndex(i => i.id === 's1|landmark_origin');
+  const items = [...base.items];
+  items.splice(at + 1, 0, {
+    kind: 'bridge', id: 'duo:verdict:s1|landmark_origin', label: 'Earl — verdict', durationSec: 3,
+    text: 'Ferry would have had you there by now, son.', ready: true,
+    duo: { speaker: 'earl', role: 'verdict', memberId: 's1|landmark_origin' },
+    duoForId: 's1|landmark_origin',
+  });
+  return { ...base, items };
+};
+
+await checkAsync('DUO-16 runner: a failed Earl render drops the beat — the story sounds, the plan proceeds, nothing substitutes', async () => {
+  const audio = new RealFakeAudio(300);
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    synthEarlUrl: async () => {
+      throw new Error('verification gate: notes leak');
+    },
+    onEvent: (t, p) => events.push({ t, p }),
+  });
+  await runner.start(duoRunnerPlan());
+  await until(
+    () =>
+      events.some(e => e.t === 'duo_line' && e.p.stage === 'render-failed') &&
+      audio.played.some(s => s.includes('s1%7Clandmark_origin.wav')),
+    'the drop to file and the member story to sound',
+  );
+  assert.ok(!audio.played.some(s => s.startsWith('blob:earl')), 'no Earl audio ever sounded');
+  const dl = events.filter(e => e.t === 'duo_line');
+  assert.equal(dl.length, 1);
+  assert.equal(dl[0].p.stage, 'render-failed', 'the drop is filed as a render failure — the verification gate doing its job');
+  assert.equal(dl[0].p.role, 'verdict');
+  // The plan completes past the dead seat: arrival closes the
+  // episode with the remaining stories owed, exactly as a
+  // failed bridge never wedges a tour.
+  runner.onPosition(dest);
+  await until(() => runner.view().closeoutDone, 'arrival closeout');
+  assert.equal(runner.view().endedKind, 'arrival-owed');
+  runner.endTour();
+});
+
+await checkAsync('DUO-17 runner: a verified Earl segment sounds after its story, filed as a duo line', async () => {
+  const audio = new RealFakeAudio(300);
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    synthEarlUrl: async t => 'blob:earl/' + t.length,
+    onEvent: (t, p) => events.push({ t, p }),
+  });
+  await runner.start(duoRunnerPlan());
+  await until(() => events.some(e => e.t === 'duo_line' && e.p.stage === 'sounded'), 'the Earl beat to sound');
+  const s1Idx = audio.played.findIndex(s => s.includes('s1%7Clandmark_origin.wav'));
+  const earlIdx = audio.played.findIndex(s => s.startsWith('blob:earl/'));
+  assert.ok(s1Idx >= 0 && earlIdx > s1Idx, 'Earl reacts after the story — never over it, never instead of it');
+  const dl = events.find(e => e.t === 'duo_line');
+  assert.equal(dl.p.role, 'verdict');
+  assert.equal(dl.p.member_id, 's1|landmark_origin');
+  runner.endTour();
+});
+
+await checkAsync('DUO-18 runner: no Earl dep wired (solo build) — the duo item never sounds and never blocks the plan', async () => {
+  const audio = new RealFakeAudio(300);
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onEvent: (t, p) => events.push({ t, p }),
+  });
+  await runner.start(duoRunnerPlan());
+  await until(
+    () =>
+      events.some(e => e.t === 'duo_line') &&
+      audio.played.some(s => s.includes('s1%7Clandmark_origin.wav')),
+    'the unrenderable duo item to resolve and the member story to sound',
+  );
+  assert.ok(!events.some(e => e.t === 'duo_line' && e.p.stage === 'sounded'), 'no duo line sounded');
+  assert.equal(
+    events.find(e => e.t === 'duo_line').p.stage,
+    'render-failed',
+    'with no Earl seam wired the item resolves as a failed render — dropped, never Miles-voiced',
+  );
+  assert.ok(!audio.played.some(s => s.startsWith('blob:earl')), 'Miles never voices an Earl line');
+  runner.onPosition(dest);
+  await until(() => runner.view().closeoutDone, 'arrival closeout past the dead seat');
+  assert.equal(runner.view().endedKind, 'arrival-owed');
+  runner.endTour();
+});
+
+await checkAsync('DUO-19 runner: an unsponsored suggestion pick earns exactly one Earl reaction beat, after Miles', async () => {
+  const audio = new RealFakeAudio(300);
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    synthEarlUrl: async t => 'blob:earl/' + t.length,
+    onEvent: (t, p) => events.push({ t, p }),
+    suggestionCandidates: async () => [sgRouteCandidate()],
+    bed: passengerBed,
+  });
+  await runner.start(qaPlan());
+  await until(() => audio.played.some(s => s.includes('s1%7Clandmark_origin.wav')), 'first story sounding');
+  assert.equal(runner.submitSuggestionAsk('food'), true);
+  await until(() => events.some(e => e.t === 'duo_line' && e.p.role === 'suggestion'), "Earl's beat to sound");
+  const dl = events.filter(e => e.t === 'duo_line');
+  assert.equal(dl.length, 1, 'one beat — the integration rule, never two');
+  assert.equal(dl[0].p.stage, 'sounded');
+  const suggIdx = audio.played.findIndex(s => s.includes('Try%20Sg%20Route'));
+  const earlIdx = audio.played.findIndex(s => s.startsWith('blob:earl/'));
+  assert.ok(suggIdx >= 0 && earlIdx > suggIdx, "Miles proposes; Earl reacts — in that order");
+  runner.endTour();
+});
+
+await checkAsync('DUO-20 runner: the same ask without the Earl dep files no duo line at all', async () => {
+  const audio = new RealFakeAudio(300);
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onEvent: (t, p) => events.push({ t, p }),
+    suggestionCandidates: async () => [sgRouteCandidate()],
+    bed: passengerBed,
+  });
+  await runner.start(qaPlan());
+  await until(() => audio.played.some(s => s.includes('s1%7Clandmark_origin.wav')), 'first story sounding');
+  assert.equal(runner.submitSuggestionAsk('food'), true);
+  await until(() => runner.view().suggestionsAnswered === 1, 'the answer to sound and settle');
+  assert.equal(events.filter(e => e.t === 'duo_line').length, 0, 'solo build: the suggestion channel is exactly as it was');
+  runner.endTour();
+});
+
+await checkAsync('DUO-21 capture: duo items and the member scripts ride the episode record', async () => {
+  const { units, plan } = duoSeatedPlan();
+  const out = await duoPass(plan, units);
+  const capItems = ec.assemblePlanItems(out, new Set(out.items.map(i => i.id)));
+  const memberCap = capItems.find(i => i.id === 'w1|landmark_history');
+  assert.ok(memberCap.duoScript && memberCap.duoScript.some(s => s.speaker === 'earl'), "the member's script is captured with its Earl segments");
+  const verdictCap = capItems.find(i => i.duoRole === 'verdict' && i.duoMemberId === 'w1|landmark_history');
+  assert.ok(verdictCap, 'duo items capture their role and member');
+  const payload = ec.assemblePlanCapture({
+    tourId: 'duo-1',
+    buildId: 'fresh-test',
+    context: captureCtx,
+    plan: out,
+    routePlanStarted: { destination: 'Dest', decisions: { thread: null } },
+    items: capItems,
+  });
+  assert.equal(payload.duo_pieces, out.items.filter(i => i.duo).length, 'the payload counts the duo pieces');
+  assert.equal(payload.duo_state.members, 3);
+  assert.equal(payload.duo_state.corrections_as_written, 2, 'the inflated tally is capture color, filed as written');
+  assert.deepEqual(payload.duo_state.claims.length, 1);
 });
 
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);

@@ -169,6 +169,7 @@ import {
 } from './placeMemory';
 import { normalizePlaceName } from './routeHistory';
 import { localSpendLedgerStore, spendCapReached } from './liveSpend';
+import { earlCallbackBeat, earlDurationSec, earlSuggestionBeat } from './duo';
 import { memorialFor } from '../data/routeMemorial';
 import type { EventAnchor, EventCandidate } from './currentEvents';
 import { getConstraints, matchInputs } from './profile';
@@ -574,6 +575,19 @@ export interface RouteRunnerDeps {
    */
   synthFinishedUrl?: (text: string) => Promise<string>;
   /**
+   * Earl synth seam (v16.2 Slice 9): synthesize ONE Earl line
+   * → playable blob URL (App wires gemini.synthesizeEarlSpeech,
+   * which carries the Algenib voice, the director's-notes
+   * format, and the measured-duration verification gate — a
+   * rejected render throws, and the segment drops). Wired by
+   * the App ONLY when the duo gate is open (flag on + audience
+   * not Family; routeMode.duoGateOpen) — the dep is the gate,
+   * exactly like generateAnswer: no dep, no Earl, and a duo
+   * plan item that somehow reaches a runner without it drops
+   * rather than ever sounding in Miles' voice.
+   */
+  synthEarlUrl?: (text: string) => Promise<string>;
+  /**
    * Phase-2 Q&A answer generation — the SAME generation path the
    * freeform engine uses (gemini.generateAnswerText), wired by the
    * App ONLY when the declared-mode gate is open. Absent = Q&A is
@@ -882,9 +896,11 @@ export class RoutePlanRunner {
   // both: a callback's line is composed at arm time and
   // rendered beside the pick's).
   private armedProposal:
-    | { flavor: 'place'; pick: SuggestionPick; url: string }
-    | { flavor: 'place-memory'; callback: CallbackCandidate; url: string }
+    | { flavor: 'place'; pick: SuggestionPick; url: string; earlUrl?: string | null; earlText?: string | null }
+    | { flavor: 'place-memory'; callback: CallbackCandidate; url: string; earlUrl?: string | null; earlText?: string | null }
     | null = null;
+  /** Earl reaction-beat rotation (Slice 9): bank lines rotate per episode, never repeat-adjacent. */
+  private duoBeatCount = 0;
   private proposalsSpokenCount = 0;
   /** Tap time (prime) or start() time, whichever came first: the tour's clock for latch telemetry. */
   private startStamp: number | null = null;
@@ -1307,7 +1323,7 @@ export class RoutePlanRunner {
       entry.lateAudible = lateAudible;
       entry.state = 'ready';
       this.renderDoneAtMs.set(it.id, Date.now());
-    } else if (it.kind === 'bridge' && (await this.applyBridgeSeamFallback(entry))) {
+    } else if (it.kind === 'bridge' && !it.duo && (await this.applyBridgeSeamFallback(entry))) {
       // Bridge render-failure fallback (field fix F5, Nov 12,
       // 2026): the seam fallback already substituted the item
       // and marked the entry ready — the seam sounds in the
@@ -1319,6 +1335,19 @@ export class RoutePlanRunner {
       // and exhaustion can complete without it.
       entry.state = 'failed';
       this.resolvedCount += 1;
+      // Duo telemetry (Slice 9): a failed Earl render — the
+      // verification gate's rejection lands here too — files
+      // its render-failed verdict; no settle ever fires for
+      // an item that never became an audible.
+      if (it.duo) {
+        this.deps.onEvent?.('duo_line', {
+          stage: 'render-failed',
+          role: it.duo.role,
+          member_id: it.duo.memberId ?? null,
+          item_id: it.id,
+          mode: 'route',
+        });
+      }
       // Drop coherence: a failed commission is a verdict, not
       // a wedge — its story sounds bridgeless, as it always
       // did before the mechanism existed.
@@ -1734,6 +1763,23 @@ export class RoutePlanRunner {
               picked_index: plan.routeChoice.pickedIndex,
             }
           : null,
+        // Duo (Slice 9, Nov 17, 2026): the episode's duo
+        // state as composed — Earl's word share against the
+        // eligible pool, the members he rode, the claims and
+        // the (possibly inflated) correction tally. Null when
+        // the duo pass never ran on this plan.
+        duo: plan.duoState
+          ? {
+              earl_words: plan.duoState.earlWords,
+              eligible_words: plan.duoState.eligibleWords,
+              members: plan.duoState.members,
+              earl_lines: plan.duoState.earlLines,
+              claims: plan.duoState.claims.length,
+              corrections: plan.duoState.corrections,
+              corrections_as_written: plan.duoState.correctionsAsWritten,
+              concessions_used: plan.duoState.concessionsUsed,
+            }
+          : null,
       },
     };
   }
@@ -1979,6 +2025,35 @@ export class RoutePlanRunner {
           continue;
         }
         const targetSounded = this.playedOrderIds.includes(it.colorForId);
+        const targetSounding =
+          target?.audible != null && this.player.current?.id === target.audible.id;
+        if (!targetSounded && !targetSounding) return; // not yet knowable: hold
+      }
+      if (it.duoForId) {
+        // DUO DEPENDENCY (Slice 9, Nov 17, 2026): an Earl
+        // beat hangs on the story it belongs to — if that
+        // story dropped stale, settled unplayed, or failed to
+        // render, the beat dies with it, silently, exactly as
+        // a Color Puck piece dies with its story. It may sound
+        // only once its story has sounded or is sounding now;
+        // any other state holds the gate defensively — in
+        // serial plan order the story's own entry always
+        // resolves first. A bridge beat (duoForId naming the
+        // bridge it hangs on) rides the same rule against its
+        // bridge item.
+        const target = this.entries.find(e => e.planItem.id === it.duoForId);
+        const targetDied =
+          this.droppedStoryIds.has(it.duoForId) ||
+          this.settledUnplayed.has(it.duoForId) ||
+          (target !== undefined && target.state === 'failed');
+        if (targetDied) {
+          entry.state = 'dropped';
+          this.feedCursor += 1;
+          this.resolvedCount += 1;
+          this.gateSkippedItemIds.add(it.id); // episode capture: the outcome row names this drop
+          continue;
+        }
+        const targetSounded = this.playedOrderIds.includes(it.duoForId);
         const targetSounding =
           target?.audible != null && this.player.current?.id === target.audible.id;
         if (!targetSounded && !targetSounding) return; // not yet knowable: hold
@@ -2935,9 +3010,14 @@ export class RoutePlanRunner {
     }
     // Bridge / reaction: Miles-solo voice lines, rendered at plan
     // time. A render failure drops the line (skip-fallback).
+    // Duo items (Slice 9) take the Earl seam instead — and with
+    // no Earl seam wired they drop: Earl never sounds in Miles'
+    // voice, and Miles never reads Earl's lines (§Q.6 fence).
     if (!it.text) return null;
     try {
-      const synth = await this.deps.synthUrl(it.text);
+      const synthFn = it.duo ? this.deps.synthEarlUrl : this.deps.synthUrl;
+      if (!synthFn) return null;
+      const synth = await synthFn(it.text);
       return {
         id,
         kind: it.kind === 'bridge' ? 'bridge' : 'commentary',
@@ -3059,6 +3139,20 @@ export class RoutePlanRunner {
     // that it played.
     if (it.kind === 'preview' && sounded) {
       this.deps.onEvent?.('route_preview', { preview: 'played' });
+    }
+    // Duo telemetry (Slice 9): every Earl item files its
+    // verdict — sounded, or dropped without sounding (a gate
+    // drop, a failed/rejected render, a teardown) — on the
+    // duo_line family, so the field can read Earl's hit rate
+    // per role exactly as it reads color's.
+    if (it.duo) {
+      this.deps.onEvent?.('duo_line', {
+        stage: sounded ? 'sounded' : 'dropped',
+        role: it.duo.role,
+        member_id: it.duo.memberId ?? null,
+        item_id: it.id,
+        mode: 'route',
+      });
     }
     if (this.closing) return; // settles caused by the closeout itself
     this.resolvedCount += 1;
@@ -3625,6 +3719,64 @@ export class RoutePlanRunner {
         this.notify();
       },
     };
+    // Earl's reaction beat (Slice 9, integration rule): ONE
+    // beat after Miles' answer, only on a real pick — never
+    // on a sponsored pick (sponsored = Earl absent), never in
+    // Family mode (duo off), never beside solemn ground (the
+    // last sounded story memorial/climax). Earl's render
+    // failure degrades to Miles alone: a missing beat is
+    // invisible. enqueueNext unshifts, so Earl is queued
+    // FIRST and Miles' answer lands ahead of him — Miles
+    // speaks, then Earl reacts.
+    let earlItem: AudibleItem | null = null;
+    if (
+      answer.kind === 'pick' &&
+      !answer.sponsored &&
+      this.deps.synthEarlUrl &&
+      this.plan &&
+      this.plan.audience !== 'family'
+    ) {
+      const lastEntry = this.lastSoundedStoryId
+        ? this.entries.find(e => e.planItem.id === this.lastSoundedStoryId)
+        : undefined;
+      const solemn = lastEntry ? this.planItemSolemn(lastEntry.planItem) : false;
+      if (!solemn) {
+        const beat = earlSuggestionBeat(intent, false, this.duoBeatCount);
+        if (beat) {
+          try {
+            const earlUrl = await this.deps.synthEarlUrl(beat);
+            if (!this.closed && this.endedKind === null) {
+              this.duoBeatCount += 1;
+              earlItem = {
+                id: `route-duo-suggestion-${++runnerSeq}`,
+                kind: 'answer',
+                label: 'Earl — reaction',
+                source: { kind: 'url', url: earlUrl },
+                durationSec: earlDurationSec(beat),
+                attempts: 0,
+                settled: false,
+                onSettle: rec => {
+                  this.deps.onEvent?.('duo_line', {
+                    stage: rec.sounded ? 'sounded' : 'dropped',
+                    role: 'suggestion',
+                    member_id: null,
+                    item_id: earlItem?.id ?? null,
+                    mode: 'route',
+                  });
+                },
+              };
+            }
+          } catch {
+            earlItem = null; // verification gate / render failure: Miles alone
+          }
+        }
+      }
+    }
+    if (this.closed || this.endedKind !== null) {
+      this.suggestionPhase = 'idle';
+      return;
+    }
+    if (earlItem) this.player.enqueueNext(earlItem);
     this.player.enqueueNext(item);
     this.notify();
   }
@@ -3851,7 +4003,25 @@ export class RoutePlanRunner {
       if (answer.kind === 'pick') {
         const url = await this.deps.synthUrl(answer.recommendation);
         if (this.closed || this.endedKind !== null) return;
-        this.armedProposal = { flavor: 'place', pick: answer, url };
+        // Earl's reaction beat, pre-rendered beside the pick
+        // (Slice 9): never on a sponsored pick, never in
+        // Family mode; a failed render arms without him.
+        let earlUrl: string | null = null;
+        let earlText: string | null = null;
+        if (!answer.sponsored && this.deps.synthEarlUrl && this.plan?.audience !== 'family') {
+          const beat = earlSuggestionBeat('any', false, this.duoBeatCount);
+          if (beat) {
+            try {
+              earlUrl = await this.deps.synthEarlUrl(beat);
+              earlText = beat;
+              this.duoBeatCount += 1;
+            } catch {
+              earlUrl = null;
+            }
+          }
+        }
+        if (this.closed || this.endedKind !== null) return;
+        this.armedProposal = { flavor: 'place', pick: answer, url, earlUrl, earlText };
         return;
       }
       // The priority rule (placeMemory.ts): the callback
@@ -3875,7 +4045,26 @@ export class RoutePlanRunner {
           const callback = candidates[0];
           const url = await this.deps.synthUrl(callback.line);
           if (this.closed || this.endedKind !== null) return;
-          this.armedProposal = { flavor: 'place-memory', callback, url };
+          // Earl's grievance beat, pre-rendered beside the
+          // callback (Slice 9): the bridge took his ferry —
+          // a callback is where his complaint belongs. Never
+          // in Family mode; a failed render arms without him.
+          let earlUrl: string | null = null;
+          let earlText: string | null = null;
+          if (this.deps.synthEarlUrl && this.plan?.audience !== 'family') {
+            const beat = earlCallbackBeat(this.duoBeatCount);
+            if (beat) {
+              try {
+                earlUrl = await this.deps.synthEarlUrl(beat);
+                earlText = beat;
+                this.duoBeatCount += 1;
+              } catch {
+                earlUrl = null;
+              }
+            }
+          }
+          if (this.closed || this.endedKind !== null) return;
+          this.armedProposal = { flavor: 'place-memory', callback, url, earlUrl, earlText };
         }
       }
     } catch {
@@ -3898,8 +4087,8 @@ export class RoutePlanRunner {
    */
   private speakProposal(
     armed:
-      | { flavor: 'place'; pick: SuggestionPick; url: string }
-      | { flavor: 'place-memory'; callback: CallbackCandidate; url: string },
+      | { flavor: 'place'; pick: SuggestionPick; url: string; earlUrl?: string | null; earlText?: string | null }
+      | { flavor: 'place-memory'; callback: CallbackCandidate; url: string; earlUrl?: string | null; earlText?: string | null },
   ): void {
     // Both flavors normalize to the one spoken shape (the
     // freeform engine's speakProposal is the mirror): a
@@ -3992,6 +4181,33 @@ export class RoutePlanRunner {
     // The channel's one-interruption rule covers proposals
     // too: while this line sounds, no ask can queue behind it.
     this.suggestionPhase = 'answering';
+    // Earl's beat rides behind Miles' line (Slice 9):
+    // enqueueNext unshifts, so Earl queues first and Miles'
+    // proposal lands ahead of him.
+    if (armed.earlUrl && armed.earlText) {
+      const beatText = armed.earlText;
+      {
+        const earlItem: AudibleItem = {
+          id: `route-duo-proposal-${++runnerSeq}`,
+          kind: 'answer',
+          label: 'Earl — reaction',
+          source: { kind: 'url', url: armed.earlUrl },
+          durationSec: earlDurationSec(beatText),
+          attempts: 0,
+          settled: false,
+          onSettle: rec => {
+            this.deps.onEvent?.('duo_line', {
+              stage: rec.sounded ? 'sounded' : 'dropped',
+              role: armed.flavor === 'place' ? 'suggestion' : 'callback',
+              member_id: null,
+              item_id: earlItem.id,
+              mode: 'route',
+            });
+          },
+        };
+        this.player.enqueueNext(earlItem);
+      }
+    }
     this.player.enqueueNext(item);
     this.notify();
   }
