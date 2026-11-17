@@ -1,0 +1,615 @@
+// The current-events layer v1 (v16.2 Slice 2, Nov 16, 2026).
+//
+// Fresh eat / drink / do candidates near the driver — near the
+// route and the destination as anchors — each one carrying
+// hours that have passed the freshness standard
+// (freshness.ts) before it may be ranked, spoken, or suggested.
+// This layer is the profile's first consumer (profile.ts's read
+// API exists for exactly this) and the candidate source the
+// suggestion slices (4–6) will draw on. It recommends nothing
+// itself: it produces a ranked, freshness-verified pool.
+//
+// ============================================================
+// SCOPE — PLACES-ONLY v1 (LEAN, NOT RULED).
+// Erik's Nov 14, 2026 lean (stack plan ◆ item 2): v1 rides the
+// existing Google Places stack only. An events FEED joins when
+// a source proves fresh enough to meet the standard's 48 h
+// dated-source rule; none has — Ticketmaster and local
+// calendars were surveyed with worse freshness and more
+// liability (stack plan, Nov 13). So the feed seam below is a
+// designed interface with NO implementation behind it, and the
+// honest gap is named here rather than papered over: v1 knows
+// what is OPEN, not what is HAPPENING. Feed candidates, when a
+// feed exists, enter only through assessEvent() — the gate is
+// built and sim-pinned now so a future feed cannot sneak past
+// it.
+// ============================================================
+//
+// Data sources, honestly:
+//   - Places (New) searchNearby over eat/drink/do types, with
+//     regular/current opening hours + UTC offset in the field
+//     mask — the same API key and fail-soft posture as
+//     facts.ts discovery. Hours are cached on-device (below)
+//     so a place's schedule is not re-fetched every cycle, and
+//     so a provider outage can fall back to cached records —
+//     which still must pass the freshness gate at serve time.
+//   - Shelf metadata: whether the library carries a story for
+//     the place (the consumer injects the key set). A candidate
+//     Miles can also TELL about ranks a step above one it
+//     cannot — contextual color, never an eligibility rule.
+//   - The profile (matchInputs / getConstraints) ranks and
+//     filters. Constraints are applied only where Places data
+//     actually answers them (alcohol-primary types, with-kids
+//     vs bar/nightclub, servesVegetarianFood); a detour-minute
+//     constraint is NOT approximated from distance — detour
+//     costing belongs to the route consumer, which owns Routes
+//     data. In v1 `detourMinutes` is therefore always null.
+//
+// Everything here fails soft and silent: no key, no network, a
+// provider error — the pool is simply empty. The pool is color
+// and candidate supply, never a drive-critical path.
+
+import {
+  assessEvent,
+  assessHours,
+  FRESHNESS_STANDARD,
+  type DatedEvent,
+  type HoursPeriod,
+  type PlaceHoursRecord,
+} from './freshness';
+import {
+  getConstraints,
+  matchInputs,
+  type MatchInputs,
+  type ResolvedConstraints,
+} from './profile';
+import { calculateDistance } from '../utils/geo';
+
+// ------------------------------------------------------------ candidate model
+
+export type EventCandidateKind = 'eat' | 'drink' | 'do';
+
+export interface EventAnchor {
+  lat: number;
+  lng: number;
+  /** Where the anchor sits in the drive: the driver now, a route point, or the destination. */
+  kind: 'position' | 'route' | 'destination';
+}
+
+export interface EventCandidate {
+  placeId: string;
+  name: string;
+  lat: number;
+  lng: number;
+  kind: EventCandidateKind;
+  types: string[];
+  rating: number | null;
+  userRatings: number | null;
+  address: string | null;
+  /** Places editorial summary, when the source gave one — color for consumers. */
+  editorial: string | null;
+  distanceM: number;
+  anchorKind: EventAnchor['kind'];
+  /** From the source hours alone (freshness.ts); null = not claimable. */
+  openNow: boolean | null;
+  closesAtMs: number | null;
+  opensAtMs: number | null;
+  /** When the hours behind this candidate were fetched — the freshness provenance. */
+  hoursFetchedAt: number;
+  /** The shelf carries at least one story for this place. */
+  hasShelfStory: boolean;
+  /** Ranking score (higher = surface sooner). Eligibility is NOT score-based. */
+  score: number;
+  /** Detour cost in minutes. Null in v1 — see the header. */
+  detourMinutes: number | null;
+  /** Set only for feed-event candidates (none exist in v1 — no feed is wired). */
+  event: DatedEvent | null;
+}
+
+/** A place as a provider reports it, before the freshness gate. */
+export interface RawPlace {
+  placeId: string;
+  name: string;
+  lat: number;
+  lng: number;
+  types: string[];
+  rating: number | null;
+  userRatings: number | null;
+  address: string | null;
+  editorial: string | null;
+  servesVegetarianFood: boolean | null;
+  hours: PlaceHoursRecord;
+}
+
+// ------------------------------------------------------------ providers
+
+export interface PlaceHoursProvider {
+  fetchPlaces(anchor: EventAnchor, radiusM: number): Promise<RawPlace[]>;
+}
+
+export interface EventsFeedProvider {
+  fetchEvents(anchor: EventAnchor, radiusM: number, nowMs: number): Promise<DatedEvent[]>;
+}
+
+/**
+ * The shipped events feed: none. This is the designed seam a
+ * future feed plugs into — and the standing record that v1 has
+ * no events source (see the header's scope note). A real feed
+ * replaces this constant; its candidates still pass through
+ * assessEvent() before they can surface.
+ */
+export const NO_EVENTS_FEED: EventsFeedProvider = {
+  async fetchEvents() {
+    return [];
+  },
+};
+
+const placesKey = (): string =>
+  (import.meta.env.VITE_GOOGLE_PLACES_API_KEY as string | undefined) ??
+  (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined) ??
+  '';
+
+/** Eat/drink/do types the layer asks Places about (story types stay facts.ts's list). */
+const CANDIDATE_TYPES = [
+  'restaurant', 'cafe', 'bakery', 'meal_takeaway', 'ice_cream_shop', 'fast_food_restaurant',
+  'bar', 'pub', 'wine_bar', 'brewery', 'coffee_shop', 'tea_house', 'night_club',
+  'tourist_attraction', 'museum', 'art_gallery', 'performing_arts_theater', 'movie_theater',
+  'park', 'zoo', 'aquarium', 'stadium', 'shopping_mall', 'book_store', 'library', 'marina',
+];
+
+interface PlacesHoursWire {
+  periods?: { open?: { day?: number; hour?: number; minute?: number }; close?: { day?: number; hour?: number; minute?: number } }[];
+}
+
+interface PlacesResultWire {
+  id?: string;
+  displayName?: { text?: string };
+  location?: { latitude?: number; longitude?: number };
+  rating?: number;
+  userRatingCount?: number;
+  types?: string[];
+  formattedAddress?: string;
+  editorialSummary?: { text?: string };
+  businessStatus?: string;
+  utcOffsetMinutes?: number;
+  servesVegetarianFood?: boolean;
+  regularOpeningHours?: PlacesHoursWire;
+  currentOpeningHours?: PlacesHoursWire;
+}
+
+function wirePeriods(wire: PlacesHoursWire | undefined): HoursPeriod[] | null {
+  if (!wire?.periods) return null;
+  const out: HoursPeriod[] = [];
+  for (const p of wire.periods) {
+    if (!p.open || p.open.day === undefined || p.open.hour === undefined) continue;
+    const period: HoursPeriod = {
+      open: { day: p.open.day, hour: p.open.hour, minute: p.open.minute ?? 0 },
+    };
+    if (p.close && p.close.day !== undefined && p.close.hour !== undefined) {
+      period.close = { day: p.close.day, hour: p.close.hour, minute: p.close.minute ?? 0 };
+    }
+    out.push(period);
+  }
+  return out;
+}
+
+/** Map one wire place onto the layer's shape; fetchedAt is stamped at parse. */
+function mapWirePlace(p: PlacesResultWire, fetchedAt: number): RawPlace | null {
+  const name = p.displayName?.text;
+  const lat = p.location?.latitude;
+  const lng = p.location?.longitude;
+  if (!p.id || !name || lat === undefined || lng === undefined) return null;
+  const current = wirePeriods(p.currentOpeningHours);
+  const regular = wirePeriods(p.regularOpeningHours);
+  // Current hours win when present: they already fold in
+  // special-day exceptions the regular week does not know.
+  const periods = current ?? regular;
+  return {
+    placeId: p.id,
+    name,
+    lat,
+    lng,
+    types: p.types ?? [],
+    rating: p.rating ?? null,
+    userRatings: p.userRatingCount ?? null,
+    address: p.formattedAddress ?? null,
+    editorial: p.editorialSummary?.text ?? null,
+    servesVegetarianFood: p.servesVegetarianFood ?? null,
+    hours: {
+      periods,
+      utcOffsetMinutes: p.utcOffsetMinutes ?? null,
+      businessStatus: p.businessStatus ?? null,
+      hoursKind: current ? 'current' : regular ? 'regular' : null,
+      fetchedAt,
+      source: 'places',
+    },
+  };
+}
+
+/** The real provider: Places (New), same key + fail-soft posture as facts.ts. */
+export const googlePlacesHoursProvider: PlaceHoursProvider = {
+  async fetchPlaces(anchor, radiusM) {
+    const key = placesKey();
+    if (!key) return [];
+    try {
+      const res = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': key,
+          'X-Goog-FieldMask':
+            'places.id,places.displayName,places.location,places.rating,places.userRatingCount,places.types,places.formattedAddress,places.editorialSummary,places.businessStatus,places.utcOffsetMinutes,places.servesVegetarianFood,places.regularOpeningHours,places.currentOpeningHours',
+        },
+        body: JSON.stringify({
+          includedTypes: CANDIDATE_TYPES,
+          maxResultCount: 20,
+          rankPreference: 'POPULARITY',
+          locationRestriction: {
+            circle: {
+              center: { latitude: anchor.lat, longitude: anchor.lng },
+              radius: radiusM,
+            },
+          },
+        }),
+      });
+      if (!res.ok) return [];
+      const parsed = (await res.json()) as { places?: PlacesResultWire[] };
+      const fetchedAt = Date.now();
+      const out: RawPlace[] = [];
+      for (const p of parsed.places ?? []) {
+        const mapped = mapWirePlace(p, fetchedAt);
+        if (mapped) out.push(mapped);
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  },
+};
+
+// ------------------------------------------------------------ hours cache
+// On-device, mirroring the profile store pattern: a raw-string
+// store seam, a size cap, fail-soft everywhere. The cache holds
+// the last-seen RawPlace per place id so hours survive between
+// cycles; freshness is judged at READ time against the
+// standard, never assumed from the cache's say-so. Entries too
+// old to ever pass the gate again are pruned on write.
+
+export interface HoursCacheStore {
+  read(): string | null;
+  write(value: string): void;
+  clear(): void;
+}
+
+export const HOURS_CACHE_KEY = 'leo_place_hours_cache';
+const MAX_CACHE_ENTRIES = 300;
+const MAX_CACHE_CHARS = 512_000;
+
+export const localHoursCacheStore: HoursCacheStore = {
+  read() {
+    try {
+      return localStorage.getItem(HOURS_CACHE_KEY);
+    } catch {
+      return null;
+    }
+  },
+  write(value: string) {
+    try {
+      localStorage.setItem(HOURS_CACHE_KEY, value);
+    } catch {
+      /* storage unavailable — the cache is a nicety, never a failure */
+    }
+  },
+  clear() {
+    try {
+      localStorage.removeItem(HOURS_CACHE_KEY);
+    } catch {
+      /* ignore */
+    }
+  },
+};
+
+interface HoursCacheDoc {
+  v: 1;
+  entries: Record<string, RawPlace>;
+}
+
+function parseCache(raw: string | null): HoursCacheDoc {
+  if (!raw || raw.length > MAX_CACHE_CHARS) return { v: 1, entries: {} };
+  try {
+    const doc = JSON.parse(raw) as HoursCacheDoc;
+    if (doc?.v !== 1 || typeof doc.entries !== 'object' || doc.entries === null) return { v: 1, entries: {} };
+    return doc;
+  } catch {
+    return { v: 1, entries: {} };
+  }
+}
+
+export function loadHoursCache(store: HoursCacheStore = localHoursCacheStore): Map<string, RawPlace> {
+  return new Map(Object.entries(parseCache(store.read()).entries));
+}
+
+/** Record fetched places; prune entries the standard can never pass again. */
+export function cachePlaces(
+  places: readonly RawPlace[],
+  store: HoursCacheStore = localHoursCacheStore,
+  nowMs: number = Date.now(),
+): void {
+  if (places.length === 0) return;
+  const doc = parseCache(store.read());
+  for (const p of places) doc.entries[p.placeId] = p;
+  const fresh = Object.values(doc.entries).filter(
+    p => nowMs - p.hours.fetchedAt <= FRESHNESS_STANDARD.hoursMaxCacheAgeMs,
+  );
+  fresh.sort((a, b) => b.hours.fetchedAt - a.hours.fetchedAt);
+  const kept = fresh.slice(0, MAX_CACHE_ENTRIES);
+  try {
+    store.write(JSON.stringify({ v: 1, entries: Object.fromEntries(kept.map(p => [p.placeId, p])) } satisfies HoursCacheDoc));
+  } catch {
+    /* a cache write is never a failure */
+  }
+}
+
+// ------------------------------------------------------------ classification + profile match
+
+const ALCOHOL_TYPES = ['bar', 'pub', 'wine_bar', 'brewery', 'liquor_store', 'night_club'];
+const EAT_TYPES = ['restaurant', 'cafe', 'bakery', 'meal_takeaway', 'meal_delivery', 'food', 'ice_cream_shop', 'sandwich_shop', 'fast_food_restaurant'];
+const COFFEE_TYPES = ['coffee_shop', 'tea_house'];
+const DO_TYPES = ['tourist_attraction', 'museum', 'art_gallery', 'performing_arts_theater', 'movie_theater', 'park', 'zoo', 'aquarium', 'stadium', 'shopping_mall', 'book_store', 'library', 'marina', 'event_venue'];
+
+/** The candidate kind a place's Places types earn it, or null (not eat/drink/do supply). */
+export function kindForTypes(types: readonly string[]): EventCandidateKind | null {
+  if (types.some(t => ALCOHOL_TYPES.includes(t))) return 'drink';
+  if (types.some(t => EAT_TYPES.includes(t) || t.endsWith('_restaurant'))) return 'eat';
+  if (types.some(t => COFFEE_TYPES.includes(t))) return 'drink';
+  if (types.some(t => DO_TYPES.includes(t))) return 'do';
+  return null;
+}
+
+const CUISINE_TYPE_FRAGMENTS: Record<string, string[]> = {
+  'tacos-mexican': ['mexican'],
+  seafood: ['seafood'],
+  bbq: ['barbecue', 'bbq'],
+  italian: ['italian'],
+  asian: ['asian', 'japanese', 'chinese', 'thai', 'korean', 'vietnamese', 'indian', 'sushi'],
+  'coffee-bakery': ['coffee_shop', 'cafe', 'bakery'],
+};
+
+const DRINK_TYPE_FRAGMENTS: Record<string, string[]> = {
+  coffee: ['coffee_shop', 'cafe', 'tea_house'],
+  beer: ['bar', 'pub', 'brewery'],
+  wine: ['wine_bar', 'bar', 'winery'],
+  cocktails: ['bar', 'cocktail_bar'],
+  // 'no-alcohol' is a preference against, not a match for — no positive signal.
+};
+
+const ACTIVITY_TYPE_FRAGMENTS: Record<string, string[]> = {
+  'live-music': ['performing_arts_theater', 'event_venue'],
+  'history-museums': ['museum', 'art_gallery', 'library'],
+  'outdoors-views': ['park', 'marina', 'tourist_attraction'],
+  sports: ['stadium'],
+  markets: ['shopping_mall', 'market'],
+  nightlife: ['night_club', 'bar', 'pub'],
+  // 'weird-local-lore' has no Places-type signal; it matches nothing, honestly.
+};
+
+function matchesAny(types: readonly string[], fragments: readonly string[]): boolean {
+  return types.some(t => fragments.some(f => t === f || t.includes(f)));
+}
+
+/** How strongly the declared profile tastes match this place (0 when neutral). */
+export function profileMatchScore(types: readonly string[], match: MatchInputs): number {
+  let hits = 0;
+  for (const c of match.cuisines) {
+    const frags = CUISINE_TYPE_FRAGMENTS[c];
+    if (frags && matchesAny(types, frags)) hits += 1;
+  }
+  for (const d of match.drinks) {
+    const frags = DRINK_TYPE_FRAGMENTS[d];
+    if (frags && matchesAny(types, frags)) hits += 1;
+  }
+  for (const a of match.activities) {
+    const frags = ACTIVITY_TYPE_FRAGMENTS[a];
+    if (frags && matchesAny(types, frags)) hits += 1;
+  }
+  return Math.min(hits * PROFILE_MATCH_POINTS, PROFILE_MATCH_CAP);
+}
+
+const PROFILE_MATCH_POINTS = 12;
+const PROFILE_MATCH_CAP = 24;
+const SHELF_BONUS = 5;
+const OPEN_NOW_BONUS = 10;
+const CLOSED_NOW_PENALTY = 15;
+
+/**
+ * Declared-constraint filters, applied only where the data
+ * answers them (see the header). Returns true when the place
+ * survives. Unknown data never filters a place out — the layer
+ * does not guess in either direction.
+ */
+export function survivesConstraints(
+  raw: RawPlace,
+  kind: EventCandidateKind,
+  constraints: ResolvedConstraints,
+): boolean {
+  const alcoholPrimary = raw.types.some(t => ALCOHOL_TYPES.includes(t));
+  if (constraints.alcoholOk === false && alcoholPrimary) return false;
+  if (constraints.usuallyWithKids === true && raw.types.some(t => t === 'bar' || t === 'night_club')) return false;
+  if (
+    kind === 'eat' &&
+    constraints.dietary.includes('vegetarian') &&
+    raw.servesVegetarianFood === false
+  ) {
+    return false;
+  }
+  return true;
+}
+
+// ------------------------------------------------------------ discovery
+
+export interface DiscoverEventOptions {
+  nowMs?: number;
+  radiusM?: number;
+  provider?: PlaceHoursProvider;
+  /** Defaults to NO_EVENTS_FEED — v1 has no feed (see the header). */
+  eventsFeed?: EventsFeedProvider;
+  /** Ranking inputs; default = the live profile reads (the layer is its first consumer). */
+  match?: MatchInputs;
+  constraints?: ResolvedConstraints;
+  /** Place keys (backend dialect) the shelf carries stories for; null = unknown, no bonus. */
+  shelfKeys?: ReadonlySet<string> | null;
+  /** Hours cache: written on fetch, read on provider-empty fallback. Null disables. */
+  cache?: HoursCacheStore | null;
+  maxResults?: number;
+}
+
+const DEFAULT_RADIUS_M = 1200;
+const DEFAULT_MAX_RESULTS = 12;
+
+/** backend.normalizePlaceKey, mirrored (partners.ts precedent: data modules stay backend-free). */
+function shelfPlaceKey(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[.'’]/g, '')
+    .replace(/\s+/g, ' ');
+}
+
+function toCandidate(
+  raw: RawPlace,
+  anchor: EventAnchor,
+  nowMs: number,
+  match: MatchInputs,
+  shelfKeys: ReadonlySet<string> | null,
+): EventCandidate | null {
+  const kind = kindForTypes(raw.types);
+  if (!kind) return null;
+  const assessment = assessHours(raw.hours, nowMs);
+  if (!assessment.eligible) return null; // the standard: silently ineligible, never guessed
+  const popularity =
+    raw.rating !== null
+      ? (raw.rating - 3.5) * 20 + Math.min(20, Math.log10((raw.userRatings ?? 0) + 1) * 8)
+      : 0;
+  const distanceM = calculateDistance(anchor.lat, anchor.lng, raw.lat, raw.lng);
+  const hasShelfStory = shelfKeys !== null && shelfKeys.has(shelfPlaceKey(raw.name));
+  let score = popularity - distanceM / 90 + profileMatchScore(raw.types, match);
+  if (hasShelfStory) score += SHELF_BONUS;
+  if (assessment.openNow === true) score += OPEN_NOW_BONUS;
+  if (assessment.openNow === false) score -= CLOSED_NOW_PENALTY;
+  return {
+    placeId: raw.placeId,
+    name: raw.name,
+    lat: raw.lat,
+    lng: raw.lng,
+    kind,
+    types: raw.types,
+    rating: raw.rating,
+    userRatings: raw.userRatings,
+    address: raw.address,
+    editorial: raw.editorial,
+    distanceM,
+    anchorKind: anchor.kind,
+    openNow: assessment.openNow,
+    closesAtMs: assessment.closesAtMs,
+    opensAtMs: assessment.opensAtMs,
+    hoursFetchedAt: raw.hours.fetchedAt,
+    hasShelfStory,
+    score,
+    detourMinutes: null,
+    event: null,
+  };
+}
+
+/**
+ * The layer's one entry point: ranked, freshness-verified
+ * eat/drink/do candidates near the given anchors. Anchors are
+ * tried in order; a place found from several anchors is kept
+ * once, judged from its nearest. Every returned candidate has
+ * passed assessHours at `nowMs`; every candidate also carries
+ * its hours' fetchedAt so a consumer can see the provenance of
+ * the claim it is about to make.
+ */
+export async function discoverEventCandidates(
+  anchors: readonly EventAnchor[],
+  opts: DiscoverEventOptions = {},
+): Promise<EventCandidate[]> {
+  const nowMs = opts.nowMs ?? Date.now();
+  const radiusM = opts.radiusM ?? DEFAULT_RADIUS_M;
+  const provider = opts.provider ?? googlePlacesHoursProvider;
+  const match = opts.match ?? matchInputs();
+  const constraints = opts.constraints ?? getConstraints();
+  const shelfKeys = opts.shelfKeys ?? null;
+  const cache = opts.cache === undefined ? localHoursCacheStore : opts.cache;
+
+  const byPlace = new Map<string, { raw: RawPlace; anchor: EventAnchor; distanceM: number }>();
+  const consider = (raw: RawPlace, anchor: EventAnchor) => {
+    const distanceM = calculateDistance(anchor.lat, anchor.lng, raw.lat, raw.lng);
+    if (distanceM > radiusM) return;
+    const existing = byPlace.get(raw.placeId);
+    if (!existing || distanceM < existing.distanceM) byPlace.set(raw.placeId, { raw, anchor, distanceM });
+  };
+
+  let fetchedAny = false;
+  for (const anchor of anchors) {
+    let places: RawPlace[] = [];
+    try {
+      places = await provider.fetchPlaces(anchor, radiusM);
+    } catch {
+      places = [];
+    }
+    if (places.length > 0) {
+      fetchedAny = true;
+      if (cache) cachePlaces(places, cache, nowMs);
+      for (const raw of places) consider(raw, anchor);
+    }
+  }
+  // Provider-empty fallback: cached records near the anchors —
+  // still gated at serve time below, so a stale cache entry is
+  // exactly as ineligible as a stale fetch.
+  if (!fetchedAny && cache) {
+    const cached = loadHoursCache(cache);
+    for (const anchor of anchors) {
+      for (const raw of cached.values()) consider(raw, anchor);
+    }
+  }
+
+  const out: EventCandidate[] = [];
+  for (const { raw, anchor } of byPlace.values()) {
+    const kind = kindForTypes(raw.types);
+    if (!kind) continue;
+    if (!survivesConstraints(raw, kind, constraints)) continue;
+    const candidate = toCandidate(raw, anchor, nowMs, match, shelfKeys);
+    if (candidate) out.push(candidate);
+  }
+  out.sort((a, b) => b.score - a.score);
+  return out.slice(0, opts.maxResults ?? DEFAULT_MAX_RESULTS);
+}
+
+/**
+ * Feed-event candidates near the anchors, gated by
+ * assessEvent(). Ships against NO_EVENTS_FEED (always empty);
+ * it exists so the gate — not a future integrator's care — is
+ * what stands between a feed and the listener.
+ */
+export async function discoverFeedEvents(
+  anchors: readonly EventAnchor[],
+  opts: DiscoverEventOptions = {},
+): Promise<DatedEvent[]> {
+  const feed = opts.eventsFeed ?? NO_EVENTS_FEED;
+  const nowMs = opts.nowMs ?? Date.now();
+  const radiusM = opts.radiusM ?? DEFAULT_RADIUS_M;
+  const out: DatedEvent[] = [];
+  for (const anchor of anchors) {
+    let events: DatedEvent[] = [];
+    try {
+      events = await feed.fetchEvents(anchor, radiusM, nowMs);
+    } catch {
+      events = [];
+    }
+    for (const ev of events) {
+      if (assessEvent(ev, nowMs).eligible) out.push(ev);
+    }
+  }
+  out.sort((a, b) => a.startsAtMs - b.startsAtMs);
+  return out;
+}
