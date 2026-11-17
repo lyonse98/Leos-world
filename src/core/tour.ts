@@ -25,9 +25,19 @@ import {
   composeSuggestion,
   type SuggestionIntent,
   type SuggestionOutcome,
+  type SuggestionPick,
 } from './suggestions';
+import {
+  judgeCandidateAtSpeak,
+  judgeProposalSeam,
+  localProposalStore,
+  recordProposal,
+  resolveProposalRecord,
+  MAX_UNSOLICITED_PROPOSALS_PER_DRIVE,
+} from './proposals';
 import type { TourMode } from './routeMode';
 import { tagsFor } from '../data/routeTags';
+import { memorialFor } from '../data/routeMemorial';
 import { partnerApprovedAngleFor } from '../data/partners';
 import * as gemini from './gemini';
 import * as facts from './facts';
@@ -196,7 +206,14 @@ export interface TourView {
   suggestion: {
     available: boolean;
     phase: 'idle' | 'answering';
-    pending: { placeId: string; name: string; kind: string; intent: SuggestionIntent } | null;
+    pending: {
+      placeId: string;
+      name: string;
+      kind: string;
+      intent: SuggestionIntent;
+      /** Which channel offered the pick (v16.2 Slice 5): the listener's ask, or Miles unprompted. */
+      source: 'solicited' | 'proposed';
+    } | null;
   };
   lastStory: { subject: string; label: string; angle: string | null } | null;
   likedSubject: string | null;
@@ -207,6 +224,8 @@ export interface TourView {
     questionsAnswered: number;
     /** Suggestion picks that actually sounded (v16.2 Slice 4). */
     suggestionsAnswered: number;
+    /** Unsolicited proposals that actually sounded (v16.2 Slice 5). */
+    proposalsSpoken: number;
     storm: boolean;
     ttsQuota: boolean;
     storyQuota: boolean;
@@ -666,7 +685,25 @@ export class Tour {
   private suggestionPhase: 'idle' | 'answering' = 'idle';
   private suggestionPicksUsed = 0;
   private suggestedPlaceIds = new Set<string>();
-  private pendingSuggestion: { placeId: string; name: string; kind: string; intent: SuggestionIntent } | null = null;
+  private pendingSuggestion: {
+    placeId: string;
+    name: string;
+    kind: string;
+    intent: SuggestionIntent;
+    source: 'solicited' | 'proposed';
+  } | null = null;
+
+  // Unsolicited proposals (v16.2 Slice 5): the seam engine
+  // beside the solicited channel, behind the SAME declared-
+  // mode gate. Selection and speech are different boundaries
+  // (proposals.ts): a pick composed at one story boundary is
+  // armed here and spoken at the next, after the seam judge
+  // and the speak-time freshness re-judgment both pass.
+  // proposalsUsed counts SPOKEN proposals only — the cap's
+  // unit; a dropped or suppressed selection never spends it.
+  private proposalsUsed = 0;
+  private proposalPlaceIds = new Set<string>();
+  private armedProposal: SuggestionPick | null = null;
 
 
   private tickTimer: unknown = null;
@@ -708,7 +745,14 @@ export class Tour {
   private userPausedFlag = false;
   private interruptedFlag = false;
   private likedSubject: string | null = null;
-  private counts = { storiesPlayed: 0, storiesDropped: 0, fillersPlayed: 0, questionsAnswered: 0, suggestionsAnswered: 0 };
+  private counts = {
+    storiesPlayed: 0,
+    storiesDropped: 0,
+    fillersPlayed: 0,
+    questionsAnswered: 0,
+    suggestionsAnswered: 0,
+    proposalsSpoken: 0,
+  };
 
   constructor(deps: TourDeps) {
     this.clock = deps.clock ?? systemClock;
@@ -857,6 +901,7 @@ export class Tour {
               name: this.pendingSuggestion.name,
               kind: this.pendingSuggestion.kind,
               intent: this.pendingSuggestion.intent,
+              source: this.pendingSuggestion.source,
             }
           : null,
       },
@@ -877,6 +922,7 @@ export class Tour {
         fillersPlayed: this.counts.fillersPlayed,
         questionsAnswered: this.counts.questionsAnswered,
         suggestionsAnswered: this.counts.suggestionsAnswered,
+        proposalsSpoken: this.counts.proposalsSpoken,
         storm: this.clock.now() < this.stormUntil || this.clock.now() < this.synthStandDownUntil,
         ttsQuota: this.seams.ttsQuotaTripped(),
         storyQuota: this.seams.storyQuotaTripped(),
@@ -3961,6 +4007,12 @@ export class Tour {
       );
       this.persistDayState(subject);
     }
+    // Unsolicited proposals (v16.2 Slice 5): a committed
+    // story settle that actually sounded is a story
+    // boundary — the one spoken seam the proposal engine
+    // judges. (A story dropped unsounded is an internal
+    // queue event, not a seam the listener experienced.)
+    if (this.phase === 'active' && rec.sounded) this.evaluateProposalSeam(item);
     this.notify();
   }
 
@@ -5250,14 +5302,21 @@ export class Tour {
     // A fresh ask over a still-pending pick IS that pick's
     // outcome — the listener asked for another instead of
     // taking it. Filed before the new ask so the acceptance
-    // accounting stays in ask order.
+    // accounting stays in ask order. A pending PROPOSAL is
+    // the exception (Slice 5): the listener didn't decline
+    // it, they turned to the ask channel — the proposal goes
+    // to the tray for a stopped-state decision instead.
     if (this.pendingSuggestion) {
-      this.emit('suggestion_outcome', {
-        outcome: 'asked-another',
-        place_id: this.pendingSuggestion.placeId,
-        intent: this.pendingSuggestion.intent,
-      });
-      this.pendingSuggestion = null;
+      if (this.pendingSuggestion.source === 'proposed') {
+        this.trayPendingProposal();
+      } else {
+        this.emit('suggestion_outcome', {
+          outcome: 'asked-another',
+          place_id: this.pendingSuggestion.placeId,
+          intent: this.pendingSuggestion.intent,
+        });
+        this.pendingSuggestion = null;
+      }
     }
     // Commentary yields to a suggestion too (the Q&A rule): a
     // clip alive at the ask dies now, so the answer owns the
@@ -5293,6 +5352,7 @@ export class Tour {
         name: answer.candidate.name,
         kind: answer.candidate.kind,
         intent,
+        source: 'solicited',
       };
     }
     const pickId = answer.kind === 'pick' ? answer.candidate.placeId : null;
@@ -5329,20 +5389,200 @@ export class Tour {
    * The listener's verdict on the pending pick (the Ask
    * sheet's Accept / No-thanks). 'asked-another' is never
    * filed here — it is produced by a subsequent ask (above),
-   * which is what the gesture means. A pick still pending at
-   * tour end files nothing: unmeasured is honest, a dismissal
-   * is never inferred.
+   * which is what the gesture means. A SOLICITED pick still
+   * pending at tour end files nothing: unmeasured is honest,
+   * a dismissal is never inferred. A PROPOSED pick (Slice 5)
+   * resolves on its own channel's vocabulary — and one still
+   * pending at tour end goes to the tray instead of
+   * vanishing (see trayPendingProposal).
    */
   resolveSuggestion(outcome: Exclude<SuggestionOutcome, 'asked-another'>): boolean {
     if (!this.pendingSuggestion) return false;
-    this.emit('suggestion_outcome', {
-      outcome,
-      place_id: this.pendingSuggestion.placeId,
-      intent: this.pendingSuggestion.intent,
-    });
+    const pending = this.pendingSuggestion;
     this.pendingSuggestion = null;
+    if (pending.source === 'proposed') {
+      resolveProposalRecord(localProposalStore, pending.placeId, outcome);
+      this.emit('proposal_outcome', {
+        outcome,
+        place_id: pending.placeId,
+        intent: pending.intent,
+        surface: 'drive',
+      });
+    } else {
+      this.emit('suggestion_outcome', {
+        outcome,
+        place_id: pending.placeId,
+        intent: pending.intent,
+      });
+    }
     this.notify();
     return true;
+  }
+
+  // ------------------------------------------------------------ unsolicited proposals (v16.2 Slice 5)
+
+  /**
+   * Carry the pending PROPOSAL to the arrival tray: its
+   * lifecycle record already stands in the store (written at
+   * speak time, state 'spoken' — the tray IS that record,
+   * surfaced when the drive is over), so carrying is the
+   * event plus clearing the in-drive pending slot. No
+   * outcome is filed: undecided is the tray's whole point.
+   */
+  private trayPendingProposal(): void {
+    if (!this.pendingSuggestion || this.pendingSuggestion.source !== 'proposed') return;
+    this.emit('proposal_trayed', { place_id: this.pendingSuggestion.placeId });
+    this.pendingSuggestion = null;
+  }
+
+  /** Memorial judgment for a freeform item (short-cut angles judge by their base angle). */
+  private itemIsMemorial(item: AudibleItem): boolean {
+    const subject = item.subject ?? '';
+    const angle = item.angleOf ?? '';
+    const baseAngle = isShortCutAngle(angle) ? angle.slice(0, -SHORT_CUT_SUFFIX.length) : angle;
+    return memorialFor(subject, baseAngle);
+  }
+
+  /**
+   * The seam engine, run at every committed story settle
+   * that actually sounded — a boundary the listener
+   * experienced. Two stages, one action per boundary
+   * (proposals.ts): SPEAK an armed selection (the seam
+   * judge and the speak-time freshness re-judgment both
+   * re-run here, against this boundary's real neighbors),
+   * or ARM the next selection (compose only — selection is
+   * free; speech is what's fenced). Behind the Slice 4
+   * gate throughout: in Driving, or with no declared mode,
+   * this method is never reached at all.
+   */
+  private evaluateProposalSeam(settledItem: AudibleItem): void {
+    if (!this.suggestionAvailable()) return;
+    const now = this.clock.now();
+
+    if (this.armedProposal) {
+      const armed = this.armedProposal;
+      this.armedProposal = null;
+      const verdict = judgeProposalSeam({
+        seam: 'story-boundary',
+        tourAgeMs: now - this.tourStartAt,
+        // Freeform's end is the listener's tap, never a
+        // schedule — the last-minutes fence cannot trigger.
+        remainingMs: null,
+        prevSolemn: this.itemIsMemorial(settledItem),
+        nextSolemn: this.player.waitingStory ? this.itemIsMemorial(this.player.waitingStory) : false,
+        // Freeform has no maneuver feed; the boundary is the discipline.
+        interchangeNear: false,
+        proposalsUsed: this.proposalsUsed,
+        channelBusy:
+          this.suggestionPhase !== 'idle' || this.qaPhase !== 'idle' || this.pendingSuggestion !== null,
+      });
+      if (!verdict.ok) {
+        this.emit('proposal_suppressed', {
+          reason: verdict.reason,
+          place_id: armed.candidate.placeId,
+        });
+        return;
+      }
+      const fresh = judgeCandidateAtSpeak(armed.candidate, now);
+      if (!fresh.ok) {
+        this.emit('proposal_dropped', {
+          reason: fresh.reason,
+          place_id: armed.candidate.placeId,
+        });
+        return;
+      }
+      this.speakProposal(armed);
+      return;
+    }
+
+    // ARM stage: the cap counts speech, so an unspoken drive
+    // may re-select at every boundary — but only into an
+    // idle channel, and never over an undecided pick.
+    if (this.proposalsUsed >= MAX_UNSOLICITED_PROPOSALS_PER_DRIVE) return;
+    if (this.suggestionPhase !== 'idle' || this.qaPhase !== 'idle' || this.pendingSuggestion) return;
+    const excluded = new Set<string>([...this.suggestedPlaceIds, ...this.proposalPlaceIds]);
+    const answer = composeSuggestion(this.eventPool, {
+      intent: 'any',
+      nowMs: now,
+      match: matchInputs(),
+      constraints: getConstraints(),
+      excludePlaceIds: excluded,
+      // The composer's own two-pick cap is the SOLICITED
+      // channel's accounting, not this channel's; the
+      // proposal cap is judged by the seam judge above.
+      picksUsed: 0,
+    });
+    if (answer.kind === 'pick') this.armedProposal = answer;
+  }
+
+  /**
+   * Speak an armed proposal: ONE line (the composer's
+   * recommendation — reason + detour + time fact; the
+   * solicited off-ramp is not spoken, because a proposal's
+   * off-ramp is ignoring it). Delivery rides the promised
+   * FIFO exactly like a solicited answer, so it sounds at
+   * this boundary, ahead of the waiting story it was judged
+   * against. Zero required interaction: the pick becomes
+   * the pending suggestion (the Ask sheet's outcome row is
+   * its decision surface), and undecided at tour end means
+   * the tray, never an inferred verdict.
+   */
+  private speakProposal(armed: SuggestionPick): void {
+    const now = this.clock.now();
+    const candidate = armed.candidate;
+    this.proposalsUsed += 1;
+    this.proposalPlaceIds.add(candidate.placeId);
+    this.pendingSuggestion = {
+      placeId: candidate.placeId,
+      name: candidate.name,
+      kind: candidate.kind,
+      intent: 'any',
+      source: 'proposed',
+    };
+    recordProposal(localProposalStore, {
+      placeId: candidate.placeId,
+      name: candidate.name,
+      kind: candidate.kind,
+      primaryReason: armed.primaryReason,
+      closesAtMs: candidate.closesAtMs,
+      hoursFetchedAt: candidate.hoursFetchedAt,
+      offeredAt: now,
+      sessionId: this.sessionId,
+      state: 'spoken',
+    });
+    this.emit('proposal_offered', {
+      place_id: candidate.placeId,
+      candidate_kind: candidate.kind,
+      reason_codes: armed.reasonCodes,
+      primary_reason: armed.primaryReason,
+      sponsored: armed.sponsored,
+      detour_minutes: armed.detourMinutes,
+    });
+    const item = this.makeItem({
+      kind: 'answer',
+      label: `Suggestion — ${candidate.name}`,
+      source: { kind: 'synth', text: armed.recommendation },
+      durationSec: estimateSpeechDurationS(armed.recommendation),
+      onSettle: rec => {
+        this.emit('proposal_playback', {
+          completed: rec.completed,
+          voice: rec.sounded ? 'gemini' : 'none',
+          sounded_ms: Math.round(rec.soundedMs),
+          attempts: item.attempts,
+          place_id: candidate.placeId,
+        });
+        if (this.phase !== 'active') return;
+        if (rec.sounded) this.counts.proposalsSpoken += 1;
+        this.suggestionPhase = 'idle';
+        this.notify();
+      },
+      story: { text: armed.recommendation },
+    });
+    // The channel's one-interruption rule covers proposals
+    // too: while this line sounds, no ask can queue behind it.
+    this.suggestionPhase = 'answering';
+    this.player.enqueuePromised(item);
+    this.notify();
   }
 
   // ------------------------------------------------------------ transport & listener actions
@@ -5452,10 +5692,17 @@ export class Tour {
     if (this.backstopTimer !== null) this.clock.clearTimeout(this.backstopTimer);
     if (this.tickTimer !== null) this.clock.clearInterval(this.tickTimer);
     if (this.qaPhase !== 'idle') this.releaseQaLock('tour-ended');
-    // A suggestion pick still pending at tour end files NO
+    // A SOLICITED pick still pending at tour end files NO
     // outcome (Slice 4): unmeasured is honest — a dismissal is
-    // never inferred from the tour simply ending.
+    // never inferred from the tour simply ending. A PROPOSED
+    // pick (Slice 5) goes to the arrival tray instead: its
+    // lifecycle record already stands in the store, and the
+    // tray is where its decision now lives. An armed but
+    // unspoken selection simply dies — it was never offered,
+    // so nothing is owed and nothing is filed.
+    this.trayPendingProposal();
     this.pendingSuggestion = null;
+    this.armedProposal = null;
     this.suggestionPhase = 'idle';
     // An engine-held WELCOME that was never offered is unknown to
     // the player's teardown: settle it here, silently and exactly
