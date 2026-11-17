@@ -1851,43 +1851,6 @@ await checkAsync('sg runner: a bed declaring Driving closes the channel even wit
   runner.endTour();
 });
 
-await checkAsync('sg runner: supply wired but NO Passenger declaration → the gate is fail-closed (no bed, or a bed that does not declare)', async () => {
-  // No bed at all: supply alone used to open the channel
-  // (the gate read `!== 'driving'` on an absent dep). Since
-  // the Nov 17, 2026 fix the declaration must be affirmative.
-  const audio1 = new RealFakeAudio(400);
-  const events1 = [];
-  const heard1 = [];
-  const bare = upRunner(audio1, events1, heard1, {
-    suggestionCandidates: async () => [upRouteCandidate()],
-  });
-  await bare.start(qaPlan());
-  assert.equal(bare.view().suggestion.available, false);
-  assert.equal(bare.submitSuggestionAsk('food'), false);
-  await driveQaPlan(bare, heard1);
-  assert.equal(proposalEventsOf(events1).length, 0, 'the seam engine stays silent without a declaration');
-  bare.endTour();
-
-  // A bed that carries no declaredMode: equally undeclared.
-  const audio2 = new RealFakeAudio();
-  const events2 = [];
-  const runner2 = new rp.RoutePlanRunner({
-    audio: audio2,
-    synthUrl: async t => 'blob:x/' + t.length,
-    onEvent: (t, p) => events2.push({ t, p }),
-    suggestionCandidates: async () => [sgRouteCandidate()],
-    bed: {
-      assets: { ocean: 'bed://ocean', road: 'bed://road', city: 'bed://city' },
-      enabled: true,
-    },
-  });
-  await runner2.start(qaPlan());
-  assert.equal(runner2.view().suggestion.available, false);
-  assert.equal(runner2.submitSuggestionAsk('food'), false);
-  assert.equal(events2.filter(e => e.t === 'suggestion_asked').length, 0);
-  runner2.endTour();
-});
-
 await checkAsync('sg runner: passenger ask → answer after the current item, full event trail, outcome resolves', async () => {
   const audio = new RealFakeAudio(400);
   const events = [];
@@ -2032,6 +1995,43 @@ const driveQaPlan = async (runner, heard, timeoutMs = 30_000) => {
   runner.onPosition(dest);
   await until(() => runner.view().closeoutDone, 'closeout', timeoutMs);
 };
+
+await checkAsync('sg runner: supply wired but NO Passenger declaration → the gate is fail-closed (no bed, or a bed that does not declare)', async () => {
+  // No bed at all: supply alone used to open the channel
+  // (the gate read `!== 'driving'` on an absent dep). Since
+  // the Nov 17, 2026 fix the declaration must be affirmative.
+  const audio1 = new RealFakeAudio(400);
+  const events1 = [];
+  const heard1 = [];
+  const bare = upRunner(audio1, events1, heard1, {
+    suggestionCandidates: async () => [upRouteCandidate()],
+  });
+  await bare.start(qaPlan());
+  assert.equal(bare.view().suggestion.available, false);
+  assert.equal(bare.submitSuggestionAsk('food'), false);
+  await driveQaPlan(bare, heard1);
+  assert.equal(proposalEventsOf(events1).length, 0, 'the seam engine stays silent without a declaration');
+  bare.endTour();
+
+  // A bed that carries no declaredMode: equally undeclared.
+  const audio2 = new RealFakeAudio();
+  const events2 = [];
+  const runner2 = new rp.RoutePlanRunner({
+    audio: audio2,
+    synthUrl: async t => 'blob:x/' + t.length,
+    onEvent: (t, p) => events2.push({ t, p }),
+    suggestionCandidates: async () => [sgRouteCandidate()],
+    bed: {
+      assets: { ocean: 'bed://ocean', road: 'bed://road', city: 'bed://city' },
+      enabled: true,
+    },
+  });
+  await runner2.start(qaPlan());
+  assert.equal(runner2.view().suggestion.available, false);
+  assert.equal(runner2.submitSuggestionAsk('food'), false);
+  assert.equal(events2.filter(e => e.t === 'suggestion_asked').length, 0);
+  runner2.endTour();
+});
 
 await checkAsync('up runner: no supply dep → story boundaries pass, zero proposal events', async () => {
   const audio = new RealFakeAudio(400);
