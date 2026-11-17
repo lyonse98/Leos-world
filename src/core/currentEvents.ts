@@ -48,6 +48,13 @@
 // Everything here fails soft and silent: no key, no network, a
 // provider error — the pool is simply empty. The pool is color
 // and candidate supply, never a drive-critical path.
+//
+// Every fetch this layer dispatches is a metered Places ask,
+// governed by the live-spend sub-cap (v16.2 Slice 8,
+// liveSpend.ts): charged at dispatch against the on-device
+// monthly ledger, and not dispatched at all once the month's
+// cap stands — discovery then serves from the hours cache
+// below, which is the designed degradation, not an error.
 
 import {
   assessEvent,
@@ -63,6 +70,12 @@ import {
   type MatchInputs,
   type ResolvedConstraints,
 } from './profile';
+import {
+  createSpendGovernor,
+  localSpendLedgerStore,
+  type SpendEventSink,
+  type SpendLedgerStore,
+} from './liveSpend';
 import { calculateDistance } from '../utils/geo';
 
 // ------------------------------------------------------------ candidate model
@@ -489,6 +502,20 @@ export interface DiscoverEventOptions {
   shelfKeys?: ReadonlySet<string> | null;
   /** Hours cache: written on fetch, read on provider-empty fallback. Null disables. */
   cache?: HoursCacheStore | null;
+  /**
+   * Live-spend governance (v16.2 Slice 8, liveSpend.ts): the
+   * ledger every Places ask in this discovery is charged to.
+   * Default = the shipped on-device ledger — governance is
+   * the layer's behavior, not an option a caller can forget.
+   */
+  spendStore?: SpendLedgerStore;
+  /**
+   * Spend telemetry sink: the engines wire their emit path
+   * here so asks, cap-trips, and degraded discoveries land
+   * on the existing capture. Absent = the accounting still
+   * happens; it is simply not filed from this call.
+   */
+  onSpendEvent?: SpendEventSink;
   maxResults?: number;
 }
 
@@ -578,8 +605,26 @@ export async function discoverEventCandidates(
     if (!existing || distanceM < existing.distanceM) byPlace.set(raw.placeId, { raw, anchor, distanceM });
   };
 
+  // Live-spend governance (Slice 8): each anchor's fetch is
+  // one metered ask, charged at dispatch by the governor.
+  // A blocked ask is simply not dispatched — the anchor
+  // contributes nothing, and if every ask is blocked the
+  // provider-empty cache fallback below is the degradation
+  // path: cached records, freshness-gated at serve time as
+  // always. An ask already dispatched when the cap trips
+  // completes normally (the governor never recalls one).
+  const governor = createSpendGovernor({
+    store: opts.spendStore ?? localSpendLedgerStore,
+    nowMs,
+    onEvent: opts.onSpendEvent,
+  });
+  let spendBlocked = false;
   let fetchedAny = false;
   for (const anchor of anchors) {
+    if (governor.beginPlacesAsk() === null) {
+      spendBlocked = true;
+      continue;
+    }
     let places: RawPlace[] = [];
     try {
       places = await provider.fetchPlaces(anchor, radiusM);
@@ -591,6 +636,13 @@ export async function discoverEventCandidates(
       if (cache) cachePlaces(places, cache, nowMs);
       for (const raw of places) consider(raw, anchor);
     }
+  }
+  if (spendBlocked) {
+    opts.onSpendEvent?.('live_spend_degraded', {
+      reason: 'spend-cap',
+      month_micro_usd: governor.monthMicroUsd(),
+      cap_micro_usd: governor.capMicroUsd,
+    });
   }
   // Provider-empty fallback: cached records near the anchors —
   // still gated at serve time below, so a stale cache entry is
