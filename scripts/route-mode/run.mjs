@@ -2194,6 +2194,247 @@ await checkAsync('pm runner: a place seated in today\'s own plan is never propos
 });
 
 
+// ---- route-outcome profile inference (v16.2 Slice 7): the
+// runner's story settles feed the profile's inferred layer —
+// the wiring the profile tool's v1 deliberately left open.
+// The signal math itself is pinned in the PF suites; here:
+// the runner end-to-end over real timing. Tag join for the
+// fixture units (src/data/routeTags): balboa stadium →
+// Sport + Expositions & the Canal; balboa theatre → Film;
+// barona cultural center & museum → Deep Time.
+// (Local store/clock helpers: the PF section's memStore /
+// RO_T0 are defined far below this block — const TDZ — so
+// the RO suites carry their own.)
+const RO_T0 = Date.parse('2026-11-13T10:00:00-08:00');
+const roMemStore = () => {
+  let v = null;
+  return { read: () => v, write: s => { v = s; }, clear: () => { v = null; } };
+};
+const roPlan = () =>
+  rm.composeRoutePlan(
+    [
+      unit('balboa stadium|landmark_origin', 32.71),
+      unit('balboa theatre|landmark_origin', 32.78),
+      unit('barona cultural center & museum|landmark_origin', 32.86),
+    ],
+    path,
+    dest,
+    'Dest',
+    { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000 },
+  );
+const driveRoPlan = async (runner, heard, timeoutMs = 30_000) => {
+  await until(() => heard.includes('balboa stadium|landmark_origin'), 'stadium settled', timeoutMs);
+  runner.onPosition({ lat: 32.78, lng: -117.25 });
+  await until(() => heard.includes('balboa theatre|landmark_origin'), 'theatre settled', timeoutMs);
+  runner.onPosition({ lat: 32.87, lng: -117.25 });
+  await until(() => heard.includes('barona cultural center & museum|landmark_origin'), 'barona settled', timeoutMs);
+  runner.onPosition(dest);
+  await until(() => runner.view().closeoutDone, 'closeout', timeoutMs);
+};
+
+await checkAsync('ro runner: completed route stories feed the inferred layer at the freeform weights, under route provenance', async () => {
+  const s = roMemStore();
+  const audio = new RealFakeAudio(400);
+  const events = [];
+  const heard = [];
+  const runner = upRunner(audio, events, heard, { profileStore: s });
+  await runner.start(roPlan());
+  await driveRoPlan(runner, heard);
+  runner.endTour();
+  const p = pf.loadProfile(s, Date.now());
+  for (const t of ['Sport', 'Expositions & the Canal', 'Film', 'Deep Time']) {
+    const e = p.inferredTopics[t];
+    assert.ok(e, `${t} was inferred`);
+    assert.equal(e.confidence, 0.25, `${t} at the completion weight`);
+    assert.equal(e.provenance, 'route-story-completion', `${t} under route provenance`);
+    assert.equal(e.source, 'inferred');
+    assert.equal(e.evidenceCount, 1, `${t}: one settle, one evidence`);
+  }
+  assert.deepEqual(
+    Object.keys(p.inferredTopics).sort(),
+    ['Deep Time', 'Expositions & the Canal', 'Film', 'Sport'],
+    'nothing else was learned',
+  );
+});
+
+/** An audio port whose clock runs long only for the story under measurement; tissue stays quick. */
+class RoFakeAudio extends RealFakeAudio {
+  play() {
+    this.durMs = this.src && this.src.includes('theatre%7Clandmark_origin') ? 30_000 : 300;
+    return super.play();
+  }
+}
+
+await checkAsync('ro runner: a route story cut short after a real listen lowers its topic at the freeform weight; the rest of the drive teaches nothing', async () => {
+  const s = roMemStore();
+  // Seed the affinity the way a prior route completion earns
+  // it, so the cut-off has something to lower.
+  pf.observeStoryOutcome(
+    { topics: ['Film'], completed: true, soundedMs: 60_000, provenance: pf.ROUTE_OUTCOME_PROVENANCE },
+    s,
+    RO_T0,
+  );
+  assert.equal(pf.loadProfile(s, RO_T0).inferredTopics['Film'].confidence, 0.25);
+  const audio = new RoFakeAudio(300);
+  const events = [];
+  const heard = [];
+  const runner = upRunner(audio, events, heard, { profileStore: s });
+  await runner.start(
+    rm.composeRoutePlan(
+      [
+        unit('balboa theatre|landmark_origin', 32.71),
+        unit('balboa stadium|landmark_origin', 32.78),
+        unit('barona cultural center & museum|landmark_origin', 32.86),
+      ],
+      path,
+      dest,
+      'Dest',
+      { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+      { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000 },
+    ),
+  );
+  // The theatre sounds first; let it run past the 10 s floor,
+  // then the listener skips it — the sounded-but-not-completed
+  // settle that IS the route cut-off signal.
+  await until(
+    () => audio.played.some(x => x.includes('theatre%7Clandmark_origin')) && audio.timeSec() >= 11,
+    'theatre heard past the 10 s floor',
+    30_000,
+  );
+  runner.skip();
+  await until(() => heard.includes('balboa theatre|landmark_origin'), 'cut story settled', 30_000);
+  runner.endTour();
+  const p = pf.loadProfile(s, Date.now());
+  const film = p.inferredTopics['Film'];
+  assert.ok(film, 'Film still inferred');
+  assert.ok(Math.abs(film.confidence - 0.15) < 1e-9, `Film lowered by the cut-off weight: ${film.confidence}`);
+  assert.equal(film.provenance, 'route-story-cutoff', 'the cut-off is the latest evidence, under route provenance');
+  assert.equal(film.evidenceCount, 2, 'completion + cut-off');
+  assert.equal(p.inferredTopics['Sport'], undefined, 'a story never really heard teaches nothing');
+  assert.equal(p.inferredTopics['Expositions & the Canal'], undefined);
+  assert.equal(p.inferredTopics['Deep Time'], undefined);
+});
+
+await checkAsync('ro runner: outcome inference never touches a declared entry — and the declaration still shadows the inference at read', async () => {
+  const s = roMemStore();
+  pf.setDeclaredTaste('storyTopics', ['Sport'], 'seed-card', s, RO_T0);
+  pf.setDeclaredConstraint('budgetComfort', 'sit-down', 'seed-card', s, RO_T0);
+  const before = JSON.parse(JSON.stringify(pf.loadProfile(s, RO_T0)));
+  const audio = new RealFakeAudio(400);
+  const events = [];
+  const heard = [];
+  const runner = upRunner(audio, events, heard, { profileStore: s });
+  await runner.start(roPlan());
+  await driveRoPlan(runner, heard);
+  runner.endTour();
+  const after = pf.loadProfile(s, Date.now());
+  assert.deepEqual(after.tastes, before.tastes, 'declared tastes untouched by outcome inference');
+  assert.deepEqual(after.constraints, before.constraints, 'declared constraints untouched');
+  assert.equal(after.inferredTopics['Sport']?.confidence, 0.25, 'the inference was still written, in its own layer');
+  assert.deepEqual(
+    pf.matchInputs(s, Date.now()).topics.filter(t => t.topic === 'Sport'),
+    [{ topic: 'Sport', weight: 1, source: 'declared' }],
+    'one Sport weight at read: the declaration, shadowing the guess',
+  );
+});
+
+await checkAsync('ro runner: a paused profile takes no writes from route outcomes', async () => {
+  const s = roMemStore();
+  pf.setDeclaredTaste('cuisines', ['bbq'], 'seed-card', s, RO_T0);
+  pf.setPaused(true, s, RO_T0);
+  const before = JSON.parse(JSON.stringify(pf.loadProfile(s, RO_T0)));
+  const audio = new RealFakeAudio(400);
+  const events = [];
+  const heard = [];
+  const runner = upRunner(audio, events, heard, { profileStore: s });
+  await runner.start(roPlan());
+  await driveRoPlan(runner, heard);
+  runner.endTour();
+  const after = pf.loadProfile(s, Date.now());
+  assert.deepEqual(after.inferredTopics, {}, 'nothing inferred while paused');
+  assert.deepEqual(after, before, 'the whole document is semantically unchanged');
+});
+
+await checkAsync('ro runner: no profileStore dep — playback is exactly the baseline drive', async () => {
+  const run = async extra => {
+    const audio = new RealFakeAudio(400);
+    const events = [];
+    const heard = [];
+    const runner = upRunner(audio, events, heard, extra);
+    await runner.start(roPlan());
+    await driveRoPlan(runner, heard);
+    const done = runner.view().closeoutDone;
+    runner.endTour();
+    return { heard, done };
+  };
+  const baseline = await run({});
+  const withStore = await run({ profileStore: roMemStore() });
+  assert.equal(baseline.done, true, 'the dep-less drive closes out');
+  assert.deepEqual(withStore.heard, baseline.heard, 'the dep changes nothing the listener hears');
+  assert.equal(withStore.done, true);
+});
+
+await checkAsync('ro e2e: a route-earned affinity moves the Slice 3 seat through matchInputs → composer', async () => {
+  const s = roMemStore();
+  // The contested seat, in the PC-5 shape: two same-class,
+  // same-ground candidates and a one-story budget, so the
+  // rank order alone decides who seats.
+  const RO_SITE = { lat: 32.7106, lng: -117.160751 };
+  const roSeatUnit = (id, placeKey, placeName, topics) => ({
+    id, placeKey, placeName, angle: 'landmark_origin', lat: RO_SITE.lat, lng: RO_SITE.lng,
+    durationSec: 150, topics, tone: 'warm', toneSecondary: null,
+    audioPath: `library/${placeKey}/landmark_origin.wav`, storyText: 'x'.repeat(400),
+  });
+  const roSeat = profileTopics =>
+    rm.composeRoutePlan(
+      [
+        roSeatUnit('alpha museum|landmark_origin', 'alpha museum', 'Alpha Museum', ['Film']),
+        roSeatUnit('mango museum|landmark_origin', 'mango museum', 'Mango Museum', ['Sport']),
+      ],
+      [{ lat: 32.705, lng: RO_SITE.lng }, { lat: 32.716, lng: RO_SITE.lng }],
+      { lat: 32.716, lng: RO_SITE.lng },
+      'North End',
+      { destinationText: 'North End', arrivalTimeMs: null, tone: null, topics: [], audience: 'standard' },
+      { nowMs: 0, heardKeys: new Set(), budgetSecOverride: 170, driveSec: null, profileTopics },
+    )
+      .items.filter(i => i.kind === 'story')
+      .map(i => i.id);
+  assert.deepEqual(
+    roSeat(pf.matchInputs(s, RO_T0).topics),
+    ['alpha museum|landmark_origin'],
+    'empty profile: the baseline candidate seats (parity)',
+  );
+  // Earn the affinity on the road: one real runner, one
+  // completed Sport story, the harness store as the dep.
+  const audio = new RealFakeAudio(400);
+  const events = [];
+  const heard = [];
+  const runner = upRunner(audio, events, heard, { profileStore: s });
+  await runner.start(
+    rm.composeRoutePlan(
+      [unit('balboa stadium|landmark_origin', 32.71)],
+      path,
+      dest,
+      'Dest',
+      { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+      { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000 },
+    ),
+  );
+  await until(() => heard.includes('balboa stadium|landmark_origin'), 'stadium settled', 30_000);
+  runner.endTour();
+  const weights = pf.matchInputs(s, Date.now()).topics;
+  assert.ok(
+    weights.some(t => t.topic === 'Sport' && t.weight === 0.25 && t.source === 'inferred'),
+    `the route outcome surfaced as an inferred weight: ${JSON.stringify(weights)}`,
+  );
+  assert.deepEqual(
+    roSeat(weights),
+    ['mango museum|landmark_origin'],
+    'the route-inferred affinity takes the contested seat',
+  );
+});
+
 await checkAsync('ambient bed: a bed whose audio layer cannot even construct self-silences, one diag, tour unharmed', async () => {
   // Node has no Audio element: the bed's browser factory throws
   // at channel construction — the extreme case of a broken bed
