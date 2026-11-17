@@ -133,6 +133,13 @@ import {
   isUrbanAreaName,
   type AmbientBedKind,
 } from './ambience';
+import {
+  composeSuggestion,
+  type SuggestionIntent,
+  type SuggestionOutcome,
+} from './suggestions';
+import type { EventAnchor, EventCandidate } from './currentEvents';
+import { getConstraints, matchInputs } from './profile';
 
 export interface RouteRunnerView {
   /**
@@ -169,6 +176,19 @@ export interface RouteRunnerView {
   qaPhase: 'idle' | 'generating' | 'answering';
   /** Answers that actually sounded this route tour. */
   questionsAnswered: number;
+  /**
+   * Solicited suggestions (v16.2 Slice 4): `available` is the
+   * gate's verdict (candidate supply wired = the App opened
+   * the gate for this ride); `pending` is the pick awaiting
+   * the listener's outcome. Mirrors freeform's view shape.
+   */
+  suggestion: {
+    available: boolean;
+    phase: 'idle' | 'answering';
+    pending: { placeId: string; name: string; kind: string } | null;
+  };
+  /** Suggestion picks that actually sounded this route tour. */
+  suggestionsAnswered: number;
   /**
    * The OPENING has settled (render-ahead pipeline, Nov 4,
    * 2026): the spoken preview, the first bridge, and the
@@ -521,6 +541,19 @@ export interface RouteRunnerDeps {
   generateAnswer?: (prompt: string) => Promise<string>;
   /** Model label filed on question_asked, matching freeform's payload. */
   answerModelLabel?: string;
+  /**
+   * Solicited suggestions (v16.2 Slice 4): candidate supply
+   * for the suggestion channel. The App wires this ONLY when
+   * the suggestion gate is open for the ride (flag on +
+   * declared Passenger/Walking) — the dep is the gate, exactly
+   * like generateAnswer above: no dep, no ask surface, and
+   * submitSuggestionAsk refuses. It receives the drive's
+   * anchors (current position + destination) and returns the
+   * freshness-verified pool (the Slice 2 layer's discovery);
+   * composition and form live in suggestions.ts. Story Q&A is
+   * a different channel and is not touched by this dep.
+   */
+  suggestionCandidates?: (anchors: EventAnchor[]) => Promise<readonly EventCandidate[]>;
   /** Best-effort heard recording for a sounded story (App wires backend.recordHeard). */
   onStoryHeard?: (unit: LibraryUnit) => void;
   /**
@@ -752,6 +785,14 @@ export class RoutePlanRunner {
   private closeoutDoneFlag = false;
   private qaPhase: RouteRunnerView['qaPhase'] = 'idle';
   private questionsAnsweredCount = 0;
+  // Solicited suggestions (v16.2 Slice 4): the channel's own
+  // state, beside Q&A's — one spoken interruption at a time is
+  // enforced across both (an ask refuses while either runs).
+  private suggestionPhase: 'idle' | 'answering' = 'idle';
+  private suggestionPicksUsed = 0;
+  private suggestedPlaceIds = new Set<string>();
+  private pendingSuggestion: { placeId: string; name: string; kind: string; intent: SuggestionIntent } | null = null;
+  private suggestionsAnsweredCount = 0;
   /** Tap time (prime) or start() time, whichever came first: the tour's clock for latch telemetry. */
   private startStamp: number | null = null;
   /** Ambient bed controller (null when the bed dep is absent — every harness, by construction). */
@@ -950,6 +991,18 @@ export class RoutePlanRunner {
       closeoutDone: this.closeoutDoneFlag,
       qaPhase: this.qaPhase,
       questionsAnswered: this.questionsAnsweredCount,
+      suggestion: {
+        available: this.suggestionAvailable(),
+        phase: this.suggestionPhase,
+        pending: this.pendingSuggestion
+          ? {
+              placeId: this.pendingSuggestion.placeId,
+              name: this.pendingSuggestion.name,
+              kind: this.pendingSuggestion.kind,
+            }
+          : null,
+      },
+      suggestionsAnswered: this.suggestionsAnsweredCount,
       narrationReady: this.plan !== null && this.openingSettledFlag,
     };
   }
@@ -3072,6 +3125,9 @@ export class RoutePlanRunner {
     if (!this.plan || this.closed) return;
     this.closed = true;
     this.closing = true;
+    // A suggestion pick still pending at closeout files NO
+    // outcome (Slice 4) — the tour ending is not a dismissal.
+    this.pendingSuggestion = null;
     const plan = this.plan;
     // The story sounding on the element right now, if any —
     // computed BEFORE the owed set (consolidation §5).
@@ -3272,8 +3328,153 @@ export class RoutePlanRunner {
     this.notify();
   }
 
+  /**
+   * The suggestion gate, runner side: candidate supply wired
+   * (the App opens the gate only for a declared Passenger/
+   * Walking ride) AND no bed dep declaring this a Driving
+   * ride. Either closed door refuses the ask.
+   */
+  private suggestionAvailable(): boolean {
+    return !!this.deps.suggestionCandidates && this.deps.bed?.declaredMode !== 'driving';
+  }
+
+  /**
+   * Solicited suggestions (v16.2 Slice 4 — Passenger/Walking
+   * only, via the gate above). Returns false when the channel
+   * is not wired, the tour is over or still held, or another
+   * spoken interruption (a question or a suggestion) is in
+   * flight. The current plan item is never cut: the answer
+   * inserts at the head of the promised FIFO and plays when
+   * the current item settles — the Q&A answer's discipline,
+   * which is the story-boundary fence (memorials and climaxes
+   * are items in the same queue). Nothing re-plans: an
+   * accepted suggestion is recorded, never routed to (detour
+   * recomposition is a separate, gated decision).
+   */
+  submitSuggestionAsk(intent: SuggestionIntent): boolean {
+    if (!this.plan || this.closed || this.endedKind !== null || this.heldStart) return false;
+    if (!this.suggestionAvailable() || this.suggestionPhase !== 'idle' || this.qaPhase !== 'idle') return false;
+    // A fresh ask over a still-pending pick IS that pick's
+    // outcome (freeform files the identical rule).
+    if (this.pendingSuggestion) {
+      this.deps.onEvent?.('suggestion_outcome', {
+        outcome: 'asked-another',
+        place_id: this.pendingSuggestion.placeId,
+        intent: this.pendingSuggestion.intent,
+      });
+      this.pendingSuggestion = null;
+    }
+    this.suggestionPhase = 'answering';
+    this.deps.onEvent?.('suggestion_asked', { intent, turn: this.suggestionPicksUsed + 1 });
+    void this.runSuggestion(intent);
+    this.notify();
+    return true;
+  }
+
+  private async runSuggestion(intent: SuggestionIntent): Promise<void> {
+    let pool: readonly EventCandidate[] = [];
+    try {
+      const anchors: EventAnchor[] = [];
+      if (this.bedLastPos) anchors.push({ lat: this.bedLastPos.lat, lng: this.bedLastPos.lng, kind: 'position' });
+      if (this.plan) anchors.push({ lat: this.plan.destination.lat, lng: this.plan.destination.lng, kind: 'destination' });
+      pool = await this.deps.suggestionCandidates!(anchors);
+    } catch {
+      pool = []; // supply failed: the honest none-answer, never a fabricated pick
+    }
+    if (this.closed || this.endedKind !== null) {
+      this.suggestionPhase = 'idle';
+      return;
+    }
+    const answer = composeSuggestion(pool, {
+      intent,
+      nowMs: Date.now(),
+      match: matchInputs(),
+      constraints: getConstraints(),
+      excludePlaceIds: this.suggestedPlaceIds,
+      picksUsed: this.suggestionPicksUsed,
+    });
+    this.deps.onEvent?.('suggestion_answered', {
+      outcome: answer.kind,
+      place_id: answer.kind === 'pick' ? answer.candidate.placeId : null,
+      candidate_kind: answer.kind === 'pick' ? answer.candidate.kind : null,
+      reason_codes: answer.reasonCodes,
+      primary_reason: answer.kind === 'pick' ? answer.primaryReason : answer.reasonCodes[0],
+      sponsored: answer.kind === 'pick' ? answer.sponsored : false,
+      detour_minutes: answer.kind === 'pick' ? answer.detourMinutes : null,
+      turn: this.suggestionPicksUsed + 1,
+    });
+    if (answer.kind === 'pick') {
+      this.suggestionPicksUsed += 1;
+      this.suggestedPlaceIds.add(answer.candidate.placeId);
+      this.pendingSuggestion = {
+        placeId: answer.candidate.placeId,
+        name: answer.candidate.name,
+        kind: answer.candidate.kind,
+        intent,
+      };
+    }
+    const pickId = answer.kind === 'pick' ? answer.candidate.placeId : null;
+    let url: string;
+    try {
+      url = await this.deps.synthUrl(answer.text);
+    } catch {
+      this.suggestionPhase = 'idle';
+      this.notify();
+      return;
+    }
+    if (this.closed || this.endedKind !== null) {
+      this.suggestionPhase = 'idle';
+      return;
+    }
+    const item: AudibleItem = {
+      id: `route-suggestion-${++runnerSeq}`,
+      kind: 'answer',
+      label: answer.kind === 'pick' ? `Suggestion — ${answer.candidate.name}` : 'Suggestion',
+      source: { kind: 'url', url },
+      durationSec: estimateDurationSec(answer.text),
+      attempts: 0,
+      settled: false,
+      onSettle: rec => {
+        this.deps.onEvent?.('suggestion_playback', {
+          completed: rec.completed,
+          voice: rec.sounded ? 'gemini' : 'none',
+          sounded_ms: Math.round(rec.soundedMs),
+          attempts: item.attempts,
+          place_id: pickId,
+        });
+        if (rec.sounded && pickId !== null) this.suggestionsAnsweredCount += 1;
+        this.suggestionPhase = 'idle';
+        this.notify();
+      },
+    };
+    this.player.enqueueNext(item);
+    this.notify();
+  }
+
+  /**
+   * The listener's verdict on the pending pick (Accept /
+   * No-thanks). Mirrors freeform: 'asked-another' comes only
+   * from a subsequent ask, and a pick pending at tour end
+   * files nothing.
+   */
+  resolveSuggestion(outcome: Exclude<SuggestionOutcome, 'asked-another'>): boolean {
+    if (!this.pendingSuggestion) return false;
+    this.deps.onEvent?.('suggestion_outcome', {
+      outcome,
+      place_id: this.pendingSuggestion.placeId,
+      intent: this.pendingSuggestion.intent,
+    });
+    this.pendingSuggestion = null;
+    this.notify();
+    return true;
+  }
+
   /** User ends the route: teardown, no sign-off line, owed state kept if already set. */
   endTour(): void {
+    // A suggestion pick still pending files NO outcome (Slice
+    // 4): unmeasured is honest — a dismissal is never inferred
+    // from the tour simply ending.
+    this.pendingSuggestion = null;
     // An End Tour on a tour that actually began still concludes
     // a drive (addendum 2): file its record from the standing
     // accounting before teardown. A never-begun plan (the
