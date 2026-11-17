@@ -405,6 +405,16 @@ export interface TrayJudgment {
   expired: boolean;
   /** The listener may still act on it (undecided + unexpired). */
   actionable: boolean;
+  /**
+   * Place-memory only (v16.2 audit fix, Nov 17, 2026): true
+   * when NO successful heard read has landed yet, so the
+   * record's "still unheard" premise is UNVERIFIED. An
+   * unverified record renders visible but non-actionable, in
+   * a neutral checking state — never as a live claim. Always
+   * false for place records, and for callbacks once a read
+   * has landed.
+   */
+  unverified: boolean;
 }
 
 /**
@@ -418,19 +428,21 @@ export interface TrayJudgment {
  * time — its claim is "this story is still unheard", so it
  * expires exactly when that stops being true: the place
  * stands in the caller's heard-name set (normalized keys).
- * A caller that cannot supply heard evidence passes no set,
- * and a callback then renders unexpired — fail-open toward
- * showing the entry, because the tray's heard fetch is
- * best-effort everywhere else in the shell too; the entry it
- * might wrongly keep actionable is a story the listener can
- * simply dismiss.
+ * A caller that cannot supply heard evidence passes no set:
+ * the callback then renders UNVERIFIED (visible, never
+ * actionable, no "still unheard" claim — v16.2 audit fix,
+ * Nov 17, 2026; the earlier fail-open reading let a failed
+ * best-effort read present a possibly-heard story as a live
+ * actionable claim for a whole session). Once a read lands
+ * — even an empty one — normal judgment applies.
  */
 export function judgeTrayRecord(
   record: ProposalRecord,
   nowMs: number,
   heardNameKeys?: ReadonlySet<string>,
 ): TrayJudgment {
-  if (record.state === 'dismissed') return { visible: false, expired: false, actionable: false };
+  if (record.state === 'dismissed') return { visible: false, expired: false, actionable: false, unverified: false };
+  const unverified = record.flavor === 'place-memory' && heardNameKeys === undefined;
   const expired =
     record.flavor === 'place-memory'
       ? heardNameKeys !== undefined && heardNameKeys.has(normalizePlaceName(record.name))
@@ -439,7 +451,8 @@ export function judgeTrayRecord(
   return {
     visible: true,
     expired,
-    actionable: record.state === 'spoken' && !expired,
+    actionable: record.state === 'spoken' && !expired && !unverified,
+    unverified,
   };
 }
 

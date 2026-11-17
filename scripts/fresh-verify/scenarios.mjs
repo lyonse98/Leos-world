@@ -7300,11 +7300,19 @@ export async function runScenarios(Tour, extras) {
       closesAtMs: null, hoursFetchedAt: UP_NOW, offeredAt: UP_NOW, sessionId: 'pm-sim', state: 'spoken',
       flavor: 'place-memory', passedAt: UP_NOW - 40 * UP_DAY_MS,
     });
-    check('a spoken callback stands in the tray, actionable while its story is unheard',
-      proposals.trayEntries(store, UP_NOW).length === 1 &&
-      proposals.trayEntries(store, UP_NOW)[0].judgment.actionable === true);
-    check('no hours claim can expire it: months later, still unheard, still actionable',
-      proposals.trayEntries(store, UP_NOW + 90 * UP_DAY_MS)[0].judgment.actionable === true);
+    check('before any heard read lands, the callback renders UNVERIFIED: visible, unexpired, never actionable (Nov 17, 2026 audit fix)',
+      (() => {
+        const entries = proposals.trayEntries(store, UP_NOW);
+        const j = entries[0]?.judgment;
+        return entries.length === 1 && j.visible && !j.expired && !j.actionable && j.unverified === true;
+      })());
+    check('once a landed read confirms the story unheard, the callback stands actionable',
+      (() => {
+        const j = proposals.trayEntries(store, UP_NOW, new Set())[0].judgment;
+        return j.actionable === true && j.unverified === false;
+      })());
+    check('no hours claim can expire it: months later, read landed, still unheard, still actionable',
+      proposals.trayEntries(store, UP_NOW + 90 * UP_DAY_MS, new Set())[0].judgment.actionable === true);
     check('heard since — the entry renders expired: visible, never actionable',
       (() => {
         const j = proposals.judgeTrayRecord(
@@ -7324,6 +7332,12 @@ export async function runScenarios(Tour, extras) {
         const rec = proposals.loadProposalRecords(store).find(r => r.placeId === 'pm-tacos');
         const j = proposals.judgeTrayRecord(rec, UP_NOW, new Set(['beta museum']));
         return j.expired === false && j.actionable === true;
+      })());
+    check('a PLACE entry is never unverified either — the state is callback-only, read or no read',
+      (() => {
+        const rec = proposals.loadProposalRecords(store).find(r => r.placeId === 'pm-tacos');
+        const j = proposals.judgeTrayRecord(rec, UP_NOW);
+        return j.unverified === false && j.actionable === true;
       })());
     store.write(JSON.stringify([{
       placeId: 'legacy-place', name: 'Legacy', kind: 'eat', primaryReason: 'open-now',
@@ -7367,8 +7381,8 @@ export async function runScenarios(Tour, extras) {
       records.length === 1 && records[0].flavor === 'place-memory' && records[0].kind === 'story' &&
       records[0].passedAt === 0 && records[0].state === 'spoken',
       JSON.stringify(records));
-    check('the tray entry is actionable while unheard, expired once heard',
-      proposals.trayEntries(proposals.localProposalStore, world.clock.now())[0].judgment.actionable === true &&
+    check('the tray entry is actionable once a landed read confirms it unheard, expired once heard',
+      proposals.trayEntries(proposals.localProposalStore, world.clock.now(), new Set())[0].judgment.actionable === true &&
       proposals.trayEntries(proposals.localProposalStore, world.clock.now(), new Set(['echo observatory']))[0]
         .judgment.expired === true);
     check('resolving files proposal_outcome with the flavor — never suggestion_outcome',

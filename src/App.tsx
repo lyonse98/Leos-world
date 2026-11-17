@@ -432,29 +432,40 @@ function SuggestionTray({
   onResolve: (record: ProposalRecord, outcome: 'accepted' | 'dismissed') => void;
 }) {
   const [nowMs, setNowMs] = useState(() => Date.now());
-  useEffect(() => {
-    setNowMs(Date.now());
-    const t = setInterval(() => setNowMs(Date.now()), 30_000);
-    return () => clearInterval(t);
-  }, [refreshKey]);
   // Place-memory entries expire on heard evidence, not
   // hours (Slice 6): the tray reads the heard ledger's place
   // names (best-effort, like every ledger read in the shell)
   // and hands their normalized keys to the display judge.
-  // Until the read lands — or if it fails — callbacks render
-  // unexpired rather than vanishing.
+  // Until a read LANDS, callbacks render UNVERIFIED —
+  // visible but non-actionable, with no "still unheard"
+  // claim (v16.2 audit fix, Nov 17, 2026: a failed read used
+  // to leave them actionable all session) — and the tray's
+  // 30-second tick keeps retrying the read until one lands,
+  // so the state resolves instead of pinning.
   const [heardNameKeys, setHeardNameKeys] = useState<ReadonlySet<string> | undefined>(undefined);
+  const heardReadLandedRef = useRef(false);
   useEffect(() => {
+    setNowMs(Date.now());
     let live = true;
-    fetchHeardTopics(deviceKey())
-      .then(topics => {
-        if (live) setHeardNameKeys(new Set(topics.map(t => normalizePlaceName(t))));
-      })
-      .catch(() => {
-        /* the ledger is a filter, not a dependency */
-      });
+    const readHeard = () => {
+      fetchHeardTopics(deviceKey())
+        .then(topics => {
+          if (!live) return;
+          heardReadLandedRef.current = true;
+          setHeardNameKeys(new Set(topics.map(t => normalizePlaceName(t))));
+        })
+        .catch(() => {
+          /* best-effort: callbacks stay unverified; the tick retries */
+        });
+    };
+    readHeard();
+    const t = setInterval(() => {
+      setNowMs(Date.now());
+      if (!heardReadLandedRef.current) readHeard();
+    }, 30_000);
     return () => {
       live = false;
+      clearInterval(t);
     };
   }, [refreshKey]);
   const entries = loadProposalRecords(localProposalStore)
@@ -468,8 +479,9 @@ function SuggestionTray({
         <div key={`${record.placeId}:${record.offeredAt}`} className="mt-3 rounded-3xl bg-cream2/80 px-4 py-3">
           <p className="text-sm font-black text-ink">{record.name}</p>
           <p className="mt-0.5 text-xs text-inksoft">
-            {TRAY_REASON_LABELS[record.primaryReason] ?? 'Miles suggested it'} ·{' '}
-            {trayTimeLabel(record, judgment.expired)}
+            {judgment.unverified
+              ? 'A story you passed — checking whether you have heard it since'
+              : `${TRAY_REASON_LABELS[record.primaryReason] ?? 'Miles suggested it'} · ${trayTimeLabel(record, judgment.expired)}`}
           </p>
           {record.state === 'accepted' ? (
             <p className="mt-2 text-xs font-bold text-sagedeep">Saved ✓</p>
