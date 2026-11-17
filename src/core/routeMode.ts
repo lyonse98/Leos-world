@@ -123,6 +123,27 @@ export function qaGateOpen(flagEnabled: boolean, mode: TourMode): boolean {
   return flagEnabled && routeQaAvailable(mode);
 }
 
+/** Solicited suggestions (v16.2 Slice 4; the fence was RULED
+ *  Nov 13, 2026): the suggestion channel is available in
+ *  Passenger/Walking and unavailable in Driving — the same
+ *  fence as Q&A, but a SEPARATE gate for a separate channel.
+ *  Suggestions are not story Q&A: the ask is "find me a stop",
+ *  the answer is composed from freshness-verified candidates
+ *  (suggestions.ts), and nothing here reopens, extends, or
+ *  depends on the question pipeline. The gate reads the
+ *  DECLARED mode only, exactly like its sibling above. */
+export function routeSuggestionsAvailable(mode: TourMode): boolean {
+  return mode === 'passenger';
+}
+
+/** The full suggestion gate, mirroring qaGateOpen: flag on AND
+ *  declared Passenger/Walking. In Driving the ask surface does
+ *  not exist at any layer — no pill, no sheet, and the engines
+ *  refuse the ask even if a surface were somehow mounted. */
+export function suggestionGateOpen(flagEnabled: boolean, mode: TourMode): boolean {
+  return flagEnabled && routeSuggestionsAvailable(mode);
+}
+
 /**
  * Feature flag. On the v16-route-mode branch it defaults ON so
  * Erik's branch-switch publish shows the mode box with no env

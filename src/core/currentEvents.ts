@@ -397,22 +397,34 @@ function matchesAny(types: readonly string[], fragments: readonly string[]): boo
   return types.some(t => fragments.some(f => t === f || t.includes(f)));
 }
 
-/** How strongly the declared profile tastes match this place (0 when neutral). */
-export function profileMatchScore(types: readonly string[], match: MatchInputs): number {
-  let hits = 0;
+/**
+ * The declared taste option ids (profile vocabulary: a cuisine,
+ * a drink, an activity) this place's types actually match —
+ * the evidence behind profileMatchScore, exported so a
+ * consumer (the suggestion composer, Slice 4) can NAME the
+ * match in its spoken reason instead of claiming a match it
+ * cannot point to. Order: cuisines, drinks, activities.
+ */
+export function matchedTasteIds(types: readonly string[], match: MatchInputs): string[] {
+  const out: string[] = [];
   for (const c of match.cuisines) {
     const frags = CUISINE_TYPE_FRAGMENTS[c];
-    if (frags && matchesAny(types, frags)) hits += 1;
+    if (frags && matchesAny(types, frags)) out.push(c);
   }
   for (const d of match.drinks) {
     const frags = DRINK_TYPE_FRAGMENTS[d];
-    if (frags && matchesAny(types, frags)) hits += 1;
+    if (frags && matchesAny(types, frags)) out.push(d);
   }
   for (const a of match.activities) {
     const frags = ACTIVITY_TYPE_FRAGMENTS[a];
-    if (frags && matchesAny(types, frags)) hits += 1;
+    if (frags && matchesAny(types, frags)) out.push(a);
   }
-  return Math.min(hits * PROFILE_MATCH_POINTS, PROFILE_MATCH_CAP);
+  return out;
+}
+
+/** How strongly the declared profile tastes match this place (0 when neutral). */
+export function profileMatchScore(types: readonly string[], match: MatchInputs): number {
+  return Math.min(matchedTasteIds(types, match).length * PROFILE_MATCH_POINTS, PROFILE_MATCH_CAP);
 }
 
 const PROFILE_MATCH_POINTS = 12;
@@ -420,6 +432,25 @@ const PROFILE_MATCH_CAP = 24;
 const SHELF_BONUS = 5;
 const OPEN_NOW_BONUS = 10;
 const CLOSED_NOW_PENALTY = 15;
+
+/**
+ * The type-based half of the constraint filters: everything
+ * that can be judged from a place's Places types alone.
+ * Exported separately because a bare EventCandidate (the
+ * pool's shape) carries types but not the provider record —
+ * the suggestion composer (Slice 4) re-judges the pool with
+ * this at answer time, so a constraint is enforced at the
+ * moment of the claim, not only at discovery.
+ */
+export function typesSurviveConstraints(
+  types: readonly string[],
+  constraints: ResolvedConstraints,
+): boolean {
+  const alcoholPrimary = types.some(t => ALCOHOL_TYPES.includes(t));
+  if (constraints.alcoholOk === false && alcoholPrimary) return false;
+  if (constraints.usuallyWithKids === true && types.some(t => t === 'bar' || t === 'night_club')) return false;
+  return true;
+}
 
 /**
  * Declared-constraint filters, applied only where the data
@@ -432,9 +463,7 @@ export function survivesConstraints(
   kind: EventCandidateKind,
   constraints: ResolvedConstraints,
 ): boolean {
-  const alcoholPrimary = raw.types.some(t => ALCOHOL_TYPES.includes(t));
-  if (constraints.alcoholOk === false && alcoholPrimary) return false;
-  if (constraints.usuallyWithKids === true && raw.types.some(t => t === 'bar' || t === 'night_club')) return false;
+  if (!typesSurviveConstraints(raw.types, constraints)) return false;
   if (
     kind === 'eat' &&
     constraints.dietary.includes('vegetarian') &&
