@@ -9,7 +9,7 @@
 import registryData from '../data/sd-historic-registry.json';
 import { MAJOR_PLACES } from '../content/majorPlaces';
 import { isTier1HouseException } from '../data/tier1HouseExceptions';
-import { activePartners, partnerForPlaceName, type Partner } from '../data/partners';
+import { activePartners, partnerForPlaceName, PARTNERS, type Partner } from '../data/partners';
 import { houseImportanceFor } from '../data/houseImportance';
 import { isHousePlaceName } from './houseClass';
 import { findNamedArea } from '../services/namedAreas';
@@ -345,7 +345,8 @@ export function applyHouseDemotion(candidates: Candidate[]): void {
  * today it holds one dormant prospect — this function is a
  * no-op on every candidate, by construction.
  */
-export function applyPartnerBoost(candidates: Candidate[], partners: readonly Partner[] = activePartners()): void {
+export function applyPartnerBoost(candidates: Candidate[], list: readonly Partner[] = PARTNERS): void {
+  const partners = activePartners(list);
   if (partners.length === 0) return;
   for (const c of candidates) {
     const partner = partnerForPlaceName(c.name, partners) ?? (c.registry ? partnerForPlaceName(c.registry.name, partners) : null);
