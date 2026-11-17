@@ -10,6 +10,9 @@ import registryData from '../data/sd-historic-registry.json';
 import { MAJOR_PLACES } from '../content/majorPlaces';
 import { isTier1HouseException } from '../data/tier1HouseExceptions';
 import { activePartners, partnerForPlaceName, PARTNERS, type Partner } from '../data/partners';
+import { ROUTE_TAGS } from '../data/routeTags';
+import { matchInputs } from './profile';
+import { profileScoreBoost, profileWeightMap, type ProfileTopicWeight } from './profileRank';
 import { houseImportanceFor } from '../data/houseImportance';
 import { isHousePlaceName } from './houseClass';
 import { findNamedArea } from '../services/namedAreas';
@@ -266,6 +269,7 @@ export async function discoverCandidates(center: GeoPoint, radiusM: number): Pro
   }
   applyHouseDemotion(out);
   applyPartnerBoost(out);
+  applyProfileBoost(out);
   out.sort((a, b) => b.score - a.score);
   return out;
 }
@@ -354,6 +358,95 @@ export function applyPartnerBoost(candidates: Candidate[], list: readonly Partne
     if (c.distanceM > partner.serveRadiusM) continue;
     c.tier1 = true;
     c.partnerId = partner.id;
+  }
+}
+
+// ------------------------------------------------------------ profile signal
+
+/**
+ * The shelf's topic tags indexed by place. routeTags.ts is
+ * keyed place_key|angle (one entry per telling); a discovery
+ * candidate is a PLACE, so its topic set is the union over
+ * its tellings. Built once, lazily.
+ */
+let placeTopicsCache: Map<string, string[]> | null = null;
+function placeTopicsIndex(): Map<string, string[]> {
+  if (placeTopicsCache) return placeTopicsCache;
+  const sets = new Map<string, Set<string>>();
+  for (const [key, entry] of Object.entries(ROUTE_TAGS)) {
+    const cut = key.lastIndexOf('|');
+    if (cut < 0) continue;
+    const place = key.slice(0, cut);
+    let set = sets.get(place);
+    if (!set) {
+      set = new Set();
+      sets.set(place, set);
+    }
+    for (const t of entry.topics) set.add(t);
+  }
+  placeTopicsCache = new Map([...sets].map(([k, v]) => [k, [...v]]));
+  return placeTopicsCache;
+}
+
+/**
+ * The library writer's place-key dialect (backend.ts's
+ * normalizePlaceKey rule, restated so discovery stays free of
+ * the backend module): trimmed, lowercase, periods and
+ * apostrophes removed, whitespace collapsed. routeTags keys
+ * are written in this dialect.
+ */
+const writerPlaceKey = (name: string): string =>
+  name
+    .trim()
+    .toLowerCase()
+    .replace(/[.'’]/g, '')
+    .replace(/\s+/g, ' ');
+
+/**
+ * The story topics the shelf carries for a candidate's place,
+ * judged on either name the candidate carries (the Places
+ * display name or the registry's own — the two-dialect rule
+ * the partner boost judges by), each read in both key
+ * dialects. A place with no tagged tellings has no topics and
+ * can earn no profile boost.
+ */
+export function candidateTopics(c: Candidate): string[] {
+  const index = placeTopicsIndex();
+  const out = new Set<string>();
+  for (const name of [c.name, c.registry?.name]) {
+    if (!name) continue;
+    for (const key of [writerPlaceKey(name), name.toLowerCase().trim()]) {
+      for (const t of index.get(key) ?? []) out.add(t);
+    }
+  }
+  return [...out];
+}
+
+/**
+ * Profile signal in freeform discovery (v16.2 Slice 3, Nov 16,
+ * 2026): the caller's story-topic affinities — declared at
+ * weight 1, inferred at their aged confidence, exactly as
+ * profile.ts's matchInputs resolved them — add a small,
+ * capped score boost to candidates whose shelf tellings carry
+ * a matched topic. The cap (profileRank.ts) is under half the
+ * smallest structural step in this score (the 20-point
+ * house-importance graduation), so the boost swaps near-tied
+ * candidates within their class and can never promote one
+ * across a class boundary; the tier flag, the house demotion
+ * and every downstream gate are untouched. With no topics —
+ * no profile, an empty profile, or a paused one — the
+ * function returns before touching a single score, so
+ * discovery is arithmetically the pre-slice discovery.
+ */
+export function applyProfileBoost(
+  candidates: Candidate[],
+  topics: readonly ProfileTopicWeight[] = matchInputs().topics,
+): void {
+  if (topics.length === 0) return;
+  const weights = profileWeightMap(topics);
+  for (const c of candidates) {
+    const boost = profileScoreBoost(candidateTopics(c), weights);
+    if (boost > 0) c.score += boost;
   }
 }
 
