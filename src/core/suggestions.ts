@@ -230,11 +230,7 @@ function timeClause(candidate: EventCandidate): string {
 }
 
 /** The spoken reason clause for the primary reason — every clause is checkable against the candidate. */
-function reasonClause(
-  primary: SuggestionReasonCode,
-  candidate: EventCandidate,
-  tasteLabels: string[],
-): string {
+function reasonClause(primary: SuggestionReasonCode, tasteLabels: string[]): string {
   switch (primary) {
     case 'profile-match': {
       const labels = tasteLabels.slice(0, 2).join(' and ');
@@ -351,7 +347,7 @@ export function composeSuggestion(
   const primaryReason = reasonCodes[0];
 
   const detourMinutes = detourOf(candidate);
-  const parts = [reasonClause(primaryReason, candidate, tasteLabels)];
+  const parts = [reasonClause(primaryReason, tasteLabels)];
   if (detourMinutes !== null) parts.push(`about ${Math.max(1, Math.round(detourMinutes))} minutes off your way`);
   parts.push(timeClause(candidate));
   const recommendation = `Try ${candidate.name} — ${parts.join(', ')}.`;
