@@ -105,7 +105,7 @@ async function healthyOpening(world, audio, pos = UTC, speed = 8) {
 }
 
 export async function runScenarios(Tour, extras) {
-  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, facts, partners, freshness, currentEvents, suggestions, composeRoutePlan, hashString } = extras;
+  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, facts, partners, freshness, currentEvents, suggestions, proposals, composeRoutePlan, hashString } = extras;
 
   // ---------------------------------------------------------- S-01 healthy start
   suite('S-01 healthy start / opener order');
@@ -6720,6 +6720,309 @@ export async function runScenarios(Tour, extras) {
     check('once the lock is idle the suggestion ask is accepted', tour.submitSuggestionAsk('food') === true);
     await world.clock.advance(30_000);
     check('and its answer filed normally', world.eventsOf('suggestion_answered').length === 1);
+    tour.endTour();
+  }
+
+  // ---------------------------------------------------------------
+  // UP suites (Nov 16, 2026): unsolicited seam proposals +
+  // the arrival tray, v16.2 Slice 5. Passenger/Walking ONLY —
+  // the Driving absence is pinned as hard as the presence.
+  // UP-1 pins every timing fence at the seam judge, UP-2 the
+  // speak-time freshness re-judgment + the tray lifecycle
+  // store, UP-3 the freeform engine end to end (two-boundary
+  // arm/speak, the per-drive cap, the proposal outcome
+  // vocabulary), UP-4 the total absence in Driving and in a
+  // gateless Tour, UP-5 the silent speak-time staleness drop,
+  // UP-6 the tray carry at tour end, UP-7 the channel-busy
+  // suppression + drop in-engine. The demotion rule is
+  // measurement only in v1 — these suites pin the events it
+  // will read, not any automatic behavior.
+  const UP_NOW = Date.UTC(2026, 10, 18, 19, 0, 0);
+  const UP_DAY_MS = 24 * 60 * 60 * 1000;
+  const upCandidate = (over = {}) => ({
+    placeId: 'up-tacos', name: 'Up Test Tacos', lat: 32.853, lng: -117.18, kind: 'eat',
+    types: ['mexican_restaurant', 'restaurant'], rating: 4.2, userRatings: 300, address: null,
+    editorial: null, distanceM: 900, anchorKind: 'position', openNow: true,
+    closesAtMs: UP_NOW + 5 * 60 * 60 * 1000, opensAtMs: null, hoursFetchedAt: UP_NOW - 60_000,
+    hasShelfStory: false, score: 40, detourMinutes: null, event: null, ...over,
+  });
+  const UP_SEAM_BASE = {
+    seam: 'story-boundary', tourAgeMs: 300_000, remainingMs: 600_000,
+    prevSolemn: false, nextSolemn: false, interchangeNear: false,
+    proposalsUsed: 0, channelBusy: false,
+  };
+  const PROPOSAL_EVENT_TYPES = [
+    'proposal_offered', 'proposal_playback', 'proposal_suppressed',
+    'proposal_dropped', 'proposal_trayed', 'proposal_outcome',
+  ];
+  const proposalEvents = world => PROPOSAL_EVENT_TYPES.flatMap(t => world.eventsOf(t));
+  // A four-subject shelf: story boundaries keep flowing for
+  // the whole sim (a one-story shelf exhausts after the
+  // opening and the seam engine would starve — the engine is
+  // not broken, the world is just quiet).
+  const UP_SUBJECTS = ['Alpha Park', 'Beta Museum', 'Gamma Pier', 'Delta Fort'];
+  const upWorld = (over = {}) => makeWorld(Tour, {
+    candidates: UP_SUBJECTS.map(n => makeCandidate(n)),
+    library: [...UP_SUBJECTS],
+    eventCandidates: [upCandidate({ hoursFetchedAt: 0, closesAtMs: 10 * 60 * 60 * 1000 })],
+    declaredMode: 'passenger',
+    ...over,
+  });
+
+  suite('UP-1 the seam judge: every adopted timing fence, the per-drive cap, and the legal seams');
+  {
+    check('the cap is the plan value: one unsolicited proposal per drive',
+      proposals.MAX_UNSOLICITED_PROPOSALS_PER_DRIVE === 1);
+    check('a clean mid-drive story boundary is legal',
+      proposals.judgeProposalSeam(UP_SEAM_BASE).ok === true);
+    check('the cap blocks the second proposal of the drive',
+      proposals.judgeProposalSeam({ ...UP_SEAM_BASE, proposalsUsed: 1 }).reason === 'cap');
+    check('the cap outranks even the first-minute fence (judgment order is pinned)',
+      proposals.judgeProposalSeam({ ...UP_SEAM_BASE, proposalsUsed: 1, tourAgeMs: 0 }).reason === 'cap');
+    check('never in the first 60 seconds',
+      proposals.judgeProposalSeam({ ...UP_SEAM_BASE, tourAgeMs: 59_999 }).reason === 'first-minute' &&
+      proposals.judgeProposalSeam({ ...UP_SEAM_BASE, tourAgeMs: 60_000 }).ok === true);
+    check('never in the last 2 minutes — and an unknown remainder cannot trigger the fence',
+      proposals.judgeProposalSeam({ ...UP_SEAM_BASE, remainingMs: 119_999 }).reason === 'last-minutes' &&
+      proposals.judgeProposalSeam({ ...UP_SEAM_BASE, remainingMs: 120_000 }).ok === true &&
+      proposals.judgeProposalSeam({ ...UP_SEAM_BASE, remainingMs: null }).ok === true);
+    check('never right after memorial or climax material',
+      proposals.judgeProposalSeam({ ...UP_SEAM_BASE, prevSolemn: true }).reason === 'after-solemn');
+    check('never right before memorial or climax material',
+      proposals.judgeProposalSeam({ ...UP_SEAM_BASE, nextSolemn: true }).reason === 'before-solemn');
+    check('never during a complex interchange',
+      proposals.judgeProposalSeam({ ...UP_SEAM_BASE, interchangeNear: true }).reason === 'interchange');
+    check('never into a busy channel (an ask or question owns the interruption slot)',
+      proposals.judgeProposalSeam({ ...UP_SEAM_BASE, channelBusy: true }).reason === 'channel-busy');
+    check('the pre-drive preview is a legal seam even at tour age zero',
+      proposals.judgeProposalSeam({ ...UP_SEAM_BASE, seam: 'preview', tourAgeMs: 0 }).ok === true);
+    check('arrival is always legal — every fence yields there',
+      proposals.judgeProposalSeam({
+        seam: 'arrival', tourAgeMs: 0, remainingMs: 0, prevSolemn: true, nextSolemn: true,
+        interchangeNear: true, proposalsUsed: 1, channelBusy: true,
+      }).ok === true);
+  }
+
+  suite('UP-2 speak-time freshness + the tray lifecycle store: re-judged, expiring, resolving');
+  {
+    check('a fresh, open candidate passes the speak-time re-judgment',
+      proposals.judgeCandidateAtSpeak(upCandidate(), UP_NOW).ok === true);
+    check('hours older than the freshness standard at speak time drop it as stale',
+      proposals.judgeCandidateAtSpeak(upCandidate({ hoursFetchedAt: UP_NOW - 8 * UP_DAY_MS }), UP_NOW).reason === 'stale-at-speak');
+    check('a place the source now reports closed drops as closed, never stale',
+      proposals.judgeCandidateAtSpeak(upCandidate({ openNow: false }), UP_NOW).reason === 'closed-at-speak');
+    check('unknown open-state at speak time is stale — "open now" is never assumed',
+      proposals.judgeCandidateAtSpeak(upCandidate({ openNow: null, closesAtMs: null }), UP_NOW).reason === 'stale-at-speak');
+    check('a closing time that passed since selection drops as closed',
+      proposals.judgeCandidateAtSpeak(upCandidate({ closesAtMs: UP_NOW - 1 }), UP_NOW).reason === 'closed-at-speak');
+
+    resetLocalStorage();
+    const store = proposals.localProposalStore;
+    const rec = (over = {}) => ({
+      placeId: 'up-tacos', name: 'Up Test Tacos', kind: 'eat', primaryReason: 'open-now',
+      closesAtMs: UP_NOW + 3_600_000, hoursFetchedAt: UP_NOW - 60_000, offeredAt: UP_NOW,
+      sessionId: 'up-sim', state: 'spoken', ...over,
+    });
+    proposals.recordProposal(store, rec());
+    check('a spoken proposal stands in the tray, actionable while its window stands',
+      proposals.trayEntries(store, UP_NOW).length === 1 &&
+      proposals.trayEntries(store, UP_NOW)[0].judgment.actionable === true);
+    proposals.recordProposal(store, rec({ offeredAt: UP_NOW + 1000 }));
+    check('a re-offer of the same place replaces its older record (one entry per place)',
+      proposals.loadProposalRecords(store).length === 1 &&
+      proposals.loadProposalRecords(store)[0].offeredAt === UP_NOW + 1000);
+    check('past its closing time the entry renders expired — visible, never actionable',
+      (() => { const j = proposals.judgeTrayRecord(rec(), UP_NOW + 3_600_001); return j.visible && j.expired && !j.actionable; })());
+    check('aged-out hours expire the entry the same way',
+      (() => { const j = proposals.judgeTrayRecord(rec({ closesAtMs: null, hoursFetchedAt: UP_NOW - 8 * UP_DAY_MS }), UP_NOW); return j.visible && j.expired && !j.actionable; })());
+    check('accepting resolves the record to saved: still shown, no longer actionable',
+      proposals.resolveProposalRecord(store, 'up-tacos', 'accepted') === true &&
+      proposals.loadProposalRecords(store)[0].state === 'accepted' &&
+      proposals.trayEntries(store, UP_NOW)[0].judgment.actionable === false);
+    proposals.recordProposal(store, rec({ placeId: 'up-other', name: 'Up Other' }));
+    check('dismissing removes the entry from the tray entirely',
+      proposals.resolveProposalRecord(store, 'up-other', 'dismissed') === true &&
+      proposals.trayEntries(store, UP_NOW).every(e => e.record.placeId !== 'up-other'));
+    resetLocalStorage();
+    for (let i = 0; i < 25; i++) proposals.recordProposal(store, rec({ placeId: `up-p${i}`, name: `Up P${i}`, offeredAt: UP_NOW + i }));
+    check('the tray ledger is bounded (newest 20 stand)',
+      proposals.loadProposalRecords(store).length === 20 &&
+      proposals.loadProposalRecords(store)[0].placeId === 'up-p24');
+  }
+
+  suite('UP-3 freeform end to end: arm at one boundary, speak at the next, exactly one per drive, proposal outcomes');
+  {
+    resetLocalStorage();
+    const world = upWorld();
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 15_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    for (let i = 0; i < 80 && tour.view().diagnostics.proposalsSpoken !== 1; i++) {
+      await world.clock.advance(5_000);
+    }
+    const offered = world.eventsOf('proposal_offered');
+    check('exactly one proposal was offered across many boundaries (the per-drive cap)',
+      offered.length === 1 && offered[0].payload.place_id === 'up-tacos',
+      JSON.stringify(offered.map(e => e.payload)));
+    check('the offer never sounded inside the first minute (the fence, in-engine)',
+      offered.length === 1 && offered[0].at >= 60_000, `at=${offered[0]?.at}`);
+    check('any earlier speak attempt was suppressed, never spoken (first-minute drop, then re-selection)',
+      world.eventsOf('proposal_suppressed').every(e => e.payload.reason === 'first-minute'),
+      JSON.stringify(world.eventsOf('proposal_suppressed').map(e => e.payload)));
+    check('proposal_playback filed its settle truth',
+      world.eventsOf('proposal_playback').length === 1 &&
+      world.eventsOf('proposal_playback')[0].payload.completed === true &&
+      world.eventsOf('proposal_playback')[0].payload.place_id === 'up-tacos');
+    check('the pending pick is the proposal, tagged by source',
+      tour.view().suggestion.pending?.placeId === 'up-tacos' && tour.view().suggestion.pending?.source === 'proposed',
+      JSON.stringify(tour.view().suggestion.pending));
+    check('the lifecycle record stands in the tray store as spoken',
+      proposals.loadProposalRecords(proposals.localProposalStore).length === 1 &&
+      proposals.loadProposalRecords(proposals.localProposalStore)[0].state === 'spoken');
+    check('resolving files proposal_outcome on its own channel — never suggestion_outcome',
+      tour.resolveSuggestion('accepted') === true &&
+      world.eventsOf('proposal_outcome').length === 1 &&
+      world.eventsOf('proposal_outcome')[0].payload.outcome === 'accepted' &&
+      world.eventsOf('proposal_outcome')[0].payload.surface === 'drive' &&
+      world.eventsOf('suggestion_outcome').length === 0,
+      JSON.stringify(world.eventsOf('proposal_outcome').map(e => e.payload)));
+    check('and the tray record resolves with the verdict',
+      proposals.loadProposalRecords(proposals.localProposalStore)[0].state === 'accepted');
+    await world.clock.advance(120_000);
+    check('the cap holds for the rest of the drive (no second offer, ever)',
+      world.eventsOf('proposal_offered').length === 1);
+    tour.endTour();
+  }
+
+  suite('UP-4 Driving and gateless tours: total absence — no offers, no events, no tray records');
+  {
+    resetLocalStorage();
+    const driveWorld = upWorld({ declaredMode: 'driving' });
+    const driveAudio = new FakeAudio(driveWorld.clock, okPolicy({ library: 15_000 }));
+    const driveTour = await startAt(driveWorld, driveAudio, UTC);
+    driveTour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await driveWorld.clock.advance(240_000);
+    check('setup: story boundaries really happened on the Driving ride (the absence is not vacuous)',
+      driveWorld.eventsOf('story_playback').length >= 3,
+      `${driveWorld.eventsOf('story_playback').length}`);
+    check('a Driving ride files zero proposal events across many story boundaries',
+      proposalEvents(driveWorld).length === 0,
+      JSON.stringify(proposalEvents(driveWorld).map(e => e.type)));
+    check('and writes no tray records', proposals.loadProposalRecords(proposals.localProposalStore).length === 0);
+    driveTour.endTour();
+
+    resetLocalStorage();
+    const bareWorld = makeWorld(Tour, {
+      candidates: UP_SUBJECTS.map(n => makeCandidate(n)),
+      library: [...UP_SUBJECTS],
+      eventCandidates: [upCandidate({ hoursFetchedAt: 0, closesAtMs: 10 * 60 * 60 * 1000 })],
+    });
+    const bareAudio = new FakeAudio(bareWorld.clock, okPolicy({ library: 15_000 }));
+    const bare = new Tour({ audio: bareAudio, clock: bareWorld.clock, seams: bareWorld.seams });
+    bare.onPosition({ ...UTC, speedMps: 8, headingDeg: 180 });
+    bare.start(false);
+    await bareWorld.clock.advance(240_000);
+    check('a Tour with no declaredMode dep (closed by construction) is equally silent',
+      proposalEvents(bareWorld).length === 0 &&
+      proposals.loadProposalRecords(proposals.localProposalStore).length === 0);
+    bare.endTour();
+  }
+
+  suite('UP-5 speak-time staleness: a place that closes between selection and speech is dropped silently, cap unspent');
+  {
+    resetLocalStorage();
+    // The candidate stands open when the second selection
+    // composes (~60 s in) and closed by its speak boundary
+    // (~75 s in): closesAtMs sits between the two.
+    const world = upWorld({ eventCandidates: [upCandidate({ hoursFetchedAt: 0, closesAtMs: 70_000 })] });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 15_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(180_000);
+    const dropped = world.eventsOf('proposal_dropped');
+    check('the stale-at-speak drop filed, with its reason',
+      dropped.length === 1 && dropped[0].payload.reason === 'closed-at-speak' && dropped[0].payload.place_id === 'up-tacos',
+      JSON.stringify(dropped.map(e => e.payload)));
+    check('nothing was offered or sounded — the drop is silent by construction',
+      world.eventsOf('proposal_offered').length === 0 && world.eventsOf('proposal_playback').length === 0 &&
+      tour.view().diagnostics.proposalsSpoken === 0);
+    check('no tray record was written for a proposal never spoken',
+      proposals.loadProposalRecords(proposals.localProposalStore).length === 0);
+    tour.endTour();
+  }
+
+  suite('UP-6 the tray carry: an undecided proposal trays at tour end; a solicited pick still files nothing');
+  {
+    resetLocalStorage();
+    const world = upWorld();
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 15_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    for (let i = 0; i < 80 && tour.view().diagnostics.proposalsSpoken !== 1; i++) {
+      await world.clock.advance(5_000);
+    }
+    check('setup: the proposal sounded and stands undecided',
+      tour.view().suggestion.pending?.source === 'proposed');
+    tour.endTour();
+    check('tour end trays the undecided proposal (exactly one trayed event, no outcome inferred)',
+      world.eventsOf('proposal_trayed').length === 1 &&
+      world.eventsOf('proposal_trayed')[0].payload.place_id === 'up-tacos' &&
+      world.eventsOf('proposal_outcome').length === 0,
+      JSON.stringify(world.eventsOf('proposal_trayed').map(e => e.payload)));
+    check('the tray entry stands actionable for the stopped-state decision',
+      proposals.trayEntries(proposals.localProposalStore, world.clock.now()).length === 1 &&
+      proposals.trayEntries(proposals.localProposalStore, world.clock.now())[0].judgment.actionable === true);
+
+    // Control: the Slice 4 rule is untouched — a SOLICITED
+    // pick pending at tour end files nothing and trays nothing.
+    resetLocalStorage();
+    const askWorld = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park')],
+      library: ['Balboa Park'],
+      eventCandidates: [sgCandidate({ hoursFetchedAt: 0, closesAtMs: 10 * 60 * 60 * 1000 })],
+      declaredMode: 'passenger',
+    });
+    const askAudio = new FakeAudio(askWorld.clock, okPolicy());
+    const askTour = await startAt(askWorld, askAudio, UTC);
+    await askWorld.clock.advance(40_000);
+    check('control setup: the solicited ask lands a pick', askTour.submitSuggestionAsk('any') === true);
+    askTour.endTour();
+    check('a solicited pick at tour end files no outcome and no tray carry',
+      askWorld.eventsOf('suggestion_outcome').length === 0 && askWorld.eventsOf('proposal_trayed').length === 0);
+  }
+
+  suite('UP-7 channel-busy in-engine: a speak attempt into an owned channel suppresses and drops, then the channel frees');
+  {
+    resetLocalStorage();
+    const world = upWorld();
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 15_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    // A selection armed at the welcome boundary (~30 s). The
+    // listener asks a question; its answer cycle owns the
+    // channel when the next story boundary arrives, so the
+    // speak attempt must suppress as channel-busy and drop.
+    check('the question is accepted', tour.submitQuestion('What is this place?') === true);
+    for (let i = 0; i < 40 && tour.view().qaPhase === 'idle'; i++) {
+      await world.clock.advance(500);
+    }
+    check('setup: the Q&A cycle owns the channel', tour.view().qaPhase !== 'idle', tour.view().qaPhase);
+    await world.clock.advance(30_000);
+    const suppressed = world.eventsOf('proposal_suppressed');
+    check('the speak attempt into the busy channel suppressed and dropped the selection',
+      suppressed.some(e => e.payload.reason === 'channel-busy') &&
+      world.eventsOf('proposal_offered').length === 0,
+      JSON.stringify(suppressed.map(e => e.payload)));
+    // The Q&A cycle ends, the resume grace releases the lock,
+    // and the engine re-selects and speaks on later boundaries
+    // — the drop cost a cycle, never the drive's one proposal.
+    await world.clock.advance(60_000);
+    for (let i = 0; i < 80 && tour.view().diagnostics.proposalsSpoken !== 1; i++) {
+      await world.clock.advance(5_000);
+    }
+    check('after the channel frees, the proposal still lands — exactly once',
+      world.eventsOf('proposal_offered').length === 1 && tour.view().diagnostics.proposalsSpoken === 1,
+      JSON.stringify(world.eventsOf('proposal_offered').map(e => e.payload)));
     tour.endTour();
   }
 }

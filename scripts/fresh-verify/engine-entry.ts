@@ -19,6 +19,7 @@ export * as partners from '../../src/data/partners';
 export * as freshness from '../../src/core/freshness';
 export * as currentEvents from '../../src/core/currentEvents';
 export * as suggestions from '../../src/core/suggestions';
+export * as proposals from '../../src/core/proposals';
 export { hashString } from '../../src/utils/hash';
 export { houseImportanceFor } from '../../src/data/houseImportance';
 export {
