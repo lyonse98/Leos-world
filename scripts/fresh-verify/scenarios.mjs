@@ -105,7 +105,7 @@ async function healthyOpening(world, audio, pos = UTC, speed = 8) {
 }
 
 export async function runScenarios(Tour, extras) {
-  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, facts, partners, freshness, currentEvents, suggestions, proposals, composeRoutePlan, hashString } = extras;
+  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, facts, partners, freshness, currentEvents, suggestions, proposals, placeMemory, composeRoutePlan, hashString } = extras;
 
   // ---------------------------------------------------------- S-01 healthy start
   suite('S-01 healthy start / opener order');
@@ -7023,6 +7023,225 @@ export async function runScenarios(Tour, extras) {
     check('after the channel frees, the proposal still lands — exactly once',
       world.eventsOf('proposal_offered').length === 1 && tour.view().diagnostics.proposalsSpoken === 1,
       JSON.stringify(world.eventsOf('proposal_offered').map(e => e.payload)));
+    tour.endTour();
+  }
+
+  // ---------------------------------------------------------------
+  // PM suites (Nov 16, 2026): place-memory callbacks, v16.2
+  // Slice 6 — ONE flavor of the Slice 5 proposal channel, not
+  // a new channel and not the killed callback opener (nothing
+  // here touches a tour start). PM-1 pins the pure derivation
+  // (passed = owed on a concluded drive; discharged by the
+  // heard ledger or a newer record's played list), the line,
+  // and the speak-time heard judge; PM-2 the tray record's
+  // heard-based expiry; PM-3 the freeform engine end to end;
+  // PM-4 the priority rule (a place proposal outranks a
+  // callback; both spend the same one cap); PM-5 the Driving
+  // absence with the flavor wired; PM-6 the heard-at-speak
+  // drop in-engine.
+  const PM_NOW = Date.UTC(2026, 10, 18, 19, 0, 0);
+  const pmRecord = (over = {}) => ({
+    destinationName: 'Old Town', destinationPlaceKey: null, threadTopic: null,
+    playedSubjects: [], owedSubjects: ['Echo Observatory'], endedAt: 0, ...over,
+  });
+
+  suite('PM-1 derivation: passed-but-unheard only, discharged by hearing, newest pass wins; the line; the speak judge');
+  {
+    const T_OLD = Date.UTC(2026, 8, 5, 18, 0, 0);
+    const T_NEW = Date.UTC(2026, 9, 20, 18, 0, 0);
+    const records = [
+      pmRecord({ endedAt: T_NEW, playedSubjects: ['Alpha Park'], owedSubjects: ['Gamma Pier'] }),
+      pmRecord({ endedAt: T_OLD, playedSubjects: [], owedSubjects: ['Beta Museum', 'Alpha Park', 'Gamma Pier'] }),
+    ];
+    const derived = placeMemory.deriveCallbackCandidates(records, new Set(), PM_NOW);
+    check('owed-and-unheard places derive, newest pass first, one candidate per place',
+      derived.length === 2 && derived[0].name === 'Gamma Pier' && derived[1].name === 'Beta Museum',
+      JSON.stringify(derived.map(c => c.name)));
+    check('the candidate carries the newest owing record\'s pass date (the memory the line speaks)',
+      derived[0].lastPassedAt === T_NEW && derived[1].lastPassedAt === T_OLD);
+    check('a place played on a NEWER drive is discharged — heard since it was owed',
+      derived.every(c => c.name !== 'Alpha Park'));
+    check('the place id is the namespaced normalized name',
+      derived[0].placeId === 'memory:gamma pier' && derived[1].placeId === 'memory:beta museum');
+    check('the heard ledger discharges at derivation: a heard place is never a candidate',
+      placeMemory.deriveCallbackCandidates(records, new Set(['beta museum']), PM_NOW)
+        .every(c => c.name !== 'Beta Museum'));
+    check('places already proposed this drive are excluded by id',
+      placeMemory.deriveCallbackCandidates(records, new Set(), PM_NOW, { excludePlaceIds: new Set(['memory:gamma pier']) })
+        .every(c => c.name !== 'Gamma Pier'));
+    check('no records — or no owed subjects — derive nothing',
+      placeMemory.deriveCallbackCandidates([], new Set(), PM_NOW).length === 0 &&
+      placeMemory.deriveCallbackCandidates([pmRecord({ owedSubjects: [] })], new Set(), PM_NOW).length === 0);
+    check('the line speaks the pass month, same-year',
+      placeMemory.composeCallbackLine('Beta Museum', Date.UTC(2026, 9, 14, 18, 0, 0), PM_NOW) ===
+        "You passed Beta Museum back in October — its story's still unheard.");
+    check('the line speaks a same-month pass plainly',
+      placeMemory.composeCallbackLine('Beta Museum', Date.UTC(2026, 10, 3, 18, 0, 0), PM_NOW) ===
+        "You passed Beta Museum earlier this month — its story's still unheard.");
+    check('the line carries the year when the pass was last year',
+      placeMemory.composeCallbackLine('Beta Museum', Date.UTC(2025, 11, 25, 18, 0, 0), PM_NOW) ===
+        "You passed Beta Museum back in December 2025 — its story's still unheard.");
+    const cand = derived[0];
+    check('the speak-time judge passes an unheard callback',
+      placeMemory.judgeCallbackAtSpeak(cand, new Set()).ok === true);
+    check('the speak-time judge drops a callback heard since selection, as heard-at-speak',
+      placeMemory.judgeCallbackAtSpeak(cand, new Set(['gamma pier'])).reason === 'heard-at-speak');
+  }
+
+  suite('PM-2 the tray record: a callback expires on heard evidence, never on hours; legacy records read as place flavor');
+  {
+    resetLocalStorage();
+    const store = proposals.localProposalStore;
+    proposals.recordProposal(store, {
+      placeId: 'memory:beta museum', name: 'Beta Museum', kind: 'story', primaryReason: 'place-memory',
+      closesAtMs: null, hoursFetchedAt: UP_NOW, offeredAt: UP_NOW, sessionId: 'pm-sim', state: 'spoken',
+      flavor: 'place-memory', passedAt: UP_NOW - 40 * UP_DAY_MS,
+    });
+    check('a spoken callback stands in the tray, actionable while its story is unheard',
+      proposals.trayEntries(store, UP_NOW).length === 1 &&
+      proposals.trayEntries(store, UP_NOW)[0].judgment.actionable === true);
+    check('no hours claim can expire it: months later, still unheard, still actionable',
+      proposals.trayEntries(store, UP_NOW + 90 * UP_DAY_MS)[0].judgment.actionable === true);
+    check('heard since — the entry renders expired: visible, never actionable',
+      (() => {
+        const j = proposals.judgeTrayRecord(
+          proposals.loadProposalRecords(store)[0], UP_NOW, new Set(['beta museum']));
+        return j.visible && j.expired && !j.actionable;
+      })());
+    check('an unrelated heard set leaves it actionable',
+      proposals.judgeTrayRecord(proposals.loadProposalRecords(store)[0], UP_NOW, new Set(['other place']))
+        .actionable === true);
+    proposals.recordProposal(store, {
+      placeId: 'pm-tacos', name: 'Beta Museum', kind: 'eat', primaryReason: 'open-now',
+      closesAtMs: UP_NOW + 3_600_000, hoursFetchedAt: UP_NOW - 60_000, offeredAt: UP_NOW,
+      sessionId: 'pm-sim', state: 'spoken', flavor: 'place', passedAt: null,
+    });
+    check('a PLACE entry is never expired by heard evidence — its hours alone judge it',
+      (() => {
+        const rec = proposals.loadProposalRecords(store).find(r => r.placeId === 'pm-tacos');
+        const j = proposals.judgeTrayRecord(rec, UP_NOW, new Set(['beta museum']));
+        return j.expired === false && j.actionable === true;
+      })());
+    store.write(JSON.stringify([{
+      placeId: 'legacy-place', name: 'Legacy', kind: 'eat', primaryReason: 'open-now',
+      closesAtMs: null, hoursFetchedAt: UP_NOW, offeredAt: UP_NOW, sessionId: null, state: 'spoken',
+    }]));
+    check('a pre-flavor record (no flavor / passedAt fields) reads back as a place record',
+      proposals.loadProposalRecords(store).length === 1 &&
+      proposals.loadProposalRecords(store)[0].flavor === 'place' &&
+      proposals.loadProposalRecords(store)[0].passedAt === null);
+    resetLocalStorage();
+  }
+
+  suite('PM-3 freeform end to end: an empty pool arms a callback; it speaks once, trays, and resolves on the proposal vocabulary');
+  {
+    resetLocalStorage();
+    const world = upWorld({ eventCandidates: [], driveRecords: [pmRecord()] });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 15_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    for (let i = 0; i < 80 && tour.view().diagnostics.proposalsSpoken !== 1; i++) {
+      await world.clock.advance(5_000);
+    }
+    const offered = world.eventsOf('proposal_offered');
+    check('exactly one proposal was offered — the callback, flavor-tagged in the shared vocabulary',
+      offered.length === 1 && offered[0].payload.place_id === 'memory:echo observatory' &&
+      offered[0].payload.flavor === 'place-memory' && offered[0].payload.primary_reason === 'place-memory' &&
+      offered[0].payload.candidate_kind === 'story' && offered[0].payload.sponsored === false &&
+      offered[0].payload.detour_minutes === null,
+      JSON.stringify(offered.map(e => e.payload)));
+    check('the offer never sounded inside the first minute (the seam fences bind callbacks identically)',
+      offered.length === 1 && offered[0].at >= 60_000, `at=${offered[0]?.at}`);
+    check('proposal_playback filed with the flavor tag',
+      world.eventsOf('proposal_playback').length === 1 &&
+      world.eventsOf('proposal_playback')[0].payload.flavor === 'place-memory' &&
+      world.eventsOf('proposal_playback')[0].payload.completed === true);
+    check('the pending pick is the callback, tagged by source',
+      tour.view().suggestion.pending?.placeId === 'memory:echo observatory' &&
+      tour.view().suggestion.pending?.source === 'proposed');
+    const records = proposals.loadProposalRecords(proposals.localProposalStore);
+    check('the lifecycle record stands as a place-memory entry carrying the pass date',
+      records.length === 1 && records[0].flavor === 'place-memory' && records[0].kind === 'story' &&
+      records[0].passedAt === 0 && records[0].state === 'spoken',
+      JSON.stringify(records));
+    check('the tray entry is actionable while unheard, expired once heard',
+      proposals.trayEntries(proposals.localProposalStore, world.clock.now())[0].judgment.actionable === true &&
+      proposals.trayEntries(proposals.localProposalStore, world.clock.now(), new Set(['echo observatory']))[0]
+        .judgment.expired === true);
+    check('resolving files proposal_outcome with the flavor — never suggestion_outcome',
+      tour.resolveSuggestion('accepted') === true &&
+      world.eventsOf('proposal_outcome').length === 1 &&
+      world.eventsOf('proposal_outcome')[0].payload.flavor === 'place-memory' &&
+      world.eventsOf('proposal_outcome')[0].payload.surface === 'drive' &&
+      world.eventsOf('suggestion_outcome').length === 0);
+    await world.clock.advance(120_000);
+    check('the shared cap holds: the callback spent the drive\'s one proposal',
+      world.eventsOf('proposal_offered').length === 1);
+    tour.endTour();
+  }
+
+  suite('PM-4 the priority rule: with both flavors standing, the place proposal arms and the callback never fires');
+  {
+    resetLocalStorage();
+    const world = upWorld({ driveRecords: [pmRecord()] });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 15_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    for (let i = 0; i < 80 && tour.view().diagnostics.proposalsSpoken !== 1; i++) {
+      await world.clock.advance(5_000);
+    }
+    const offered = world.eventsOf('proposal_offered');
+    check('the offered proposal is the place pick, flavor place',
+      offered.length === 1 && offered[0].payload.place_id === 'up-tacos' &&
+      offered[0].payload.flavor === 'place',
+      JSON.stringify(offered.map(e => e.payload)));
+    check('resolving the place pick is accepted', tour.resolveSuggestion('accepted') === true);
+    await world.clock.advance(120_000);
+    check('no callback follows — one cap, spent by the place (a callback is evergreen; it waits for a later drive)',
+      world.eventsOf('proposal_offered').length === 1);
+    tour.endTour();
+  }
+
+  suite('PM-5 Driving with the flavor wired: total absence — no offers, no events, no tray records');
+  {
+    resetLocalStorage();
+    const world = upWorld({ declaredMode: 'driving', eventCandidates: [], driveRecords: [pmRecord()] });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 15_000 }));
+    const tour = await startAt(world, audio, UTC);
+    tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(240_000);
+    check('setup: story boundaries really happened on the Driving ride (the absence is not vacuous)',
+      world.eventsOf('story_playback').length >= 3,
+      `${world.eventsOf('story_playback').length}`);
+    check('a Driving ride files zero proposal events even with drive records standing',
+      proposalEvents(world).length === 0,
+      JSON.stringify(proposalEvents(world).map(e => e.type)));
+    check('and writes no tray records', proposals.loadProposalRecords(proposals.localProposalStore).length === 0);
+    tour.endTour();
+  }
+
+  suite('PM-6 heard-at-speak in-engine: the callback place\'s own story sounds between selection and speech — dropped silently, cap unspent');
+  {
+    resetLocalStorage();
+    // Gamma Pier is the shelf's third subject: armed at the
+    // boundary before its own settle (after a first-minute
+    // suppression cycle), its story sounds AT the speak
+    // boundary — the settle files it heard before the seam
+    // judges, so the re-judgment must drop the callback.
+    const world = upWorld({ eventCandidates: [], driveRecords: [pmRecord({ owedSubjects: ['Gamma Pier'] })] });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 15_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(240_000);
+    const dropped = world.eventsOf('proposal_dropped').filter(e => e.payload.flavor === 'place-memory');
+    check('the heard-at-speak drop filed exactly once, with its reason and place',
+      dropped.length === 1 && dropped[0].payload.reason === 'heard-at-speak' &&
+      dropped[0].payload.place_id === 'memory:gamma pier',
+      JSON.stringify(world.eventsOf('proposal_dropped').map(e => e.payload)));
+    check('nothing was offered or sounded — the drop is silent by construction',
+      world.eventsOf('proposal_offered').length === 0 && tour.view().diagnostics.proposalsSpoken === 0);
+    check('no tray record was written for a callback never spoken',
+      proposals.loadProposalRecords(proposals.localProposalStore).length === 0);
     tour.endTour();
   }
 }

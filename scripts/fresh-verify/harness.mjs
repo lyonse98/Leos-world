@@ -272,6 +272,12 @@ export function makeWorld(Tour, opts = {}) {
     // flip it mid-tour. Null (the default) = no mode declared
     // = the channel is closed, like every pre-Slice-4 world.
     declaredMode: opts.declaredMode ?? null,
+    // Drive records (v16.2 Slice 6): the place-memory
+    // callback flavor's source — prior route drives' records
+    // as plain RouteDriveRecord objects, handed to the Tour
+    // as a getter. Empty (the default) = no callbacks, like
+    // every pre-Slice-6 world.
+    driveRecords: opts.driveRecords ?? [],
   };
 
   const libraryRows = new Map();
@@ -477,7 +483,11 @@ export function makeWorld(Tour, opts = {}) {
     }),
   };
   world.seams = seams;
-  world.makeTour = audio => new Tour({ audio, clock, seams, declaredMode: () => world.declaredMode });
+  world.makeTour = audio => new Tour({
+    audio, clock, seams,
+    declaredMode: () => world.declaredMode,
+    placeMemoryRecords: () => world.driveRecords,
+  });
   world.eventsOf = type => events.filter(e => e.type === type);
   return world;
 }
