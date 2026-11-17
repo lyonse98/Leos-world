@@ -38,7 +38,9 @@
 //     declared constraints never decay. In v1, inference writes
 //     exactly one thing: story-topic affinities, from signals
 //     the app already generates on-device (story completions vs
-//     cut-offs, thread menu picks). Tone picks and mode picks
+//     cut-offs — freeform settles and, since v16.2 Slice 7,
+//     route-episode story outcomes — plus thread menu picks).
+//     Tone picks and mode picks
 //     are accepted by the signal API below and deliberately map
 //     to NO field — the field list has no tone/mode slot, and
 //     inventing one is forbidden by the same spec.
@@ -693,6 +695,28 @@ const THREAD_PICK_DELTA = 0.4;
 /** A cut-off only counts as a taste signal when the listener actually heard some of the story. */
 export const CUTOFF_MIN_SOUNDED_MS = 10_000;
 
+/**
+ * Which engine observed a story outcome: the provenance pair
+ * the bump records on the affinity. Freeform settles (tour.ts)
+ * write the default pair; route-episode outcomes
+ * (routePlayback.ts, v16.2 Slice 7) write the route pair, so
+ * an affinity's record keeps the two engines' evidence
+ * distinguishable. The WEIGHTS are identical either way —
+ * provenance is bookkeeping, never a second scheme.
+ */
+export interface StoryOutcomeProvenance {
+  completion: string;
+  cutoff: string;
+}
+const DEFAULT_OUTCOME_PROVENANCE: StoryOutcomeProvenance = {
+  completion: 'story-completion',
+  cutoff: 'story-cutoff',
+};
+export const ROUTE_OUTCOME_PROVENANCE: StoryOutcomeProvenance = {
+  completion: 'route-story-completion',
+  cutoff: 'route-story-cutoff',
+};
+
 function bumpTopic(
   p: MilesProfile,
   topic: string,
@@ -724,20 +748,35 @@ function bumpTopic(
  * weak negative. Never sounded, or barely heard → no signal:
  * a story the road took away is not a story the listener
  * rejected.
+ *
+ * Two engines observe outcomes through this one intake:
+ * freeform settles (tour.ts, the original wiring) and
+ * route-episode story settles (routePlayback.ts, v16.2
+ * Slice 7). The route caller passes ROUTE_OUTCOME_PROVENANCE
+ * so its evidence is distinguishable in the record; the
+ * signal math is shared, deliberately — one weighting scheme,
+ * two witnesses.
  */
 export function observeStoryOutcome(
-  args: { topics: string[]; completed: boolean; soundedMs: number },
+  args: {
+    topics: string[];
+    completed: boolean;
+    soundedMs: number;
+    /** Which engine observed the outcome — provenance bookkeeping only; the weights never vary by engine. */
+    provenance?: StoryOutcomeProvenance;
+  },
   store: ProfileStore = localProfileStore,
   now: number = Date.now(),
 ): void {
   const topics = args.topics.filter(t => STORY_TOPICS.includes(t));
   if (topics.length === 0) return;
+  const provenance = args.provenance ?? DEFAULT_OUTCOME_PROVENANCE;
   mutate(p => {
     if (p.paused) return;
     if (args.completed) {
-      for (const t of topics) bumpTopic(p, t, COMPLETION_DELTA, 'story-completion', now);
+      for (const t of topics) bumpTopic(p, t, COMPLETION_DELTA, provenance.completion, now);
     } else if (args.soundedMs >= CUTOFF_MIN_SOUNDED_MS) {
-      for (const t of topics) bumpTopic(p, t, CUTOFF_DELTA, 'story-cutoff', now);
+      for (const t of topics) bumpTopic(p, t, CUTOFF_DELTA, provenance.cutoff, now);
     }
   }, store, now);
 }
