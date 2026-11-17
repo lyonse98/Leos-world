@@ -175,9 +175,8 @@ export const NO_EVENTS_FEED: EventsFeedProvider = {
  * keys carry DIFFERENT API-restriction lists (Nov 3, 2026,
  * probe-verified), so no single key can be "the" Places key:
  * the key named Places may be restriction-blocked for a call
- * another key answers. (facts.ts keeps its own single-key
- * copy for freeform discovery — a separate, pre-existing
- * posture, not shared with this layer.)
+ * another key answers. (facts.ts carries the same walk for
+ * freeform discovery since the Slice 9 rider, Nov 17, 2026.)
  */
 const placesKeys = (): string[] =>
   configuredKeys(

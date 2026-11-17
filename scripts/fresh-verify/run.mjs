@@ -45,6 +45,7 @@ const extras = {
   routeInterItemGapMs: engine.routeInterItemGapMs,
   facts: {
     discoverCandidates: engine.discoverCandidates,
+    searchNearbyWithKeyWalk: engine.searchNearbyWithKeyWalk,
     isTier1HouseException: engine.isTier1HouseException,
     applyHouseDemotion: engine.applyHouseDemotion,
     applyPartnerBoost: engine.applyPartnerBoost,

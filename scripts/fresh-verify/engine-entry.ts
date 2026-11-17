@@ -4,6 +4,7 @@ export { Tour } from '../../src/core/tour';
 export { Player, makePrimeUrl } from '../../src/core/player';
 export {
   discoverCandidates,
+  searchNearbyWithKeyWalk,
   applyHouseDemotion,
   applyPartnerBoost,
   applyProfileBoost,

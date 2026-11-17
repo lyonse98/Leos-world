@@ -61,10 +61,33 @@ export interface Candidate {
   distanceM: number;
 }
 
-const placesKey = (): string =>
-  (import.meta.env.VITE_GOOGLE_PLACES_API_KEY as string | undefined) ??
-  (import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined) ??
-  '';
+/**
+ * The configured Google keys for freeform discovery's Places
+ * calls, in the App's order (Places, Maps, Gemini), deduped
+ * with blanks dropped — the list the key walk below tries,
+ * per call. The bundle's keys carry DIFFERENT API-restriction
+ * lists (Nov 3, 2026, probe-verified), so no single key can
+ * be "the" Places key: the key named Places may be
+ * restriction-blocked for a call another key answers. This
+ * module previously took the first configured key only, so a
+ * restriction-blocked first key silently emptied freeform
+ * discovery on every drive — the same failure the v16.2
+ * audit fix closed in currentEvents.ts, closed here as the
+ * Slice 9 rider (Nov 17, 2026) under the identical discipline.
+ */
+const placesKeys = (): string[] => {
+  const raw = [
+    import.meta.env.VITE_GOOGLE_PLACES_API_KEY as string | undefined,
+    import.meta.env.VITE_GOOGLE_MAPS_API_KEY as string | undefined,
+    import.meta.env.VITE_GEMINI_API_KEY as string | undefined,
+  ];
+  return [...new Set(raw.map(k => (typeof k === 'string' ? k.trim() : '')).filter(k => k.length > 0))];
+};
+
+/** The maps retry backoff (routeMode's discipline): one retry pass, after this pause. */
+const PLACES_RETRY_DELAY_MS = 1200;
+
+const placesSleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
 const STORY_TYPES = [
   'tourist_attraction',
@@ -93,32 +116,58 @@ interface PlacesResult {
   formattedAddress?: string;
 }
 
-async function searchNearby(center: GeoPoint, radiusM: number): Promise<Candidate[]> {
-  const key = placesKey();
-  if (!key) return [];
-  try {
-    const res = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Goog-Api-Key': key,
-        'X-Goog-FieldMask':
-          'places.displayName,places.location,places.rating,places.userRatingCount,places.types,places.formattedAddress',
-      },
-      body: JSON.stringify({
-        includedTypes: STORY_TYPES,
-        maxResultCount: 20,
-        rankPreference: 'POPULARITY',
-        locationRestriction: {
-          circle: {
-            center: { latitude: center.lat, longitude: center.lng },
-            radius: radiusM,
-          },
+/**
+ * ONE pass of the searchNearby key walk: every configured
+ * key in order until one ANSWERS. A key that answers — even
+ * with zero places — is definitive: the service itself
+ * judged the query, so later keys are not tried for it. A
+ * non-OK response (a 403 restriction block above all), an
+ * unparseable body, or a transport failure moves to the
+ * next key, never fails the call. Returns null when no key
+ * answered. This is routeMode's geocodePass discipline,
+ * carried to freeform discovery (Slice 9 rider, Nov 17,
+ * 2026 — the module previously took a single key and
+ * returned [] on its first error).
+ */
+async function searchNearbyPass(
+  center: GeoPoint,
+  radiusM: number,
+  keys: string[],
+  fetchFn: typeof fetch,
+): Promise<Candidate[] | null> {
+  for (const key of keys) {
+    let res: Response;
+    try {
+      res = await fetchFn('https://places.googleapis.com/v1/places:searchNearby', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': key,
+          'X-Goog-FieldMask':
+            'places.displayName,places.location,places.rating,places.userRatingCount,places.types,places.formattedAddress',
         },
-      }),
-    });
-    if (!res.ok) return [];
-    const parsed = (await res.json()) as { places?: PlacesResult[] };
+        body: JSON.stringify({
+          includedTypes: STORY_TYPES,
+          maxResultCount: 20,
+          rankPreference: 'POPULARITY',
+          locationRestriction: {
+            circle: {
+              center: { latitude: center.lat, longitude: center.lng },
+              radius: radiusM,
+            },
+          },
+        }),
+      });
+    } catch {
+      continue; // transport failure → the next key
+    }
+    if (!res.ok) continue; // blocked / failed key → the next key
+    let parsed: { places?: PlacesResult[] };
+    try {
+      parsed = (await res.json()) as { places?: PlacesResult[] };
+    } catch {
+      continue; // an unparseable body is not an answer
+    }
     const out: Candidate[] = [];
     for (const p of parsed.places ?? []) {
       const name = p.displayName?.text;
@@ -142,9 +191,35 @@ async function searchNearby(center: GeoPoint, radiusM: number): Promise<Candidat
       });
     }
     return out;
-  } catch {
-    return [];
   }
+  return null;
+}
+
+/**
+ * Freeform discovery's Places call under the key-walk
+ * discipline: one pass over every configured key; when no
+ * key answers, ONE retry pass after the 1.2 s maps backoff;
+ * fail-soft to [] — never an exception, and never again a
+ * silent single-key empty.
+ */
+export async function searchNearbyWithKeyWalk(
+  center: GeoPoint,
+  radiusM: number,
+  keys: string[],
+  fetchFn: typeof fetch = fetch,
+  opts: { sleep?: (ms: number) => Promise<void> } = {},
+): Promise<Candidate[]> {
+  if (keys.length === 0) return [];
+  const sleep = opts.sleep ?? placesSleep;
+  const first = await searchNearbyPass(center, radiusM, keys, fetchFn);
+  if (first !== null) return first;
+  await sleep(PLACES_RETRY_DELAY_MS);
+  const second = await searchNearbyPass(center, radiusM, keys, fetchFn);
+  return second ?? [];
+}
+
+async function searchNearby(center: GeoPoint, radiusM: number): Promise<Candidate[]> {
+  return searchNearbyWithKeyWalk(center, radiusM, placesKeys());
 }
 
 /** Registry records near a point. Selection-eligible = verified coords only; the rest are facts-only. */

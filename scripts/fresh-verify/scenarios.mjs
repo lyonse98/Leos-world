@@ -6299,6 +6299,95 @@ export async function runScenarios(Tour, extras) {
     }
   }
 
+  // CE-8 (Nov 17, 2026, Slice 9 rider): facts.ts gets the
+  // same key walk. Freeform discovery previously took the
+  // FIRST configured key only and returned [] on its first
+  // error — the identical silent-empty failure CE-7 pins for
+  // the events layer, one module over. The discipline is the
+  // same: every key in order, a failure moves to the next,
+  // an answering key is definitive, one retry pass after the
+  // 1.2 s maps backoff, fail-soft to empty.
+  suite('CE-8 the facts key walk: freeform discovery walks every key, one retry pass, fail-soft');
+  {
+    const ce8Wire = {
+      displayName: { text: 'Ce8 Walk Museum' },
+      location: { latitude: 32.853, longitude: -117.18 },
+      rating: 4.5, userRatingCount: 100, types: ['museum'],
+      formattedAddress: '1 Walk Way',
+    };
+    const ce8Res = (status, body = {}) => ({ ok: status >= 200 && status < 300, status, json: async () => body });
+    const ce8Fetch = behavior => {
+      const calls = [];
+      const fn = async (url, init) => {
+        const key = init.headers['X-Goog-Api-Key'];
+        calls.push(key);
+        return behavior(key, calls.filter(k => k === key).length);
+      };
+      fn.calls = calls;
+      return fn;
+    };
+    const noSleep = async () => {};
+
+    const walk1 = ce8Fetch(key => (key === 'key-blocked' ? ce8Res(403, { error: { status: 'PERMISSION_DENIED' } }) : ce8Res(200, { places: [ce8Wire] })));
+    const walked = await facts.searchNearbyWithKeyWalk(CE_ANCHOR, 1200, ['key-blocked', 'key-open', 'key-third'], walk1, { sleep: noSleep });
+    check('a 403 on the first key moves to the next key, whose answer serves discovery',
+      walked.length === 1 && walked[0].name === 'Ce8 Walk Museum' && walked[0].source === 'places',
+      JSON.stringify(walked.map(c => c.name)));
+    check('the walk stops at the answering key (the third key is never tried)',
+      JSON.stringify(walk1.calls) === JSON.stringify(['key-blocked', 'key-open']), JSON.stringify(walk1.calls));
+
+    const walk2 = ce8Fetch(() => ce8Res(200, { places: [] }));
+    const empty = await facts.searchNearbyWithKeyWalk(CE_ANCHOR, 1200, ['key-a', 'key-b'], walk2, { sleep: noSleep });
+    check('a key that answers with zero places is definitive — no further keys, no retry pass',
+      empty.length === 0 && walk2.calls.length === 1, JSON.stringify(walk2.calls));
+
+    const sleeps = [];
+    const walk3 = ce8Fetch((key, nth) => {
+      if (key === 'key-open') return nth >= 2 ? ce8Res(200, { places: [ce8Wire] }) : ce8Res(500);
+      if (key === 'key-blocked') return ce8Res(403);
+      throw new Error('transport down');
+    });
+    const retried = await facts.searchNearbyWithKeyWalk(CE_ANCHOR, 1200, ['key-blocked', 'key-open', 'key-throws'], walk3, {
+      sleep: async ms => { sleeps.push(ms); },
+    });
+    check('when no key answers, one retry pass after the 1.2 s maps backoff finds the recovered key',
+      retried.length === 1 && JSON.stringify(sleeps) === JSON.stringify([1200]) && walk3.calls.length === 5,
+      `places=${retried.length} sleeps=${JSON.stringify(sleeps)} calls=${walk3.calls.length}`);
+
+    const walk4 = ce8Fetch(() => ce8Res(403));
+    const dead = await facts.searchNearbyWithKeyWalk(CE_ANCHOR, 1200, ['key-a', 'key-b'], walk4, { sleep: noSleep });
+    check('every key failing both passes fails soft to empty — never an exception',
+      dead.length === 0 && walk4.calls.length === 4, `calls=${walk4.calls.length}`);
+
+    const walk5 = ce8Fetch(() => ce8Res(200, { places: [ce8Wire] }));
+    const noKeys = await facts.searchNearbyWithKeyWalk(CE_ANCHOR, 1200, [], walk5, { sleep: noSleep });
+    check('no configured keys never walks at all', noKeys.length === 0 && walk5.calls.length === 0);
+
+    // The shipped provider through discovery, with the
+    // bundle's env keys (fake-places → fake-maps →
+    // fake-gemini): the first is restriction-blocked, the
+    // second answers, and the place reaches the merged pool.
+    const realFetch = globalThis.fetch;
+    const envCalls = [];
+    globalThis.fetch = async (url, init) => {
+      const key = init.headers['X-Goog-Api-Key'];
+      envCalls.push(key);
+      if (key === 'fake-places') return ce8Res(403, { error: { status: 'PERMISSION_DENIED' } });
+      if (key === 'fake-maps') return ce8Res(200, { places: [ce8Wire] });
+      throw new Error('the walk should never reach the third key');
+    };
+    try {
+      const pool = await facts.discoverCandidates(CE_ANCHOR, 1200);
+      check('through discovery, the shipped provider walks past the blocked env key and the place joins the pool',
+        pool.some(c => c.source === 'places' && c.name === 'Ce8 Walk Museum'),
+        JSON.stringify(pool.map(c => `${c.source}:${c.name}`)));
+      check('the walk made exactly two HTTP attempts and stopped at the answering key',
+        JSON.stringify(envCalls) === JSON.stringify(['fake-places', 'fake-maps']), JSON.stringify(envCalls));
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+
   // ---------------------------------------------------------------
   // PC suites (Nov 16, 2026): profile in the composer, v16.2
   // Slice 3. The stored taste profile (declared + inferred
