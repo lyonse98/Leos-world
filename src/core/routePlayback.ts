@@ -3399,15 +3399,24 @@ export class RoutePlanRunner {
    * Phase-2 Q&A (Passenger/Walking only — the generator dep is
    * the gate: no generator, no question). Returns false when a
    * question is already in flight (one at a time, like freeform),
-   * when the tour is over, or when Q&A is not wired. The current
-   * plan item is never cut: the answer inserts at the head of the
-   * promised FIFO and plays when the current item settles, ahead
-   * of the next unplayed plan item. Nothing re-plans.
+   * when the tour is over, or when Q&A is not wired — and while
+   * the suggestion channel owns the shared one-interruption
+   * slot (a suggestion answer sounding, or a pick pending its
+   * verdict; v16.2 audit fix, Nov 17, 2026 — the mirrored
+   * condition to the ask side's qaPhase check, freeform's
+   * submitQuestion carries the same rule). The refusal is not
+   * a dropped question: App's qaLocked derives from the same
+   * condition, so the form is locked while the channel is
+   * owned. The current plan item is never cut: the answer
+   * inserts at the head of the promised FIFO and plays when
+   * the current item settles, ahead of the next unplayed plan
+   * item. Nothing re-plans.
    */
   submitQuestion(raw: string): boolean {
     const question = raw.trim();
     if (!question || !this.plan || this.closed || this.endedKind !== null || this.heldStart) return false;
     if (!this.deps.generateAnswer || this.qaPhase !== 'idle') return false;
+    if (this.suggestionPhase !== 'idle' || this.pendingSuggestion !== null) return false;
     this.qaPhase = 'generating';
     this.deps.onEvent?.('question_asked', {
       question: question.slice(0, 500),

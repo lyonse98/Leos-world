@@ -3586,7 +3586,11 @@ function MilesApp() {
                 {qaOpen && (
                   <QuestionForm
                     question={question}
-                    qaLocked={(rView?.qaPhase ?? 'idle') !== 'idle'}
+                    qaLocked={
+                      (rView?.qaPhase ?? 'idle') !== 'idle' ||
+                      (rView?.suggestion.phase ?? 'idle') !== 'idle' ||
+                      !!rView?.suggestion.pending
+                    }
                     qaPhase={rView?.qaPhase ?? 'idle'}
                     onQuestionChange={setQuestion}
                     onFocusChange={setQuestionFocused}

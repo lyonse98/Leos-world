@@ -215,6 +215,12 @@ export interface TourView {
   nowPlaying: { label: string; kind: string } | null;
   upNext: string | null;
   userPaused: boolean;
+  /**
+   * The question form's lock: Q&A's own cycle OR the
+   * suggestion channel owning the one-interruption slot (an
+   * answer sounding, a pick pending) — one lock, both
+   * channels (see submitQuestion).
+   */
   qaLocked: boolean;
   qaPhase: 'idle' | 'generating' | 'answering' | 'awaiting-resume';
   /**
@@ -923,7 +929,7 @@ export class Tour {
       nowPlaying: snap.currentLabel ? { label: snap.currentLabel, kind: snap.currentKind ?? '' } : null,
       upNext: snap.waitingLabel,
       userPaused: this.userPausedFlag,
-      qaLocked: this.qaPhase !== 'idle',
+      qaLocked: this.qaPhase !== 'idle' || this.suggestionPhase !== 'idle' || this.pendingSuggestion !== null,
       qaPhase: this.qaPhase,
       suggestion: {
         available: this.suggestionAvailable(),
@@ -5202,10 +5208,24 @@ export class Tour {
     this.maybeOpenTour();
   }
 
-  /** Submit a typed question. Returns false when the lock is held (A2). */
+  /**
+   * Submit a typed question. Returns false when the lock is
+   * held (A2) — and the lock is the SHARED one-interruption
+   * slot (v16.2 audit fix, Nov 17, 2026): a suggestion answer
+   * sounding, or a suggestion/proposal pick still pending
+   * its verdict, holds the channel exactly as a Q&A cycle
+   * holds it against an ask (the ask side has checked
+   * qaPhase since Slice 4; this is the mirrored condition).
+   * The refusal is not a dropped question: the view's
+   * qaLocked carries the same condition, so the form is
+   * locked while the channel is owned and the listener asks
+   * when it frees — and the answer, once accepted, rides the
+   * promised FIFO as it always has.
+   */
   submitQuestion(raw: string): boolean {
     const question = raw.trim();
     if (!question || this.phase !== 'active' || this.qaPhase !== 'idle') return false;
+    if (this.suggestionPhase !== 'idle' || this.pendingSuggestion !== null) return false;
     // Commentary yields to Q&A too: a clip alive at submit dies now,
     // so the answer pipeline owns the player outright (A2/A4).
     this.yieldCommentary();

@@ -512,7 +512,7 @@ export function check(label, cond, detail = '') {
 // the floor FAILS, whatever its pass rate. run.mjs enforces
 // the floor on the full run (scenarios + Monte Carlo);
 // partial runs (--scenarios / --mc) skip it.
-export const FRESH_VERIFY_MIN_CHECKS = 1017;
+export const FRESH_VERIFY_MIN_CHECKS = 1028;
 export function summarize(minChecks = 0) {
   const failed = results.filter(r => !r.pass);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

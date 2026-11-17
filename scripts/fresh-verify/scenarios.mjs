@@ -6824,6 +6824,110 @@ export async function runScenarios(Tour, extras) {
     tour.endTour();
   }
 
+  // SG-7 (Nov 17, 2026, v16.2 audit fix): the RECIPROCAL
+  // direction of SG-6's rule. The ask side has refused during
+  // a Q&A cycle since Slice 4, but submitQuestion checked
+  // only its own phase — a question could be submitted over
+  // a sounding suggestion answer or a pick still awaiting
+  // its verdict. Now the slot is shared symmetrically: Q&A
+  // refuses while the suggestion channel owns it (answer in
+  // flight OR pick pending, solicited or proposed), the
+  // view's qaLocked mirrors the same condition, and resolving
+  // the pick frees the channel.
+  suite('SG-7 the reciprocal direction: a question waits out the suggestion channel — sounding answer and pending pick alike');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park')],
+      library: ['Balboa Park'],
+      eventCandidates: [sgCandidate({ hoursFetchedAt: 0, closesAtMs: 10 * 60 * 60 * 1000 })],
+      declaredMode: 'passenger',
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    check('the ask is accepted', tour.submitSuggestionAsk('food') === true);
+    check('a question while the suggestion answer is in flight is refused',
+      tour.submitQuestion('What is this place?') === false);
+    check('and the form lock shows it (qaLocked mirrors the channel)', tour.view().qaLocked === true);
+    await world.clock.advance(60_000);
+    check('the answer sounded and its pick stands pending',
+      world.eventsOf('suggestion_playback').length === 1 && tour.view().suggestion.pending?.placeId === 'sg-tacos',
+      JSON.stringify(tour.view().suggestion.pending));
+    check('a question while the pick awaits its verdict is still refused',
+      tour.submitQuestion('What is this place?') === false);
+    check('no question was ever filed', world.eventsOf('question_asked').length === 0);
+    check('resolving the pick frees the channel',
+      tour.resolveSuggestion('accepted') === true && tour.view().qaLocked === false);
+    check('and the question is accepted', tour.submitQuestion('What is this place?') === true);
+    await world.clock.advance(60_000);
+    tour.endTour();
+
+    // A PROPOSED pick (Slice 5) holds the slot the same way.
+    resetLocalStorage();
+    const propWorld = makeWorld(Tour, {
+      candidates: ['Alpha Park', 'Beta Museum', 'Gamma Pier', 'Delta Fort'].map(n => makeCandidate(n)),
+      library: ['Alpha Park', 'Beta Museum', 'Gamma Pier', 'Delta Fort'],
+      eventCandidates: [sgCandidate({ placeId: 'sg-proposed', name: 'Sg Proposed Tacos', hoursFetchedAt: 0, closesAtMs: 10 * 60 * 60 * 1000 })],
+      declaredMode: 'passenger',
+    });
+    const propAudio = new FakeAudio(propWorld.clock, okPolicy({ library: 15_000 }));
+    const { tour: propTour } = await healthyOpening(propWorld, propAudio);
+    propTour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    for (let i = 0; i < 80 && propTour.view().diagnostics.proposalsSpoken !== 1; i++) {
+      await propWorld.clock.advance(5_000);
+    }
+    check('setup: the proposal sounded and its pick stands pending, tagged proposed',
+      propTour.view().suggestion.pending?.placeId === 'sg-proposed' && propTour.view().suggestion.pending?.source === 'proposed',
+      JSON.stringify(propTour.view().suggestion.pending));
+    check('a question while the PROPOSED pick awaits its verdict is refused',
+      propTour.submitQuestion('What is this place?') === false && propTour.view().qaLocked === true);
+    check('resolving it frees the channel for the question',
+      propTour.resolveSuggestion('dismissed') === true && propTour.submitQuestion('What is this place?') === true);
+    await propWorld.clock.advance(60_000);
+    propTour.endTour();
+  }
+
+  // SG-8 (Nov 17, 2026, v16.2 audit fix): max-detour honesty.
+  // Production never computes a suggestion's detour minutes
+  // (Slice 4's designed deferral — no ask-time Routes call),
+  // so the stored max-detour constraint cannot fire — and the
+  // profile editor's control that set it is no longer
+  // rendered, because a control that cannot take effect is a
+  // false promise. The constraint stays in the profile
+  // document and round-trips untouched through editor saves,
+  // ready for the day detour costing lands.
+  suite('SG-8 max-detour honesty: no enforcement without costing, no control rendered, the stored value round-trips untouched');
+  {
+    const uncosted = sgCompose([sgCandidate()], {
+      constraints: { ...SG_NO_CONSTRAINTS, maxDetourMinutes: 5 },
+    });
+    check('with detour minutes uncomputed (the production reality), the stored cap excludes nothing and claims nothing',
+      uncosted.kind === 'pick' && uncosted.detourMinutes === null && !uncosted.text.includes('minutes off your way'),
+      uncosted.kind === 'pick' ? uncosted.text : uncosted.kind);
+
+    const React = await import('react');
+    const { renderToString } = await import('react-dom/server');
+    resetLocalStorage();
+    const html = renderToString(React.createElement(profileUi.ProfileEditor, {
+      form: profileUi.formFromProfile(profile.loadProfile()),
+      onChange: () => {},
+    }));
+    check('the profile editor renders its real controls but no detour control',
+      html.includes('A good stop usually costs') && !/detour/i.test(html),
+      html.slice(0, 200));
+
+    profile.setDeclaredConstraint('maxDetourMinutes', 10, 'sg-sim');
+    const form = profileUi.formFromProfile(profile.loadProfile());
+    check('a stored max-detour value reads into the editor form', form.maxDetourMinutes === 10);
+    form.budgetComfort = 'splurge';
+    profileUi.saveDeclaredForm(form, 'sg-sim');
+    check('an editor save for other fields leaves the stored max-detour value untouched',
+      profile.loadProfile().constraints.maxDetourMinutes?.value === 10 &&
+      profile.getConstraints().maxDetourMinutes === 10,
+      JSON.stringify(profile.loadProfile().constraints.maxDetourMinutes));
+    resetLocalStorage();
+  }
+
   // ---------------------------------------------------------------
   // UP suites (Nov 16, 2026): unsolicited seam proposals +
   // the arrival tray, v16.2 Slice 5. Passenger/Walking ONLY —
