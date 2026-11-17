@@ -2075,6 +2075,124 @@ await checkAsync('up runner: a speak attempt right after the climax story suppre
   runner.endTour();
 });
 
+// ---- place-memory callbacks (v16.2 Slice 6): the callback
+// flavor of the same seam engine. The pure derivation is
+// pinned in the fresh-verify PM suites — here: the runner
+// end-to-end (an honest empty pool arms a callback, which
+// speaks its memory line and trays undecided), the priority
+// rule (a standing place pick outranks the callback and
+// spends the shared cap), the Driving-bed absence with the
+// records wired, and the in-plan exclusion (a story seated
+// in today's own plan is never proposed as "still unheard").
+const pmRecords = (over = {}) => [{
+  destinationName: 'Dest', destinationPlaceKey: null, threadTopic: null,
+  playedSubjects: [], owedSubjects: ['Unheard Falls'],
+  endedAt: Date.now() - 40 * 24 * 3600 * 1000, ...over,
+}];
+/** The UP happy-path choreography: feed the drive so a legal speak boundary arrives. */
+const drivePmPlan = async (runner, heard, events) => {
+  const plan = qaPlan();
+  plan.climaxUnitId = null;
+  for (const it of plan.items) { it.climax = false; it.portalClimax = false; }
+  await runner.start(plan);
+  await until(() => heard.includes('s1|landmark_origin'), 's1 sounded', 120_000);
+  runner.onPosition({ lat: 32.78, lng: -117.25 });
+  await until(() => heard.includes('s2|landmark_origin'), 's2 sounded', 120_000);
+  runner.onPosition({ lat: 32.87, lng: -117.25 });
+  await until(() => events.some(e => e.t === 'proposal_playback'), 'proposal to sound and settle', 240_000);
+};
+
+await checkAsync('pm runner: an honest empty pool arms a callback — it speaks its memory line, trays undecided, files flavor throughout', async () => {
+  const audio = new RealFakeAudio(22_000);
+  const events = [];
+  const heard = [];
+  const runner = upRunner(audio, events, heard, {
+    suggestionCandidates: async () => [],
+    placeMemoryRecords: () => pmRecords(),
+  });
+  await drivePmPlan(runner, heard, events);
+  const offered = events.filter(e => e.t === 'proposal_offered');
+  assert.equal(offered.length, 1, JSON.stringify(proposalEventsOf(events).map(e => [e.t, e.p])));
+  assert.equal(offered[0].p.place_id, 'memory:unheard falls');
+  assert.equal(offered[0].p.flavor, 'place-memory');
+  assert.equal(offered[0].p.primary_reason, 'place-memory');
+  assert.equal(offered[0].p.candidate_kind, 'story');
+  const pb = events.filter(e => e.t === 'proposal_playback');
+  assert.equal(pb.length, 1);
+  assert.equal(pb[0].p.flavor, 'place-memory');
+  assert.equal(pb[0].p.completed, true);
+  assert.equal(runner.view().proposalsSpoken, 1);
+  assert.equal(runner.view().suggestion.pending?.placeId, 'memory:unheard falls');
+  assert.equal(runner.view().suggestion.pending?.source, 'proposed');
+  // The spoken line is the composed memory line (the
+  // synthUrl stub truncates at 16 chars: 'You passed Unhea…').
+  assert.ok(audio.played.some(s => s.includes('You%20passed%20Unhea')), 'the callback line sounded: ' + JSON.stringify(audio.played));
+  // Finish the drive; the shared cap means no second offer ever.
+  await until(() => heard.includes('s3|landmark_origin'), 's3 sounded', 240_000);
+  runner.onPosition(dest);
+  await until(() => runner.view().closeoutDone, 'closeout', 240_000);
+  assert.equal(events.filter(e => e.t === 'proposal_offered').length, 1);
+  runner.endTour();
+  const trayed = events.filter(e => e.t === 'proposal_trayed');
+  assert.equal(trayed.length, 1, JSON.stringify(proposalEventsOf(events).map(e => [e.t, e.p])));
+  assert.equal(trayed[0].p.place_id, 'memory:unheard falls');
+  assert.equal(trayed[0].p.flavor, 'place-memory');
+  assert.equal(events.filter(e => e.t === 'proposal_outcome').length, 0, 'undecided files no outcome — the tray decides later');
+});
+
+await checkAsync('pm runner: the priority rule — a standing place pick outranks the callback and spends the one cap', async () => {
+  const audio = new RealFakeAudio(22_000);
+  const events = [];
+  const heard = [];
+  const runner = upRunner(audio, events, heard, {
+    suggestionCandidates: async () => [upRouteCandidate()],
+    placeMemoryRecords: () => pmRecords(),
+  });
+  await drivePmPlan(runner, heard, events);
+  const offered = events.filter(e => e.t === 'proposal_offered');
+  assert.equal(offered.length, 1, JSON.stringify(proposalEventsOf(events).map(e => [e.t, e.p])));
+  assert.equal(offered[0].p.place_id, 'up-route-tacos');
+  assert.equal(offered[0].p.flavor, 'place');
+  await until(() => heard.includes('s3|landmark_origin'), 's3 sounded', 240_000);
+  runner.onPosition(dest);
+  await until(() => runner.view().closeoutDone, 'closeout', 240_000);
+  assert.equal(events.filter(e => e.t === 'proposal_offered').length, 1, 'the callback never follows — one cap, spent by the place');
+  runner.endTour();
+});
+
+await checkAsync('pm runner: a bed declaring Driving closes the callback flavor even with records wired', async () => {
+  const audio = new RealFakeAudio(400);
+  const events = [];
+  const heard = [];
+  const runner = upRunner(audio, events, heard, {
+    suggestionCandidates: async () => [],
+    placeMemoryRecords: () => pmRecords(),
+    bed: {
+      assets: { ocean: 'bed://ocean', road: 'bed://road', city: 'bed://city' },
+      enabled: true,
+      declaredMode: 'driving',
+    },
+  });
+  await runner.start(qaPlan());
+  await driveQaPlan(runner, heard);
+  assert.equal(proposalEventsOf(events).length, 0, JSON.stringify(proposalEventsOf(events)));
+  runner.endTour();
+});
+
+await checkAsync('pm runner: a place seated in today\'s own plan is never proposed as still unheard', async () => {
+  const audio = new RealFakeAudio(400);
+  const events = [];
+  const heard = [];
+  const runner = upRunner(audio, events, heard, {
+    suggestionCandidates: async () => [],
+    placeMemoryRecords: () => pmRecords({ owedSubjects: ['s2|landmark_origin'] }),
+  });
+  await runner.start(qaPlan());
+  await driveQaPlan(runner, heard);
+  assert.equal(proposalEventsOf(events).length, 0, JSON.stringify(proposalEventsOf(events)));
+  runner.endTour();
+});
+
 
 await checkAsync('ambient bed: a bed whose audio layer cannot even construct self-silences, one diag, tour unharmed', async () => {
   // Node has no Audio element: the bed's browser factory throws
