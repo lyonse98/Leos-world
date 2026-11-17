@@ -1900,6 +1900,182 @@ await checkAsync('sg runner: an empty pool composes the honest none-answer — s
   runner.endTour();
 });
 
+// ---- unsolicited proposals (v16.2 Slice 5): the runner-level
+// seam engine. Passenger/Walking only, behind the SAME gate
+// as Slice 4's channel (supply dep + no Driving bed). The
+// pure judgments are pinned in the fresh-verify UP suites —
+// here: the gate's total absence, the two-boundary arm/speak
+// over real runner timing, the first-minute fence firing
+// in-runner, the climax-adjacency suppressions, and the tray
+// carry at tour end. Driving idiom mirrors the wrap-up
+// suites: stories release on GPS progress, so each story is
+// fed its position as it sounds. NOTE the runner clock is
+// real time: story clips are lengthened (22 s) in the speak
+// suites so a legal speak boundary (tour age ≥ 60 s) arrives.
+const upRouteCandidate = (over = {}) => ({
+  placeId: 'up-route-tacos', name: 'Up Route Tacos', lat: 32.75, lng: -117.25, kind: 'eat',
+  types: ['mexican_restaurant', 'restaurant'], rating: 4.2, userRatings: 300, address: null,
+  editorial: null, distanceM: 300, anchorKind: 'destination', openNow: true,
+  closesAtMs: Date.now() + 5 * 60 * 60 * 1000, opensAtMs: null, hoursFetchedAt: Date.now() - 1000,
+  hasShelfStory: false, score: 40, detourMinutes: null, event: null, ...over,
+});
+const PROPOSAL_TYPES = ['proposal_offered', 'proposal_playback', 'proposal_suppressed', 'proposal_dropped', 'proposal_trayed', 'proposal_outcome'];
+const proposalEventsOf = events => events.filter(e => PROPOSAL_TYPES.includes(e.t));
+const upRunner = (audio, events, heard, extra = {}) => new rp.RoutePlanRunner({
+  audio,
+  synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+  onEvent: (t, p) => events.push({ t, p }),
+  onStoryHeard: u => heard.push(u.id),
+  ...extra,
+});
+/** Feed each qaPlan story its release position as it sounds, then arrive. */
+const driveQaPlan = async (runner, heard, timeoutMs = 30_000) => {
+  await until(() => heard.includes('s1|landmark_origin'), 's1 sounded', timeoutMs);
+  runner.onPosition({ lat: 32.78, lng: -117.25 });
+  await until(() => heard.includes('s2|landmark_origin'), 's2 sounded', timeoutMs);
+  runner.onPosition({ lat: 32.87, lng: -117.25 });
+  await until(() => heard.includes('s3|landmark_origin'), 's3 sounded', timeoutMs);
+  runner.onPosition(dest);
+  await until(() => runner.view().closeoutDone, 'closeout', timeoutMs);
+};
+
+await checkAsync('up runner: no supply dep → story boundaries pass, zero proposal events', async () => {
+  const audio = new RealFakeAudio(400);
+  const events = [];
+  const heard = [];
+  const runner = upRunner(audio, events, heard);
+  await runner.start(qaPlan());
+  await driveQaPlan(runner, heard);
+  assert.equal(proposalEventsOf(events).length, 0, JSON.stringify(proposalEventsOf(events)));
+  runner.endTour();
+});
+
+await checkAsync('up runner: a bed declaring Driving closes the seam engine even with supply wired', async () => {
+  const audio = new RealFakeAudio(400);
+  const events = [];
+  const heard = [];
+  const runner = upRunner(audio, events, heard, {
+    suggestionCandidates: async () => [upRouteCandidate()],
+    bed: {
+      assets: { ocean: 'bed://ocean', road: 'bed://road', city: 'bed://city' },
+      enabled: true,
+      declaredMode: 'driving',
+    },
+  });
+  await runner.start(qaPlan());
+  await driveQaPlan(runner, heard);
+  assert.equal(runner.view().suggestion.available, false);
+  assert.equal(proposalEventsOf(events).length, 0, JSON.stringify(proposalEventsOf(events)));
+  runner.endTour();
+});
+
+await checkAsync('up runner: the first-minute fence fires in-runner — a young tour arms, attempts, and suppresses', async () => {
+  const audio = new RealFakeAudio(400);
+  const events = [];
+  const heard = [];
+  const runner = upRunner(audio, events, heard, {
+    suggestionCandidates: async () => [upRouteCandidate()],
+  });
+  await runner.start(qaPlan());
+  await driveQaPlan(runner, heard);
+  const suppressed = events.filter(e => e.t === 'proposal_suppressed');
+  assert.ok(suppressed.length >= 1, JSON.stringify(events.filter(e => e.t.startsWith('proposal'))));
+  assert.ok(suppressed.every(e => e.p.reason === 'first-minute'), JSON.stringify(suppressed.map(e => e.p)));
+  assert.equal(suppressed[0].p.place_id, 'up-route-tacos');
+  assert.equal(events.filter(e => e.t === 'proposal_offered').length, 0);
+  runner.endTour();
+});
+
+await checkAsync('up runner: passenger end-to-end — arm at one boundary, speak at the next past 60 s, cap holds, undecided trays at tour end', async () => {
+  const audio = new RealFakeAudio(22_000);
+  const events = [];
+  const heard = [];
+  const runner = upRunner(audio, events, heard, {
+    suggestionCandidates: async () => [upRouteCandidate()],
+  });
+  const plan = qaPlan();
+  // The composer reserves a climax from this cast (the last
+  // story) — against it, the s2-boundary speak attempt would
+  // be fenced before-solemn, correctly. The happy path pins
+  // the UNfenced seam, so the fixture clears the climax; the
+  // fenced variants are the two climax suites below.
+  plan.climaxUnitId = null;
+  for (const it of plan.items) { it.climax = false; it.portalClimax = false; }
+  await runner.start(plan);
+  await until(() => heard.includes('s1|landmark_origin'), 's1 sounded', 120_000);
+  runner.onPosition({ lat: 32.78, lng: -117.25 });
+  await until(() => heard.includes('s2|landmark_origin'), 's2 sounded', 120_000);
+  // s3's release position is fed while s2 sounds — the car
+  // keeps moving. (Feeding it only after the proposal would
+  // leave the plan looking exhausted at s2's settle, and the
+  // closeout owns that seam: no speak. That ordering is the
+  // engine being conservative, not a missed proposal.)
+  runner.onPosition({ lat: 32.87, lng: -117.25 });
+  await until(() => events.some(e => e.t === 'proposal_playback'), 'proposal to sound and settle', 240_000);
+  const offered = events.filter(e => e.t === 'proposal_offered');
+  assert.equal(offered.length, 1);
+  assert.equal(offered[0].p.place_id, 'up-route-tacos');
+  assert.equal(offered[0].p.sponsored, false);
+  const pb = events.filter(e => e.t === 'proposal_playback');
+  assert.equal(pb.length, 1);
+  assert.equal(pb[0].p.completed, true);
+  assert.equal(runner.view().proposalsSpoken, 1);
+  assert.equal(runner.view().suggestion.pending?.placeId, 'up-route-tacos');
+  assert.equal(runner.view().suggestion.pending?.source, 'proposed');
+  // The spoken line is the composer's one-line recommendation.
+  assert.ok(audio.played.some(s => s.includes('Try%20Up%20Route')), 'the recommendation line sounded');
+  // Finish the drive; the cap means no second offer ever.
+  runner.onPosition({ lat: 32.87, lng: -117.25 });
+  await until(() => heard.includes('s3|landmark_origin'), 's3 sounded', 240_000);
+  runner.onPosition(dest);
+  await until(() => runner.view().closeoutDone, 'closeout', 240_000);
+  assert.equal(events.filter(e => e.t === 'proposal_offered').length, 1);
+  runner.endTour();
+  const trayed = events.filter(e => e.t === 'proposal_trayed');
+  assert.equal(trayed.length, 1, JSON.stringify(events.filter(e => e.t.startsWith('proposal'))));
+  assert.equal(trayed[0].p.place_id, 'up-route-tacos');
+  assert.equal(events.filter(e => e.t === 'proposal_outcome').length, 0, 'undecided files no outcome — the tray decides later');
+});
+
+await checkAsync('up runner: a speak attempt before the climax story suppresses as before-solemn', async () => {
+  const audio = new RealFakeAudio(22_000);
+  const events = [];
+  const heard = [];
+  const runner = upRunner(audio, events, heard, {
+    suggestionCandidates: async () => [upRouteCandidate()],
+  });
+  const plan = qaPlan();
+  const stories = plan.items.filter(it => it.kind === 'story');
+  stories[stories.length - 1].climax = true; // the closing story is the climax
+  await runner.start(plan);
+  await driveQaPlan(runner, heard, 240_000);
+  const suppressed = events.filter(e => e.t === 'proposal_suppressed');
+  assert.equal(suppressed.length, 1, JSON.stringify(events.filter(e => e.t.startsWith('proposal'))));
+  assert.equal(suppressed[0].p.reason, 'before-solemn');
+  assert.equal(events.filter(e => e.t === 'proposal_offered').length, 0);
+  runner.endTour();
+});
+
+await checkAsync('up runner: a speak attempt right after the climax story suppresses as after-solemn', async () => {
+  const audio = new RealFakeAudio(22_000);
+  const events = [];
+  const heard = [];
+  const runner = upRunner(audio, events, heard, {
+    suggestionCandidates: async () => [upRouteCandidate()],
+  });
+  const plan = qaPlan();
+  const stories = plan.items.filter(it => it.kind === 'story');
+  stories[1].climax = true; // the middle story is the climax: its own settle is the fenced seam
+  await runner.start(plan);
+  await driveQaPlan(runner, heard, 240_000);
+  const suppressed = events.filter(e => e.t === 'proposal_suppressed');
+  assert.equal(suppressed.length, 1, JSON.stringify(events.filter(e => e.t.startsWith('proposal'))));
+  assert.equal(suppressed[0].p.reason, 'after-solemn');
+  assert.equal(events.filter(e => e.t === 'proposal_offered').length, 0);
+  runner.endTour();
+});
+
+
 await checkAsync('ambient bed: a bed whose audio layer cannot even construct self-silences, one diag, tour unharmed', async () => {
   // Node has no Audio element: the bed's browser factory throws
   // at channel construction — the extreme case of a broken bed
