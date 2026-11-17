@@ -1781,6 +1781,125 @@ await checkAsync('qa runner: passenger question → answer after current item, p
   runner.endTour();
 });
 
+// ---- solicited suggestions (v16.2 Slice 4): the runner-level
+// channel. The supply dep is the gate (the App wires it only
+// for declared Passenger/Walking rides); composition + form
+// are pinned pure in the fresh-verify SG suites — here: the
+// gate, the boundary delivery, and the event trail.
+const sgRouteCandidate = (over = {}) => ({
+  placeId: 'sg-route-tacos', name: 'Sg Route Tacos', lat: 32.75, lng: -117.25, kind: 'eat',
+  types: ['mexican_restaurant', 'restaurant'], rating: 4.2, userRatings: 300, address: null,
+  editorial: null, distanceM: 300, anchorKind: 'destination', openNow: true,
+  closesAtMs: Date.now() + 5 * 60 * 60 * 1000, opensAtMs: null, hoursFetchedAt: Date.now() - 1000,
+  hasShelfStory: false, score: 40, detourMinutes: null, event: null, ...over,
+});
+
+await checkAsync('sg runner: no supply dep (driving) → ask refused, nothing filed', async () => {
+  const audio = new RealFakeAudio();
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:x/' + t.length,
+    onEvent: (t, p) => events.push({ t, p }),
+  });
+  await runner.start(qaPlan());
+  assert.equal(runner.submitSuggestionAsk('food'), false);
+  assert.equal(runner.view().suggestion.available, false);
+  assert.equal(events.filter(e => e.t === 'suggestion_asked').length, 0);
+  runner.endTour();
+});
+
+await checkAsync('sg runner: a bed declaring Driving closes the channel even with supply wired', async () => {
+  const audio = new RealFakeAudio();
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:x/' + t.length,
+    onEvent: (t, p) => events.push({ t, p }),
+    suggestionCandidates: async () => [sgRouteCandidate()],
+    bed: {
+      assets: { ocean: 'bed://ocean', road: 'bed://road', city: 'bed://city' },
+      enabled: true,
+      declaredMode: 'driving',
+    },
+  });
+  await runner.start(qaPlan());
+  assert.equal(runner.view().suggestion.available, false);
+  assert.equal(runner.submitSuggestionAsk('food'), false);
+  assert.equal(events.filter(e => e.t === 'suggestion_asked').length, 0);
+  runner.endTour();
+});
+
+await checkAsync('sg runner: passenger ask → answer after the current item, full event trail, outcome resolves', async () => {
+  const audio = new RealFakeAudio(400);
+  const events = [];
+  let anchorsSeen = null;
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onEvent: (t, p) => events.push({ t, p }),
+    suggestionCandidates: async anchors => {
+      anchorsSeen = anchors;
+      return [sgRouteCandidate(), sgRouteCandidate({ placeId: 'sg-route-other', name: 'Sg Route Other', score: 30 })];
+    },
+  });
+  await runner.start(qaPlan());
+  await until(() => audio.played.some(s => s.includes('s1%7Clandmark_origin.wav')), 'first story sounding');
+  assert.equal(runner.view().suggestion.available, true);
+  assert.equal(runner.submitSuggestionAsk('food'), true);
+  assert.equal(runner.submitSuggestionAsk('food'), false); // one at a time
+  assert.ok(anchorsSeen && anchorsSeen.some(a => a.kind === 'destination'), 'supply was asked at the destination anchor');
+  const asked = events.filter(e => e.t === 'suggestion_asked');
+  assert.equal(asked.length, 1);
+  assert.equal(asked[0].p.intent, 'food');
+  await until(() => events.some(e => e.t === 'suggestion_playback'), 'suggestion to sound and settle');
+  const answered = events.filter(e => e.t === 'suggestion_answered');
+  assert.equal(answered.length, 1);
+  assert.equal(answered[0].p.outcome, 'pick');
+  assert.equal(answered[0].p.place_id, 'sg-route-tacos');
+  assert.ok(answered[0].p.reason_codes.includes('open-now'), 'reason codes filed');
+  assert.equal(answered[0].p.sponsored, false);
+  const played = audio.played;
+  const suggIdx = played.findIndex(s => s.includes('Try%20Sg%20Route'));
+  const s1Idx = played.findIndex(s => s.includes('s1%7Clandmark_origin.wav'));
+  assert.ok(s1Idx >= 0 && suggIdx > s1Idx, 'the answer sounded after the current (first) story — never over it');
+  const pb = events.filter(e => e.t === 'suggestion_playback');
+  assert.equal(pb.length, 1);
+  assert.equal(pb[0].p.completed, true);
+  assert.equal(runner.view().suggestionsAnswered, 1);
+  assert.equal(runner.view().suggestion.pending?.placeId, 'sg-route-tacos');
+  assert.equal(runner.resolveSuggestion('dismissed'), true);
+  assert.equal(runner.resolveSuggestion('dismissed'), false); // already resolved
+  const outcomes = events.filter(e => e.t === 'suggestion_outcome');
+  assert.equal(outcomes.length, 1);
+  assert.equal(outcomes[0].p.outcome, 'dismissed');
+  assert.equal(runner.view().suggestion.pending, null);
+  runner.endTour();
+});
+
+await checkAsync('sg runner: an empty pool composes the honest none-answer — spoken, no pick pending', async () => {
+  const audio = new RealFakeAudio(400);
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onEvent: (t, p) => events.push({ t, p }),
+    suggestionCandidates: async () => [],
+  });
+  await runner.start(qaPlan());
+  await until(() => audio.played.some(s => s.includes('s1%7Clandmark_origin.wav')), 'first story sounding');
+  assert.equal(runner.submitSuggestionAsk('do'), true);
+  await until(() => events.some(e => e.t === 'suggestion_playback'), 'none-answer to sound');
+  const answered = events.filter(e => e.t === 'suggestion_answered');
+  assert.equal(answered.length, 1);
+  assert.equal(answered[0].p.outcome, 'none');
+  assert.equal(answered[0].p.primary_reason, 'pool-empty');
+  assert.equal(answered[0].p.place_id, null);
+  assert.equal(runner.view().suggestion.pending, null);
+  assert.equal(runner.view().suggestionsAnswered, 0); // a none-answer is not a sounded pick
+  runner.endTour();
+});
+
 await checkAsync('ambient bed: a bed whose audio layer cannot even construct self-silences, one diag, tour unharmed', async () => {
   // Node has no Audio element: the bed's browser factory throws
   // at channel construction — the extreme case of a broken bed

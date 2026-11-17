@@ -105,7 +105,7 @@ async function healthyOpening(world, audio, pos = UTC, speed = 8) {
 }
 
 export async function runScenarios(Tour, extras) {
-  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, facts, partners, freshness, currentEvents, composeRoutePlan, hashString } = extras;
+  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, facts, partners, freshness, currentEvents, suggestions, composeRoutePlan, hashString } = extras;
 
   // ---------------------------------------------------------- S-01 healthy start
   suite('S-01 healthy start / opener order');
@@ -6416,5 +6416,310 @@ export async function runScenarios(Tour, extras) {
     check('the constraints themselves still read back verbatim for their own consumers',
       profile.getConstraints().budgetComfort === 'splurge' && profile.getConstraints().dietary.join() === 'vegetarian');
     profile.wipeProfile();
+  }
+
+  // ---------------------------------------------------------------
+  // SG suites (Nov 16, 2026): solicited suggestions, v16.2
+  // Slice 4. The channel: a Passenger/Walking listener asks for
+  // a stop; the answer is composed from the Slice 2 pool by the
+  // pure composer (suggestions.ts) under the adopted policy
+  // form. SG-1 pins the mode gate at the engine, SG-2 the
+  // spoken form, SG-3 the honest no-suggestion answers, SG-4
+  // the constraint filters at answer time, SG-5 the freeform
+  // channel end to end (boundary delivery, logging, outcomes,
+  // the two-pick cap), SG-6 the one-interruption rule shared
+  // with Q&A. Story Q&A itself is untouched by every check
+  // here — this is suggestions only.
+  const SG_NOW = Date.UTC(2026, 10, 18, 19, 0, 0);
+  const SG_DAY_MS = 24 * 60 * 60 * 1000;
+  const sgCandidate = (over = {}) => ({
+    placeId: 'sg-tacos', name: 'Sg Test Tacos', lat: 32.853, lng: -117.18, kind: 'eat',
+    types: ['mexican_restaurant', 'restaurant'], rating: 4.2, userRatings: 300, address: null,
+    editorial: null, distanceM: 900, anchorKind: 'position', openNow: true,
+    closesAtMs: SG_NOW + 5 * 60 * 60 * 1000, opensAtMs: null, hoursFetchedAt: SG_NOW - 60_000,
+    hasShelfStory: false, score: 40, detourMinutes: null, event: null, ...over,
+  });
+  const SG_NO_MATCH = { topics: [], cuisines: [], drinks: [], activities: [], dietary: [] };
+  const SG_NO_CONSTRAINTS = {
+    budgetComfort: null, maxDetourMinutes: null, alcoholOk: null, usuallyWithKids: null,
+    dogFriendly: null, walkingTolerance: null, surpriseTolerance: null, dietary: [],
+  };
+  const sgCompose = (pool, over = {}) =>
+    suggestions.composeSuggestion(pool, {
+      intent: 'any', nowMs: SG_NOW, match: SG_NO_MATCH, constraints: SG_NO_CONSTRAINTS, ...over,
+    });
+
+  suite('SG-1 the mode gate: no declared mode or a Driving declaration closes the channel; Passenger/Walking opens it');
+  {
+    // Absent dep: a Tour constructed the pre-Slice-4 way has
+    // no gate input at all — closed by construction.
+    resetLocalStorage();
+    const bareWorld = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park')],
+      library: ['Balboa Park'],
+      eventCandidates: [sgCandidate()],
+    });
+    const bareAudio = new FakeAudio(bareWorld.clock, okPolicy());
+    const bare = new Tour({ audio: bareAudio, clock: bareWorld.clock, seams: bareWorld.seams });
+    bare.onPosition({ ...UTC, speedMps: 8, headingDeg: 180 });
+    bare.start(false);
+    await bareWorld.clock.advance(40_000);
+    check('a Tour with no declaredMode dep reports the channel unavailable',
+      bare.suggestionAvailable() === false && bare.view().suggestion.available === false);
+    check('and refuses the ask', bare.submitSuggestionAsk('food') === false);
+    check('filing nothing', bareWorld.eventsOf('suggestion_asked').length === 0);
+    bare.endTour();
+
+    // Driving declared: the gate reads the declaration, and
+    // the declaration is no.
+    resetLocalStorage();
+    const driveWorld = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park')],
+      library: ['Balboa Park'],
+      eventCandidates: [sgCandidate()],
+      declaredMode: 'driving',
+    });
+    const driveAudio = new FakeAudio(driveWorld.clock, okPolicy());
+    const driveTour = await startAt(driveWorld, driveAudio, UTC);
+    await driveWorld.clock.advance(40_000);
+    check('a Driving ride reports the channel unavailable',
+      driveTour.suggestionAvailable() === false && driveTour.view().suggestion.available === false);
+    check('and refuses the ask even with a full pool standing',
+      driveTour.submitSuggestionAsk('food') === false && driveWorld.eventsOf('suggestion_asked').length === 0);
+    driveTour.endTour();
+
+    // Passenger/Walking declared: the gate opens (the ask
+    // itself is exercised end to end in SG-5).
+    resetLocalStorage();
+    const passWorld = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park')],
+      library: ['Balboa Park'],
+      declaredMode: 'passenger',
+    });
+    const passAudio = new FakeAudio(passWorld.clock, okPolicy());
+    const passTour = await startAt(passWorld, passAudio, UTC);
+    check('a Passenger/Walking ride reports the channel available',
+      passTour.suggestionAvailable() === true && passTour.view().suggestion.available === true);
+    passTour.endTour();
+  }
+
+  suite('SG-2 the spoken form: reason + time fact in the recommendation, an off-ramp in every answer, labels and detours only when real');
+  {
+    const matched = sgCompose([sgCandidate()], {
+      intent: 'food',
+      match: { ...SG_NO_MATCH, cuisines: ['tacos-mexican'] },
+    });
+    check('a gate-passing candidate composes a pick', matched.kind === 'pick', JSON.stringify(matched));
+    check('the primary reason is the profile match, named from the actual taste',
+      matched.primaryReason === 'profile-match' && matched.text.includes('matches your Tacos & Mexican pick'),
+      matched.text);
+    check('the time fact comes from the source hours', matched.text.includes('open until'), matched.text);
+    check('the recommendation names the real place', matched.recommendation.startsWith('Try Sg Test Tacos — '), matched.recommendation);
+    check('the off-ramp rides every answer', matched.text.includes('Ask for another'), matched.text);
+    check('no detour was computed, so no detour is claimed',
+      matched.detourMinutes === null && !matched.text.includes('minutes off your way'), matched.text);
+    check('nothing is sponsored in v1', matched.sponsored === false && !matched.text.startsWith('Sponsored'));
+
+    const hooked = sgCompose([sgCandidate()], { detourMinutesFor: () => 6 });
+    check('a caller-computed detour is spoken as a number',
+      hooked.kind === 'pick' && hooked.detourMinutes === 6 && hooked.text.includes('about 6 minutes off your way'),
+      hooked.kind === 'pick' ? hooked.text : hooked.kind);
+    const capped = sgCompose([sgCandidate()], {
+      detourMinutesFor: () => 6,
+      constraints: { ...SG_NO_CONSTRAINTS, maxDetourMinutes: 5 },
+    });
+    check('a known detour beyond the declared cap excludes the place — the cap is never approximated around',
+      capped.kind === 'none' && capped.reasonCodes[0] === 'constraints-excluded', JSON.stringify(capped.reasonCodes));
+
+    const sponsored = sgCompose([sgCandidate()], { sponsoredPlaceIds: new Set(['sg-tacos']) });
+    check('the sponsored hook renders the label at the head of the spoken text',
+      sponsored.kind === 'pick' && sponsored.sponsored === true && sponsored.text.startsWith('Sponsored — '),
+      sponsored.kind === 'pick' ? sponsored.text : sponsored.kind);
+
+    const soon = sgCompose([sgCandidate({
+      closesAtMs: SG_NOW + 30 * 60 * 1000, rating: 4.9, hasShelfStory: true, distanceM: 100,
+    })]);
+    check('reason priority: closes-soon outranks shelf-story, top-rated, and nearby — and all are filed',
+      soon.kind === 'pick' && soon.primaryReason === 'closes-soon' &&
+      JSON.stringify(soon.reasonCodes) === JSON.stringify(['closes-soon', 'shelf-story', 'top-rated', 'nearby', 'open-now']),
+      soon.kind === 'pick' ? JSON.stringify(soon.reasonCodes) : soon.kind);
+
+    const alternate = sgCompose(
+      [sgCandidate(), sgCandidate({ placeId: 'sg-other', name: 'Sg Other', score: 30 })],
+      { excludePlaceIds: new Set(['sg-tacos']), picksUsed: 1 },
+    );
+    check('the second pick is the alternate, with the closing off-ramp',
+      alternate.kind === 'pick' && alternate.candidate.placeId === 'sg-other' && alternate.turn === 2 &&
+      alternate.text.includes("the other one I'd stand behind"),
+      alternate.kind === 'pick' ? alternate.text : alternate.kind);
+    const cappedTurns = sgCompose([sgCandidate()], { picksUsed: 2 });
+    check('a third pick is refused by the two-pick cap, honestly',
+      cappedTurns.kind === 'none' && cappedTurns.reasonCodes[0] === 'turn-cap', JSON.stringify(cappedTurns.reasonCodes));
+  }
+
+  suite('SG-3 honest no-suggestion answers: stale, closed, unverifiable, and empty pools never produce a pick');
+  {
+    const empty = sgCompose([]);
+    check('an empty pool answers pool-empty', empty.kind === 'none' && empty.reasonCodes[0] === 'pool-empty');
+    const stale = sgCompose([sgCandidate({ hoursFetchedAt: SG_NOW - 8 * SG_DAY_MS })]);
+    check('hours that were fresh at discovery are stale at answer time 8 days on — all-stale, no pick',
+      stale.kind === 'none' && stale.reasonCodes[0] === 'all-stale' && stale.text.includes('too old to trust'),
+      JSON.stringify(stale.reasonCodes));
+    const closed = sgCompose([sgCandidate({ openNow: false, closesAtMs: null })]);
+    check('a verifiably closed place is never the pick', closed.kind === 'none' && closed.reasonCodes[0] === 'none-open');
+    const unknown = sgCompose([sgCandidate({ openNow: null, closesAtMs: null })]);
+    check('unknown open-now is not a claim: none-open, not a guess',
+      unknown.kind === 'none' && unknown.reasonCodes[0] === 'none-open');
+    const justClosed = sgCompose([sgCandidate({ closesAtMs: SG_NOW - 60_000 })]);
+    check('a place whose close has passed since discovery is none-open at answer time',
+      justClosed.kind === 'none' && justClosed.reasonCodes[0] === 'none-open');
+    const wrongKind = sgCompose([sgCandidate({ kind: 'do', types: ['museum'] })], { intent: 'food' });
+    check('an ask the pool cannot match answers intent-unmatched',
+      wrongKind.kind === 'none' && wrongKind.reasonCodes[0] === 'intent-unmatched');
+  }
+
+  suite('SG-4 constraints at answer time: with-kids and no-alcohol filter the pool the composer actually sees');
+  {
+    const bar = sgCandidate({ placeId: 'sg-bar', name: 'Sg Bar', kind: 'drink', types: ['bar'], score: 99 });
+    const cafe = sgCandidate({ placeId: 'sg-cafe', name: 'Sg Cafe', types: ['cafe', 'coffee_shop'], score: 10 });
+    const kids = sgCompose([bar, cafe], { constraints: { ...SG_NO_CONSTRAINTS, usuallyWithKids: true } });
+    check('with-kids excludes the bar-primary place even ranked first — the cafe is the pick',
+      kids.kind === 'pick' && kids.candidate.placeId === 'sg-cafe',
+      kids.kind === 'pick' ? kids.candidate.placeId : JSON.stringify(kids.reasonCodes));
+    const kidsOnly = sgCompose([bar], { constraints: { ...SG_NO_CONSTRAINTS, usuallyWithKids: true } });
+    check('with-kids and only a bar: constraints-excluded, honestly',
+      kidsOnly.kind === 'none' && kidsOnly.reasonCodes[0] === 'constraints-excluded');
+    const noAlcohol = sgCompose([bar], {
+      intent: 'drink',
+      constraints: { ...SG_NO_CONSTRAINTS, alcoholOk: false },
+    });
+    check('no-alcohol excludes the bar from a drink ask too',
+      noAlcohol.kind === 'none' && noAlcohol.reasonCodes[0] === 'constraints-excluded');
+    const neutral = sgCompose([bar, cafe]);
+    check('with no constraints declared the higher-ranked bar is the pick (no phantom filtering)',
+      neutral.kind === 'pick' && neutral.candidate.placeId === 'sg-bar');
+  }
+
+  suite('SG-5 the freeform channel end to end: boundary delivery, the full event trail, outcomes, and the cap');
+  {
+    resetLocalStorage();
+    profile.setDeclaredTaste('cuisines', ['tacos-mexican'], 'sg-sim');
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park')],
+      library: ['Balboa Park'],
+      eventCandidates: [
+        sgCandidate({ hoursFetchedAt: 0, closesAtMs: 10 * 60 * 60 * 1000 }),
+        sgCandidate({ placeId: 'sg-other', name: 'Sg Other Tacos', score: 30, hoursFetchedAt: 0, closesAtMs: 10 * 60 * 60 * 1000 }),
+      ],
+      declaredMode: 'passenger',
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 20_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    // The boundary check needs its precondition honestly: a
+    // story actually sounding when the ask lands. Poll the
+    // fake clock forward until one is (serve cycles along the
+    // way also land the pool refresh).
+    for (let i = 0; i < 60 && tour.view().nowPlaying?.kind !== 'story'; i++) {
+      await world.clock.advance(500);
+    }
+    check('the pool stands ready before the ask', tour.currentEventCandidates().length === 2,
+      `${tour.currentEventCandidates().length}`);
+    check('setup: a story is playing when the ask lands', tour.view().nowPlaying?.kind === 'story',
+      JSON.stringify(tour.view().nowPlaying));
+    const playbacksBefore = world.eventsOf('story_playback').length;
+    check('the ask is accepted', tour.submitSuggestionAsk('food') === true);
+    check('a second ask while the answer is in flight is refused', tour.submitSuggestionAsk('food') === false);
+    const asked = world.eventsOf('suggestion_asked');
+    check('suggestion_asked filed with intent + turn', asked.length === 1 && asked[0].payload.intent === 'food' && asked[0].payload.turn === 1,
+      JSON.stringify(asked.map(e => e.payload)));
+    const answered = world.eventsOf('suggestion_answered');
+    check('suggestion_answered files the pick with its reason codes (profile match rides the seeded taste)',
+      answered.length === 1 && answered[0].payload.outcome === 'pick' && answered[0].payload.place_id === 'sg-tacos' &&
+      answered[0].payload.reason_codes.includes('profile-match') && answered[0].payload.sponsored === false,
+      JSON.stringify(answered.map(e => e.payload)));
+    check('the pick is pending in the view, by name',
+      tour.view().suggestion.pending?.placeId === 'sg-tacos' && tour.view().suggestion.pending?.name === 'Sg Test Tacos');
+    await world.clock.advance(60_000);
+    const storyEvent = world.eventsOf('story_playback')[playbacksBefore];
+    const suggEvent = world.eventsOf('suggestion_playback')[0];
+    check('the answer sounded only after the playing story settled (the boundary fence)',
+      !!storyEvent && !!suggEvent && world.events.indexOf(storyEvent) < world.events.indexOf(suggEvent),
+      `story@${storyEvent ? world.events.indexOf(storyEvent) : -1} suggestion@${suggEvent ? world.events.indexOf(suggEvent) : -1}`);
+    check('and the story it waited behind completed — it was never cut',
+      storyEvent?.payload.completed === true,
+      JSON.stringify(storyEvent?.payload));
+    check('suggestion_playback filed its settle truth',
+      world.eventsOf('suggestion_playback').length === 1 && world.eventsOf('suggestion_playback')[0].payload.completed === true &&
+      world.eventsOf('suggestion_playback')[0].payload.place_id === 'sg-tacos');
+    check('diagnostics count the sounded pick', tour.view().diagnostics.suggestionsAnswered === 1);
+    check('the outcome tap files accepted, once',
+      tour.resolveSuggestion('accepted') === true && tour.resolveSuggestion('accepted') === false &&
+      world.eventsOf('suggestion_outcome').length === 1 &&
+      world.eventsOf('suggestion_outcome')[0].payload.outcome === 'accepted' &&
+      world.eventsOf('suggestion_outcome')[0].payload.place_id === 'sg-tacos',
+      JSON.stringify(world.eventsOf('suggestion_outcome').map(e => e.payload)));
+    check('the pending pick cleared', tour.view().suggestion.pending === null);
+
+    // The alternate, then the cap — with asked-another filed
+    // by the third ask itself.
+    check('the second ask is accepted', tour.submitSuggestionAsk('food') === true);
+    await world.clock.advance(60_000);
+    const answered2 = world.eventsOf('suggestion_answered');
+    check('the alternate is a different place (the first pick is excluded)',
+      answered2.length === 2 && answered2[1].payload.place_id === 'sg-other' && answered2[1].payload.turn === 2,
+      JSON.stringify(answered2.map(e => e.payload)));
+    check('the third ask is accepted as an ask (it carries the outcome + the cap answer)',
+      tour.submitSuggestionAsk('food') === true);
+    const outcomes = world.eventsOf('suggestion_outcome');
+    check('asking over the pending alternate filed asked-another for it',
+      outcomes.length === 2 && outcomes[1].payload.outcome === 'asked-another' && outcomes[1].payload.place_id === 'sg-other',
+      JSON.stringify(outcomes.map(e => e.payload)));
+    const answered3 = world.eventsOf('suggestion_answered');
+    check('and the cap answer is an honest none (turn-cap), spoken like any answer',
+      answered3.length === 3 && answered3[2].payload.outcome === 'none' && answered3[2].payload.primary_reason === 'turn-cap',
+      JSON.stringify(answered3.map(e => e.payload)));
+    await world.clock.advance(60_000);
+    tour.endTour();
+    profile.wipeProfile();
+
+    // A pick pending at tour end files no outcome.
+    resetLocalStorage();
+    const endWorld = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park')],
+      library: ['Balboa Park'],
+      eventCandidates: [sgCandidate({ hoursFetchedAt: 0, closesAtMs: 10 * 60 * 60 * 1000 })],
+      declaredMode: 'passenger',
+    });
+    const endAudio = new FakeAudio(endWorld.clock, okPolicy());
+    const endTour = await startAt(endWorld, endAudio, UTC);
+    await endWorld.clock.advance(40_000);
+    check('setup: the ask lands a pick', endTour.submitSuggestionAsk('any') === true);
+    endTour.endTour();
+    check('tour end with a pick pending files NO outcome (a dismissal is never inferred)',
+      endWorld.eventsOf('suggestion_outcome').length === 0,
+      JSON.stringify(endWorld.eventsOf('suggestion_outcome').map(e => e.payload)));
+  }
+
+  suite('SG-6 one spoken interruption at a time: a suggestion ask waits out a Q&A cycle, and vice versa the channel stays separate');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park')],
+      library: ['Balboa Park'],
+      eventCandidates: [sgCandidate({ hoursFetchedAt: 0, closesAtMs: 10 * 60 * 60 * 1000 })],
+      declaredMode: 'passenger',
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    check('the question is accepted', tour.submitQuestion('What is this place?') === true);
+    check('a suggestion ask during the Q&A cycle is refused', tour.submitSuggestionAsk('food') === false);
+    await world.clock.advance(10_000); // the answer sounds and settles; the lock awaits resume
+    check('still refused while the Q&A lock awaits resume', tour.submitSuggestionAsk('food') === false);
+    await world.clock.advance(50_000); // the 45 s resume grace releases the lock
+    check('once the lock is idle the suggestion ask is accepted', tour.submitSuggestionAsk('food') === true);
+    await world.clock.advance(30_000);
+    check('and its answer filed normally', world.eventsOf('suggestion_answered').length === 1);
+    tour.endTour();
   }
 }

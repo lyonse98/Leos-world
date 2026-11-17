@@ -55,6 +55,7 @@ const extras = {
   profileRank: engine.profileRank,
   freshness: engine.freshness,
   currentEvents: engine.currentEvents,
+  suggestions: engine.suggestions,
   composeRoutePlan: engine.composeRoutePlan,
   hashString: engine.hashString,
   CORRIDOR_SEGMENTS: engine.CORRIDOR_SEGMENTS,

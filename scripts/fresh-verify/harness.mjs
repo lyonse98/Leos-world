@@ -267,6 +267,11 @@ export function makeWorld(Tour, opts = {}) {
     // network edge — exactly like discoverCandidates above.
     eventCandidates: opts.eventCandidates ?? [],
     eventCandidateCalls: [], // every pool-refresh ask, in order
+    // Declared ride mode (v16.2 Slice 4): the suggestion gate's
+    // input, handed to the Tour as a getter so a scenario can
+    // flip it mid-tour. Null (the default) = no mode declared
+    // = the channel is closed, like every pre-Slice-4 world.
+    declaredMode: opts.declaredMode ?? null,
   };
 
   const libraryRows = new Map();
@@ -472,7 +477,7 @@ export function makeWorld(Tour, opts = {}) {
     }),
   };
   world.seams = seams;
-  world.makeTour = audio => new Tour({ audio, clock, seams });
+  world.makeTour = audio => new Tour({ audio, clock, seams, declaredMode: () => world.declaredMode });
   world.eventsOf = type => events.filter(e => e.type === type);
   return world;
 }
