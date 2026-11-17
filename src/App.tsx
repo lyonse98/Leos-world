@@ -65,6 +65,13 @@ import { finishLiveRenderBlob } from './core/audioFinish';
 import { discoverEventCandidates, type EventAnchor } from './core/currentEvents';
 import type { SuggestionIntent } from './core/suggestions';
 import {
+  judgeTrayRecord,
+  loadProposalRecords,
+  localProposalStore,
+  resolveProposalRecord,
+  type ProposalRecord,
+} from './core/proposals';
+import {
   DEFAULT_NARRATION_VOICE,
   narrationRequest,
   wrapUpTextFor,
@@ -361,6 +368,96 @@ function SuggestionPanel({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/** Why Miles proposed a place, in plain words (the composer's reason vocabulary). */
+const TRAY_REASON_LABELS: Record<string, string> = {
+  'profile-match': 'Matches your tastes',
+  'closes-soon': 'Was closing soon',
+  'shelf-story': 'A place Miles has a story about',
+  'top-rated': 'Top-rated nearby',
+  nearby: 'Right nearby',
+  'open-now': 'Open now',
+};
+
+/**
+ * The proposal's time fact, rendered for a STOPPED reader:
+ * an entry whose window has passed says so plainly — an
+ * expired entry never renders as a live claim.
+ */
+function trayTimeLabel(record: ProposalRecord, expired: boolean): string {
+  if (record.closesAtMs !== null) {
+    const until = new Intl.DateTimeFormat('en-US', { hour: 'numeric', minute: '2-digit' }).format(
+      new Date(record.closesAtMs),
+    );
+    return expired ? `Was open until ${until} — that window has passed` : `Open until ${until}`;
+  }
+  return expired ? 'Its hours are too old to vouch for now' : 'Open around the clock';
+}
+
+/**
+ * The arrival tray (v16.2 Slice 5): proposals the listener
+ * didn't decide while moving, carried to the stopped-state
+ * landing — "triage while moving, decide when stopped".
+ * Entries re-judge freshness on every render (and on a
+ * 30-second tick while the landing stands): an expired
+ * entry stays visible but inert — it renders as expired,
+ * never as a live claim. Accepting saves the place and
+ * files the outcome; it never re-plans anything. Mounted
+ * only behind the suggestion gate, so in Driving there is
+ * no tray at all.
+ */
+function SuggestionTray({
+  refreshKey,
+  onResolve,
+}: {
+  refreshKey: number;
+  onResolve: (record: ProposalRecord, outcome: 'accepted' | 'dismissed') => void;
+}) {
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    setNowMs(Date.now());
+    const t = setInterval(() => setNowMs(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, [refreshKey]);
+  const entries = loadProposalRecords(localProposalStore)
+    .map(record => ({ record, judgment: judgeTrayRecord(record, nowMs) }))
+    .filter(e => e.judgment.visible);
+  if (entries.length === 0) return null;
+  return (
+    <div className="mt-4 w-full rounded-[2rem] bg-white/70 p-4 shadow-lg shadow-ink/10">
+      <p className="text-xs font-bold uppercase tracking-[0.18em] text-sagedeep">From your drive</p>
+      {entries.map(({ record, judgment }) => (
+        <div key={`${record.placeId}:${record.offeredAt}`} className="mt-3 rounded-3xl bg-cream2/80 px-4 py-3">
+          <p className="text-sm font-black text-ink">{record.name}</p>
+          <p className="mt-0.5 text-xs text-inksoft">
+            {TRAY_REASON_LABELS[record.primaryReason] ?? 'Miles suggested it'} ·{' '}
+            {trayTimeLabel(record, judgment.expired)}
+          </p>
+          {record.state === 'accepted' ? (
+            <p className="mt-2 text-xs font-bold text-sagedeep">Saved ✓</p>
+          ) : judgment.actionable ? (
+            <div className="mt-2 flex gap-2">
+              <button
+                type="button"
+                onClick={() => onResolve(record, 'accepted')}
+                className="flex-1 whitespace-nowrap rounded-full bg-ink px-3 py-2 text-sm font-bold text-cream transition hover:bg-sagedeep active:scale-[0.99]"
+              >
+                Sounds good
+              </button>
+              <button
+                type="button"
+                onClick={() => onResolve(record, 'dismissed')}
+                className="flex-1 whitespace-nowrap rounded-full bg-cream px-3 py-2 text-sm font-bold text-ink transition hover:bg-sage/25 active:scale-[0.99]"
+              >
+                No thanks
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ))}
     </div>
   );
 }
@@ -2794,6 +2891,23 @@ function MilesApp() {
     routeRunnerRef.current?.resolveSuggestion(outcome);
   };
 
+  // Arrival tray (v16.2 Slice 5): a stopped-state verdict on
+  // a tray entry — the lifecycle ledger moves, and the
+  // outcome files on the same emit path the engines use,
+  // with surface 'tray'. Accepting SAVES the place; per the
+  // standing ruling it never re-plans a drive (detour
+  // recomposition is a separate, gated decision).
+  const [trayVersion, setTrayVersion] = useState(0);
+  const resolveTrayProposal = (record: ProposalRecord, outcome: 'accepted' | 'dismissed') => {
+    resolveProposalRecord(localProposalStore, record.placeId, outcome);
+    void emitEvent(record.sessionId ?? 'tray', 'proposal_outcome', {
+      outcome,
+      place_id: record.placeId,
+      surface: 'tray',
+    }, { lat: position?.lat ?? null, lng: position?.lng ?? null, movementMode: rideMode });
+    setTrayVersion(v => v + 1);
+  };
+
   /**
    * Tap-anywhere backup (Nov 2, 2026, face-only ruling): a tap
    * anywhere on the running tour is invisible chrome carrying the
@@ -2866,6 +2980,9 @@ function MilesApp() {
                 <p className="mt-4 w-full rounded-[2rem] bg-white/70 p-4 text-center text-sm font-bold text-ink shadow-lg shadow-ink/10">
                   {owedLine}
                 </p>
+              )}
+              {suggestionsOpen && (
+                <SuggestionTray refreshKey={trayVersion} onResolve={resolveTrayProposal} />
               )}
               {!seedOfferGone && profilePanel === 'none' && shouldOfferSeed() && (
                 <div className="mt-4 w-full rounded-[2rem] bg-white/70 p-4 text-center shadow-lg shadow-ink/10">
@@ -3148,6 +3265,10 @@ function MilesApp() {
             <p className="mt-6 w-full rounded-[2rem] bg-white/70 p-4 text-center text-sm font-bold text-ink shadow-lg shadow-ink/10">
               {owedLine}
             </p>
+          )}
+
+          {suggestionsOpen && (
+            <SuggestionTray refreshKey={trayVersion} onResolve={resolveTrayProposal} />
           )}
 
           {resumeOffered && view.phase === 'idle' ? (
