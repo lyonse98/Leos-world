@@ -866,7 +866,7 @@ export class RoutePlanRunner {
   private suggestionsAnsweredCount = 0;
   // Unsolicited proposals (v16.2 Slice 5): the seam engine
   // beside the solicited channel, behind the SAME gate (the
-  // suggestionCandidates dep + no Driving bed). Selection is
+  // suggestionCandidates dep + an affirmative Passenger bed). Selection is
   // async here (supply + pre-render), so a pick composed at
   // one story boundary is armed — audio already rendered,
   // the render-ahead discipline — and spoken at the next,
@@ -3480,11 +3480,18 @@ export class RoutePlanRunner {
   /**
    * The suggestion gate, runner side: candidate supply wired
    * (the App opens the gate only for a declared Passenger/
-   * Walking ride) AND no bed dep declaring this a Driving
-   * ride. Either closed door refuses the ask.
+   * Walking ride) AND the bed dep affirmatively declaring
+   * this a Passenger/Walking ride. Fail-CLOSED (v16.2 audit
+   * fix, Nov 17, 2026): the check is `=== 'passenger'`, the
+   * freeform engine's strict shape — a runner with supply
+   * wired but no declaration (no bed, or a bed that does not
+   * declare the mode) serves nothing. The App always wires
+   * the bed with the declared mode, so the strictness costs
+   * production nothing; the engine's last line of defense
+   * must not be a negative check on an ambient dep.
    */
   private suggestionAvailable(): boolean {
-    return !!this.deps.suggestionCandidates && this.deps.bed?.declaredMode !== 'driving';
+    return !!this.deps.suggestionCandidates && this.deps.bed?.declaredMode === 'passenger';
   }
 
   /**

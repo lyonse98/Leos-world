@@ -189,7 +189,7 @@ const pf = await import(pathToFileURL(pfOut).href);
 // the same commit; a run that executes fewer checks than
 // the floor FAILS, whatever its pass rate (enforced at the
 // final tally below).
-const MIN_CHECKS = 390;
+const MIN_CHECKS = 392;
 
 let passed = 0;
 let failed = 0;
@@ -1804,6 +1804,16 @@ const sgRouteCandidate = (over = {}) => ({
   closesAtMs: Date.now() + 5 * 60 * 60 * 1000, opensAtMs: null, hoursFetchedAt: Date.now() - 1000,
   hasShelfStory: false, score: 40, detourMinutes: null, event: null, ...over,
 });
+// The bed fixture a declared Passenger/Walking ride carries
+// (the App always wires the bed with the declared mode,
+// App.tsx). Since the Nov 17, 2026 fail-closed fix, the
+// runner's suggestion gate requires this affirmative
+// declaration — supply alone no longer opens the channel.
+const passengerBed = {
+  assets: { ocean: 'bed://ocean', road: 'bed://road', city: 'bed://city' },
+  enabled: true,
+  declaredMode: 'passenger',
+};
 
 await checkAsync('sg runner: no supply dep (driving) → ask refused, nothing filed', async () => {
   const audio = new RealFakeAudio();
@@ -1841,6 +1851,43 @@ await checkAsync('sg runner: a bed declaring Driving closes the channel even wit
   runner.endTour();
 });
 
+await checkAsync('sg runner: supply wired but NO Passenger declaration → the gate is fail-closed (no bed, or a bed that does not declare)', async () => {
+  // No bed at all: supply alone used to open the channel
+  // (the gate read `!== 'driving'` on an absent dep). Since
+  // the Nov 17, 2026 fix the declaration must be affirmative.
+  const audio1 = new RealFakeAudio(400);
+  const events1 = [];
+  const heard1 = [];
+  const bare = upRunner(audio1, events1, heard1, {
+    suggestionCandidates: async () => [upRouteCandidate()],
+  });
+  await bare.start(qaPlan());
+  assert.equal(bare.view().suggestion.available, false);
+  assert.equal(bare.submitSuggestionAsk('food'), false);
+  await driveQaPlan(bare, heard1);
+  assert.equal(proposalEventsOf(events1).length, 0, 'the seam engine stays silent without a declaration');
+  bare.endTour();
+
+  // A bed that carries no declaredMode: equally undeclared.
+  const audio2 = new RealFakeAudio();
+  const events2 = [];
+  const runner2 = new rp.RoutePlanRunner({
+    audio: audio2,
+    synthUrl: async t => 'blob:x/' + t.length,
+    onEvent: (t, p) => events2.push({ t, p }),
+    suggestionCandidates: async () => [sgRouteCandidate()],
+    bed: {
+      assets: { ocean: 'bed://ocean', road: 'bed://road', city: 'bed://city' },
+      enabled: true,
+    },
+  });
+  await runner2.start(qaPlan());
+  assert.equal(runner2.view().suggestion.available, false);
+  assert.equal(runner2.submitSuggestionAsk('food'), false);
+  assert.equal(events2.filter(e => e.t === 'suggestion_asked').length, 0);
+  runner2.endTour();
+});
+
 await checkAsync('sg runner: passenger ask → answer after the current item, full event trail, outcome resolves', async () => {
   const audio = new RealFakeAudio(400);
   const events = [];
@@ -1853,6 +1900,7 @@ await checkAsync('sg runner: passenger ask → answer after the current item, fu
       anchorsSeen = anchors;
       return [sgRouteCandidate(), sgRouteCandidate({ placeId: 'sg-route-other', name: 'Sg Route Other', score: 30 })];
     },
+    bed: passengerBed,
   });
   await runner.start(qaPlan());
   await until(() => audio.played.some(s => s.includes('s1%7Clandmark_origin.wav')), 'first story sounding');
@@ -1911,9 +1959,43 @@ await checkAsync('sg runner: an empty pool composes the honest none-answer — s
   runner.endTour();
 });
 
+await checkAsync('channel runner: Q&A and suggestions reciprocate the one-interruption rule (Nov 17, 2026 audit fix)', async () => {
+  const audio = new RealFakeAudio(400);
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    generateAnswer: async () => 'ANSWER: built in 1915.',
+    onEvent: (t, p) => events.push({ t, p }),
+    suggestionCandidates: async () => [sgRouteCandidate()],
+    bed: passengerBed,
+  });
+  await runner.start(qaPlan());
+  await until(() => audio.played.some(s => s.includes('s1%7Clandmark_origin.wav')), 'first story sounding');
+  // Suggestion first: while its answer is in flight, and then
+  // while its pick stands pending, a question is refused —
+  // the direction that checked only qaPhase before the fix.
+  assert.equal(runner.submitSuggestionAsk('food'), true);
+  assert.equal(runner.submitQuestion('When was the tower built?'), false, 'question refused while the suggestion answer is in flight');
+  await until(() => events.some(e => e.t === 'suggestion_playback'), 'suggestion answer to sound');
+  assert.equal(runner.view().suggestion.pending?.placeId, 'sg-route-tacos');
+  assert.equal(runner.submitQuestion('When was the tower built?'), false, 'question refused while the pick awaits its verdict');
+  assert.equal(events.filter(e => e.t === 'question_asked').length, 0);
+  assert.equal(runner.resolveSuggestion('accepted'), true);
+  // Then the question: while its cycle runs, an ask is
+  // refused (the direction Slice 4 already enforced) — and
+  // the channel frees when the answer settles.
+  assert.equal(runner.submitQuestion('When was the tower built?'), true);
+  assert.equal(runner.submitSuggestionAsk('food'), false, 'ask refused while the Q&A cycle runs');
+  await until(() => runner.view().qaPhase === 'idle' && runner.view().questionsAnswered === 1, 'answer to sound and settle');
+  assert.equal(runner.submitSuggestionAsk('food'), true, 'the channel frees when the answer settles');
+  runner.endTour();
+});
+
 // ---- unsolicited proposals (v16.2 Slice 5): the runner-level
 // seam engine. Passenger/Walking only, behind the SAME gate
-// as Slice 4's channel (supply dep + no Driving bed). The
+// as Slice 4's channel (supply dep + an affirmative
+// Passenger bed — fail-closed since the Nov 17, 2026 fix). The
 // pure judgments are pinned in the fresh-verify UP suites —
 // here: the gate's total absence, the two-boundary arm/speak
 // over real runner timing, the first-minute fence firing
@@ -1986,6 +2068,7 @@ await checkAsync('up runner: the first-minute fence fires in-runner — a young 
   const heard = [];
   const runner = upRunner(audio, events, heard, {
     suggestionCandidates: async () => [upRouteCandidate()],
+    bed: passengerBed,
   });
   await runner.start(qaPlan());
   await driveQaPlan(runner, heard);
@@ -2003,6 +2086,7 @@ await checkAsync('up runner: passenger end-to-end — arm at one boundary, speak
   const heard = [];
   const runner = upRunner(audio, events, heard, {
     suggestionCandidates: async () => [upRouteCandidate()],
+    bed: passengerBed,
   });
   const plan = qaPlan();
   // The composer reserves a climax from this cast (the last
@@ -2054,6 +2138,7 @@ await checkAsync('up runner: a speak attempt before the climax story suppresses 
   const heard = [];
   const runner = upRunner(audio, events, heard, {
     suggestionCandidates: async () => [upRouteCandidate()],
+    bed: passengerBed,
   });
   const plan = qaPlan();
   const stories = plan.items.filter(it => it.kind === 'story');
@@ -2073,6 +2158,7 @@ await checkAsync('up runner: a speak attempt right after the climax story suppre
   const heard = [];
   const runner = upRunner(audio, events, heard, {
     suggestionCandidates: async () => [upRouteCandidate()],
+    bed: passengerBed,
   });
   const plan = qaPlan();
   const stories = plan.items.filter(it => it.kind === 'story');
@@ -2158,6 +2244,7 @@ await checkAsync('pm runner: the priority rule — a standing place pick outrank
   const runner = upRunner(audio, events, heard, {
     suggestionCandidates: async () => [upRouteCandidate()],
     placeMemoryRecords: () => pmRecords(),
+    bed: passengerBed,
   });
   await drivePmPlan(runner, heard, events);
   const offered = events.filter(e => e.t === 'proposal_offered');
