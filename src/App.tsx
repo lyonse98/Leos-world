@@ -3,7 +3,7 @@ import { Play, Pause, Square, Send, MapPin, MessageCircle, Volume2, Waves } from
 import { Tour, type TourView } from './core/tour';
 import { createBrowserAudio } from './core/player';
 import { isTesterUnlocked, tryTesterUnlock } from './core/accessGate';
-import { observeThreadPick, setSeedState, shouldOfferSeed } from './core/profile';
+import { matchInputs, observeThreadPick, setSeedState, shouldOfferSeed } from './core/profile';
 import { SeedCard, YourMilesScreen } from './profileUi';
 import { usePosition, useWakeLock } from './hooks';
 import {
@@ -1752,6 +1752,13 @@ function MilesApp() {
         destinationPlaceKey: destPlaceKey,
         corridorTellingCounts,
         wovenIndexSupport: wovenSupportNow(),
+        // Profile rank signal (v16.2 Slice 3): this build's
+        // declared + inferred story-topic affinities, resolved
+        // once here (aged, pause-honoring) and shared by every
+        // compose and the coverage guarantee below. Empty when
+        // the profile is empty or paused — composition is then
+        // exactly the pre-slice composition.
+        profileTopics: matchInputs().topics,
         ...(threadChoice ? { threadChoice } : {}),
         toneMenu,
       };
@@ -1939,7 +1946,13 @@ function MilesApp() {
       // which reuses gapCtx/gapDeps with phase 'generation':
       // its stories promote into the shelf for future drives
       // and file their events marked deferred.
-      const gapCtx = { fetchedUnits: units, heardKeys, input, driveSec: route.durationSec };
+      const gapCtx = {
+        fetchedUnits: units,
+        heardKeys,
+        input,
+        driveSec: route.durationSec,
+        profileTopics: composeOpts.profileTopics,
+      };
       const gapDeps: GapFillDeps = {
         discoverSubjects: points => discoverGapSubjects(points, googleKeys),
         generateStory: prompt => narration.generateStory(prompt),
