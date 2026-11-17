@@ -147,9 +147,12 @@ function localWeekMinutes(nowMs: number, utcOffsetMinutes: number): number {
  * Open-now, computed from source periods only. Also derives
  * the containing period's close (when open) or the next
  * opening (when closed) as epoch instants, minute-precise.
- * An open-ended period (no close — the 24 h shape) is honored
- * for a day past its opening, which covers the overnight case
- * without claiming the whole week from one period.
+ * Period lengths are modular over the week: an overnight
+ * close carries the NEXT day's number on the wire (Fri 22:00
+ * → Sat 02:00), and a Saturday period may close on Sunday —
+ * the next cycle's ground. An open-ended period (no close —
+ * the 24 h shape) states no close at all: it is honored as
+ * open with closesAtMs null, never a fabricated close.
  */
 export function computeOpenNow(
   periods: readonly HoursPeriod[],
@@ -158,18 +161,30 @@ export function computeOpenNow(
 ): { openNow: boolean; closesAtMs: number | null; opensAtMs: number | null } {
   const nowMin = localWeekMinutes(nowMs, utcOffsetMinutes);
   let closesInMin: number | null = null;
+  let openEnded = false;
   let opensInMin: number | null = null;
   for (const p of periods) {
     const openMin = pointMinutes(p.open);
-    const closeMinRaw = p.close ? pointMinutes(p.close) : openMin + 1440;
-    const closeMin = closeMinRaw <= openMin ? closeMinRaw + MIN_PER_WEEK : closeMinRaw;
+    let closeMin: number | null;
+    if (p.close) {
+      const len = (pointMinutes(p.close) - openMin + MIN_PER_WEEK) % MIN_PER_WEEK;
+      if (len === 0) continue; // a degenerate period carries no claim
+      closeMin = openMin + len;
+    } else {
+      closeMin = null; // open-ended: no close within the week
+    }
+    const span = closeMin ?? openMin + MIN_PER_WEEK;
     // The interval may start in the previous week cycle and
     // wrap into this one, so test both this week's instant
     // and its next-cycle twin against the interval.
     for (const probe of [nowMin, nowMin + MIN_PER_WEEK]) {
-      if (probe >= openMin && probe < closeMin) {
-        const delta = closeMin - probe;
-        if (closesInMin === null || delta < closesInMin) closesInMin = delta;
+      if (probe >= openMin && probe < span) {
+        if (closeMin !== null) {
+          const delta = closeMin - probe;
+          if (closesInMin === null || delta < closesInMin) closesInMin = delta;
+        } else {
+          openEnded = true;
+        }
       }
     }
     // Next opening strictly after now (a period opening this
@@ -177,8 +192,12 @@ export function computeOpenNow(
     const deltaOpen = (openMin - nowMin + MIN_PER_WEEK) % MIN_PER_WEEK;
     if (deltaOpen > 0 && (opensInMin === null || deltaOpen < opensInMin)) opensInMin = deltaOpen;
   }
-  if (closesInMin !== null) {
-    return { openNow: true, closesAtMs: nowMs + closesInMin * 60_000, opensAtMs: null };
+  if (closesInMin !== null || openEnded) {
+    return {
+      openNow: true,
+      closesAtMs: closesInMin !== null ? nowMs + closesInMin * 60_000 : null,
+      opensAtMs: null,
+    };
   }
   return {
     openNow: false,
