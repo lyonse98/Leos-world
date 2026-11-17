@@ -57,6 +57,7 @@ const extras = {
   currentEvents: engine.currentEvents,
   suggestions: engine.suggestions,
   proposals: engine.proposals,
+  liveSpend: engine.liveSpend,
   composeRoutePlan: engine.composeRoutePlan,
   hashString: engine.hashString,
   CORRIDOR_SEGMENTS: engine.CORRIDOR_SEGMENTS,

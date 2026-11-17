@@ -21,6 +21,7 @@ export * as currentEvents from '../../src/core/currentEvents';
 export * as suggestions from '../../src/core/suggestions';
 export * as proposals from '../../src/core/proposals';
 export * as placeMemory from '../../src/core/placeMemory';
+export * as liveSpend from '../../src/core/liveSpend';
 export { hashString } from '../../src/utils/hash';
 export { houseImportanceFor } from '../../src/data/houseImportance';
 export {

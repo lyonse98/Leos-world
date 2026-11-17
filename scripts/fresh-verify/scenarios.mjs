@@ -105,7 +105,7 @@ async function healthyOpening(world, audio, pos = UTC, speed = 8) {
 }
 
 export async function runScenarios(Tour, extras) {
-  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, facts, partners, freshness, currentEvents, suggestions, proposals, placeMemory, composeRoutePlan, hashString } = extras;
+  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, facts, partners, freshness, currentEvents, suggestions, proposals, placeMemory, liveSpend, composeRoutePlan, hashString } = extras;
 
   // ---------------------------------------------------------- S-01 healthy start
   suite('S-01 healthy start / opener order');
@@ -7242,6 +7242,202 @@ export async function runScenarios(Tour, extras) {
       world.eventsOf('proposal_offered').length === 0 && tour.view().diagnostics.proposalsSpoken === 0);
     check('no tray record was written for a callback never spoken',
       proposals.loadProposalRecords(proposals.localProposalStore).length === 0);
+    tour.endTour();
+  }
+
+  // ---------------------------------------------------------------
+  // SP suites (Nov 16, 2026): the live-spend sub-cap, v16.2
+  // Slice 8. The suggestion / current-events layer's Places
+  // asks are charged an estimate against an on-device monthly
+  // ledger; at the $10 pilot cap the asks stop and discovery
+  // degrades to the hours cache — never silence, never a
+  // fabricated claim. SP-1 pins the ledger + the shipped
+  // constants, SP-2 governance at discovery under budget,
+  // SP-3 the cap trip and the degraded serve, SP-4 the
+  // crossing ask (in-flight completes) and the tour wiring.
+  const SP_EST = liveSpend.LIVE_SPEND_POLICY.placesSearchNearbyMicroUsd;
+  const SP_CAP = liveSpend.LIVE_SPEND_POLICY.monthlyCapMicroUsd;
+  const spFill = (store, nowMs, microUsd, asks) =>
+    store.write(JSON.stringify({ v: 1, months: { [liveSpend.spendMonthKey(nowMs)]: { microUsd, asks } } }));
+  const spEvents = () => {
+    const list = [];
+    return { list, sink: (type, payload) => list.push({ type, payload }) };
+  };
+
+  suite('SP-1 the ledger: estimates accumulate, persist across governors, roll over with the month; the shipped constants are the pilot numbers');
+  {
+    check('the cap is the brief\'s $10/mo pilot sub-cap, in micro-USD', SP_CAP === 10_000_000, `${SP_CAP}`);
+    check('one Places ask is estimated at the Enterprise + Atmosphere list: $0.040', SP_EST === 40_000, `${SP_EST}`);
+
+    const NOV = new Date(2026, 10, 15, 12, 0, 0).getTime();
+    const DEC = new Date(2026, 11, 15, 12, 0, 0).getTime();
+    check('the month key is the device-local calendar month', liveSpend.spendMonthKey(NOV) === '2026-11' && liveSpend.spendMonthKey(DEC) === '2026-12');
+
+    const store = ceMemStore();
+    const gov = liveSpend.createSpendGovernor({ store, nowMs: NOV });
+    const first = gov.beginPlacesAsk();
+    check('a first ask dispatches and charges the estimate', first !== null && first.monthMicroUsd === SP_EST && first.monthAsks === 1);
+    const second = gov.beginPlacesAsk();
+    check('asks accumulate in integer micro-USD', second !== null && second.monthMicroUsd === 2 * SP_EST && second.monthAsks === 2);
+    check('the month reads back through the ledger API', (() => {
+      const m = liveSpend.monthSpend(store, NOV);
+      return m.microUsd === 2 * SP_EST && m.asks === 2 && m.monthKey === '2026-11';
+    })());
+
+    const nextSession = liveSpend.createSpendGovernor({ store, nowMs: NOV });
+    check('a new governor over the same store sees the standing total (persistence across sessions)',
+      nextSession.monthMicroUsd() === 2 * SP_EST && nextSession.degraded() === false);
+
+    spFill(store, NOV, SP_CAP, 250);
+    check('a month standing at the cap is degraded, and further asks are refused',
+      liveSpend.spendCapReached(store, NOV) === true && gov.beginPlacesAsk() === null);
+    check('rollover: the new month starts at zero under the same ledger', (() => {
+      const m = liveSpend.monthSpend(store, DEC);
+      return m.microUsd === 0 && m.asks === 0 && liveSpend.spendCapReached(store, DEC) === false;
+    })());
+    const decGov = liveSpend.createSpendGovernor({ store, nowMs: DEC });
+    check('rollover: December asks dispatch again, charged to December',
+      decGov.beginPlacesAsk() !== null && liveSpend.monthSpend(store, DEC).microUsd === SP_EST &&
+      liveSpend.monthSpend(store, NOV).microUsd === SP_CAP);
+
+    const corrupt = ceMemStore();
+    corrupt.write('not a ledger {');
+    check('a corrupt ledger reads as empty and never blocks an ask',
+      liveSpend.monthSpend(corrupt, NOV).microUsd === 0 &&
+      liveSpend.createSpendGovernor({ store: corrupt, nowMs: NOV }).beginPlacesAsk() !== null);
+  }
+
+  suite('SP-2 governance at discovery: under budget the cap is invisible — asks dispatch, each is charged and filed');
+  {
+    const spendStore = ceMemStore();
+    const ev = spEvents();
+    let calls = 0;
+    const counting = { fetchPlaces: async () => { calls += 1; return [ceRaw()]; } };
+    const pool = await currentEvents.discoverEventCandidates([CE_ANCHOR], {
+      nowMs: CE_NOW, provider: counting, match: CE_NO_MATCH, constraints: CE_NO_CONSTRAINTS,
+      cache: null, spendStore, onSpendEvent: ev.sink,
+    });
+    check('the candidate still arrives, exactly as ungoverned discovery serves it', pool.length === 1 && pool[0].placeId === 'ce-place-1');
+    check('one anchor is one dispatched ask', calls === 1, `calls=${calls}`);
+    const asks = ev.list.filter(e => e.type === 'live_spend_ask');
+    check('the ask is filed with its estimate and the running monthly total',
+      asks.length === 1 && asks[0].payload.est_micro_usd === SP_EST && asks[0].payload.month_micro_usd === SP_EST &&
+      asks[0].payload.cap_micro_usd === SP_CAP && asks[0].payload.surface === 'places-search-nearby',
+      JSON.stringify(ev.list));
+    check('no cap or degraded event fires under budget', ev.list.every(e => e.type === 'live_spend_ask'));
+    check('the ledger holds the charge', liveSpend.monthSpend(spendStore, CE_NOW).microUsd === SP_EST);
+
+    const two = await currentEvents.discoverEventCandidates(
+      [CE_ANCHOR, { lat: 32.9, lng: -117.18, kind: 'destination' }],
+      { nowMs: CE_NOW, provider: counting, match: CE_NO_MATCH, constraints: CE_NO_CONSTRAINTS, cache: null, spendStore, onSpendEvent: ev.sink },
+    );
+    check('a two-anchor discovery is two asks — the total is three estimates',
+      calls === 3 && two.length === 1 && liveSpend.monthSpend(spendStore, CE_NOW).microUsd === 3 * SP_EST,
+      `calls=${calls}`);
+  }
+
+  suite('SP-3 the cap trip: asks stop dispatching, discovery degrades to the freshness-gated cache, and the none-answer stays honest');
+  {
+    // Prime a cache through a live fetch on a solvent ledger.
+    const cacheStore = ceMemStore();
+    const solvent = ceMemStore();
+    const primed = await currentEvents.discoverEventCandidates([CE_ANCHOR], {
+      nowMs: CE_NOW, provider: ceProvider([ceRaw()]), match: CE_NO_MATCH, constraints: CE_NO_CONSTRAINTS,
+      cache: cacheStore, spendStore: solvent,
+    });
+    check('the priming fetch lands a candidate and writes the cache', primed.length === 1 && currentEvents.loadHoursCache(cacheStore).has('ce-place-1'));
+
+    // The same road on an exhausted ledger: the provider would
+    // return a DIFFERENT place — it must never be asked.
+    const capped = ceMemStore();
+    spFill(capped, CE_NOW, SP_CAP, 250);
+    const ev = spEvents();
+    let calls = 0;
+    const other = { fetchPlaces: async () => { calls += 1; return [ceRaw({ placeId: 'ce-other', name: 'Ce Other Eats' })]; } };
+    const degraded = await currentEvents.discoverEventCandidates([CE_ANCHOR], {
+      nowMs: CE_NOW, provider: other, match: CE_NO_MATCH, constraints: CE_NO_CONSTRAINTS,
+      cache: cacheStore, spendStore: capped, onSpendEvent: ev.sink,
+    });
+    check('at the cap the provider is never dispatched', calls === 0, `calls=${calls}`);
+    check('degradation serves the cached candidate — the channel keeps answering from what it has',
+      degraded.length === 1 && degraded[0].placeId === 'ce-place-1', JSON.stringify(degraded.map(c => c.placeId)));
+    check('the cap-trip is filed, and the degraded serve is filed once with its reason code',
+      ev.list.filter(e => e.type === 'live_spend_capped').length === 1 &&
+      ev.list.filter(e => e.type === 'live_spend_degraded').length === 1 &&
+      ev.list.find(e => e.type === 'live_spend_degraded').payload.reason === 'spend-cap',
+      JSON.stringify(ev.list));
+    check('no ask is charged for a dispatch that never happened', liveSpend.monthSpend(capped, CE_NOW).microUsd === SP_CAP);
+
+    // Degraded with nothing cached: an empty pool, and the
+    // composer's honest none — never an invented place.
+    const ev2 = spEvents();
+    const empty = await currentEvents.discoverEventCandidates([CE_ANCHOR], {
+      nowMs: CE_NOW, provider: other, match: CE_NO_MATCH, constraints: CE_NO_CONSTRAINTS,
+      cache: ceMemStore(), spendStore: capped, onSpendEvent: ev2.sink,
+    });
+    const noneAnswer = suggestions.composeSuggestion(empty, { intent: 'food', nowMs: CE_NOW });
+    check('an empty degraded pool composes the honest pool-empty none-answer',
+      empty.length === 0 && noneAnswer.kind === 'none' && noneAnswer.reasonCodes[0] === 'pool-empty');
+
+    // Degraded with only STALE cache: freshness still binds —
+    // the cap never licenses a stale "open now".
+    const staleCache = ceMemStore();
+    staleCache.write(JSON.stringify({
+      v: 1,
+      entries: { 'ce-place-1': ceRaw({ hours: ceHours({ fetchedAt: CE_NOW - 8 * CE_DAY_MS }) }) },
+    }));
+    const stale = await currentEvents.discoverEventCandidates([CE_ANCHOR], {
+      nowMs: CE_NOW, provider: other, match: CE_NO_MATCH, constraints: CE_NO_CONSTRAINTS,
+      cache: staleCache, spendStore: capped,
+    });
+    check('a stale cached record stays ineligible in degradation — no fabricated open-now', stale.length === 0);
+  }
+
+  suite('SP-4 the crossing ask: an ask dispatched under the cap completes and counts; the next is refused — and the tour files spend on its emit path');
+  {
+    // One ask of headroom left in the month.
+    const spendStore = ceMemStore();
+    spFill(spendStore, CE_NOW, SP_CAP - SP_EST, 249);
+    const ev = spEvents();
+    let calls = 0;
+    const counting = { fetchPlaces: async () => { calls += 1; return [ceRaw()]; } };
+    const pool = await currentEvents.discoverEventCandidates(
+      [CE_ANCHOR, { lat: 32.9, lng: -117.18, kind: 'destination' }],
+      { nowMs: CE_NOW, provider: counting, match: CE_NO_MATCH, constraints: CE_NO_CONSTRAINTS, cache: null, spendStore, onSpendEvent: ev.sink },
+    );
+    check('the crossing ask dispatches and its results serve — in-flight is never recalled',
+      calls === 1 && pool.length === 1 && pool[0].placeId === 'ce-place-1', `calls=${calls}`);
+    check('the crossing charge lands: the month stands exactly at the cap',
+      liveSpend.monthSpend(spendStore, CE_NOW).microUsd === SP_CAP);
+    check('the second anchor is refused at dispatch and the degraded serve is filed',
+      ev.list.filter(e => e.type === 'live_spend_capped').length === 1 &&
+      ev.list.filter(e => e.type === 'live_spend_degraded').length === 1,
+      JSON.stringify(ev.list));
+    const gov = liveSpend.createSpendGovernor({ store: spendStore, nowMs: CE_NOW });
+    check('from the cap on, the governor reports degraded and refuses every further ask',
+      gov.degraded() === true && gov.beginPlacesAsk() === null);
+
+    // The freeform wiring: the pool refresh hands discovery a
+    // spend sink on the engine's own emit path (the harness
+    // seam fakes the network edge, so the wiring is what is
+    // pinned here; discovery-level filing is SP-2/SP-3).
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park')],
+      library: ['Balboa Park'],
+      eventCandidates: [],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    await world.clock.advance(40_000);
+    tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(10_000);
+    const sink = world.eventCandidateCalls[0]?.opts.onSpendEvent;
+    check('the refresh passes a spend-event sink into discovery', typeof sink === 'function',
+      JSON.stringify(Object.keys(world.eventCandidateCalls[0]?.opts ?? {})));
+    sink('live_spend_ask', { surface: 'places-search-nearby', est_micro_usd: SP_EST, month_micro_usd: SP_EST, cap_micro_usd: SP_CAP });
+    check('the sink files on the tour\'s emit path, payload intact',
+      world.eventsOf('live_spend_ask').length === 1 && world.eventsOf('live_spend_ask')[0].payload.month_micro_usd === SP_EST);
     tour.endTour();
   }
 }
