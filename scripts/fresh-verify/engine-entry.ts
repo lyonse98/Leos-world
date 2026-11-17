@@ -6,10 +6,13 @@ export {
   discoverCandidates,
   applyHouseDemotion,
   applyPartnerBoost,
+  applyProfileBoost,
+  candidateTopics,
   HOUSE_SCORE_PENALTY,
   HOUSE_SCORE_PENALTY_SOLID,
   HOUSE_SCORE_PENALTY_DEAD,
 } from '../../src/core/facts';
+export * as profileRank from '../../src/core/profileRank';
 export { isTier1HouseException } from '../../src/data/tier1HouseExceptions';
 export { composeRoutePlan } from '../../src/core/routeMode';
 export * as partners from '../../src/data/partners';

@@ -105,7 +105,7 @@ async function healthyOpening(world, audio, pos = UTC, speed = 8) {
 }
 
 export async function runScenarios(Tour, extras) {
-  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, facts, partners, freshness, currentEvents, composeRoutePlan, hashString } = extras;
+  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, facts, partners, freshness, currentEvents, composeRoutePlan, hashString } = extras;
 
   // ---------------------------------------------------------- S-01 healthy start
   suite('S-01 healthy start / opener order');
@@ -6196,5 +6196,225 @@ export async function runScenarios(Tour, extras) {
       currentEvents.kindForTypes(['gas_station']) === null);
     check('an alcohol type wins the kind over food (a bar-restaurant is a drink candidate)',
       currentEvents.kindForTypes(['restaurant', 'bar']) === 'drink');
+  }
+
+  // ---------------------------------------------------------------
+  // PC suites (Nov 16, 2026): profile in the composer, v16.2
+  // Slice 3. The stored taste profile (declared + inferred
+  // story-topic affinities, profile.ts) becomes a SOFT ranking
+  // signal: freeform discovery gains a capped score boost
+  // (facts.applyProfileBoost), the route composer's bucket
+  // chain and climax tie-break gain a rank term seated under
+  // tone (profileRank.ts owns the doctrine). The fences pinned
+  // here: selection-only; parity with no / empty / paused
+  // profile; inferred strictly weaker than declared; no
+  // crossing of a class boundary (the structural score steps
+  // in freeform, the house class and this drive's tone steer
+  // in route); declared constraints never leak into the
+  // signal. PC-1/PC-2 follow the PN-1 direct-function pattern,
+  // PC-5/PC-7 the PN-2 contested-seat pattern.
+  const pcCandidate = (name, score, over = {}) => ({
+    name, lat: 32.7157, lng: -117.1611, source: 'major', types: [],
+    rating: null, userRatings: null, address: null, tier1: false, partnerId: null, score,
+    registry: null, distanceM: 300, ...over,
+  });
+  const pcDeclared = topic => [{ topic, weight: 1, source: 'declared' }];
+  const pcInferred = (topic, weight) => [{ topic, weight, source: 'inferred' }];
+
+  suite('PC-1 profile boost (freeform): declared topics add the capped boost, inferred add proportionally less, empty input is a no-op');
+  {
+    check('candidate topics resolve from the shelf tags (Balboa Stadium carries Sport; Allied Gardens carries San Diego River)',
+      facts.candidateTopics(pcCandidate('Balboa Stadium', 0)).includes('Sport') &&
+      facts.candidateTopics(pcCandidate('Allied Gardens', 0)).includes('San Diego River'),
+      JSON.stringify(facts.candidateTopics(pcCandidate('Balboa Stadium', 0))));
+
+    const park = pcCandidate('Balboa Park', 50);
+    const stadium = pcCandidate('Balboa Stadium', 50);
+    const gardens = pcCandidate('Allied Gardens', 50);
+    facts.applyProfileBoost([park, stadium, gardens], pcDeclared('Sport'));
+    check('a declared affinity adds exactly the cap (8) to a matching candidate',
+      stadium.score === 58, `score=${stadium.score}`);
+    check('non-matching candidates are untouched', park.score === 50 && gardens.score === 50,
+      `${park.score}/${gardens.score}`);
+
+    const stadiumInf = pcCandidate('Balboa Stadium', 50);
+    facts.applyProfileBoost([stadiumInf], pcInferred('Sport', 0.5));
+    check('an inferred affinity at 0.5 adds half the cap — strictly weaker than declared',
+      stadiumInf.score === 54, `score=${stadiumInf.score}`);
+
+    const untouched = pcCandidate('Balboa Stadium', 50);
+    facts.applyProfileBoost([untouched], []);
+    check('an empty topic list is an exact no-op', untouched.score === 50);
+  }
+
+  suite('PC-2 profile boost (freeform order): near-ties swap within reach of the cap, structural steps never do');
+  {
+    const order = list => [...list].sort((a, b) => b.score - a.score).map(c => c.name);
+
+    const a1 = pcCandidate('Balboa Park', 55);
+    const b1 = pcCandidate('Balboa Stadium', 50);
+    facts.applyProfileBoost([a1, b1], pcDeclared('Sport'));
+    check('declared: a 5-point deficit flips (50 + 8 > 55)',
+      JSON.stringify(order([a1, b1])) === JSON.stringify(['Balboa Stadium', 'Balboa Park']),
+      JSON.stringify(order([a1, b1])));
+
+    const a2 = pcCandidate('Balboa Park', 55);
+    const b2 = pcCandidate('Balboa Stadium', 50);
+    facts.applyProfileBoost([a2, b2], pcInferred('Sport', 0.5));
+    check('inferred 0.5: the same deficit holds (50 + 4 < 55)',
+      JSON.stringify(order([a2, b2])) === JSON.stringify(['Balboa Park', 'Balboa Stadium']),
+      JSON.stringify(order([a2, b2])));
+
+    const a3 = pcCandidate('Balboa Park', 70);
+    const b3 = pcCandidate('Balboa Stadium', 50);
+    facts.applyProfileBoost([a3, b3], pcDeclared('Sport'));
+    check('a 20-point structural step (the house-importance graduation) is never bridged (50 + 8 < 70)',
+      JSON.stringify(order([a3, b3])) === JSON.stringify(['Balboa Park', 'Balboa Stadium']),
+      JSON.stringify(order([a3, b3])));
+  }
+
+  suite('PC-3 profile boost (freeform, shipped store): the default read path honors the profile — and its pause');
+  {
+    profile.wipeProfile();
+    const fresh = pcCandidate('Balboa Stadium', 50);
+    facts.applyProfileBoost([fresh]);
+    check('no profile on the device: the default path is an exact no-op', fresh.score === 50);
+
+    profile.setDeclaredTaste('storyTopics', ['Sport'], 'pc-sim');
+    const declared = pcCandidate('Balboa Stadium', 50);
+    facts.applyProfileBoost([declared]);
+    check('a declared story-topic on the device feeds the default path (+8)',
+      declared.score === 58, `score=${declared.score}`);
+
+    profile.setPaused(true);
+    const paused = pcCandidate('Balboa Stadium', 50);
+    facts.applyProfileBoost([paused]);
+    check('paused: the default path is an exact no-op again (pause means pause)', paused.score === 50);
+    profile.wipeProfile();
+  }
+
+  suite('PC-4 profile rank seam: weights resolve strongest-topic, declared over inferred, none is neutral');
+  {
+    const empty = profileRank.profileWeightMap(undefined);
+    check('no weights: every rank reads the neutral 1',
+      profileRank.profileRankOf(['Sport'], empty) === 1 && profileRank.profileRankOf([], empty) === 1);
+    const mixed = profileRank.profileWeightMap([
+      { topic: 'Sport', weight: 1, source: 'declared' },
+      { topic: 'Film', weight: 0.3, source: 'inferred' },
+    ]);
+    check('a declared match ranks 0; an inferred match lands strictly between; a miss reads 1',
+      profileRank.profileRankOf(['Sport'], mixed) === 0 &&
+      Math.abs(profileRank.profileRankOf(['Film'], mixed) - 0.7) < 1e-9 &&
+      profileRank.profileRankOf(['Coast'], mixed) === 1);
+    check('a multi-topic unit takes its strongest topic',
+      profileRank.profileRankOf(['Coast', 'Film', 'Sport'], mixed) === 0);
+    check('the score form is the cap times the weight, and the cap is 8',
+      profileRank.profileScoreBoost(['Film'], mixed) === profileRank.PROFILE_FREEFORM_BOOST_MAX * 0.3 &&
+      profileRank.PROFILE_FREEFORM_BOOST_MAX === 8);
+  }
+
+  // PC-5/PC-6 share the contested-seat fixture (the PN-2 shape):
+  // two same-class, same-ground candidates, a one-story budget,
+  // the bucket's rank order decides the seat.
+  const PC_SITE = { lat: 32.7106, lng: -117.160751 };
+  const pcUnit = (id, placeKey, placeName, topics, over = {}) => ({
+    id, placeKey, placeName, angle: 'landmark_origin', lat: PC_SITE.lat, lng: PC_SITE.lng,
+    durationSec: 150, topics, tone: 'warm', toneSecondary: null,
+    audioPath: `library/${placeKey}/landmark_origin.wav`, storyText: 'x'.repeat(400), ...over,
+  });
+  const pcAlpha = () => pcUnit('alpha museum|landmark_origin', 'alpha museum', 'Alpha Museum', ['Film']);
+  const pcMango = () => pcUnit('mango museum|landmark_origin', 'mango museum', 'Mango Museum', ['Sport']);
+  const pcPath = [{ lat: 32.7050, lng: PC_SITE.lng }, { lat: 32.7160, lng: PC_SITE.lng }];
+  const pcDest = { lat: 32.7160, lng: PC_SITE.lng };
+  const pcInput = { destinationText: 'North End', arrivalTimeMs: null, tone: null, topics: [], audience: 'standard' };
+  const pcSeat = (opts = {}, units = [pcAlpha(), pcMango()], inp = pcInput) =>
+    composeRoutePlan(units, pcPath, pcDest, 'North End', inp, {
+      nowMs: 0, heardKeys: new Set(), budgetSecOverride: 170, driveSec: null, ...opts,
+    }).items.filter(i => i.kind === 'story').map(i => i.id);
+
+  suite('PC-5 profile rank (route): the seat follows declared over inferred over none; tone and house class stay senior');
+  {
+    check('no profile opt: the baseline candidate takes the seat (parity)',
+      JSON.stringify(pcSeat()) === JSON.stringify(['alpha museum|landmark_origin']),
+      JSON.stringify(pcSeat()));
+    check('explicitly empty weights: still the baseline (parity)',
+      JSON.stringify(pcSeat({ profileTopics: [] })) === JSON.stringify(['alpha museum|landmark_origin']));
+    check('a declared affinity takes the seat',
+      JSON.stringify(pcSeat({ profileTopics: pcDeclared('Sport') })) === JSON.stringify(['mango museum|landmark_origin']),
+      JSON.stringify(pcSeat({ profileTopics: pcDeclared('Sport') })));
+    check('an inferred affinity takes the seat when nothing competes',
+      JSON.stringify(pcSeat({ profileTopics: pcInferred('Sport', 0.4) })) === JSON.stringify(['mango museum|landmark_origin']));
+    check('declared beats inferred head-to-head (Film declared vs Sport inferred 0.99)',
+      JSON.stringify(pcSeat({ profileTopics: [...pcDeclared('Film'), ...pcInferred('Sport', 0.99)] })) === JSON.stringify(['alpha museum|landmark_origin']));
+    check('and the mirror: Sport declared beats Film inferred 0.99',
+      JSON.stringify(pcSeat({ profileTopics: [...pcInferred('Film', 0.99), ...pcDeclared('Sport')] })) === JSON.stringify(['mango museum|landmark_origin']));
+
+    const mangoGrand = () => pcUnit('mango museum|landmark_origin', 'mango museum', 'Mango Museum', ['Sport'], { tone: 'grand' });
+    check("this drive's tone steer stays senior to the stored profile (tone-matched alpha beats profile-matched mango)",
+      JSON.stringify(pcSeat({ profileTopics: pcDeclared('Sport') }, [pcAlpha(), mangoGrand()], { ...pcInput, tone: 'warm' })) === JSON.stringify(['alpha museum|landmark_origin']),
+      JSON.stringify(pcSeat({ profileTopics: pcDeclared('Sport') }, [pcAlpha(), mangoGrand()], { ...pcInput, tone: 'warm' })));
+
+    const mangoHouseClass = () => pcUnit('mango museum|landmark_origin', 'mango museum', 'Mango Museum', ['Sport', 'Architecture']);
+    check('the house class stays senior: a declared affinity cannot promote a house-class story across the boundary',
+      JSON.stringify(pcSeat({ profileTopics: pcDeclared('Sport') }, [pcAlpha(), mangoHouseClass()])) === JSON.stringify(['alpha museum|landmark_origin']),
+      JSON.stringify(pcSeat({ profileTopics: pcDeclared('Sport') }, [pcAlpha(), mangoHouseClass()])));
+  }
+
+  suite('PC-6 profile rank (route, shipped store): matchInputs feeds the composer; pause restores parity');
+  {
+    profile.wipeProfile();
+    profile.setDeclaredTaste('storyTopics', ['Sport'], 'pc-sim');
+    const live = profile.matchInputs().topics;
+    check('the store read path yields the declared weight',
+      live.length === 1 && live[0].topic === 'Sport' && live[0].weight === 1 && live[0].source === 'declared',
+      JSON.stringify(live));
+    check('composer + store weights: the affinity takes the seat',
+      JSON.stringify(pcSeat({ profileTopics: live })) === JSON.stringify(['mango museum|landmark_origin']),
+      JSON.stringify(pcSeat({ profileTopics: live })));
+    profile.setPaused(true);
+    check('paused: matchInputs empties and the seat returns to the baseline',
+      profile.matchInputs().topics.length === 0 &&
+      JSON.stringify(pcSeat({ profileTopics: profile.matchInputs().topics })) === JSON.stringify(['alpha museum|landmark_origin']));
+    profile.wipeProfile();
+  }
+
+  suite('PC-7 profile rank (climax): the tie-break hears the profile; without it the longer story closes');
+  {
+    const climaxUnit = (id, placeKey, placeName, topics, durationSec) => ({
+      id, placeKey, placeName, angle: 'landmark_origin', lat: pcDest.lat, lng: pcDest.lng,
+      durationSec, topics, tone: 'warm', toneSecondary: null,
+      audioPath: `library/${placeKey}/landmark_origin.wav`, storyText: 'x'.repeat(400),
+    });
+    const alpha = () => climaxUnit('alpha museum|landmark_origin', 'alpha museum', 'Alpha Museum', ['Film'], 200);
+    const mango = () => climaxUnit('mango museum|landmark_origin', 'mango museum', 'Mango Museum', ['Sport'], 120);
+    const planIds = (opts = {}) =>
+      composeRoutePlan([alpha(), mango()], pcPath, pcDest, 'North End', pcInput, {
+        nowMs: 0, heardKeys: new Set(), budgetSecOverride: 400, driveSec: null, ...opts,
+      }).items.filter(i => i.kind === 'story').map(i => i.id);
+
+    const base = planIds();
+    check('both stories seat under the wide budget', base.length === 2, JSON.stringify(base));
+    check('no profile: the longer story closes the drive (climax by duration)',
+      base[base.length - 1] === 'alpha museum|landmark_origin', JSON.stringify(base));
+    const boosted = planIds({ profileTopics: pcDeclared('Sport') });
+    check('a declared affinity takes the climax slot for the shorter matched story',
+      boosted[boosted.length - 1] === 'mango museum|landmark_origin', JSON.stringify(boosted));
+  }
+
+  suite('PC-8 constraints stay out of the ranking signal (and keep reading back as hard values)');
+  {
+    profile.wipeProfile();
+    profile.setDeclaredConstraint('budgetComfort', 'splurge', 'pc-sim');
+    profile.setDeclaredConstraint('dietary', ['vegetarian'], 'pc-sim');
+    profile.setDeclaredTaste('cuisines', ['seafood'], 'pc-sim');
+    const inputs = profile.matchInputs();
+    check('a constraints-and-cuisines profile yields NO story-topic weights',
+      inputs.topics.length === 0, JSON.stringify(inputs.topics));
+    const c = pcCandidate('Balboa Stadium', 50);
+    facts.applyProfileBoost([c], inputs.topics);
+    check('and discovery is untouched by it', c.score === 50);
+    check('the constraints themselves still read back verbatim for their own consumers',
+      profile.getConstraints().budgetComfort === 'splurge' && profile.getConstraints().dietary.join() === 'vegetarian');
+    profile.wipeProfile();
   }
 }
