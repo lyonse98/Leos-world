@@ -180,6 +180,17 @@ execFileSync(
 );
 const pf = await import(pathToFileURL(pfOut).href);
 
+// CHECK-COUNT FLOOR (v16.2 audit fix, Nov 17, 2026): a green
+// run must EXECUTE at least this many checks. A broken suite
+// throws and fails loudly, but a cleanly deleted or
+// never-registered suite used to lower the denominator and
+// still exit 0 — the total was an observation, not an
+// assertion. The rule: adding a suite raises this floor in
+// the same commit; a run that executes fewer checks than
+// the floor FAILS, whatever its pass rate (enforced at the
+// final tally below).
+const MIN_CHECKS = 390;
+
 let passed = 0;
 let failed = 0;
 function check(name, fn) {
@@ -10436,4 +10447,10 @@ check('PF-12 profile: a deleted inferred topic stays deleted until new evidence 
 });
 
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);
+if (passed + failed < MIN_CHECKS) {
+  console.log(
+    `CHECK-COUNT FLOOR: only ${passed + failed} checks executed, floor is ${MIN_CHECKS} — a suite has gone missing (see the MIN_CHECKS rule above).`,
+  );
+  process.exit(1);
+}
 process.exit(failed === 0 ? 0 : 1);

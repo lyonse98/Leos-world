@@ -81,7 +81,7 @@ const extras = {
 };
 
 const args = process.argv.slice(2);
-const { summarize } = await import('./harness.mjs');
+const { summarize, FRESH_VERIFY_MIN_CHECKS } = await import('./harness.mjs');
 
 if (!args.includes('--mc')) {
   const { runScenarios } = await import('./scenarios.mjs');
@@ -92,4 +92,8 @@ if (!args.includes('--scenarios')) {
   await runMonteCarlo(engine.Tour, extras);
 }
 
-process.exit(summarize() ? 0 : 1);
+// The check-count floor applies to the full run only (see
+// harness.mjs): a partial run executes a legitimately
+// smaller denominator.
+const fullRun = !args.includes('--scenarios') && !args.includes('--mc');
+process.exit(summarize(fullRun ? FRESH_VERIFY_MIN_CHECKS : 0) ? 0 : 1);

@@ -502,12 +502,29 @@ export function check(label, cond, detail = '') {
   results.push({ suite: currentSuite, label, pass: Boolean(cond), detail });
   if (!cond) console.log(`  FAIL ${currentSuite} :: ${label} ${detail}`);
 }
-export function summarize() {
+// CHECK-COUNT FLOOR (v16.2 audit fix, Nov 17, 2026): a green
+// run must EXECUTE at least this many checks. A broken suite
+// throws and fails loudly, but a cleanly deleted or
+// never-registered suite used to lower the denominator and
+// still exit 0 — the total was an observation, not an
+// assertion. The rule: adding a suite raises this floor in
+// the same commit; a run that executes fewer checks than
+// the floor FAILS, whatever its pass rate. run.mjs enforces
+// the floor on the full run (scenarios + Monte Carlo);
+// partial runs (--scenarios / --mc) skip it.
+export const FRESH_VERIFY_MIN_CHECKS = 1008;
+export function summarize(minChecks = 0) {
   const failed = results.filter(r => !r.pass);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
   if (failed.length) {
     console.log('FAILURES:');
     for (const f of failed) console.log(` - ${f.suite} :: ${f.label} ${f.detail}`);
+  }
+  if (results.length < minChecks) {
+    console.log(
+      `CHECK-COUNT FLOOR: only ${results.length} checks executed, floor is ${minChecks} — a suite has gone missing (see harness.mjs).`,
+    );
+    return false;
   }
   return failed.length === 0;
 }
