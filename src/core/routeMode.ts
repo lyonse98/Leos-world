@@ -22,6 +22,7 @@
 import { normalizePlaceName, selectPriorDrive, type RouteDriveRecord } from './routeHistory';
 import { houseRank, houseRankForPlaceKey, isHouseStory } from './houseClass';
 import { isPortalTarget } from './housePortal';
+import { activePartners, partnerForUnit, PARTNERS, type Partner } from '../data/partners';
 import { SHORT_CUT_DURATION_SEC } from '../data/shortCuts';
 
 export { isHouseStory } from './houseClass';
@@ -2654,6 +2655,15 @@ export interface ComposeOptions {
    */
   wovenIndexSupport?: ReadonlyMap<string, number>;
   /**
+   * Partner registry for the partner-class rank term (v16.2
+   * Slice 1): defaults to the shipped registry; tests inject
+   * fixture partners. Only ACTIVE partners whose site the path
+   * passes within their serve radius contribute — with the
+   * shipped (dormant) registry the term is identically zero
+   * and composition is exactly the pre-feature composer's.
+   */
+  partners?: readonly Partner[];
+  /**
    * Prior route drives (addendum 2), newest first, with each
    * record's owed subjects ALREADY filtered against the current
    * heard ledger by the caller (routeHistory.stillOwedSubjects)
@@ -3100,6 +3110,33 @@ export function composeRoutePlan(
   const toneRank = (u: LibraryUnit): number =>
     steerTone && (u.tone === steerTone || u.toneSecondary === steerTone) ? 0 : 1;
   const familyRank = (u: LibraryUnit): number => (family ? familyRankOf(u) : 0);
+  // Partner class (v16.2 Slice 1, Nov 16, 2026): a unit in an
+  // ACTIVE partner's frozen, approved set wins its bucket when
+  // this drive passes within the partner's serve radius of the
+  // partner's site — the route form of the pilot's core promise
+  // (the partner's approved telling of their own property,
+  // told first on their ground). The term sits directly under
+  // the Family boundary (a safety boundary outranks a business
+  // one) and ABOVE the house demotion: the demotion is an
+  // ordering backstop for generic registry houses, and a
+  // partner house museum must not be sunk by it on its own
+  // ground. It outranks tone and thread for the same reason —
+  // those are taste; this is a commitment. Radius-bounded by
+  // construction: the path-proximity set is computed once per
+  // compose, a partner whose site the drive does not approach
+  // contributes nothing, and with no active partner in range
+  // every unit reads 1, so the chain is arithmetically today's.
+  const partnerList = opts.partners ?? PARTNERS;
+  const pathActivePartners = new Set(
+    activePartners(partnerList)
+      .filter(p => distanceToPathM({ lat: p.site.lat, lng: p.site.lng }, path) <= p.serveRadiusM)
+      .map(p => p.id),
+  );
+  const partnerRank = (u: LibraryUnit): number => {
+    if (pathActivePartners.size === 0) return 1;
+    const owner = partnerForUnit(u.id, partnerList);
+    return owner && pathActivePartners.has(owner.id) ? 0 : 1;
+  };
   const threadRank = (u: LibraryUnit): number => (threadMemberIds.has(u.id) ? 0 : 1);
   // House demotion (field fix F1, Nov 12, 2026): the house /
   // architecture class sorts below everything else it competes
@@ -3111,6 +3148,7 @@ export function composeRoutePlan(
   // house still seats when nothing stronger competes.
   const byRank = (a: LibraryUnit, b: LibraryUnit): number =>
     familyRank(a) - familyRank(b) ||
+    partnerRank(a) - partnerRank(b) ||
     houseRank(a) - houseRank(b) ||
     toneRank(a) - toneRank(b) ||
     threadRank(a) - threadRank(b) ||

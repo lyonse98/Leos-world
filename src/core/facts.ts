@@ -9,6 +9,7 @@
 import registryData from '../data/sd-historic-registry.json';
 import { MAJOR_PLACES } from '../content/majorPlaces';
 import { isTier1HouseException } from '../data/tier1HouseExceptions';
+import { activePartners, partnerForPlaceName, type Partner } from '../data/partners';
 import { houseImportanceFor } from '../data/houseImportance';
 import { isHousePlaceName } from './houseClass';
 import { findNamedArea } from '../services/namedAreas';
@@ -43,6 +44,14 @@ export interface Candidate {
   userRatings: number | null;
   address: string | null;
   tier1: boolean;
+  /**
+   * Partner class (v16.2): the id of the ACTIVE partner whose
+   * site this candidate is, when the driver is inside that
+   * partner's serve radius — set by applyPartnerBoost, the
+   * partner road to Tier-1. Null everywhere else, and null
+   * everywhere while the partner registry is dormant.
+   */
+  partnerId: string | null;
   /** Selection score (higher = serve sooner). */
   score: number;
   registry: RegistryRecord | null;
@@ -123,6 +132,7 @@ async function searchNearby(center: GeoPoint, radiusM: number): Promise<Candidat
         userRatings: p.userRatingCount ?? null,
         address: p.formattedAddress ?? null,
         tier1: false,
+        partnerId: null,
         score: 0,
         registry: null,
         distanceM: calculateDistance(center.lat, center.lng, lat, lng),
@@ -210,6 +220,7 @@ export async function discoverCandidates(center: GeoPoint, radiusM: number): Pro
         userRatings: null,
         address: rec.address,
         tier1: registryConfersTier1(rec.name, rec),
+        partnerId: null,
         score: 20 + boost,
         registry: rec,
         distanceM: dist,
@@ -240,6 +251,7 @@ export async function discoverCandidates(center: GeoPoint, radiusM: number): Pro
         userRatings: null,
         address: null,
         tier1: major.tier1,
+        partnerId: null,
         score: 30 + major.historicalScore / 4,
         registry: null,
         distanceM: dist,
@@ -253,6 +265,7 @@ export async function discoverCandidates(center: GeoPoint, radiusM: number): Pro
     c.score += popularity - c.distanceM / 90;
   }
   applyHouseDemotion(out);
+  applyPartnerBoost(out);
   out.sort((a, b) => b.score - a.score);
   return out;
 }
@@ -309,6 +322,37 @@ function houseScorePenalty(c: Candidate): number {
 export function applyHouseDemotion(candidates: Candidate[]): void {
   for (const c of candidates) {
     if (isHousePlaceName(c.name)) c.score -= houseScorePenalty(c);
+  }
+}
+
+/**
+ * Partner class in freeform discovery (v16.2 Slice 1, Nov 16,
+ * 2026): a candidate that IS an ACTIVE partner's site — judged
+ * on either name it carries, the Places display name or the
+ * registry's own, the same two-dialect rule as the Tier-1
+ * house exceptions — and whose ground lies inside the
+ * partner's serve radius (the candidate's distanceM is the
+ * driver's distance to the site itself) earns Tier-1 and
+ * carries the partner's id. This is the partner's road to the
+ * Tier-1 lane: the approved telling of their own property wins
+ * its serve class near their site (tour.ts additionally
+ * prefers the frozen set's exact telling for the place).
+ *
+ * Like the house-exception road, the boost touches the TIER
+ * only, never the score: the partner's ground orders among
+ * ordinary candidates exactly as it did, house demotion
+ * included. And while the registry holds no active partner —
+ * today it holds one dormant prospect — this function is a
+ * no-op on every candidate, by construction.
+ */
+export function applyPartnerBoost(candidates: Candidate[], partners: readonly Partner[] = activePartners()): void {
+  if (partners.length === 0) return;
+  for (const c of candidates) {
+    const partner = partnerForPlaceName(c.name, partners) ?? (c.registry ? partnerForPlaceName(c.registry.name, partners) : null);
+    if (!partner) continue;
+    if (c.distanceM > partner.serveRadiusM) continue;
+    c.tier1 = true;
+    c.partnerId = partner.id;
   }
 }
 

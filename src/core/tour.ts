@@ -22,6 +22,7 @@ import { isHousePlaceName, isHouseStory } from './houseClass';
 import { findPortalTarget, type PortalStoryRef } from './housePortal';
 import { observeStoryOutcome } from './profile';
 import { tagsFor } from '../data/routeTags';
+import { partnerApprovedAngleFor } from '../data/partners';
 import * as gemini from './gemini';
 import * as facts from './facts';
 import {
@@ -1673,6 +1674,7 @@ export class Tour {
       userRatings: null,
       address: null,
       tier1: false,
+      partnerId: null,
       score: 0,
       registry: null,
       distanceM: 0,
@@ -2890,18 +2892,28 @@ export class Tour {
     const key = backend.placeKeyOf(candidate.name);
     // Library, place-first at any eligible undealt angle (S5).
     const dealt = this.dealtAngles.get(key) ?? new Set<string>();
-    const entry = this.libraryIndex.find(
-      e =>
-        e.place_key === key &&
-        e.angle !== 'filler' &&
-        !INTRO_ANGLES.has(e.angle) &&
-        !isWovenTwinAngle(e.angle) &&
-        // A short cut is never picked AS an angle: left in
-        // the find, the rotation would deal full and short
-        // as two different stories (Nov 12, 2026).
-        !isShortCutAngle(e.angle) &&
-        !dealt.has(e.angle),
-    );
+    const eligibleEntry = (e: (typeof this.libraryIndex)[number]): boolean =>
+      e.place_key === key &&
+      e.angle !== 'filler' &&
+      !INTRO_ANGLES.has(e.angle) &&
+      !isWovenTwinAngle(e.angle) &&
+      // A short cut is never picked AS an angle: left in
+      // the find, the rotation would deal full and short
+      // as two different stories (Nov 12, 2026).
+      !isShortCutAngle(e.angle) &&
+      !dealt.has(e.angle);
+    // Partner class (v16.2 Slice 1): when an ACTIVE partner
+    // owns this place, its frozen set's approved telling is
+    // the row this place serves — the exact telling the
+    // partner signed off on, ahead of the place's rotation.
+    // Heard discipline still binds: a dealt approved angle
+    // falls back to the ordinary find below. Null while the
+    // registry is dormant, so the find is exactly today's.
+    const partnerAngle = partnerApprovedAngleFor(key);
+    const entry =
+      (partnerAngle !== null
+        ? this.libraryIndex.find(e => eligibleEntry(e) && e.angle === partnerAngle)
+        : undefined) ?? this.libraryIndex.find(eligibleEntry);
     if (entry) {
       const item = await this.libraryItemForEntry(entry, candidate.tier1);
       if (item) return item;
@@ -3131,6 +3143,7 @@ export class Tour {
         userRatings: null,
         address: null,
         tier1: false,
+        partnerId: null,
         score: 0,
         registry: null,
         distanceM: 0,
@@ -3522,6 +3535,7 @@ export class Tour {
               userRatings: null,
               address: null,
               tier1: item.tier1 ?? false,
+              partnerId: null,
               score: 0,
               registry: null,
               distanceM: 0,
@@ -3566,6 +3580,7 @@ export class Tour {
             userRatings: null,
             address: null,
             tier1: false,
+            partnerId: null,
             score: 0,
             registry: null,
             distanceM: 0,
