@@ -20,7 +20,13 @@ import {
 import * as backend from './backend';
 import { isHousePlaceName, isHouseStory } from './houseClass';
 import { findPortalTarget, type PortalStoryRef } from './housePortal';
-import { observeStoryOutcome } from './profile';
+import { getConstraints, matchInputs, observeStoryOutcome } from './profile';
+import {
+  composeSuggestion,
+  type SuggestionIntent,
+  type SuggestionOutcome,
+} from './suggestions';
+import type { TourMode } from './routeMode';
 import { tagsFor } from '../data/routeTags';
 import { partnerApprovedAngleFor } from '../data/partners';
 import * as gemini from './gemini';
@@ -157,6 +163,17 @@ export interface TourDeps {
    * (A's primeClipUrl discipline, adapted to the per-tour engine).
    */
   clipUrls?: Map<string, string>;
+  /**
+   * The ride's DECLARED mode (v16.2 Slice 4): the solicited-
+   * suggestion gate reads it at ask time. An absent dep means
+   * no mode was ever declared (the flag-off v15 landing), so
+   * the suggestion channel is closed by construction — the
+   * same posture as the route runner's missing generator dep.
+   * The App wires a getter over the latched ride mode; the
+   * declared mode is the gate's ONLY input — speed, movement,
+   * and stillness never open it.
+   */
+  declaredMode?: () => TourMode | null;
 }
 
 export interface TourView {
@@ -169,6 +186,18 @@ export interface TourView {
   userPaused: boolean;
   qaLocked: boolean;
   qaPhase: 'idle' | 'generating' | 'answering' | 'awaiting-resume';
+  /**
+   * Solicited suggestions (v16.2 Slice 4): `available` is the
+   * gate's verdict for this ride; `pending` is the pick still
+   * awaiting the listener's outcome (the Ask sheet's Accept /
+   * Another / No-thanks row renders from it). Carries no story
+   * text — the view never carries what Miles speaks (Oct 30).
+   */
+  suggestion: {
+    available: boolean;
+    phase: 'idle' | 'answering';
+    pending: { placeId: string; name: string; kind: string } | null;
+  };
   lastStory: { subject: string; label: string; angle: string | null } | null;
   likedSubject: string | null;
   diagnostics: {
@@ -176,6 +205,8 @@ export interface TourView {
     storiesDropped: number;
     fillersPlayed: number;
     questionsAnswered: number;
+    /** Suggestion picks that actually sounded (v16.2 Slice 4). */
+    suggestionsAnswered: number;
     storm: boolean;
     ttsQuota: boolean;
     storyQuota: boolean;
@@ -600,9 +631,10 @@ export class Tour {
   // Current-events pool (v16.2 Slice 2, Nov 16, 2026): ranked,
   // freshness-verified eat/drink/do candidates near the driver,
   // refreshed off the serve cycle by refreshEventPool. It is
-  // contextual color + candidate supply for the suggestion
-  // slices — nothing in v1 serves FROM it, so an empty or
-  // stale pool changes no spoken behavior.
+  // contextual color + candidate supply; since Slice 4 the
+  // solicited-suggestion channel composes its answers from it
+  // (submitSuggestionAsk) — story serving still never reads it,
+  // so an empty or stale pool changes no story behavior.
   private eventPool: currentEvents.EventCandidate[] = [];
   private eventPoolAt = 0;
   private eventPoolPos: { lat: number; lng: number } | null = null;
@@ -624,6 +656,17 @@ export class Tour {
   private qaPhase: TourView['qaPhase'] = 'idle';
   private qaFailsafe: unknown = null;
   private qaGrace: unknown = null;
+
+  // Solicited suggestions (v16.2 Slice 4): a channel beside
+  // Q&A, not inside it — its own phase (one spoken interruption
+  // at a time is enforced across both), its own two-pick cap,
+  // and a pending pick awaiting the listener's outcome. The
+  // declared-mode dep is the gate (see TourDeps).
+  private declaredModeFn: (() => TourMode | null) | null = null;
+  private suggestionPhase: 'idle' | 'answering' = 'idle';
+  private suggestionPicksUsed = 0;
+  private suggestedPlaceIds = new Set<string>();
+  private pendingSuggestion: { placeId: string; name: string; kind: string; intent: SuggestionIntent } | null = null;
 
 
   private tickTimer: unknown = null;
@@ -665,12 +708,13 @@ export class Tour {
   private userPausedFlag = false;
   private interruptedFlag = false;
   private likedSubject: string | null = null;
-  private counts = { storiesPlayed: 0, storiesDropped: 0, fillersPlayed: 0, questionsAnswered: 0 };
+  private counts = { storiesPlayed: 0, storiesDropped: 0, fillersPlayed: 0, questionsAnswered: 0, suggestionsAnswered: 0 };
 
   constructor(deps: TourDeps) {
     this.clock = deps.clock ?? systemClock;
     this.seams = { ...realSeams, ...(deps.seams ?? {}) };
     this.clipUrls = deps.clipUrls ?? new Map();
+    this.declaredModeFn = deps.declaredMode ?? null;
     this.player = new Player(deps.audio, this.clock, {
       resolveUrl: item => this.resolveUrl(item),
       stallSource: () => this.pickStall(),
@@ -804,6 +848,17 @@ export class Tour {
       userPaused: this.userPausedFlag,
       qaLocked: this.qaPhase !== 'idle',
       qaPhase: this.qaPhase,
+      suggestion: {
+        available: this.suggestionAvailable(),
+        phase: this.suggestionPhase,
+        pending: this.pendingSuggestion
+          ? {
+              placeId: this.pendingSuggestion.placeId,
+              name: this.pendingSuggestion.name,
+              kind: this.pendingSuggestion.kind,
+            }
+          : null,
+      },
       // The view deliberately carries NO story text (Erik, Oct 30,
       // 2026): what Miles is speaking never renders on screen — the
       // UI shows a minimal now-playing card (place name / one line).
@@ -820,6 +875,7 @@ export class Tour {
         storiesDropped: this.counts.storiesDropped,
         fillersPlayed: this.counts.fillersPlayed,
         questionsAnswered: this.counts.questionsAnswered,
+        suggestionsAnswered: this.counts.suggestionsAnswered,
         storm: this.clock.now() < this.stormUntil || this.clock.now() < this.synthStandDownUntil,
         ttsQuota: this.seams.ttsQuotaTripped(),
         storyQuota: this.seams.storyQuotaTripped(),
@@ -5161,6 +5217,133 @@ export class Tour {
     this.notify();
   }
 
+  // ------------------------------------------------------------ solicited suggestions (v16.2 Slice 4)
+
+  /**
+   * The suggestion gate, engine side: the DECLARED mode — and
+   * only the declared mode — opens the channel. No dep (the
+   * flag-off landing) or a Driving declaration closes it, and
+   * nothing about speed or movement is consulted.
+   */
+  suggestionAvailable(): boolean {
+    return this.declaredModeFn?.() === 'passenger';
+  }
+
+  /**
+   * Ask Miles for a stop (Passenger/Walking only — see the
+   * gate). The answer is composed synchronously from the
+   * standing current-events pool by the pure composer
+   * (suggestions.ts): no generation, no prompt, no waiting on
+   * the network. Delivery rides the promised FIFO exactly like
+   * a Q&A answer — the current story is never cut; the answer
+   * sounds when it settles, ahead of whatever waits behind it
+   * (the story-boundary fence, memorials and climaxes
+   * included, since they are items in the same queue).
+   * Returns false when the gate is closed, the tour is not
+   * active, or another spoken interruption (a question or a
+   * suggestion) is already in flight.
+   */
+  submitSuggestionAsk(intent: SuggestionIntent): boolean {
+    if (this.phase !== 'active' || !this.suggestionAvailable()) return false;
+    if (this.suggestionPhase !== 'idle' || this.qaPhase !== 'idle') return false;
+    // A fresh ask over a still-pending pick IS that pick's
+    // outcome — the listener asked for another instead of
+    // taking it. Filed before the new ask so the acceptance
+    // accounting stays in ask order.
+    if (this.pendingSuggestion) {
+      this.emit('suggestion_outcome', {
+        outcome: 'asked-another',
+        place_id: this.pendingSuggestion.placeId,
+        intent: this.pendingSuggestion.intent,
+      });
+      this.pendingSuggestion = null;
+    }
+    // Commentary yields to a suggestion too (the Q&A rule): a
+    // clip alive at the ask dies now, so the answer owns the
+    // seam it lands on.
+    this.yieldCommentary();
+    this.emit('suggestion_asked', { intent, turn: this.suggestionPicksUsed + 1 });
+    // An opportunistic pool refresh for the NEXT ask; this
+    // answer composes from the pool as it stands.
+    this.refreshEventPool();
+    const answer = composeSuggestion(this.eventPool, {
+      intent,
+      nowMs: this.clock.now(),
+      match: matchInputs(),
+      constraints: getConstraints(),
+      excludePlaceIds: this.suggestedPlaceIds,
+      picksUsed: this.suggestionPicksUsed,
+    });
+    this.emit('suggestion_answered', {
+      outcome: answer.kind,
+      place_id: answer.kind === 'pick' ? answer.candidate.placeId : null,
+      candidate_kind: answer.kind === 'pick' ? answer.candidate.kind : null,
+      reason_codes: answer.reasonCodes,
+      primary_reason: answer.kind === 'pick' ? answer.primaryReason : answer.reasonCodes[0],
+      sponsored: answer.kind === 'pick' ? answer.sponsored : false,
+      detour_minutes: answer.kind === 'pick' ? answer.detourMinutes : null,
+      turn: this.suggestionPicksUsed + 1,
+    });
+    if (answer.kind === 'pick') {
+      this.suggestionPicksUsed += 1;
+      this.suggestedPlaceIds.add(answer.candidate.placeId);
+      this.pendingSuggestion = {
+        placeId: answer.candidate.placeId,
+        name: answer.candidate.name,
+        kind: answer.candidate.kind,
+        intent,
+      };
+    }
+    const pickId = answer.kind === 'pick' ? answer.candidate.placeId : null;
+    const item = this.makeItem({
+      kind: 'answer',
+      label: answer.kind === 'pick' ? `Suggestion — ${answer.candidate.name}` : 'Suggestion',
+      source: { kind: 'synth', text: answer.text },
+      durationSec: estimateSpeechDurationS(answer.text),
+      onSettle: rec => {
+        // The settle truth files even at teardown (the Q&A
+        // salvage rule): an answer dropped by a queue clear
+        // must not vanish from the acceptance accounting.
+        this.emit('suggestion_playback', {
+          completed: rec.completed,
+          voice: rec.sounded ? 'gemini' : 'none',
+          sounded_ms: Math.round(rec.soundedMs),
+          attempts: item.attempts,
+          place_id: pickId,
+        });
+        if (this.phase !== 'active') return;
+        if (rec.sounded && pickId !== null) this.counts.suggestionsAnswered += 1;
+        this.suggestionPhase = 'idle';
+        this.notify();
+      },
+      story: { text: answer.text },
+    });
+    this.suggestionPhase = 'answering';
+    this.player.enqueuePromised(item);
+    this.notify();
+    return true;
+  }
+
+  /**
+   * The listener's verdict on the pending pick (the Ask
+   * sheet's Accept / No-thanks). 'asked-another' is never
+   * filed here — it is produced by a subsequent ask (above),
+   * which is what the gesture means. A pick still pending at
+   * tour end files nothing: unmeasured is honest, a dismissal
+   * is never inferred.
+   */
+  resolveSuggestion(outcome: Exclude<SuggestionOutcome, 'asked-another'>): boolean {
+    if (!this.pendingSuggestion) return false;
+    this.emit('suggestion_outcome', {
+      outcome,
+      place_id: this.pendingSuggestion.placeId,
+      intent: this.pendingSuggestion.intent,
+    });
+    this.pendingSuggestion = null;
+    this.notify();
+    return true;
+  }
+
   // ------------------------------------------------------------ transport & listener actions
 
   pauseByUser(): void {
@@ -5268,6 +5451,11 @@ export class Tour {
     if (this.backstopTimer !== null) this.clock.clearTimeout(this.backstopTimer);
     if (this.tickTimer !== null) this.clock.clearInterval(this.tickTimer);
     if (this.qaPhase !== 'idle') this.releaseQaLock('tour-ended');
+    // A suggestion pick still pending at tour end files NO
+    // outcome (Slice 4): unmeasured is honest — a dismissal is
+    // never inferred from the tour simply ending.
+    this.pendingSuggestion = null;
+    this.suggestionPhase = 'idle';
     // An engine-held WELCOME that was never offered is unknown to
     // the player's teardown: settle it here, silently and exactly
     // once (it was never committed, so it files no §8 terminal).
