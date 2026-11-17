@@ -105,7 +105,7 @@ async function healthyOpening(world, audio, pos = UTC, speed = 8) {
 }
 
 export async function runScenarios(Tour, extras) {
-  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, facts } = extras;
+  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, facts, partners, composeRoutePlan, hashString } = extras;
 
   // ---------------------------------------------------------- S-01 healthy start
   suite('S-01 healthy start / opener order');
@@ -5736,5 +5736,175 @@ export async function runScenarios(Tour, extras) {
     check('the welcome is not heard-marked',
       !world.heard.includes('Welcome to Bay Ho'), world.heard.join(' | '));
     tour.endTour();
+  }
+
+  // ---------------------------------------------------------------
+  // PN suites (Nov 16, 2026): partner class, v16.2 Slice 1. The
+  // partner offer (Erik, Nov 16): a partner's PRE-APPROVED
+  // tellings of its own property win their serve class near the
+  // partner's site, and the approved set is FROZEN — drift
+  // against live rows is detectable. The shipped registry holds
+  // ONE dormant prospect (the Gaslamp Museum): dormant means
+  // zero effect anywhere, and PN-1/PN-2 pin that as a tested
+  // property, not a hope. Fixture partners exercise the active
+  // paths. Direct-function suites follow the HI pattern;
+  // PN-2 composes real plans (the composer's seat under a
+  // one-story budget is the observable the rank term moves).
+  const pnPartner = (over = {}) => ({
+    id: 'pn-test-museum',
+    name: 'PN Test Museum',
+    status: 'active',
+    site: { placeKeys: ['davis-horton house'], lat: 32.7106, lng: -117.160751 },
+    serveRadiusM: 400,
+    approvedStories: [
+      { unitId: 'davis-horton house|landmark_origin', audioPath: 'library/davis-horton house/landmark_origin-approved.wav' },
+    ],
+    ...over,
+  });
+  const pnCandidate = (name, distanceM, over = {}) => ({
+    name, lat: 32.7106, lng: -117.160751, source: 'registry', types: ['historic_site'],
+    rating: null, userRatings: null, address: null, tier1: false, partnerId: null, score: 50,
+    registry: null, distanceM, ...over,
+  });
+
+  suite('PN-1 partner class (freeform): an active partner site inside its radius earns Tier-1; outside, dormant, and non-partner ground do not');
+  {
+    const inside = pnCandidate('Davis-Horton House', 150);
+    facts.applyPartnerBoost([inside], [pnPartner()]);
+    check('the partner site at 150 m (radius 400) is Tier-1', inside.tier1 === true, `tier1=${inside.tier1}`);
+    check('it carries the partner id', inside.partnerId === 'pn-test-museum', `partnerId=${inside.partnerId}`);
+
+    const outside = pnCandidate('Davis-Horton House', 900);
+    facts.applyPartnerBoost([outside], [pnPartner()]);
+    check('the same site at 900 m is untouched — the boost is radius-bounded', outside.tier1 === false && outside.partnerId === null,
+      `tier1=${outside.tier1} partnerId=${outside.partnerId}`);
+
+    const bystander = pnCandidate('Balboa Theatre', 100);
+    facts.applyPartnerBoost([bystander], [pnPartner()]);
+    check('a non-partner candidate near the driver is untouched', bystander.tier1 === false && bystander.partnerId === null);
+
+    const viaRegistry = pnCandidate('Davis Horton Museum', 100, { registry: { name: 'Davis-Horton House' } });
+    facts.applyPartnerBoost([viaRegistry], [pnPartner()]);
+    check('the registry-name dialect matches when the display name does not', viaRegistry.tier1 === true && viaRegistry.partnerId === 'pn-test-museum',
+      `tier1=${viaRegistry.tier1}`);
+
+    const dormant = pnCandidate('Davis-Horton House', 100);
+    facts.applyPartnerBoost([dormant], [pnPartner({ status: 'dormant' })]);
+    check('a DORMANT partner confers nothing, even at 100 m', dormant.tier1 === false && dormant.partnerId === null);
+
+    const shipped = pnCandidate('Davis-Horton House', 100);
+    facts.applyPartnerBoost([shipped]);
+    check('the SHIPPED registry is inert in discovery (one dormant prospect, no active partners)',
+      shipped.tier1 === false && shipped.partnerId === null && partners.activePartners().length === 0,
+      `active=${partners.activePartners().length}`);
+    check('the shipped registry holds exactly the dormant Gaslamp prospect',
+      partners.PARTNERS.length === 1 && partners.PARTNERS[0].id === 'gaslamp-museum' && partners.PARTNERS[0].status === 'dormant',
+      JSON.stringify(partners.PARTNERS.map(p => `${p.id}:${p.status}`)));
+  }
+
+  suite('PN-2 partner class (route): the approved telling takes the contested seat near the site; far site, dormant, and shipped registry leave the seat to the baseline');
+  {
+    const SITE = { lat: 32.7106, lng: -117.160751 };
+    const pnUnit = (id, placeKey, placeName) => ({
+      id, placeKey, placeName, angle: 'landmark_origin', lat: SITE.lat, lng: SITE.lng,
+      durationSec: 150, topics: [], tone: 'warm', toneSecondary: null,
+      audioPath: `library/${placeKey}/landmark_origin.wav`, storyText: 'x'.repeat(400),
+    });
+    const alpha = () => pnUnit('alpha museum|landmark_origin', 'alpha museum', 'Alpha Museum');
+    const mango = () => pnUnit('mango museum|landmark_origin', 'mango museum', 'Mango Museum');
+    const path = [{ lat: 32.7050, lng: SITE.lng }, { lat: 32.7160, lng: SITE.lng }];
+    const dest = { lat: 32.7160, lng: SITE.lng };
+    const input = { destinationText: 'North End', arrivalTimeMs: null, tone: null, topics: [], audience: 'standard' };
+    // A one-story budget over two same-class, same-ground
+    // candidates: exactly one seat exists, and the bucket's
+    // rank order decides who takes it (verified shape, Nov 16).
+    const seat = (partnerOpts) =>
+      composeRoutePlan([alpha(), mango()], path, dest, 'North End', input, {
+        nowMs: 0, heardKeys: new Set(), budgetSecOverride: 170, driveSec: null, ...partnerOpts,
+      }).items.filter(i => i.kind === 'story').map(i => i.id);
+    const mangoPartner = (over = {}) => ({
+      id: 'pn-route-museum', name: 'PN Route Museum', status: 'active',
+      site: { placeKeys: ['mango museum'], lat: SITE.lat, lng: SITE.lng },
+      serveRadiusM: 400,
+      approvedStories: [{ unitId: 'mango museum|landmark_origin', audioPath: 'library/mango museum/landmark_origin-approved.wav' }],
+      ...over,
+    });
+
+    check('baseline (no partners): the baseline candidate takes the seat',
+      JSON.stringify(seat({ partners: [] })) === JSON.stringify(['alpha museum|landmark_origin']),
+      JSON.stringify(seat({ partners: [] })));
+    check('partner active + path through the site: the APPROVED telling takes the seat',
+      JSON.stringify(seat({ partners: [mangoPartner()] })) === JSON.stringify(['mango museum|landmark_origin']),
+      JSON.stringify(seat({ partners: [mangoPartner()] })));
+    check('partner active but the site is 10 km off the path: no effect — radius-bounded',
+      JSON.stringify(seat({ partners: [mangoPartner({ site: { placeKeys: ['mango museum'], lat: 32.8000, lng: SITE.lng } })] })) === JSON.stringify(['alpha museum|landmark_origin']),
+      JSON.stringify(seat({ partners: [mangoPartner({ site: { placeKeys: ['mango museum'], lat: 32.8000, lng: SITE.lng } })] })));
+    check('partner DORMANT: no effect',
+      JSON.stringify(seat({ partners: [mangoPartner({ status: 'dormant' })] })) === JSON.stringify(['alpha museum|landmark_origin']));
+    check('shipped registry (no partners opt): composition is the baseline — the feature ships inert',
+      JSON.stringify(seat({})) === JSON.stringify(['alpha museum|landmark_origin']));
+  }
+
+  suite('PN-3 frozen sets: drift against live rows is detected — audio moved, row missing, text changed; a clean set files nothing');
+  {
+    const frozenText = 'The approved telling, word for word.';
+    const frozen = pnPartner({
+      approvedStories: [
+        { unitId: 'davis-horton house|landmark_origin', audioPath: 'library/davis-horton house/landmark_origin-approved.wav', textHash: hashString(frozenText) },
+        { unitId: 'davis-horton house|landmark_people', audioPath: 'library/davis-horton house/landmark_people-approved.wav' },
+      ],
+    });
+    const cleanRows = new Map([
+      ['davis-horton house|landmark_origin', { audioPath: 'library/davis-horton house/landmark_origin-approved.wav', storyText: frozenText }],
+      ['davis-horton house|landmark_people', { audioPath: 'library/davis-horton house/landmark_people-approved.wav', storyText: 'People text.' }],
+    ]);
+    check('a live set matching every pin files no drift',
+      partners.checkFrozenSets([frozen], cleanRows).length === 0,
+      JSON.stringify(partners.checkFrozenSets([frozen], cleanRows)));
+
+    const movedRows = new Map(cleanRows);
+    movedRows.set('davis-horton house|landmark_people', { audioPath: 'library/davis-horton house/landmark_people-swap-2027.wav', storyText: 'People text.' });
+    const moved = partners.checkFrozenSets([frozen], movedRows);
+    check('a re-rendered telling (the swap signature: audio_path moved) is flagged',
+      moved.length === 1 && moved[0].kind === 'audio-moved' && moved[0].unitId === 'davis-horton house|landmark_people',
+      JSON.stringify(moved));
+
+    const missingRows = new Map(cleanRows);
+    missingRows.delete('davis-horton house|landmark_origin');
+    const missing = partners.checkFrozenSets([frozen], missingRows);
+    check('a vanished row is flagged missing',
+      missing.length === 1 && missing[0].kind === 'missing' && missing[0].actual === null,
+      JSON.stringify(missing));
+
+    const editedRows = new Map(cleanRows);
+    editedRows.set('davis-horton house|landmark_origin', { audioPath: 'library/davis-horton house/landmark_origin-approved.wav', storyText: 'A quietly edited telling.' });
+    const edited = partners.checkFrozenSets([frozen], editedRows);
+    check('a text edit under the same audio is flagged when the pin recorded a text hash',
+      edited.length === 1 && edited[0].kind === 'text-changed',
+      JSON.stringify(edited));
+
+    check('the shipped registry (empty approved set) cannot drift',
+      partners.checkFrozenSets(partners.PARTNERS, new Map()).length === 0);
+  }
+
+  suite('PN-4 serve preference + unit-id helpers: the approved angle resolves for an active partner only');
+  {
+    check('unit ids split on the last pipe (corridor keys carry colons, never pipes)',
+      partners.unitPlaceKey('sr-905 west: brown field to i-805|corridor') === 'sr-905 west: brown field to i-805' &&
+      partners.unitAngle('sr-905 west: brown field to i-805|corridor') === 'corridor');
+    check('an ACTIVE partner yields its approved angle for the place',
+      partners.partnerApprovedAngleFor('davis-horton house', [pnPartner()]) === 'landmark_origin',
+      `${partners.partnerApprovedAngleFor('davis-horton house', [pnPartner()])}`);
+    check('a DORMANT partner yields no preference',
+      partners.partnerApprovedAngleFor('davis-horton house', [pnPartner({ status: 'dormant' })]) === null);
+    check('an unrelated place yields no preference',
+      partners.partnerApprovedAngleFor('balboa park', [pnPartner()]) === null);
+    check('the SHIPPED registry yields no preference anywhere (dormant)',
+      partners.partnerApprovedAngleFor('davis-horton house') === null);
+    check('partnerForUnit finds the owner of an approved story',
+      partners.partnerForUnit('davis-horton house|landmark_origin', [pnPartner()])?.id === 'pn-test-museum');
+    check('partnerForPlaceName matches on the normalized key (either dialect)',
+      partners.partnerForPlaceName('Davis-Horton House', [pnPartner()])?.id === 'pn-test-museum' &&
+      partners.partnerForPlaceName('davis-horton house', [pnPartner()])?.id === 'pn-test-museum');
   }
 }

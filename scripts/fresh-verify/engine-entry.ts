@@ -5,11 +5,15 @@ export { Player, makePrimeUrl } from '../../src/core/player';
 export {
   discoverCandidates,
   applyHouseDemotion,
+  applyPartnerBoost,
   HOUSE_SCORE_PENALTY,
   HOUSE_SCORE_PENALTY_SOLID,
   HOUSE_SCORE_PENALTY_DEAD,
 } from '../../src/core/facts';
 export { isTier1HouseException } from '../../src/data/tier1HouseExceptions';
+export { composeRoutePlan } from '../../src/core/routeMode';
+export * as partners from '../../src/data/partners';
+export { hashString } from '../../src/utils/hash';
 export { houseImportanceFor } from '../../src/data/houseImportance';
 export {
   daypartOf,
