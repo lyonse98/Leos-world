@@ -19,6 +19,10 @@ execFileSync(
     '--bundle',
     '--format=esm',
     '--platform=node',
+    // The app build compiles JSX with the automatic runtime;
+    // the bundle must match now that profileUi.tsx is part of
+    // it (SG-8 renders the profile editor, Nov 17, 2026).
+    '--jsx=automatic',
     `--outfile=${out}`,
     '--log-level=warning',
     // The engine reads Vite's import.meta.env; give the harness a fake set.
@@ -71,6 +75,11 @@ const extras = {
   },
   placeMemory: engine.placeMemory,
   profile: engine.profile,
+  profileUi: {
+    ProfileEditor: engine.ProfileEditor,
+    formFromProfile: engine.formFromProfile,
+    saveDeclaredForm: engine.saveDeclaredForm,
+  },
   ambience: {
     AmbientBedController: engine.AmbientBedController,
     resolveAmbientBed: engine.resolveAmbientBed,

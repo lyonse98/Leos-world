@@ -12,7 +12,6 @@ import {
   ACTIVITY_OPTIONS,
   BUDGET_COMFORT_OPTIONS,
   CUISINE_OPTIONS,
-  DETOUR_MINUTE_OPTIONS,
   DIETARY_OPTIONS,
   DRINK_OPTIONS,
   OPTION_LABELS,
@@ -248,20 +247,19 @@ export function ProfileEditor({
           onPick={v => set({ budgetComfort: v })}
         />
       </Section>
-      <Section title="Worth a detour of…">
-        <div className="mt-2 flex flex-wrap gap-2">
-          {DETOUR_MINUTE_OPTIONS.map(m => (
-            <button
-              key={m}
-              type="button"
-              onClick={() => set({ maxDetourMinutes: form.maxDetourMinutes === m ? null : m })}
-              className={`${chipBase} ${form.maxDetourMinutes === m ? chipOn : chipOff}`}
-            >
-              {m} minutes
-            </button>
-          ))}
-        </div>
-      </Section>
+      {/*
+        The "Worth a detour of…" control is deliberately NOT
+        rendered (v16.2 audit fix, Nov 17, 2026): suggestion
+        detour minutes are never computed in v1 (Slice 4's
+        designed deferral — no ask-time Routes call), so the
+        stored constraint could never fire and a rendered
+        control would promise an enforcement that does not
+        exist. The constraint itself stays in the profile
+        document — formFromProfile / saveDeclaredForm carry it
+        untouched through every save — and takes effect the
+        day detour costing lands; render the control again in
+        that change.
+      */}
       <Section title="Walking once you park">
         <SingleRow
           options={WALKING_TOLERANCE_OPTIONS}

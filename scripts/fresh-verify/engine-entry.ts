@@ -35,6 +35,7 @@ export { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor } from '../../src/d
 export { resolveFillerRegion } from '../../src/data/fillerRegions';
 export { isTesterUnlocked, tryTesterUnlock, TESTER_ACCESS_CODE } from '../../src/core/accessGate';
 export * as profile from '../../src/core/profile';
+export { ProfileEditor, formFromProfile, saveDeclaredForm } from '../../src/profileUi';
 export {
   AmbientBedController,
   resolveAmbientBed,

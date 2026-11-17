@@ -105,7 +105,7 @@ async function healthyOpening(world, audio, pos = UTC, speed = 8) {
 }
 
 export async function runScenarios(Tour, extras) {
-  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, facts, partners, freshness, currentEvents, suggestions, proposals, placeMemory, liveSpend, composeRoutePlan, hashString } = extras;
+  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, profileUi, facts, partners, freshness, currentEvents, suggestions, proposals, placeMemory, liveSpend, composeRoutePlan, hashString } = extras;
 
   // ---------------------------------------------------------- S-01 healthy start
   suite('S-01 healthy start / opener order');
@@ -6621,16 +6621,14 @@ export async function runScenarios(Tour, extras) {
       matched.detourMinutes === null && !matched.text.includes('minutes off your way'), matched.text);
     check('nothing is sponsored in v1', matched.sponsored === false && !matched.text.startsWith('Sponsored'));
 
-    const hooked = sgCompose([sgCandidate()], { detourMinutesFor: () => 6 });
-    check('a caller-computed detour is spoken as a number',
-      hooked.kind === 'pick' && hooked.detourMinutes === 6 && hooked.text.includes('about 6 minutes off your way'),
-      hooked.kind === 'pick' ? hooked.text : hooked.kind);
-    const capped = sgCompose([sgCandidate()], {
-      detourMinutesFor: () => 6,
-      constraints: { ...SG_NO_CONSTRAINTS, maxDetourMinutes: 5 },
-    });
-    check('a known detour beyond the declared cap excludes the place — the cap is never approximated around',
-      capped.kind === 'none' && capped.reasonCodes[0] === 'constraints-excluded', JSON.stringify(capped.reasonCodes));
+    // The detourMinutesFor seam itself stays (it is the
+    // designed slot for ask-time costing), but the two pins
+    // that injected a production-impossible provider and
+    // asserted spoken numbers + cap enforcement were removed
+    // Nov 17, 2026 (v16.2 audit fix): production never
+    // supplies the provider, so those checks certified
+    // behavior a listener can never meet. SG-8 pins the
+    // production reality instead.
 
     const sponsored = sgCompose([sgCandidate()], { sponsoredPlaceIds: new Set(['sg-tacos']) });
     check('the sponsored hook renders the label at the head of the spoken text',
