@@ -2582,13 +2582,15 @@ export class Tour {
   private refreshEventPool(): void {
     if (this.phase !== 'active' || !this.position) return;
     const now = this.clock.now();
-    if (now - this.eventPoolAt < 60_000) return;
-    if (
-      this.eventPoolPos &&
-      now - this.eventPoolAt < 600_000 &&
-      calculateDistance(this.position.lat, this.position.lng, this.eventPoolPos.lat, this.eventPoolPos.lng) < 500
-    ) {
-      return;
+    if (this.eventPoolPos) {
+      // Not the first ask: the cadence gates apply.
+      if (now - this.eventPoolAt < 60_000) return;
+      if (
+        now - this.eventPoolAt < 600_000 &&
+        calculateDistance(this.position.lat, this.position.lng, this.eventPoolPos.lat, this.eventPoolPos.lng) < 500
+      ) {
+        return;
+      }
     }
     this.eventPoolAt = now;
     this.eventPoolPos = { lat: this.position.lat, lng: this.position.lng };
