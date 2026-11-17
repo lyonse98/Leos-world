@@ -105,7 +105,7 @@ async function healthyOpening(world, audio, pos = UTC, speed = 8) {
 }
 
 export async function runScenarios(Tour, extras) {
-  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, facts, partners, composeRoutePlan, hashString } = extras;
+  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, facts, partners, freshness, currentEvents, composeRoutePlan, hashString } = extras;
 
   // ---------------------------------------------------------- S-01 healthy start
   suite('S-01 healthy start / opener order');
@@ -5906,5 +5906,295 @@ export async function runScenarios(Tour, extras) {
     check('partnerForPlaceName matches on the normalized key (either dialect)',
       partners.partnerForPlaceName('Davis-Horton House', [pnPartner()])?.id === 'pn-test-museum' &&
       partners.partnerForPlaceName('davis-horton house', [pnPartner()])?.id === 'pn-test-museum');
+  }
+
+  // ---------------------------------------------------------------
+  // CE suites (Nov 16, 2026): the current-events layer v1, v16.2
+  // Slice 2. The freshness standard (stack plan ◆3, LEAN-ADOPT)
+  // is enforced as pure gates: no known hours = no
+  // recommendation, hours cached ≤ 7 days, "open now" computed
+  // only from source periods, event times need a dated source
+  // ≤ 48 h old. CE-1/CE-2 pin the gates, CE-3 the event gate,
+  // CE-4 the discovery pipeline against a fixture provider,
+  // CE-5 the Tour wiring (the harness seam fakes only the
+  // network edge), CE-6 the shipped defaults. Fixture clock:
+  // Wed Nov 18, 2026, 19:00 UTC = 11:00 in San Diego (UTC−8).
+  const CE_NOW = Date.UTC(2026, 10, 18, 19, 0, 0);
+  const CE_DAY_MS = 24 * 60 * 60 * 1000;
+  const ceDaily = (openH, closeH) =>
+    Array.from({ length: 7 }, (_, day) => ({ open: { day, hour: openH, minute: 0 }, close: { day, hour: closeH, minute: 0 } }));
+  const ceHours = (over = {}) => ({
+    periods: ceDaily(9, 21),
+    utcOffsetMinutes: -480,
+    businessStatus: 'OPERATIONAL',
+    hoursKind: 'regular',
+    fetchedAt: CE_NOW - 60_000,
+    source: 'places',
+    ...over,
+  });
+  const ceRaw = (over = {}) => ({
+    placeId: 'ce-place-1',
+    name: 'Ce Test Tacos',
+    lat: 32.853,
+    lng: -117.18,
+    types: ['mexican_restaurant', 'restaurant'],
+    rating: 4.6,
+    userRatings: 800,
+    address: '1 Test Way',
+    editorial: null,
+    servesVegetarianFood: null,
+    hours: ceHours(),
+    ...over,
+  });
+  const CE_ANCHOR = { lat: 32.853, lng: -117.18, kind: 'position' };
+  const ceProvider = places => ({ fetchPlaces: async () => places });
+  const CE_NO_MATCH = { topics: [], cuisines: [], drinks: [], activities: [], dietary: [] };
+  const CE_NO_CONSTRAINTS = {
+    budgetComfort: null, maxDetourMinutes: null, alcoholOk: null, usuallyWithKids: null,
+    dogFriendly: null, walkingTolerance: null, surpriseTolerance: null, dietary: [],
+  };
+  const ceDiscover = (places, over = {}) =>
+    currentEvents.discoverEventCandidates([CE_ANCHOR], {
+      nowMs: CE_NOW, provider: ceProvider(places), match: CE_NO_MATCH,
+      constraints: CE_NO_CONSTRAINTS, cache: null, ...over,
+    });
+  const ceMemStore = () => {
+    let v = null;
+    return { read: () => v, write: s => { v = s; }, clear: () => { v = null; } };
+  };
+
+  suite('CE-1 freshness gates (hours): fresh known hours pass; stale, unknown, missing, and non-operational records are silently ineligible');
+  {
+    const fresh = freshness.assessHours(ceHours(), CE_NOW);
+    check('fresh daily hours (fetched 1 min ago) are eligible', fresh.eligible === true, JSON.stringify(fresh.failures));
+    check('open-now is computed from the periods: Wed 11:00 inside 09:00–21:00 is open', fresh.openNow === true);
+    check('the containing close is derived: closes 10 h after 11:00', fresh.closesAtMs === CE_NOW + 10 * 60 * 60 * 1000,
+      `${fresh.closesAtMs} vs ${CE_NOW + 10 * 60 * 60 * 1000}`);
+
+    const boundary = freshness.assessHours(ceHours({ fetchedAt: CE_NOW - 7 * CE_DAY_MS }), CE_NOW);
+    check('hours cached exactly 7 days are still eligible (the standard is ≤ 7 days)', boundary.eligible === true);
+    const stale = freshness.assessHours(ceHours({ fetchedAt: CE_NOW - 7 * CE_DAY_MS - 60_000 }), CE_NOW);
+    check('hours cached 7 days + 1 minute are stale — ineligible', stale.eligible === false && stale.failures.includes('hours-stale'),
+      JSON.stringify(stale.failures));
+    check('a stale record leaks NO open-now claim (null, not a guess)', stale.openNow === null);
+    const future = freshness.assessHours(ceHours({ fetchedAt: CE_NOW + 60_000 }), CE_NOW);
+    check('a record dated in the future is corrupt, judged stale', future.eligible === false && future.failures.includes('hours-stale'));
+
+    const missing = freshness.assessHours(null, CE_NOW);
+    check('no record at all → no-hours-record', missing.eligible === false && missing.failures.includes('no-hours-record'));
+    const noPeriods = freshness.assessHours(ceHours({ periods: null }), CE_NOW);
+    check('a source that returned no hours → hours-unknown, no recommendation', noPeriods.eligible === false && noPeriods.failures.includes('hours-unknown') && noPeriods.openNow === null);
+    const emptyPeriods = freshness.assessHours(ceHours({ periods: [] }), CE_NOW);
+    check('an empty period list is unknown hours too', emptyPeriods.eligible === false && emptyPeriods.failures.includes('hours-unknown'));
+    const noOffset = freshness.assessHours(ceHours({ utcOffsetMinutes: null }), CE_NOW);
+    check('periods without a UTC offset cannot ground a time claim → hours-unknown', noOffset.eligible === false && noOffset.failures.includes('hours-unknown'));
+    const malformed = freshness.assessHours(ceHours({ periods: [{ open: { day: 3 } }] }), CE_NOW);
+    check('a malformed period (no hour) is not usable hours', malformed.eligible === false && malformed.failures.includes('hours-unknown'));
+
+    const permClosed = freshness.assessHours(ceHours({ businessStatus: 'CLOSED_PERMANENTLY' }), CE_NOW);
+    check('a permanently closed place is ineligible however fresh its hours', permClosed.eligible === false && permClosed.failures.includes('not-operational'));
+
+    const closedNow = freshness.assessHours(ceHours({ periods: ceDaily(13, 21) }), CE_NOW);
+    check('freshness is not open-now: a 13:00–21:00 place at 11:00 is ELIGIBLE and honestly closed',
+      closedNow.eligible === true && closedNow.openNow === false, JSON.stringify(closedNow));
+    check('its next opening is derived: opens 2 h after 11:00', closedNow.opensAtMs === CE_NOW + 2 * 60 * 60 * 1000);
+  }
+
+  suite('CE-2 open-now computation: overnight periods, the week wrap, the 24 h shape, and closed means closed');
+  {
+    // Friday 22:00 → Saturday 02:00 (the close carries Saturday's number).
+    const friNight = [{ open: { day: 5, hour: 22, minute: 0 }, close: { day: 6, hour: 2, minute: 0 } }];
+    const sat0130 = Date.UTC(2026, 10, 21, 9, 30, 0); // Sat 01:30 San Diego
+    const overnight = freshness.assessHours(ceHours({ periods: friNight, fetchedAt: sat0130 - 1000 }), sat0130);
+    check('an overnight period holds at Sat 01:30', overnight.eligible === true && overnight.openNow === true, JSON.stringify(overnight));
+    check('its close is 30 minutes out', overnight.closesAtMs === sat0130 + 30 * 60_000);
+
+    // Saturday 22:00 → Sunday 02:00: the close is next-cycle ground.
+    const satNight = [{ open: { day: 6, hour: 22, minute: 0 }, close: { day: 0, hour: 2, minute: 0 } }];
+    const sun0100 = Date.UTC(2026, 10, 22, 9, 0, 0); // Sun 01:00 San Diego
+    const wrap = freshness.assessHours(ceHours({ periods: satNight, fetchedAt: sun0100 - 1000 }), sun0100);
+    check('a period closing across the week boundary still holds at Sun 01:00', wrap.eligible === true && wrap.openNow === true, JSON.stringify(wrap));
+    check('its close is 60 minutes out', wrap.closesAtMs === sun0100 + 60 * 60_000);
+
+    const always = freshness.assessHours(ceHours({ periods: [{ open: { day: 0, hour: 0, minute: 0 } }] }), CE_NOW);
+    check('the 24 h shape (one open, no close) is open — with NO fabricated close', always.openNow === true && always.closesAtMs === null,
+      JSON.stringify(always));
+
+    const wed2300 = Date.UTC(2026, 10, 19, 7, 0, 0); // Wed 23:00 San Diego
+    const night = freshness.assessHours(ceHours({ fetchedAt: wed2300 - 1000 }), wed2300);
+    check('the same 09:00–21:00 schedule computes CLOSED at 23:00 — computed, never assumed', night.openNow === false);
+    check('the next opening is derived across midnight: Thu 09:00, 10 h out', night.opensAtMs === wed2300 + 10 * 60 * 60 * 1000);
+  }
+
+  suite('CE-3 freshness gates (events): a named event needs a dated source ≤ 48 h old and a future start');
+  {
+    const ev = (over = {}) => ({ title: 'Ce Fest', startsAtMs: CE_NOW + 2 * 60 * 60 * 1000, sourceAtMs: CE_NOW - 60 * 60 * 1000, sourceName: 'ce-feed', ...over });
+    check('a dated (1 h), future event is eligible', freshness.assessEvent(ev(), CE_NOW).eligible === true);
+    check('a dated (47 h) event is still inside the window', freshness.assessEvent(ev({ sourceAtMs: CE_NOW - 47 * 60 * 60 * 1000 }), CE_NOW).eligible === true);
+    const undated = freshness.assessEvent(ev({ sourceAtMs: null }), CE_NOW);
+    check('an undated event is ineligible however plausible', undated.eligible === false && undated.failures.includes('event-undated'));
+    const stale = freshness.assessEvent(ev({ sourceAtMs: CE_NOW - 49 * 60 * 60 * 1000 }), CE_NOW);
+    check('a 49 h-old source is stale', stale.eligible === false && stale.failures.includes('event-source-stale'));
+    const future = freshness.assessEvent(ev({ sourceAtMs: CE_NOW + 60_000 }), CE_NOW);
+    check('a source dated in the future is corrupt, not fresh', future.eligible === false && future.failures.includes('event-source-future'));
+    const past = freshness.assessEvent(ev({ startsAtMs: CE_NOW - 60_000 }), CE_NOW);
+    check('an already-started event is ineligible', past.eligible === false && past.failures.includes('event-past'));
+
+    const feed = { fetchEvents: async () => [ev(), ev({ title: 'Undated', sourceAtMs: null }), ev({ title: 'Stale', sourceAtMs: CE_NOW - 72 * 60 * 60 * 1000 })] };
+    const served = await currentEvents.discoverFeedEvents([CE_ANCHOR], { nowMs: CE_NOW, eventsFeed: feed });
+    check('the feed path serves only the gate-passing event', served.length === 1 && served[0].title === 'Ce Fest', JSON.stringify(served.map(e => e.title)));
+    const none = await currentEvents.discoverFeedEvents([CE_ANCHOR], { nowMs: CE_NOW });
+    check('the shipped NO_EVENTS_FEED serves nothing', none.length === 0);
+  }
+
+  suite('CE-4 discovery pipeline: only freshness-passing eat/drink/do candidates are ranked; profile, constraints, shelf, and cache shape the pool');
+  {
+    const barPeriods = Array.from({ length: 7 }, (_, day) => ({
+      open: { day, hour: 17, minute: 0 },
+      close: { day: (day + 1) % 7, hour: 2, minute: 0 },
+    }));
+    const ceBar = (over = {}) => ceRaw({
+      placeId: 'ce-bar', name: 'Ce Test Bar', types: ['bar'],
+      hours: ceHours({ periods: barPeriods }), ...over,
+    });
+
+    const pool = await ceDiscover([
+      ceRaw(),
+      ceRaw({ placeId: 'ce-stale', name: 'Ce Stale Cafe', hours: ceHours({ fetchedAt: CE_NOW - 8 * CE_DAY_MS }) }),
+      ceRaw({ placeId: 'ce-nohours', name: 'Ce No-Hours Bakery', types: ['bakery'], hours: ceHours({ periods: null }) }),
+      ceBar(),
+      ceRaw({ placeId: 'ce-permclosed', name: 'Ce Gone', hours: ceHours({ businessStatus: 'CLOSED_PERMANENTLY' }) }),
+      ceRaw({ placeId: 'ce-gas', name: 'Ce Gas', types: ['gas_station'] }),
+    ]);
+    check('stale hours, no hours, permanently closed, and non-eat/drink/do supply are all silently excluded',
+      JSON.stringify(pool.map(c => c.placeId)) === JSON.stringify(['ce-place-1', 'ce-bar']),
+      JSON.stringify(pool.map(c => c.placeId)));
+    check('the open-now candidate outranks the verifiably closed one', pool[0].placeId === 'ce-place-1' && pool[0].openNow === true && pool[1].openNow === false);
+    check('kinds classify from types', pool[0].kind === 'eat' && pool[1].kind === 'drink');
+    check('candidates carry their freshness provenance', pool[0].hoursFetchedAt === CE_NOW - 60_000 && pool[0].detourMinutes === null);
+
+    const far = await ceDiscover([ceRaw({ placeId: 'ce-far', name: 'Ce Far', lat: 32.898, lng: -117.18 })]);
+    check('a place beyond the radius is not a candidate', far.length === 0);
+
+    const dedup = await currentEvents.discoverEventCandidates(
+      [CE_ANCHOR, { lat: 32.9, lng: -117.18, kind: 'destination' }],
+      { nowMs: CE_NOW, provider: ceProvider([ceRaw()]), match: CE_NO_MATCH, constraints: CE_NO_CONSTRAINTS, cache: null },
+    );
+    check('a place found from two anchors is kept once, from the nearest', dedup.length === 1 && dedup[0].anchorKind === 'position');
+
+    const shelf = await ceDiscover([ceRaw()], { shelfKeys: new Set(['ce test tacos']) });
+    const noShelf = await ceDiscover([ceRaw()]);
+    check('a shelf story for the place is ranking color: flagged, and worth points',
+      shelf[0].hasShelfStory === true && noShelf[0].hasShelfStory === false && shelf[0].score > noShelf[0].score,
+      `shelf=${shelf[0].score} plain=${noShelf[0].score}`);
+
+    const italian = ceRaw({ placeId: 'ce-italian', name: 'Ce Italian', types: ['italian_restaurant', 'restaurant'], rating: 4.7 });
+    const neutral = await ceDiscover([italian, ceRaw()]);
+    check('neutral ranking follows popularity: the 4.7 Italian leads the 4.6 Mexican',
+      neutral[0].placeId === 'ce-italian', JSON.stringify(neutral.map(c => `${c.placeId}:${c.score.toFixed(1)}`)));
+    const matched = await ceDiscover([italian, ceRaw()], {
+      match: { ...CE_NO_MATCH, cuisines: ['tacos-mexican'] },
+    });
+    check('a declared cuisine match lifts its place above a more popular non-match (the profile is consumed)',
+      matched[0].placeId === 'ce-place-1', JSON.stringify(matched.map(c => `${c.placeId}:${c.score.toFixed(1)}`)));
+
+    const noAlcohol = await ceDiscover([ceBar()], { constraints: { ...CE_NO_CONSTRAINTS, alcoholOk: false } });
+    check('alcoholOk=false filters alcohol-primary places out', noAlcohol.length === 0);
+    const withKids = await ceDiscover([ceBar()], { constraints: { ...CE_NO_CONSTRAINTS, usuallyWithKids: true } });
+    check('usually-with-kids filters bars out', withKids.length === 0);
+    const vegBlocked = await ceDiscover([ceRaw({ servesVegetarianFood: false })], {
+      constraints: { ...CE_NO_CONSTRAINTS, dietary: ['vegetarian'] },
+    });
+    check('a declared vegetarian need drops a place the source says does not serve vegetarian food', vegBlocked.length === 0);
+    const vegUnknown = await ceDiscover([ceRaw({ servesVegetarianFood: null })], {
+      constraints: { ...CE_NO_CONSTRAINTS, dietary: ['vegetarian'] },
+    });
+    check('unknown dietary data never filters a place out (no guessing, either direction)', vegUnknown.length === 1);
+
+    const defaulted = await currentEvents.discoverEventCandidates([CE_ANCHOR], {
+      nowMs: CE_NOW, provider: ceProvider([ceRaw()]), cache: null,
+    });
+    check('the default profile reads (the live matchInputs/getConstraints) stay neutral on an empty profile',
+      defaulted.length === 1 && defaulted[0].placeId === 'ce-place-1');
+
+    // Cache: a fetch writes it; a provider-empty day can still
+    // serve from it — gated at serve time, like any fetch.
+    const store = ceMemStore();
+    const fetched = await ceDiscover([ceRaw()], { cache: store });
+    check('a successful fetch populates the hours cache', fetched.length === 1 && currentEvents.loadHoursCache(store).has('ce-place-1'));
+    const fromCache = await ceDiscover([], { provider: ceProvider([]), cache: store });
+    check('a provider-empty discovery falls back to fresh cached records, provenance intact',
+      fromCache.length === 1 && fromCache[0].hoursFetchedAt === CE_NOW - 60_000, JSON.stringify(fromCache.map(c => c.placeId)));
+    const staleStore = ceMemStore();
+    staleStore.write(JSON.stringify({ v: 1, entries: { 'ce-place-1': ceRaw({ hours: ceHours({ fetchedAt: CE_NOW - 8 * CE_DAY_MS }) }) } }));
+    const staleCache = await ceDiscover([], { provider: ceProvider([]), cache: staleStore });
+    check('a stale cached record is exactly as ineligible as a stale fetch', staleCache.length === 0);
+  }
+
+  suite('CE-5 tour wiring: the serve cycle refreshes the pool, diagnostics + telemetry report it, and the cadence gate holds');
+  {
+    const ceFixture = (over = {}) => ({
+      placeId: 'ce-tour-1', name: 'Ce Tour Tacos', lat: 32.853, lng: -117.18, kind: 'eat',
+      types: ['restaurant'], rating: 4.5, userRatings: 100, address: null, editorial: null,
+      distanceM: 50, anchorKind: 'position', openNow: true, closesAtMs: null, opensAtMs: null,
+      hoursFetchedAt: CE_NOW, hasShelfStory: false, score: 40, detourMinutes: null, event: null, ...over,
+    });
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park')],
+      library: ['Balboa Park'],
+      eventCandidates: [ceFixture(), ceFixture({ placeId: 'ce-tour-2', name: 'Ce Tour Bar', openNow: false })],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC);
+    await world.clock.advance(40_000);
+    tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(10_000);
+    check('a serve cycle asks the layer for candidates', world.eventCandidateCalls.length >= 1, `calls=${world.eventCandidateCalls.length}`);
+    check('the ask is anchored on the driver, with the shelf key set injected',
+      world.eventCandidateCalls[0].anchors[0].kind === 'position' && world.eventCandidateCalls[0].opts.shelfKeys instanceof Set);
+    check('the pool holds what the layer returned', tour.currentEventCandidates().length === 2);
+    check('diagnostics report the pool size', tour.view().diagnostics.eventCandidates === 2, `${tour.view().diagnostics.eventCandidates}`);
+    const poolEvents = world.eventsOf('current_events_pool');
+    check('current_events_pool telemetry files the count + open-now count',
+      poolEvents.length >= 1 && poolEvents[0].payload.count === 2 && poolEvents[0].payload.open_now === 1,
+      JSON.stringify(poolEvents.map(e => e.payload)));
+    const callsBefore = world.eventCandidateCalls.length;
+    tour.onPosition({ lat: UTC.lat + 0.006, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(10_000);
+    check('a second cycle inside the ground cell + window does not re-ask', world.eventCandidateCalls.length === callsBefore,
+      `calls=${world.eventCandidateCalls.length} before=${callsBefore}`);
+
+    resetLocalStorage();
+    const plain = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park')],
+      library: ['Balboa Park'],
+    });
+    const plainAudio = new FakeAudio(plain.clock, okPolicy());
+    const plainTour = await startAt(plain, plainAudio, UTC);
+    await plain.clock.advance(40_000);
+    plainTour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await plain.clock.advance(10_000);
+    check('the default world still asks — and the pool simply stays empty',
+      plain.eventCandidateCalls.length >= 1 && plainTour.currentEventCandidates().length === 0 &&
+      plainTour.view().diagnostics.eventCandidates === 0);
+  }
+
+  suite('CE-6 shipped defaults: the standard is the proposed standard, the feed is absent, kinds classify');
+  {
+    check('the standard is exactly the proposed floor (7 d hours / 48 h events / known-hours required / source-only open-now)',
+      freshness.FRESHNESS_STANDARD.hoursMaxCacheAgeMs === 7 * CE_DAY_MS &&
+      freshness.FRESHNESS_STANDARD.eventMaxSourceAgeMs === 48 * 60 * 60 * 1000 &&
+      freshness.FRESHNESS_STANDARD.requireKnownHours === true &&
+      freshness.FRESHNESS_STANDARD.openNowFromSourceOnly === true,
+      JSON.stringify(freshness.FRESHNESS_STANDARD));
+    check('kind classification: restaurant → eat, bar → drink, coffee shop → drink, museum → do, gas station → none',
+      currentEvents.kindForTypes(['mexican_restaurant']) === 'eat' &&
+      currentEvents.kindForTypes(['bar']) === 'drink' &&
+      currentEvents.kindForTypes(['coffee_shop']) === 'drink' &&
+      currentEvents.kindForTypes(['museum']) === 'do' &&
+      currentEvents.kindForTypes(['gas_station']) === null);
+    check('an alcohol type wins the kind over food (a bar-restaurant is a drink candidate)',
+      currentEvents.kindForTypes(['restaurant', 'bar']) === 'drink');
   }
 }

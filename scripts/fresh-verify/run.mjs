@@ -50,6 +50,8 @@ const extras = {
     HOUSE_SCORE_PENALTY_DEAD: engine.HOUSE_SCORE_PENALTY_DEAD,
   },
   partners: engine.partners,
+  freshness: engine.freshness,
+  currentEvents: engine.currentEvents,
   composeRoutePlan: engine.composeRoutePlan,
   hashString: engine.hashString,
   CORRIDOR_SEGMENTS: engine.CORRIDOR_SEGMENTS,

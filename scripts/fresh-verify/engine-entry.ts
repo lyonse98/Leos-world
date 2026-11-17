@@ -13,6 +13,8 @@ export {
 export { isTier1HouseException } from '../../src/data/tier1HouseExceptions';
 export { composeRoutePlan } from '../../src/core/routeMode';
 export * as partners from '../../src/data/partners';
+export * as freshness from '../../src/core/freshness';
+export * as currentEvents from '../../src/core/currentEvents';
 export { hashString } from '../../src/utils/hash';
 export { houseImportanceFor } from '../../src/data/houseImportance';
 export {
