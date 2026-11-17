@@ -44,6 +44,7 @@ import {
   type CallbackCandidate,
 } from './placeMemory';
 import { normalizePlaceName, type RouteDriveRecord } from './routeHistory';
+import { localSpendLedgerStore, spendCapReached } from './liveSpend';
 import type { TourMode } from './routeMode';
 import { tagsFor } from '../data/routeTags';
 import { memorialFor } from '../data/routeMemorial';
@@ -2731,7 +2732,13 @@ export class Tour {
     this.eventPoolPos = { lat: this.position.lat, lng: this.position.lng };
     const shelfKeys = new Set(this.libraryIndex.map(e => e.place_key));
     void this.seams
-      .discoverEventCandidates([{ lat: this.position.lat, lng: this.position.lng, kind: 'position' }], { shelfKeys })
+      .discoverEventCandidates([{ lat: this.position.lat, lng: this.position.lng, kind: 'position' }], {
+        shelfKeys,
+        // Live-spend telemetry (v16.2 Slice 8): the refresh's
+        // Places ask, any cap-trip, and any degraded serve
+        // file on this engine's emit path.
+        onSpendEvent: (type, data) => this.emit(type, data),
+      })
       .then(candidates => {
         this.eventPool = candidates;
         this.emit('current_events_pool', {
@@ -5375,6 +5382,10 @@ export class Tour {
       sponsored: answer.kind === 'pick' ? answer.sponsored : false,
       detour_minutes: answer.kind === 'pick' ? answer.detourMinutes : null,
       turn: this.suggestionPicksUsed + 1,
+      // Live-spend degradation stamp (v16.2 Slice 8): true
+      // when the answer was composed while the month's
+      // sub-cap stands — i.e. from cache/shelf supply only.
+      spend_degraded: spendCapReached(localSpendLedgerStore, this.clock.now()),
     });
     if (answer.kind === 'pick') {
       this.suggestionPicksUsed += 1;
@@ -5685,6 +5696,7 @@ export class Tour {
       sponsored: spoken.sponsored,
       detour_minutes: spoken.detourMinutes,
       flavor: armed.flavor,
+      spend_degraded: spendCapReached(localSpendLedgerStore, this.clock.now()),
     });
     const item = this.makeItem({
       kind: 'answer',

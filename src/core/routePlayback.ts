@@ -168,6 +168,7 @@ import {
   type CallbackCandidate,
 } from './placeMemory';
 import { normalizePlaceName } from './routeHistory';
+import { localSpendLedgerStore, spendCapReached } from './liveSpend';
 import { memorialFor } from '../data/routeMemorial';
 import type { EventAnchor, EventCandidate } from './currentEvents';
 import { getConstraints, matchInputs } from './profile';
@@ -3557,6 +3558,10 @@ export class RoutePlanRunner {
       sponsored: answer.kind === 'pick' ? answer.sponsored : false,
       detour_minutes: answer.kind === 'pick' ? answer.detourMinutes : null,
       turn: this.suggestionPicksUsed + 1,
+      // Live-spend degradation stamp (v16.2 Slice 8): true
+      // when the answer was composed while the month's
+      // sub-cap stands — i.e. from cache/shelf supply only.
+      spend_degraded: spendCapReached(localSpendLedgerStore, Date.now()),
     });
     if (answer.kind === 'pick') {
       this.suggestionPicksUsed += 1;
@@ -3944,6 +3949,7 @@ export class RoutePlanRunner {
       sponsored: spoken.sponsored,
       detour_minutes: spoken.detourMinutes,
       flavor: armed.flavor,
+      spend_degraded: spendCapReached(localSpendLedgerStore, Date.now()),
     });
     const item: AudibleItem = {
       id: `route-proposal-${++runnerSeq}`,

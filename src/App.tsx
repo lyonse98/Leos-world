@@ -1356,7 +1356,21 @@ function MilesApp() {
       // freeform Tour injects its own index on its refreshes).
       ...(suggestionGateOpen(ROUTE_MODE_ENABLED, tourMode)
         ? {
-            suggestionCandidates: async (anchors: EventAnchor[]) => discoverEventCandidates(anchors, {}),
+            suggestionCandidates: async (anchors: EventAnchor[]) =>
+              discoverEventCandidates(anchors, {
+                // Live-spend telemetry (v16.2 Slice 8): the
+                // supply's Places asks, cap-trips, and
+                // degraded serves file on the same emit path
+                // as every other runner event.
+                onSpendEvent: (type, payload) => {
+                  const pos = positionRef.current;
+                  void emitEvent(sessionId, type, payload, {
+                    lat: pos?.lat ?? null,
+                    lng: pos?.lng ?? null,
+                    movementMode: tourMode,
+                  });
+                },
+              }),
             // Place-memory callbacks (v16.2 Slice 6): the
             // drive-record supply rides the SAME gate as the
             // candidate supply — wired together or not at all.
