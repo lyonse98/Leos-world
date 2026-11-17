@@ -34,7 +34,16 @@ import {
   recordProposal,
   resolveProposalRecord,
   MAX_UNSOLICITED_PROPOSALS_PER_DRIVE,
+  type ProposalFlavor,
 } from './proposals';
+import {
+  deriveCallbackCandidates,
+  judgeCallbackAtSpeak,
+  CALLBACK_CANDIDATE_KIND,
+  PLACE_MEMORY_REASON,
+  type CallbackCandidate,
+} from './placeMemory';
+import { normalizePlaceName, type RouteDriveRecord } from './routeHistory';
 import type { TourMode } from './routeMode';
 import { tagsFor } from '../data/routeTags';
 import { memorialFor } from '../data/routeMemorial';
@@ -184,6 +193,17 @@ export interface TourDeps {
    * and stillness never open it.
    */
   declaredMode?: () => TourMode | null;
+  /**
+   * The on-device drive records (v16.2 Slice 6): the
+   * place-memory callback flavor's source — places a prior
+   * ROUTE drive's plan seated but left unheard. An absent
+   * dep means the flavor is off (closed by construction,
+   * like an absent declaredMode); the App wires the shell's
+   * drive-record store. Read at arm time, never cached: the
+   * store is the memory, and a record filed since the last
+   * boundary counts.
+   */
+  placeMemoryRecords?: () => RouteDriveRecord[];
 }
 
 export interface TourView {
@@ -691,6 +711,8 @@ export class Tour {
     kind: string;
     intent: SuggestionIntent;
     source: 'solicited' | 'proposed';
+    /** Which proposal flavor offered it (Slice 6); 'place' for every solicited pick. */
+    flavor: ProposalFlavor;
   } | null = null;
 
   // Unsolicited proposals (v16.2 Slice 5): the seam engine
@@ -701,9 +723,18 @@ export class Tour {
   // and the speak-time freshness re-judgment both pass.
   // proposalsUsed counts SPOKEN proposals only — the cap's
   // unit; a dropped or suppressed selection never spends it.
+  // Slice 6 adds the second flavor to the armed slot: a
+  // place-memory callback (placeMemory.ts), armed only when
+  // the pool composes no pick (the priority rule) and spoken
+  // under the same judges, with its own heard re-judgment.
   private proposalsUsed = 0;
   private proposalPlaceIds = new Set<string>();
-  private armedProposal: SuggestionPick | null = null;
+  private armedProposal:
+    | { flavor: 'place'; pick: SuggestionPick }
+    | { flavor: 'place-memory'; callback: CallbackCandidate }
+    | null = null;
+  /** The drive-record supply for the callback flavor (Slice 6); null = flavor off. */
+  private placeMemoryRecordsFn: (() => RouteDriveRecord[]) | null = null;
 
 
   private tickTimer: unknown = null;
@@ -759,6 +790,7 @@ export class Tour {
     this.seams = { ...realSeams, ...(deps.seams ?? {}) };
     this.clipUrls = deps.clipUrls ?? new Map();
     this.declaredModeFn = deps.declaredMode ?? null;
+    this.placeMemoryRecordsFn = deps.placeMemoryRecords ?? null;
     this.player = new Player(deps.audio, this.clock, {
       resolveUrl: item => this.resolveUrl(item),
       stallSource: () => this.pickStall(),
@@ -5353,6 +5385,7 @@ export class Tour {
         kind: answer.candidate.kind,
         intent,
         source: 'solicited',
+        flavor: 'place',
       };
     }
     const pickId = answer.kind === 'pick' ? answer.candidate.placeId : null;
@@ -5407,6 +5440,7 @@ export class Tour {
         place_id: pending.placeId,
         intent: pending.intent,
         surface: 'drive',
+        flavor: pending.flavor,
       });
     } else {
       this.emit('suggestion_outcome', {
@@ -5431,8 +5465,28 @@ export class Tour {
    */
   private trayPendingProposal(): void {
     if (!this.pendingSuggestion || this.pendingSuggestion.source !== 'proposed') return;
-    this.emit('proposal_trayed', { place_id: this.pendingSuggestion.placeId });
+    this.emit('proposal_trayed', {
+      place_id: this.pendingSuggestion.placeId,
+      flavor: this.pendingSuggestion.flavor,
+    });
     this.pendingSuggestion = null;
+  }
+
+  /**
+   * This tour's heard evidence as normalized place-name
+   * keys — the callback flavor's judgment currency.
+   * heardTopics stands keyed by the shell's §8A place-key
+   * rule (lowercase display names); normalizePlaceName is
+   * invariant over that keying, so the projection is exact.
+   * The set merges the cross-day ledger (hydrated at start)
+   * with this tour's own delivered subjects as they settle —
+   * which is what lets the speak-time judge catch a story
+   * heard minutes ago, in this very drive.
+   */
+  private heardNameKeys(): Set<string> {
+    const out = new Set<string>();
+    for (const key of this.heardTopics) out.add(normalizePlaceName(key));
+    return out;
   }
 
   /** Memorial judgment for a freeform item (short-cut angles judge by their base angle). */
@@ -5462,6 +5516,7 @@ export class Tour {
     if (this.armedProposal) {
       const armed = this.armedProposal;
       this.armedProposal = null;
+      const armedPlaceId = armed.flavor === 'place' ? armed.pick.candidate.placeId : armed.callback.placeId;
       const verdict = judgeProposalSeam({
         seam: 'story-boundary',
         tourAgeMs: now - this.tourStartAt,
@@ -5479,17 +5534,35 @@ export class Tour {
       if (!verdict.ok) {
         this.emit('proposal_suppressed', {
           reason: verdict.reason,
-          place_id: armed.candidate.placeId,
+          place_id: armedPlaceId,
+          flavor: armed.flavor,
         });
         return;
       }
-      const fresh = judgeCandidateAtSpeak(armed.candidate, now);
-      if (!fresh.ok) {
-        this.emit('proposal_dropped', {
-          reason: fresh.reason,
-          place_id: armed.candidate.placeId,
-        });
-        return;
+      // The speak-time re-judgment is flavor-shaped: a place
+      // is judged on its hours (Slice 5), a callback on its
+      // heard state (Slice 6) — a story heard since selection
+      // drops the callback silently, cap unspent.
+      if (armed.flavor === 'place') {
+        const fresh = judgeCandidateAtSpeak(armed.pick.candidate, now);
+        if (!fresh.ok) {
+          this.emit('proposal_dropped', {
+            reason: fresh.reason,
+            place_id: armedPlaceId,
+            flavor: armed.flavor,
+          });
+          return;
+        }
+      } else {
+        const fresh = judgeCallbackAtSpeak(armed.callback, this.heardNameKeys());
+        if (!fresh.ok) {
+          this.emit('proposal_dropped', {
+            reason: fresh.reason,
+            place_id: armedPlaceId,
+            flavor: armed.flavor,
+          });
+          return;
+        }
       }
       this.speakProposal(armed);
       return;
@@ -5512,7 +5585,22 @@ export class Tour {
       // proposal cap is judged by the seam judge above.
       picksUsed: 0,
     });
-    if (answer.kind === 'pick') this.armedProposal = answer;
+    if (answer.kind === 'pick') {
+      this.armedProposal = { flavor: 'place', pick: answer };
+      return;
+    }
+    // The priority rule (placeMemory.ts): the callback
+    // flavor arms ONLY when the pool composed no pick — a
+    // perishable place recommendation always outranks an
+    // evergreen memory. Derivation is live at every
+    // boundary: the drive records as they stand, discharged
+    // against this tour's heard evidence as it stands.
+    if (this.placeMemoryRecordsFn) {
+      const candidates = deriveCallbackCandidates(this.placeMemoryRecordsFn(), this.heardNameKeys(), now, {
+        excludePlaceIds: excluded,
+      });
+      if (candidates.length > 0) this.armedProposal = { flavor: 'place-memory', callback: candidates[0] };
+    }
   }
 
   /**
@@ -5527,56 +5615,97 @@ export class Tour {
    * its decision surface), and undecided at tour end means
    * the tray, never an inferred verdict.
    */
-  private speakProposal(armed: SuggestionPick): void {
+  private speakProposal(
+    armed: { flavor: 'place'; pick: SuggestionPick } | { flavor: 'place-memory'; callback: CallbackCandidate },
+  ): void {
     const now = this.clock.now();
-    const candidate = armed.candidate;
+    // Both flavors normalize to the one spoken shape: an id,
+    // a name, a kind, a line. A place speaks the composer's
+    // recommendation; a callback speaks its composed memory
+    // line and carries no hours, no detour, no sponsor — its
+    // record's hoursFetchedAt is the moment Miles vouched
+    // the memory (the tray never judges a callback on hours;
+    // see judgeTrayRecord), and passedAt carries the pass.
+    const spoken =
+      armed.flavor === 'place'
+        ? {
+            placeId: armed.pick.candidate.placeId,
+            name: armed.pick.candidate.name,
+            kind: armed.pick.candidate.kind,
+            line: armed.pick.recommendation,
+            primaryReason: armed.pick.primaryReason,
+            reasonCodes: armed.pick.reasonCodes as readonly string[],
+            sponsored: armed.pick.sponsored,
+            detourMinutes: armed.pick.detourMinutes,
+            closesAtMs: armed.pick.candidate.closesAtMs,
+            hoursFetchedAt: armed.pick.candidate.hoursFetchedAt,
+            passedAt: null as number | null,
+          }
+        : {
+            placeId: armed.callback.placeId,
+            name: armed.callback.name,
+            kind: CALLBACK_CANDIDATE_KIND,
+            line: armed.callback.line,
+            primaryReason: PLACE_MEMORY_REASON,
+            reasonCodes: [PLACE_MEMORY_REASON] as readonly string[],
+            sponsored: false,
+            detourMinutes: null as number | null,
+            closesAtMs: null as number | null,
+            hoursFetchedAt: now,
+            passedAt: armed.callback.lastPassedAt,
+          };
     this.proposalsUsed += 1;
-    this.proposalPlaceIds.add(candidate.placeId);
+    this.proposalPlaceIds.add(spoken.placeId);
     this.pendingSuggestion = {
-      placeId: candidate.placeId,
-      name: candidate.name,
-      kind: candidate.kind,
+      placeId: spoken.placeId,
+      name: spoken.name,
+      kind: spoken.kind,
       intent: 'any',
       source: 'proposed',
+      flavor: armed.flavor,
     };
     recordProposal(localProposalStore, {
-      placeId: candidate.placeId,
-      name: candidate.name,
-      kind: candidate.kind,
-      primaryReason: armed.primaryReason,
-      closesAtMs: candidate.closesAtMs,
-      hoursFetchedAt: candidate.hoursFetchedAt,
+      placeId: spoken.placeId,
+      name: spoken.name,
+      kind: spoken.kind,
+      primaryReason: spoken.primaryReason,
+      closesAtMs: spoken.closesAtMs,
+      hoursFetchedAt: spoken.hoursFetchedAt,
       offeredAt: now,
       sessionId: this.sessionId,
       state: 'spoken',
+      flavor: armed.flavor,
+      passedAt: spoken.passedAt,
     });
     this.emit('proposal_offered', {
-      place_id: candidate.placeId,
-      candidate_kind: candidate.kind,
-      reason_codes: armed.reasonCodes,
-      primary_reason: armed.primaryReason,
-      sponsored: armed.sponsored,
-      detour_minutes: armed.detourMinutes,
+      place_id: spoken.placeId,
+      candidate_kind: spoken.kind,
+      reason_codes: spoken.reasonCodes,
+      primary_reason: spoken.primaryReason,
+      sponsored: spoken.sponsored,
+      detour_minutes: spoken.detourMinutes,
+      flavor: armed.flavor,
     });
     const item = this.makeItem({
       kind: 'answer',
-      label: `Suggestion — ${candidate.name}`,
-      source: { kind: 'synth', text: armed.recommendation },
-      durationSec: estimateSpeechDurationS(armed.recommendation),
+      label: `Suggestion — ${spoken.name}`,
+      source: { kind: 'synth', text: spoken.line },
+      durationSec: estimateSpeechDurationS(spoken.line),
       onSettle: rec => {
         this.emit('proposal_playback', {
           completed: rec.completed,
           voice: rec.sounded ? 'gemini' : 'none',
           sounded_ms: Math.round(rec.soundedMs),
           attempts: item.attempts,
-          place_id: candidate.placeId,
+          place_id: spoken.placeId,
+          flavor: armed.flavor,
         });
         if (this.phase !== 'active') return;
         if (rec.sounded) this.counts.proposalsSpoken += 1;
         this.suggestionPhase = 'idle';
         this.notify();
       },
-      story: { text: armed.recommendation },
+      story: { text: spoken.line },
     });
     // The channel's one-interruption rule covers proposals
     // too: while this line sounds, no ask can queue behind it.
