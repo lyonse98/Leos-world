@@ -67,6 +67,7 @@ import {
   type RoutePlan,
 } from './routeMode';
 import { FAMILY_GAP_STORY_RULES } from './narration';
+import { profileRankOf, profileWeightMap } from './profileRank';
 import { registryNear } from './facts';
 import { isHousePlaceName } from './houseClass';
 import { MAJOR_PLACES } from '../content/majorPlaces';
@@ -493,6 +494,16 @@ export interface GapFillContext {
   input: ParsedRouteInput;
   /** The Routes drive-time estimate — the plan's expected-time map. */
   driveSec: number;
+  /**
+   * Profile topic weights for the profile rank term (v16.2
+   * Slice 3): the caller's matchInputs().topics, the same
+   * weights the composer received. Absent (pre-slice callers,
+   * a paused or empty profile) the term reads its neutral
+   * value for every unit and shelf ranking is exactly the
+   * pre-feature ranking. Selection-only, as everywhere the
+   * signal rides (profileRank.ts owns the doctrine).
+   */
+  profileTopics?: readonly { topic: string; weight: number }[];
 }
 
 export interface GapFillDeps {
@@ -783,21 +794,36 @@ export async function fillRouteGaps(
   const toneRank = (u: LibraryUnit): number =>
     steerTone && (u.tone === steerTone || u.toneSecondary === steerTone) ? 0 : 1;
   const famRank = (u: LibraryUnit): number => (family ? familyRankOf(u) : 0);
+  // Profile signal (v16.2 Slice 3, Nov 16, 2026): the stored
+  // taste profile as a soft rank term, seated directly under
+  // toneRank exactly as in the composer's chains — a stored
+  // taste yields to this drive's tone steer, and both yield
+  // to the family boundary above them. With no weights every
+  // unit reads the neutral 1 and the key is today's.
+  const profileWeights = profileWeightMap(ctx.profileTopics);
+  const profRank = (u: LibraryUnit): number => profileRankOf(u.topics, profileWeights);
+  const keyLess = (a: readonly number[], b: readonly number[]): boolean => {
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return a[i] < b[i];
+    }
+    return false;
+  };
 
   /**
    * Best untiled shelf unit anchored inside a sub-gap (ranking:
-   * tone → angle class → stories before intros → nearest the
-   * middle). Plain neighborhood intros ARE fill candidates
-   * (welcome demotion, Nov 4, 2026: intros left the composer's
-   * chapter-opener lane, and the guarantee's library-first pool
-   * is where they belong in route) — heard-excluded exactly
-   * like stories, and ranked after story angles so a real
-   * story always wins its gap first. The greet variant and the
-   * filler lanes never tile anywhere in route.
+   * family → tone → profile → angle class → stories before
+   * intros → nearest the middle). Plain neighborhood intros
+   * ARE fill candidates (welcome demotion, Nov 4, 2026: intros
+   * left the composer's chapter-opener lane, and the
+   * guarantee's library-first pool is where they belong in
+   * route) — heard-excluded exactly like stories, and ranked
+   * after story angles so a real story always wins its gap
+   * first. The greet variant and the filler lanes never tile
+   * anywhere in route.
    */
   const bestShelfCandidate = (sub: StoryGap): LibraryUnit | null => {
     let best: LibraryUnit | null = null;
-    let bestKey: [number, number, number, number, number] | null = null;
+    let bestKey: [number, number, number, number, number, number] | null = null;
     for (const u of ctx.fetchedUnits) {
       if (plannedIds.has(u.id) || ctx.heardKeys.has(u.id)) continue;
       if (u.angle === 'neighborhood_intro_greet' || u.angle === 'filler' || u.angle === 'filler_hosted') continue;
@@ -819,25 +845,15 @@ export async function fillRouteGaps(
       if (!inCorridor(u)) continue; // geographic only — a fetched portal candidate never becomes a gap fill
       const anchor = progressAlongPath({ lat: u.lat, lng: u.lng }, plan.path);
       if (anchor < sub.startProgress - 1e-9 || anchor > sub.endProgress + 1e-9) continue;
-      const key: [number, number, number, number, number] = [
+      const key: [number, number, number, number, number, number] = [
         famRank(u),
         toneRank(u),
+        profRank(u),
         angleClassRank(u.angle),
         u.angle === 'neighborhood_intro' ? 1 : 0,
         Math.abs(anchor - sub.midProgress),
       ];
-      if (
-        !bestKey ||
-        key[0] < bestKey[0] ||
-        (key[0] === bestKey[0] && key[1] < bestKey[1]) ||
-        (key[0] === bestKey[0] && key[1] === bestKey[1] && key[2] < bestKey[2]) ||
-        (key[0] === bestKey[0] && key[1] === bestKey[1] && key[2] === bestKey[2] && key[3] < bestKey[3]) ||
-        (key[0] === bestKey[0] &&
-          key[1] === bestKey[1] &&
-          key[2] === bestKey[2] &&
-          key[3] === bestKey[3] &&
-          key[4] < bestKey[4])
-      ) {
+      if (!bestKey || keyLess(key, bestKey)) {
         best = u;
         bestKey = key;
       }

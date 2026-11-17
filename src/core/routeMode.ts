@@ -23,6 +23,7 @@ import { normalizePlaceName, selectPriorDrive, type RouteDriveRecord } from './r
 import { houseRank, houseRankForPlaceKey, isHouseStory } from './houseClass';
 import { isPortalTarget } from './housePortal';
 import { activePartners, partnerForUnit, PARTNERS, type Partner } from '../data/partners';
+import { profileRankOf, profileWeightMap } from './profileRank';
 import { SHORT_CUT_DURATION_SEC } from '../data/shortCuts';
 
 export { isHouseStory } from './houseClass';
@@ -2664,6 +2665,22 @@ export interface ComposeOptions {
    */
   partners?: readonly Partner[];
   /**
+   * Profile topic weights for the profile rank term (v16.2
+   * Slice 3): the caller's matchInputs().topics — declared
+   * story-topic affinities at weight 1, inferred at their aged
+   * confidence, already resolved by profile.ts at read time.
+   * Absent (every pre-slice caller, the harness, a paused or
+   * empty profile — matchInputs empties itself in both cases)
+   * the term reads its neutral value for every unit and
+   * composition is exactly the pre-feature composer's. The
+   * term is a soft, selection-only signal (profileRank.ts owns
+   * the doctrine): in every chain it joins it sits below the
+   * family boundary, the partner class, the house class and
+   * this drive's tone steer, so it reorders within a class and
+   * never promotes across one.
+   */
+  profileTopics?: readonly { topic: string; weight: number }[];
+  /**
    * Prior route drives (addendum 2), newest first, with each
    * record's owed subjects ALREADY filtered against the current
    * heard ledger by the caller (routeHistory.stillOwedSubjects)
@@ -3137,6 +3154,21 @@ export function composeRoutePlan(
     const owner = partnerForUnit(u.id, partnerList);
     return owner && pathActivePartners.has(owner.id) ? 0 : 1;
   };
+  // Profile signal (v16.2 Slice 3, Nov 16, 2026): the stored
+  // taste profile as a soft rank term, the tone lever's
+  // sibling — selection-only, fed by the caller's declared +
+  // inferred story-topic affinities (profileRank.ts owns the
+  // doctrine and the fences). It sits directly under toneRank
+  // in every chain it joins: a stored taste yields to the
+  // steer the listener chose for THIS drive, and both yield
+  // to the structural terms above them (family boundary,
+  // partner class, house class). A unit's term is 1 − its
+  // strongest topic weight, so a declared match (0) beats an
+  // inferred one (0 < term < 1) beats no match (1) — and with
+  // no weights at all every unit reads 1, the neutral value,
+  // and the chains are arithmetically today's.
+  const profileWeights = profileWeightMap(opts.profileTopics);
+  const profileRank = (u: LibraryUnit): number => profileRankOf(u.topics, profileWeights);
   const threadRank = (u: LibraryUnit): number => (threadMemberIds.has(u.id) ? 0 : 1);
   // House demotion (field fix F1, Nov 12, 2026): the house /
   // architecture class sorts below everything else it competes
@@ -3151,6 +3183,7 @@ export function composeRoutePlan(
     partnerRank(a) - partnerRank(b) ||
     houseRank(a) - houseRank(b) ||
     toneRank(a) - toneRank(b) ||
+    profileRank(a) - profileRank(b) ||
     threadRank(a) - threadRank(b) ||
     angleClassRank(a.angle) - angleClassRank(b.angle) ||
     prog(a) - prog(b);
@@ -3431,6 +3464,7 @@ export function composeRoutePlan(
         familyRank(a) - familyRank(b) ||
         houseRank(a) - houseRank(b) ||
         toneRank(a) - toneRank(b) ||
+        profileRank(a) - profileRank(b) ||
         threadRank(a) - threadRank(b);
       if (head !== 0) return head;
       // The scarcity band: weights within ~10% of each other
