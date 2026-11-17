@@ -260,6 +260,13 @@ export function makeWorld(Tour, opts = {}) {
     cachedStories: [],
     fillerPinFails: opts.fillerPinFails ?? false,
     hostedPinFails: opts.hostedPinFails ?? false,
+    // Current-events fixtures (v16.2 Slice 2): pre-built
+    // EventCandidate objects the tour's pool refresh returns;
+    // the layer's own gates are pinned against the real
+    // functions in the CE suites, this seam fakes only the
+    // network edge — exactly like discoverCandidates above.
+    eventCandidates: opts.eventCandidates ?? [],
+    eventCandidateCalls: [], // every pool-refresh ask, in order
   };
 
   const libraryRows = new Map();
@@ -444,6 +451,10 @@ export function makeWorld(Tour, opts = {}) {
     ttsQuotaTripped: () => world.ttsQuota,
     storyQuotaTripped: () => world.storyQuota,
     discoverCandidates: async () => world.candidates,
+    discoverEventCandidates: async (anchors, opts) => {
+      world.eventCandidateCalls.push({ anchors, opts });
+      return world.eventCandidates;
+    },
     reverseArea: async () => world.area,
     buildFactPack: async (candidate, area) => ({
       name: candidate.name,

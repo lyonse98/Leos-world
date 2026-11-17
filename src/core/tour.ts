@@ -25,6 +25,7 @@ import { tagsFor } from '../data/routeTags';
 import { partnerApprovedAngleFor } from '../data/partners';
 import * as gemini from './gemini';
 import * as facts from './facts';
+import * as currentEvents from './currentEvents';
 import {
   GREETINGS_FRESH,
   GREETINGS_RESUME,
@@ -111,6 +112,7 @@ export interface NetSeams {
   discoverCandidates: typeof facts.discoverCandidates;
   reverseArea: typeof facts.reverseArea;
   buildFactPack: typeof facts.buildFactPack;
+  discoverEventCandidates: typeof currentEvents.discoverEventCandidates;
 }
 
 const realSeams: NetSeams = {
@@ -139,6 +141,7 @@ const realSeams: NetSeams = {
   discoverCandidates: facts.discoverCandidates,
   reverseArea: facts.reverseArea,
   buildFactPack: facts.buildFactPack,
+  discoverEventCandidates: currentEvents.discoverEventCandidates,
 };
 
 export interface TourDeps {
@@ -178,6 +181,8 @@ export interface TourView {
     storyQuota: boolean;
     bufferCount: number;
     neighborhood: string | null;
+    /** Current-events pool size (v16.2 Slice 2) — color supply, not a serve input in v1. */
+    eventCandidates: number;
   };
 }
 
@@ -592,6 +597,15 @@ export class Tour {
   private synthSamples: number[] = [];
   private durationSamples: number[] = [];
   private lastCyclePos: Position | null = null;
+  // Current-events pool (v16.2 Slice 2, Nov 16, 2026): ranked,
+  // freshness-verified eat/drink/do candidates near the driver,
+  // refreshed off the serve cycle by refreshEventPool. It is
+  // contextual color + candidate supply for the suggestion
+  // slices — nothing in v1 serves FROM it, so an empty or
+  // stale pool changes no spoken behavior.
+  private eventPool: currentEvents.EventCandidate[] = [];
+  private eventPoolAt = 0;
+  private eventPoolPos: { lat: number; lng: number } | null = null;
   private objectUrls = new Map<string, string>();
 
   // Economies (§5)
@@ -811,6 +825,7 @@ export class Tour {
         storyQuota: this.seams.storyQuotaTripped(),
         bufferCount: this.buffer.size,
         neighborhood: this.area.neighborhood,
+        eventCandidates: this.eventPool.length,
       },
     };
   }
@@ -880,6 +895,9 @@ export class Tour {
     // read, so the greeting's attempt below is still the tap's
     // first media action.
     this.introFormDecided = false;
+    this.eventPool = [];
+    this.eventPoolAt = 0;
+    this.eventPoolPos = null;
     this.hookState = 'idle';
     this.hookText = null;
     this.hookCommissioned = false;
@@ -2543,6 +2561,52 @@ export class Tour {
     return false;
   }
 
+  /**
+   * The current-events pool, as last refreshed (v16.2 Slice 2).
+   * Read-only candidate supply for composition color and the
+   * coming suggestion slices; empty until the first refresh
+   * lands, and empty forever when Places is unreachable.
+   */
+  currentEventCandidates(): readonly currentEvents.EventCandidate[] {
+    return this.eventPool;
+  }
+
+  /**
+   * Refresh the current-events pool off the serve cycle —
+   * fire-and-forget, gated so the Places stack is asked at
+   * most once per 10 minutes inside a 500 m ground cell, with
+   * a 60 s hard floor between asks. The refresh never awaits
+   * inside the cycle and any failure leaves the previous pool
+   * standing: the pool is color, never a drive-visible error.
+   */
+  private refreshEventPool(): void {
+    if (this.phase !== 'active' || !this.position) return;
+    const now = this.clock.now();
+    if (now - this.eventPoolAt < 60_000) return;
+    if (
+      this.eventPoolPos &&
+      now - this.eventPoolAt < 600_000 &&
+      calculateDistance(this.position.lat, this.position.lng, this.eventPoolPos.lat, this.eventPoolPos.lng) < 500
+    ) {
+      return;
+    }
+    this.eventPoolAt = now;
+    this.eventPoolPos = { lat: this.position.lat, lng: this.position.lng };
+    const shelfKeys = new Set(this.libraryIndex.map(e => e.place_key));
+    void this.seams
+      .discoverEventCandidates([{ lat: this.position.lat, lng: this.position.lng, kind: 'position' }], { shelfKeys })
+      .then(candidates => {
+        this.eventPool = candidates;
+        this.emit('current_events_pool', {
+          count: candidates.length,
+          open_now: candidates.filter(c => c.openNow === true).length,
+        });
+      })
+      .catch(() => {
+        /* the pool is color, never a failure */
+      });
+  }
+
   async runServeCycle(reason: string): Promise<void> {
     void reason;
     if (this.phase !== 'active' || !this.position) return;
@@ -2558,6 +2622,7 @@ export class Tour {
     // Only live generation stands down, inside serveCandidate.
     this.cycling = true;
     this.lastCyclePos = this.position;
+    this.refreshEventPool();
     try {
       // Portal discharge (Nov 14, 2026): while a house
       // sounds, its payload owns the next story slot — the
