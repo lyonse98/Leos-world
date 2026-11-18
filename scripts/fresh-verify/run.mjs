@@ -60,6 +60,8 @@ const extras = {
   profileRank: engine.profileRank,
   freshness: engine.freshness,
   currentEvents: engine.currentEvents,
+  eventsFeed: engine.eventsFeed,
+  EVENT_FEEDS: engine.EVENT_FEEDS,
   suggestions: engine.suggestions,
   proposals: engine.proposals,
   liveSpend: engine.liveSpend,

@@ -89,6 +89,17 @@ export interface DatedEvent {
   /** When the SOURCE published/last-verified this listing. Null = undated. */
   sourceAtMs: number | null;
   sourceName: string;
+  /**
+   * Venue display name, when the feed names one (events feed,
+   * Nov 18, 2026). Optional: the gate below judges time only;
+   * venue fields are the consumer's color, never eligibility.
+   */
+  venueName?: string | null;
+  /** Venue address text as the feed published it, when it did. */
+  address?: string | null;
+  /** Venue coordinates, when the feed states or a geocode resolved them. */
+  lat?: number | null;
+  lng?: number | null;
 }
 
 // ------------------------------------------------------------ the hours gate
