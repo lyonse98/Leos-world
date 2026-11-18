@@ -23,6 +23,16 @@
 // feed exists, enter only through assessEvent() — the gate is
 // built and sim-pinned now so a future feed cannot sneak past
 // it.
+//
+// UPDATE (Nov 18, 2026): a feed now exists behind the seam —
+// eventsFeed.ts implements it over FREE published iCal
+// calendar feeds (Balboa Park + UC San Diego, verified by
+// fetch in the Nov 18 source survey; Erik's ruling: free
+// sources only, no signup, the Ticketmaster decision is his
+// and later). The seam's default below stays NO_EVENTS_FEED:
+// no production surface consumes feed events yet, so a caller
+// opts into the real provider explicitly. Feed candidates
+// still enter only through assessEvent(), exactly as pinned.
 // ============================================================
 //
 // Data sources, honestly:
@@ -125,7 +135,7 @@ export interface EventCandidate {
   score: number;
   /** Detour cost in minutes. Null in v1 — see the header. */
   detourMinutes: number | null;
-  /** Set only for feed-event candidates (none exist in v1 — no feed is wired). */
+  /** Set only for feed-event candidates (the feed lives in eventsFeed.ts; unwired in v1 surfaces). */
   event: DatedEvent | null;
 }
 
@@ -155,11 +165,12 @@ export interface EventsFeedProvider {
 }
 
 /**
- * The shipped events feed: none. This is the designed seam a
- * future feed plugs into — and the standing record that v1 has
- * no events source (see the header's scope note). A real feed
- * replaces this constant; its candidates still pass through
- * assessEvent() before they can surface.
+ * The seam's default feed: none. This is the designed seam a
+ * feed plugs into; a real provider now exists behind it
+ * (eventsFeed.ts, Nov 18, 2026 — published iCal feeds), but
+ * the default stays empty until a caller opts in explicitly.
+ * Any feed's candidates still pass through assessEvent()
+ * before they can surface.
  */
 export const NO_EVENTS_FEED: EventsFeedProvider = {
   async fetchEvents() {
@@ -584,7 +595,7 @@ export interface DiscoverEventOptions {
   nowMs?: number;
   radiusM?: number;
   provider?: PlaceHoursProvider;
-  /** Defaults to NO_EVENTS_FEED — v1 has no feed (see the header). */
+  /** Defaults to NO_EVENTS_FEED; pass eventsFeed.ts's icalEventsFeed to opt in. */
   eventsFeed?: EventsFeedProvider;
   /** Ranking inputs; default = the live profile reads (the layer is its first consumer). */
   match?: MatchInputs;
@@ -759,7 +770,7 @@ export async function discoverEventCandidates(
 
 /**
  * Feed-event candidates near the anchors, gated by
- * assessEvent(). Ships against NO_EVENTS_FEED (always empty);
+ * assessEvent(). Defaults to NO_EVENTS_FEED (always empty);
  * it exists so the gate — not a future integrator's care — is
  * what stands between a feed and the listener.
  */

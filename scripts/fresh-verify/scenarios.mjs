@@ -105,7 +105,7 @@ async function healthyOpening(world, audio, pos = UTC, speed = 8) {
 }
 
 export async function runScenarios(Tour, extras) {
-  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, profileUi, facts, partners, freshness, currentEvents, suggestions, proposals, placeMemory, liveSpend, composeRoutePlan, hashString } = extras;
+  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, profileUi, facts, partners, freshness, currentEvents, eventsFeed, EVENT_FEEDS, suggestions, proposals, placeMemory, liveSpend, composeRoutePlan, hashString } = extras;
 
   // ---------------------------------------------------------- S-01 healthy start
   suite('S-01 healthy start / opener order');
@@ -6386,6 +6386,316 @@ export async function runScenarios(Tour, extras) {
     } finally {
       globalThis.fetch = realFetch;
     }
+  }
+
+  // CE-9 (Nov 18, 2026, events feed v1): the iCal provider
+  // behind the Slice 2 seam. Erik's ruling: FREE published
+  // calendar feeds only, no signup, no key of his. Fixtures
+  // below are RECORDED shapes from the two verified feeds
+  // (Balboa Park / The Events Calendar; UC San Diego /
+  // Localist), trimmed — zero live calls. The pins: TZID and
+  // DATE times land on the right instants; RRULE expands with
+  // EXDATE + RECURRENCE-ID honored; coordinates come from GEO
+  // or the governed geocode cache, never a guess; a snapshot's
+  // fetch instant is the source date, so a dead feed's events
+  // retire through the 48 h gate exactly as designed.
+  suite('CE-9 the iCal events feed: published feeds parse, recur, geocode under the sub-cap, and age out through the gate');
+  {
+    const ce9Feed = (id, sourceName) => ({
+      id, sourceName, url: `https://example.test/${id}.ics`,
+      defaultZone: 'America/Los_Angeles', refreshMs: 3 * 60 * 60 * 1000, coverage: 'ce9 fixture',
+    });
+    const BALBOA_FEED = ce9Feed('ce9-balboa', 'Balboa Park');
+    const UCSD_FEED = ce9Feed('ce9-ucsd', 'UC San Diego Events Calendar');
+    // Recorded shape: The Events Calendar feed (TZID times,
+    // escaped commas, full street addresses, all-day spans).
+    const BALBOA_ICS = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'PRODID:-//Balboa Park - ECPv6.18.4//NONSGML v1.0//EN',
+      'BEGIN:VEVENT',
+      'DTSTART;TZID=America/Los_Angeles:20261121T193000',
+      'DTEND;TZID=America/Los_Angeles:20261121T213000',
+      'DTSTAMP:20261026T125650Z',
+      'UID:ce9-concert@test',
+      'SUMMARY:Camarada Chamber ',
+      ' Music Mingle',
+      'LOCATION:Mingei International Museum\\, 1439 El Prado\\, San Diego\\, CA\\, 92102\\, United States',
+      'END:VEVENT',
+      'BEGIN:VEVENT',
+      'DTSTART;TZID=America/Los_Angeles:20261122T193000',
+      'DTEND;TZID=America/Los_Angeles:20261122T213000',
+      'DTSTAMP:20261026T125650Z',
+      'UID:ce9-concert-2@test',
+      'SUMMARY:Camarada Second Night',
+      'LOCATION:Mingei International Museum\\, 1439 El Prado\\, San Diego\\, CA\\, 92102\\, United States',
+      'END:VEVENT',
+      'BEGIN:VEVENT',
+      'DTSTART;TZID=America/Los_Angeles:20261119T140000',
+      'DTEND;TZID=America/Los_Angeles:20261119T150000',
+      'DTSTAMP:20261101T000000Z',
+      'UID:ce9-organ@test',
+      'SUMMARY:Spreckels Organ Pavilion Tour',
+      'LOCATION:Spreckels Organ Pavilion\\, Balboa Park\\, San Diego\\, CA',
+      'END:VEVENT',
+      'BEGIN:VEVENT',
+      'DTSTART;VALUE=DATE:20250106',
+      'DTEND;VALUE=DATE:20261120',
+      'DTSTAMP:20260527T133154Z',
+      'UID:ce9-exhibit@test',
+      'SUMMARY:Wild San Diego',
+      'LOCATION:San Diego Natural History Museum (The Nat)\\, 1788 El Prado\\, Balboa Park\\, San Diego\\, CA\\, 92101\\, United States',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    // Recorded shape: Localist feed (UTC times, GEO, DATE).
+    const UCSD_ICS = [
+      'BEGIN:VCALENDAR',
+      'VERSION:2.0',
+      'PRODID:icalendar-ruby',
+      'BEGIN:VEVENT',
+      'DTSTAMP:20261118T181459Z',
+      'UID:ce9-lecture@test',
+      'DTSTART:20261119T033000Z',
+      'DTEND:20261119T053000Z',
+      'GEO:32.881125;-117.237593',
+      'LOCATION:Geisel Library\\, Service Hub',
+      'SUMMARY:Ce9 Evening Lecture',
+      'END:VEVENT',
+      'BEGIN:VEVENT',
+      'DTSTAMP:20261118T181459Z',
+      'UID:ce9-weekly@test',
+      'DTSTART:20261107T173000Z',
+      'DTEND:20261107T183000Z',
+      'RRULE:FREQ=WEEKLY;COUNT=6',
+      'EXDATE:20261121T173000Z',
+      'GEO:32.879;-117.236',
+      'LOCATION:Student Center B',
+      'SUMMARY:Ce9 Weekly Meetup',
+      'END:VEVENT',
+      'BEGIN:VEVENT',
+      'DTSTAMP:20261118T181459Z',
+      'UID:ce9-weekly@test',
+      'RECURRENCE-ID:20261128T173000Z',
+      'DTSTART:20261128T183000Z',
+      'DTEND:20261128T193000Z',
+      'GEO:32.879;-117.236',
+      'LOCATION:Student Center B',
+      'SUMMARY:Ce9 Weekly Meetup (Moved)',
+      'END:VEVENT',
+      'BEGIN:VEVENT',
+      'DTSTAMP:20261118T181459Z',
+      'UID:ce9-daily@test',
+      'DTSTART:20261118T200000Z',
+      'DTEND:20261118T210000Z',
+      'RRULE:FREQ=DAILY;COUNT=3',
+      'GEO:32.879;-117.236',
+      'LOCATION:Price Center',
+      'SUMMARY:Ce9 Daily Stand',
+      'END:VEVENT',
+      'END:VCALENDAR',
+    ].join('\r\n');
+    const MINGEI_ADDR = 'Mingei International Museum, 1439 El Prado, San Diego, CA, 92102, United States';
+    const ORGAN_ADDR = 'Spreckels Organ Pavilion, Balboa Park, San Diego, CA';
+    const ce9Geocoder = table => {
+      const cache = new Map();
+      const calls = [];
+      return {
+        calls,
+        lookup: q => cache.get(q) ?? null,
+        resolve: async q => {
+          calls.push(q);
+          const hit = table[q] ?? null;
+          if (hit) cache.set(q, hit);
+          return hit;
+        },
+      };
+    };
+    const ce9Fetch = table => {
+      const calls = [];
+      const fn = async url => {
+        calls.push(url);
+        const text = table[url];
+        if (text === undefined) throw new Error('feed down');
+        return text;
+      };
+      fn.calls = calls;
+      return fn;
+    };
+    const BALBOA_ANCHOR = { lat: 32.7341, lng: -117.1486, kind: 'position' };
+    const UCSD_ANCHOR = { lat: 32.881, lng: -117.2376, kind: 'position' };
+
+    // --- the Balboa shape: TZID, folding, escapes, geocoded venues
+    const balboaGeo = ce9Geocoder({
+      [MINGEI_ADDR]: { lat: 32.7313, lng: -117.1488 },
+      [ORGAN_ADDR]: { lat: 32.7296, lng: -117.1478 },
+    });
+    const balboaFetch = ce9Fetch({ [BALBOA_FEED.url]: BALBOA_ICS });
+    const balboaProvider = eventsFeed.createICalEventsFeed({
+      feeds: [BALBOA_FEED], fetchText: balboaFetch, snapshotStore: ceMemStore(), geocoder: balboaGeo,
+    });
+    const balboaEvents = await balboaProvider.fetchEvents(BALBOA_ANCHOR, 1200, CE_NOW);
+    check('the Balboa feed yields its three upcoming timed events (the long-running exhibition started in the past)',
+      balboaEvents.length === 3, JSON.stringify(balboaEvents.map(e => e.title)));
+    const concert = balboaEvents.find(e => e.title.startsWith('Camarada Chamber'));
+    check('a folded SUMMARY unfolds into one title', concert?.title === 'Camarada Chamber Music Mingle', concert?.title);
+    check('a TZID start lands on the right instant (Nov 21 19:30 PST = Nov 22 03:30 UTC)',
+      concert?.startsAtMs === Date.UTC(2026, 10, 22, 3, 30, 0), `${concert?.startsAtMs}`);
+    check("the event's source date is the snapshot's fetch instant, not its months-old DTSTAMP",
+      concert?.sourceAtMs === CE_NOW, `${concert?.sourceAtMs}`);
+    check('the venue name leads the LOCATION; the address survives unescaped',
+      concert?.venueName === 'Mingei International Museum' && concert?.address === MINGEI_ADDR,
+      JSON.stringify({ v: concert?.venueName, a: concert?.address }));
+    const servedBalboa = await currentEvents.discoverFeedEvents([BALBOA_ANCHOR], { nowMs: CE_NOW, eventsFeed: balboaProvider });
+    check('through the gate, all three events are eligible (future starts, fresh snapshot)',
+      servedBalboa.length === 3, JSON.stringify(servedBalboa.map(e => e.title)));
+    check('two events at one venue cost ONE geocode; a second fetch within the snapshot window costs none',
+      balboaGeo.calls.filter(q => q === MINGEI_ADDR).length === 1 && balboaFetch.calls.length === 1,
+      `geocodes=${JSON.stringify(balboaGeo.calls)} fetches=${balboaFetch.calls.length}`);
+    const farEvents = await balboaProvider.fetchEvents(UCSD_ANCHOR, 1200, CE_NOW);
+    check('the same events are honestly absent 15 km away at a 1.2 km radius', farEvents.length === 0);
+
+    // --- parser pins: DATE landings and monthly ordinal expansion
+    const janWindow = eventsFeed.parseFeedOccurrences(BALBOA_ICS, BALBOA_FEED, Date.UTC(2025, 0, 1), Date.UTC(2025, 1, 1));
+    const exhibit = janWindow.find(o => o.title === 'Wild San Diego');
+    check('an all-day DATE start lands at local midnight (Jan 6 2025 00:00 PST = 08:00 UTC)',
+      exhibit?.startsAtMs === Date.UTC(2025, 0, 6, 8, 0, 0), `${exhibit?.startsAtMs}`);
+    const MONTHLY_ICS = [
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+      'UID:ce9-monthly@test',
+      'DTSTART;TZID=America/Los_Angeles:20261114T093000',
+      'RRULE:FREQ=MONTHLY;BYDAY=2SA;COUNT=3',
+      'GEO:32.9;-117.2',
+      'LOCATION:Visitor Center',
+      'SUMMARY:Ce9 Second Saturday Walk',
+      'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+    const monthly = eventsFeed.parseFeedOccurrences(MONTHLY_ICS, BALBOA_FEED, CE_NOW - 30 * CE_DAY_MS, CE_NOW + 90 * CE_DAY_MS);
+    check('a monthly BYDAY=2SA rule expands to the 2nd Saturdays, wall-clock stable across months',
+      JSON.stringify(monthly.map(o => o.startsAtMs)) ===
+        JSON.stringify([Date.UTC(2026, 10, 14, 17, 30), Date.UTC(2026, 11, 12, 17, 30), Date.UTC(2027, 0, 9, 17, 30)]),
+      JSON.stringify(monthly.map(o => o.startsAtMs)));
+
+    // --- the UCSD shape: GEO in-feed, recurrence discipline
+    const ucsdGeo = ce9Geocoder({});
+    const ucsdProvider = eventsFeed.createICalEventsFeed({
+      feeds: [UCSD_FEED], fetchText: ce9Fetch({ [UCSD_FEED.url]: UCSD_ICS }), snapshotStore: ceMemStore(), geocoder: ucsdGeo,
+    });
+    const ucsdEvents = await ucsdProvider.fetchEvents(UCSD_ANCHOR, 1200, CE_NOW);
+    const lecture = ucsdEvents.find(e => e.title === 'Ce9 Evening Lecture');
+    check('a GEO-carrying event serves with the feed’s own coordinates and no geocode is consulted',
+      lecture?.lat === 32.881125 && lecture?.lng === -117.237593 && ucsdGeo.calls.length === 0,
+      JSON.stringify({ lat: lecture?.lat, calls: ucsdGeo.calls.length }));
+    const meetups = ucsdEvents.filter(e => e.title.startsWith('Ce9 Weekly Meetup'));
+    check('the weekly series contributes exactly one in-window occurrence: the EXDATE is gone, the override moved',
+      meetups.length === 1 && meetups[0].title === 'Ce9 Weekly Meetup (Moved)' && meetups[0].startsAtMs === Date.UTC(2026, 10, 28, 18, 30, 0),
+      JSON.stringify(meetups.map(e => `${e.title}@${e.startsAtMs}`)));
+    const dailies = ucsdEvents.filter(e => e.title === 'Ce9 Daily Stand');
+    check('a daily COUNT=3 rule yields exactly three occurrences',
+      dailies.length === 3 && dailies[0].startsAtMs === Date.UTC(2026, 10, 18, 20, 0, 0) && dailies[2].startsAtMs === Date.UTC(2026, 10, 20, 20, 0, 0),
+      JSON.stringify(dailies.map(e => e.startsAtMs)));
+
+    // --- cross-feed dedupe: the same listing in two feeds is one event
+    const DUP_ICS = [
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+      'UID:ce9-dup@other',
+      'DTSTART:20261122T033000Z',
+      'GEO:32.7313;-117.1488',
+      'LOCATION:Mingei International Museum',
+      'SUMMARY:Camarada Chamber Music Mingle',
+      'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+    const DUP_FEED = ce9Feed('ce9-dup', 'Ce9 Mirror');
+    const dupProvider = eventsFeed.createICalEventsFeed({
+      feeds: [BALBOA_FEED, DUP_FEED],
+      fetchText: ce9Fetch({ [BALBOA_FEED.url]: BALBOA_ICS, [DUP_FEED.url]: DUP_ICS }),
+      snapshotStore: ceMemStore(), geocoder: balboaGeo,
+    });
+    const dupEvents = await dupProvider.fetchEvents(BALBOA_ANCHOR, 1200, CE_NOW);
+    check('the same title + start + place arriving from two feeds dedupes to one event',
+      dupEvents.filter(e => e.title === 'Camarada Chamber Music Mingle').length === 1,
+      JSON.stringify(dupEvents.map(e => e.title)));
+
+    // --- stale-while-error: a dead feed ages out through the 48 h gate
+    const GALA_FEED = ce9Feed('ce9-gala', 'Ce9 Gala Feed');
+    const GALA_ICS = [
+      'BEGIN:VCALENDAR', 'VERSION:2.0', 'BEGIN:VEVENT',
+      'UID:ce9-gala@test',
+      'DTSTART:20261121T190000Z',
+      'GEO:32.7341;-117.1486',
+      'LOCATION:Ce9 Hall',
+      'SUMMARY:Ce9 Future Gala',
+      'END:VEVENT', 'END:VCALENDAR',
+    ].join('\r\n');
+    const galaStore = ceMemStore();
+    const galaLive = eventsFeed.createICalEventsFeed({
+      feeds: [GALA_FEED], fetchText: ce9Fetch({ [GALA_FEED.url]: GALA_ICS }), snapshotStore: galaStore, geocoder: null,
+    });
+    await galaLive.fetchEvents(BALBOA_ANCHOR, 1200, CE_NOW);
+    const galaDead = eventsFeed.createICalEventsFeed({
+      feeds: [GALA_FEED], fetchText: ce9Fetch({}), snapshotStore: galaStore, geocoder: null,
+    });
+    const at47 = await currentEvents.discoverFeedEvents([BALBOA_ANCHOR], { nowMs: CE_NOW + 47 * 60 * 60 * 1000, eventsFeed: galaDead });
+    check('a feed down for 47 h still serves its last snapshot — the source is inside the 48 h window',
+      at47.length === 1 && at47[0].title === 'Ce9 Future Gala', JSON.stringify(at47.map(e => e.title)));
+    const at49 = await currentEvents.discoverFeedEvents([BALBOA_ANCHOR], { nowMs: CE_NOW + 49 * 60 * 60 * 1000, eventsFeed: galaDead });
+    check('at 49 h the gate retires the dead feed’s events — staleness cannot be laundered',
+      at49.length === 0, JSON.stringify(at49.map(e => e.title)));
+
+    // --- fail-soft: garbage and dead feeds are empty answers, never throws
+    const garbageProvider = eventsFeed.createICalEventsFeed({
+      feeds: [GALA_FEED], fetchText: async () => 'this is not a calendar', snapshotStore: ceMemStore(), geocoder: null,
+    });
+    check('a malformed feed body yields no events and no throw',
+      (await garbageProvider.fetchEvents(BALBOA_ANCHOR, 1200, CE_NOW)).length === 0);
+    const deadProvider = eventsFeed.createICalEventsFeed({
+      feeds: [GALA_FEED], fetchText: ce9Fetch({}), snapshotStore: ceMemStore(), geocoder: null,
+    });
+    check('a feed that never answers, with no snapshot, yields no events and no throw',
+      (await deadProvider.fetchEvents(BALBOA_ANCHOR, 1200, CE_NOW)).length === 0);
+
+    // --- the shipped geocoder: governed, cached, capped
+    const geoSpendStore = ceMemStore();
+    const geoCacheStore = ceMemStore();
+    let geoHttpCalls = 0;
+    const placesGeocoder = eventsFeed.createPlacesFeedGeocoder({
+      apiKeys: ['ce9-key'],
+      fetchJson: async () => {
+        geoHttpCalls += 1;
+        return { places: [{ location: { latitude: 32.7313, longitude: -117.1488 } }] };
+      },
+      spendStore: geoSpendStore, store: geoCacheStore, sleep: async () => {},
+    });
+    const resolved = await placesGeocoder.resolve(MINGEI_ADDR);
+    check('the Places geocoder resolves a venue address to coordinates',
+      resolved?.lat === 32.7313 && resolved?.lng === -117.1488, JSON.stringify(resolved));
+    check('one resolution charges exactly one governed ask against the sub-cap ledger',
+      liveSpend.monthSpend(geoSpendStore, Date.now()).asks === 1 && geoHttpCalls === 1,
+      JSON.stringify(liveSpend.monthSpend(geoSpendStore, Date.now())));
+    const resolvedAgain = await placesGeocoder.resolve(MINGEI_ADDR);
+    check('the same venue again is served from the on-device cache — no ask, no HTTP',
+      resolvedAgain?.lat === 32.7313 && liveSpend.monthSpend(geoSpendStore, Date.now()).asks === 1 && geoHttpCalls === 1);
+    const cappedSpendStore = ceMemStore();
+    cappedSpendStore.write(JSON.stringify({
+      v: 1,
+      months: { [liveSpend.spendMonthKey(Date.now())]: { microUsd: liveSpend.LIVE_SPEND_POLICY.monthlyCapMicroUsd, asks: 250 } },
+    }));
+    let cappedHttpCalls = 0;
+    const cappedGeocoder = eventsFeed.createPlacesFeedGeocoder({
+      apiKeys: ['ce9-key'],
+      fetchJson: async () => { cappedHttpCalls += 1; return { places: [{ location: { latitude: 1, longitude: 1 } }] }; },
+      spendStore: cappedSpendStore, store: ceMemStore(), sleep: async () => {},
+    });
+    check('at the sub-cap the geocoder refuses before dispatch — no HTTP, no coordinates, no throw',
+      (await cappedGeocoder.resolve('1 Nowhere Lane, San Diego, CA')) === null && cappedHttpCalls === 0);
+
+    // --- the shipped config is exactly the verified survey set
+    check('the shipped feed config is the two verified sources (Balboa Park + UC San Diego), San Diego-zoned',
+      EVENT_FEEDS.length === 2 &&
+        EVENT_FEEDS.some(f => f.url === 'https://balboapark.org/events/?ical=1') &&
+        EVENT_FEEDS.some(f => f.url === 'https://calendar.ucsd.edu/calendar.ics') &&
+        EVENT_FEEDS.every(f => f.defaultZone === 'America/Los_Angeles'),
+      JSON.stringify(EVENT_FEEDS.map(f => f.id)));
   }
 
   // ---------------------------------------------------------------

@@ -19,6 +19,8 @@ export { composeRoutePlan } from '../../src/core/routeMode';
 export * as partners from '../../src/data/partners';
 export * as freshness from '../../src/core/freshness';
 export * as currentEvents from '../../src/core/currentEvents';
+export * as eventsFeed from '../../src/core/eventsFeed';
+export { EVENT_FEEDS } from '../../src/data/eventFeeds';
 export * as suggestions from '../../src/core/suggestions';
 export * as proposals from '../../src/core/proposals';
 export * as placeMemory from '../../src/core/placeMemory';
