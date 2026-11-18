@@ -1,6 +1,6 @@
 // GENERATED — do not hand-edit. Built by
 // scripts/route-mode/build-route-presence.mjs from
-// presence-classes.csv (3608 rows, the Nov 4, 2026
+// presence-classes.csv (3629 rows, the Nov 4, 2026
 // presence audit). The route build joins library rows to this
 // map at runtime, so no DB change is needed for route mode to
 // know a story's presence register.
@@ -3348,6 +3348,27 @@ export const ROUTE_PRESENCE: Record<string, RoutePresenceEntry> = {
   "jonas salk house|landmark_origin": { presence: "safe", protected: false },
   "darlington house|landmark_origin": { presence: "safe", protected: false },
   "south molton villa ii|landmark_origin": { presence: "safe", protected: false },
+  "mc p's irish pub|landmark_cultural": { presence: "mixed", protected: false },
+  "coronado brewing company|landmark_origin": { presence: "safe", protected: false },
+  "clayton's coffee shop|landmark_origin": { presence: "mixed", protected: false },
+  "coronado historical association|landmark_building": { presence: "safe", protected: false },
+  "spreckels park|landmark_event": { presence: "safe", protected: false },
+  "village theatre|landmark_building": { presence: "safe", protected: false },
+  "lamb's players theatre|landmark_cultural": { presence: "safe", protected: false },
+  "el cordova hotel|landmark_origin": { presence: "mixed", protected: false },
+  "night and day cafe|landmark_origin": { presence: "safe", protected: false },
+  "orange avenue|landmark_event": { presence: "safe", protected: false },
+  "avenue of heroes|landmark_cultural": { presence: "safe", protected: false },
+  "gate one|landmark_origin": { presence: "safe", protected: false },
+  "preble field|landmark_role": { presence: "safe", protected: false },
+  "ntc mess hall|landmark_recent": { presence: "safe", protected: false },
+  "52 boats memorial|landmark_event": { presence: "safe", protected: false },
+  "ingram plaza|landmark_people": { presence: "safe", protected: false },
+  "ntc barracks|landmark_building": { presence: "safe", protected: false },
+  "uss recruit|landmark_building": { presence: "safe", protected: false },
+  "north chapel|landmark_building": { presence: "mixed", protected: false },
+  "sail ho golf course|landmark_sports": { presence: "safe", protected: false },
+  "ntc command center|landmark_building": { presence: "safe", protected: false },
   "sr-75 north: imperial beach to coronado cays|corridor-woven-v1": { presence: "safe", protected: false },
   "sr-75 north: coronado cays to coronado|corridor-woven-v1": { presence: "safe", protected: false },
   "coronado ferry landing|landmark_event-woven-v1": { presence: "safe", protected: false },

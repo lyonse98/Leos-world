@@ -1,6 +1,6 @@
 // GENERATED — do not hand-edit. Built by
 // scripts/route-mode/build-route-tags.mjs from story-tags.csv
-// (4233 rows, Nov 1 tone/topic tagging). The route
+// (4254 rows, Nov 1 tone/topic tagging). The route
 // composer joins library-index rows to this map at runtime, so no
 // DB change is needed for route mode to see tone/topic tags.
 
@@ -4245,6 +4245,27 @@ export const ROUTE_TAGS: Record<string, RouteTagEntry> = {
   "jonas salk house|landmark_origin": { topics: ["architecture,modernism,science,la jolla"], tone: "reflective", toneSecondary: "warm" },
   "darlington house|landmark_origin": { topics: ["architecture,historic preservation,philanthropy,la jolla"], tone: "warm", toneSecondary: "reflective" },
   "south molton villa ii|landmark_origin": { topics: ["irving gill,architecture,scripps,museums,la jolla"], tone: "reflective", toneSecondary: "warm" },
+  "mc p's irish pub|landmark_cultural": { topics: [], tone: "warm", toneSecondary: "reverent" },
+  "coronado brewing company|landmark_origin": { topics: [], tone: "warm", toneSecondary: null },
+  "clayton's coffee shop|landmark_origin": { topics: [], tone: "warm", toneSecondary: "light" },
+  "coronado historical association|landmark_building": { topics: [], tone: "reflective", toneSecondary: "warm" },
+  "spreckels park|landmark_event": { topics: [], tone: "warm", toneSecondary: "reflective" },
+  "village theatre|landmark_building": { topics: [], tone: "warm", toneSecondary: "reflective" },
+  "lamb's players theatre|landmark_cultural": { topics: [], tone: "warm", toneSecondary: "reflective" },
+  "el cordova hotel|landmark_origin": { topics: [], tone: "warm", toneSecondary: "reflective" },
+  "night and day cafe|landmark_origin": { topics: [], tone: "warm", toneSecondary: null },
+  "orange avenue|landmark_event": { topics: [], tone: "warm", toneSecondary: "grand" },
+  "avenue of heroes|landmark_cultural": { topics: [], tone: "reverent", toneSecondary: "warm" },
+  "gate one|landmark_origin": { topics: [], tone: "reflective", toneSecondary: "warm" },
+  "preble field|landmark_role": { topics: [], tone: "reflective", toneSecondary: "grand" },
+  "ntc mess hall|landmark_recent": { topics: [], tone: "warm", toneSecondary: "reflective" },
+  "52 boats memorial|landmark_event": { topics: [], tone: "somber", toneSecondary: "reverent" },
+  "ingram plaza|landmark_people": { topics: [], tone: "reflective", toneSecondary: "reverent" },
+  "ntc barracks|landmark_building": { topics: [], tone: "grand", toneSecondary: "reflective" },
+  "uss recruit|landmark_building": { topics: [], tone: "light", toneSecondary: "warm" },
+  "north chapel|landmark_building": { topics: [], tone: "reverent", toneSecondary: "reflective" },
+  "sail ho golf course|landmark_sports": { topics: [], tone: "warm", toneSecondary: "reflective" },
+  "ntc command center|landmark_building": { topics: [], tone: "reflective", toneSecondary: "warm" },
 };
 
 export function tagsFor(placeKey: string, angle: string): RouteTagEntry {
