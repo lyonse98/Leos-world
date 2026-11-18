@@ -83,11 +83,15 @@
 //
 // FAIL-SOFT EVERYWHERE: a dead feed, a malformed calendar, a
 // blocked geocode, a full storage — each degrades to fewer
-// events or none, never a throw. discoverFeedEvents'
-// default stays NO_EVENTS_FEED: no production surface
-// consumes feed events yet, so a caller opts in explicitly
-// (icalEventsFeed below) rather than the pool changing
-// behavior under the shipped app.
+// events or none, never a throw. discoverFeedEvents' and
+// discoverEventCandidates' defaults stay NO_EVENTS_FEED: a
+// caller opts in explicitly (icalEventsFeed below) rather
+// than the pool changing behavior under an unconsenting
+// caller. The production discovery call sites opted in on
+// Nov 18, 2026 (the integration): gated events join the
+// Slice 2 pool as candidates; v1 surfaces still never speak
+// one (the composer's pick must be verifiably open now, and
+// an event carries no hours claim).
 // ============================================================
 
 import type { DatedEvent } from './freshness';
@@ -1001,8 +1005,10 @@ export function createICalEventsFeed(deps: ICalEventsFeedDeps = {}): EventsFeedP
 
 /**
  * The shipped provider over the configured feeds
- * (src/data/eventFeeds.ts). discoverFeedEvents' default stays
- * NO_EVENTS_FEED — a caller opts into this explicitly until a
- * production surface consumes feed events.
+ * (src/data/eventFeeds.ts). The discovery defaults stay
+ * NO_EVENTS_FEED — a caller opts into this explicitly. The
+ * production call sites (the freeform Tour's pool refresh,
+ * the route runner's suggestion supply) pass it since the
+ * Nov 18, 2026 integration.
  */
 export const icalEventsFeed: EventsFeedProvider = createICalEventsFeed();

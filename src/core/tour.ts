@@ -52,6 +52,7 @@ import { partnerApprovedAngleFor } from '../data/partners';
 import * as gemini from './gemini';
 import * as facts from './facts';
 import * as currentEvents from './currentEvents';
+import { icalEventsFeed } from './eventsFeed';
 import {
   GREETINGS_FRESH,
   GREETINGS_RESUME,
@@ -2740,6 +2741,12 @@ export class Tour {
     void this.seams
       .discoverEventCandidates([{ lat: this.position.lat, lng: this.position.lng, kind: 'position' }], {
         shelfKeys,
+        // Events feed opt-in (Nov 18, 2026 integration): the
+        // pool also carries assessEvent-gated feed events as
+        // candidates. They are supply and color only — the
+        // suggestion composer's verifiably-open-now pick can
+        // never select one (a feed candidate has no hours).
+        eventsFeed: icalEventsFeed,
         // Live-spend telemetry (v16.2 Slice 8): the refresh's
         // Places ask, any cap-trip, and any degraded serve
         // file on this engine's emit path.
@@ -2750,6 +2757,7 @@ export class Tour {
         this.emit('current_events_pool', {
           count: candidates.length,
           open_now: candidates.filter(c => c.openNow === true).length,
+          events: candidates.filter(c => c.event !== null).length,
         });
       })
       .catch(() => {

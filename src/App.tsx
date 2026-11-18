@@ -65,6 +65,7 @@ import {
 import { finishLiveRenderBlob, decodeWavPcm16, findSilenceSpans } from './core/audioFinish';
 import type { DuoSilenceMap } from './core/duo';
 import { discoverEventCandidates, type EventAnchor } from './core/currentEvents';
+import { icalEventsFeed } from './core/eventsFeed';
 import type { SuggestionIntent } from './core/suggestions';
 import {
   judgeTrayRecord,
@@ -1416,6 +1417,11 @@ function MilesApp() {
         ? {
             suggestionCandidates: async (anchors: EventAnchor[]) =>
               discoverEventCandidates(anchors, {
+                // Events feed opt-in (Nov 18, 2026 integration):
+                // gated feed events ride the supply pool as
+                // candidates; the composer's verifiably-open-now
+                // pick can never select one in v1 (no hours).
+                eventsFeed: icalEventsFeed,
                 // Live-spend telemetry (v16.2 Slice 8): the
                 // supply's Places asks, cap-trips, and
                 // degraded serves file on the same emit path

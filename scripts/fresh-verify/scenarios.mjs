@@ -6698,6 +6698,76 @@ export async function runScenarios(Tour, extras) {
       JSON.stringify(EVENT_FEEDS.map(f => f.id)));
   }
 
+  // CE-10 (Nov 18, 2026, the integration): the opt-in is wired
+  // into discovery. discoverEventCandidates consumes
+  // opts.eventsFeed — gated feed events join the Slice 2 pool
+  // as candidates carrying their DatedEvent — and the
+  // production call sites pass icalEventsFeed. The fences
+  // pinned here: the assessEvent gate judges every event
+  // (stale source, past start, and unplaced events never
+  // join); the default (no opt-in) stays places-only; and the
+  // suggestion composer can never speak a feed candidate —
+  // its pick must be verifiably open now, and an event
+  // carries no hours claim (openNow stays null).
+  suite('CE-10 the pool opt-in: gated feed events join discovery as candidates; the default stays places-only; the composer never speaks one');
+  {
+    const ce10Event = (over = {}) => ({
+      title: 'Ce10 Gallery Night',
+      startsAtMs: CE_NOW + 3 * 60 * 60 * 1000,
+      sourceAtMs: CE_NOW - 60 * 60 * 1000,
+      sourceName: 'Ce10 Feed',
+      venueName: 'Ce10 Gallery',
+      address: '2 Test Way',
+      lat: 32.853,
+      lng: -117.18,
+      ...over,
+    });
+    const ce10Feed = {
+      fetchEvents: async () => [
+        ce10Event(),
+        ce10Event({ title: 'Ce10 Stale Source', sourceAtMs: CE_NOW - 49 * 60 * 60 * 1000 }),
+        ce10Event({ title: 'Ce10 Already Started', startsAtMs: CE_NOW - 60 * 60 * 1000 }),
+        ce10Event({ title: 'Ce10 Unplaced', lat: null, lng: null }),
+      ],
+    };
+    const ce10Discover = (anchors, over = {}) =>
+      currentEvents.discoverEventCandidates(anchors, {
+        nowMs: CE_NOW, provider: ceProvider([ceRaw()]), match: CE_NO_MATCH,
+        constraints: CE_NO_CONSTRAINTS, cache: null, ...over,
+      });
+
+    const pool = await ce10Discover([CE_ANCHOR], { eventsFeed: ce10Feed });
+    const evCandidates = pool.filter(c => c.event !== null);
+    check('an opted-in discovery pools places and gated feed events side by side',
+      pool.length === 2 && evCandidates.length === 1,
+      JSON.stringify(pool.map(c => c.name)));
+    check('the feed candidate carries its event, is a do-kind, and claims no open-now',
+      evCandidates[0]?.event?.title === 'Ce10 Gallery Night' && evCandidates[0]?.kind === 'do' &&
+        evCandidates[0]?.openNow === null,
+      JSON.stringify(evCandidates[0]));
+    check('the gate judged the rest away: stale source, past start, and unplaced events never join',
+      !pool.some(c => c.name.includes('Stale') || c.name.includes('Started') || c.name.includes('Unplaced')));
+
+    const twoAnchors = await ce10Discover(
+      [CE_ANCHOR, { lat: 32.854, lng: -117.18, kind: 'route' }],
+      { eventsFeed: ce10Feed },
+    );
+    check('the same event from two anchors joins once, judged from its nearest',
+      twoAnchors.filter(c => c.event !== null).length === 1,
+      JSON.stringify(twoAnchors.map(c => c.name)));
+
+    const noOptIn = await ce10Discover([CE_ANCHOR]);
+    check('without the opt-in the pool stays places-only (the default is unchanged)',
+      noOptIn.length === 1 && noOptIn.every(c => c.event === null),
+      JSON.stringify(noOptIn.map(c => c.name)));
+
+    const answer = suggestions.composeSuggestion(evCandidates, {
+      intent: 'any', nowMs: CE_NOW, match: CE_NO_MATCH, constraints: CE_NO_CONSTRAINTS,
+    });
+    check('the composer answers none over a pool of only feed candidates — no speech path opens',
+      answer.kind === 'none', JSON.stringify(answer));
+  }
+
   // ---------------------------------------------------------------
   // PC suites (Nov 16, 2026): profile in the composer, v16.2
   // Slice 3. The stored taste profile (declared + inferred

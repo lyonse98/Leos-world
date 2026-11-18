@@ -33,6 +33,17 @@
 // no production surface consumes feed events yet, so a caller
 // opts into the real provider explicitly. Feed candidates
 // still enter only through assessEvent(), exactly as pinned.
+//
+// INTEGRATION (Nov 18, 2026, later): the opt-in is now wired.
+// discoverEventCandidates consumes opts.eventsFeed — gated
+// feed events join the same ranked pool as candidates
+// carrying their DatedEvent — and the production discovery
+// call sites (the freeform Tour's pool refresh, the route
+// runner's suggestion supply) pass icalEventsFeed. The
+// default stays NO_EVENTS_FEED for any caller that does not
+// opt in. Speech fences are untouched: a feed candidate has
+// no hours, so openNow is null and the suggestion composer's
+// verifiably-open-now pick can never select one in v1.
 // ============================================================
 //
 // Data sources, honestly:
@@ -135,7 +146,14 @@ export interface EventCandidate {
   score: number;
   /** Detour cost in minutes. Null in v1 — see the header. */
   detourMinutes: number | null;
-  /** Set only for feed-event candidates (the feed lives in eventsFeed.ts; unwired in v1 surfaces). */
+  /**
+   * Set only for feed-event candidates (the feed lives in
+   * eventsFeed.ts). Pool members since the Nov 18, 2026
+   * integration; still unspoken in v1 surfaces — the
+   * suggestion composer's pick must be verifiably open now,
+   * and an event carries no hours claim (openNow stays null),
+   * so feed candidates enrich the pool without a speech path.
+   */
   event: DatedEvent | null;
 }
 
@@ -157,7 +175,15 @@ export interface RawPlace {
 // ------------------------------------------------------------ providers
 
 export interface PlaceHoursProvider {
-  fetchPlaces(anchor: EventAnchor, radiusM: number): Promise<RawPlace[]>;
+  // nowMs is the caller's clock for this fetch (discovery's
+  // judgment instant): freshly fetched records are stamped
+  // with it, so a record can never read as future-dated
+  // against the very pass that fetched it. Mirrors the
+  // EventsFeedProvider seam below, which has always taken
+  // the clock. Production callers pass discovery's nowMs,
+  // which defaults to Date.now() — the stamp is the fetch
+  // instant either way.
+  fetchPlaces(anchor: EventAnchor, radiusM: number, nowMs?: number): Promise<RawPlace[]>;
 }
 
 export interface EventsFeedProvider {
@@ -295,6 +321,7 @@ async function searchNearbyPass(
   radiusM: number,
   keys: string[],
   fetchFn: typeof fetch,
+  nowMs?: number,
 ): Promise<{ places: RawPlace[]; answered: boolean }> {
   for (const key of keys) {
     let res: Response;
@@ -329,7 +356,12 @@ async function searchNearbyPass(
     } catch {
       continue;
     }
-    const fetchedAt = Date.now();
+    // Stamped with the caller's clock when one is threaded
+    // (see PlaceHoursProvider): the freshness gate judges a
+    // record future-dated when fetchedAt > its nowMs, so a
+    // parse stamp from a DIFFERENT clock than the judging
+    // pass reads as corrupt the moment the two clocks cross.
+    const fetchedAt = nowMs ?? Date.now();
     const out: RawPlace[] = [];
     for (const p of parsed.places ?? []) {
       const mapped = mapWirePlace(p, fetchedAt);
@@ -364,21 +396,21 @@ export async function fetchPlacesWithKeyWalk(
   radiusM: number,
   apiKeys: string[],
   fetchFn: typeof fetch = fetch,
-  opts: MapsCallOptions = {},
+  opts: MapsCallOptions & { nowMs?: number } = {},
 ): Promise<RawPlace[]> {
   const keys = configuredKeys(apiKeys);
   if (keys.length === 0) return [];
-  const first = await searchNearbyPass(anchor, radiusM, keys, fetchFn);
+  const first = await searchNearbyPass(anchor, radiusM, keys, fetchFn, opts.nowMs);
   if (first.answered) return first.places;
   await (opts.sleep ?? placesSleep)(opts.retryDelayMs ?? MAPS_RETRY_DELAY_MS);
-  const second = await searchNearbyPass(anchor, radiusM, keys, fetchFn);
+  const second = await searchNearbyPass(anchor, radiusM, keys, fetchFn, opts.nowMs);
   return second.places;
 }
 
 /** The real provider: Places (New), walking every configured key (above). */
 export const googlePlacesHoursProvider: PlaceHoursProvider = {
-  async fetchPlaces(anchor, radiusM) {
-    return fetchPlacesWithKeyWalk(anchor, radiusM, placesKeys());
+  async fetchPlaces(anchor, radiusM, nowMs) {
+    return fetchPlacesWithKeyWalk(anchor, radiusM, placesKeys(), undefined, { nowMs });
   },
 };
 
@@ -679,13 +711,71 @@ function toCandidate(
 }
 
 /**
+ * One gated feed event as a pool candidate. The event is the
+ * candidate (its title is the label; the venue rides in the
+ * payload and the address), kind is always 'do', and there is
+ * no hours claim to make — openNow stays null, which is also
+ * the speech fence: the suggestion composer's pick must be
+ * verifiably open now, so a feed candidate can enrich the
+ * pool but can never be spoken by the v1 surfaces. Scoring
+ * mirrors the places scale minus everything an event cannot
+ * claim: no popularity (no rating), no open-now bonus — just
+ * distance and the shelf bonus when the shelf carries the
+ * venue's story. Eligibility was judged by assessEvent
+ * before this conversion (see discoverEventCandidates), so
+ * sourceAtMs is a real, gate-fresh date here.
+ */
+function feedEventCandidate(
+  ev: DatedEvent,
+  anchor: EventAnchor,
+  distanceM: number,
+  shelfKeys: ReadonlySet<string> | null,
+): EventCandidate | null {
+  // A pool candidate is a point on the map; an event the
+  // feed could not place (no GEO, geocode unresolvable) was
+  // already excluded by the provider, and the seam does not
+  // trust that — no coordinates, no candidate, never guessed.
+  if (ev.lat == null || ev.lng == null) return null;
+  const hasShelfStory =
+    shelfKeys !== null && ev.venueName != null && shelfKeys.has(shelfPlaceKey(ev.venueName));
+  let score = -distanceM / 90;
+  if (hasShelfStory) score += SHELF_BONUS;
+  return {
+    placeId: `feed:${ev.sourceName}:${ev.title}:${ev.startsAtMs}`,
+    name: ev.title,
+    lat: ev.lat,
+    lng: ev.lng,
+    kind: 'do',
+    types: [],
+    rating: null,
+    userRatings: null,
+    address: ev.address ?? null,
+    editorial: null,
+    distanceM,
+    anchorKind: anchor.kind,
+    openNow: null,
+    closesAtMs: null,
+    opensAtMs: null,
+    hoursFetchedAt: ev.sourceAtMs ?? 0,
+    hasShelfStory,
+    score,
+    detourMinutes: null,
+    event: ev,
+  };
+}
+
+/**
  * The layer's one entry point: ranked, freshness-verified
  * eat/drink/do candidates near the given anchors. Anchors are
  * tried in order; a place found from several anchors is kept
- * once, judged from its nearest. Every returned candidate has
- * passed assessHours at `nowMs`; every candidate also carries
- * its hours' fetchedAt so a consumer can see the provenance of
- * the claim it is about to make.
+ * once, judged from its nearest. Every returned place
+ * candidate has passed assessHours at `nowMs`; every
+ * candidate also carries its hours' fetchedAt so a consumer
+ * can see the provenance of the claim it is about to make.
+ * When the caller opts into a feed (opts.eventsFeed), gated
+ * feed events join the same pool as candidates whose `event`
+ * payload is set — they have passed assessEvent at `nowMs`
+ * instead, and their provenance is the event's source date.
  */
 export async function discoverEventCandidates(
   anchors: readonly EventAnchor[],
@@ -729,7 +819,7 @@ export async function discoverEventCandidates(
     }
     let places: RawPlace[] = [];
     try {
-      places = await provider.fetchPlaces(anchor, radiusM);
+      places = await provider.fetchPlaces(anchor, radiusM, nowMs);
     } catch {
       places = [];
     }
@@ -764,6 +854,40 @@ export async function discoverEventCandidates(
     const candidate = toCandidate(raw, anchor, nowMs, match, shelfKeys);
     if (candidate) out.push(candidate);
   }
+
+  // Feed events, when the caller opted in (opts.eventsFeed):
+  // the same pool, entered only through assessEvent — the
+  // gate discoverFeedEvents applies — judged from the
+  // nearest anchor like a place, deduped across anchors.
+  // Fail-soft throughout, and independent of the Places
+  // pass: a spend-blocked or empty places discovery does not
+  // starve the feed, and a dead feed costs the pool nothing.
+  if (opts.eventsFeed) {
+    const feed = opts.eventsFeed;
+    const byEvent = new Map<string, { candidate: EventCandidate; distanceM: number }>();
+    for (const anchor of anchors) {
+      let events: DatedEvent[] = [];
+      try {
+        events = await feed.fetchEvents(anchor, radiusM, nowMs);
+      } catch {
+        events = [];
+      }
+      for (const ev of events) {
+        if (!assessEvent(ev, nowMs).eligible) continue;
+        if (ev.lat == null || ev.lng == null) continue;
+        const distanceM = calculateDistance(anchor.lat, anchor.lng, ev.lat, ev.lng);
+        if (distanceM > radiusM) continue;
+        const candidate = feedEventCandidate(ev, anchor, distanceM, shelfKeys);
+        if (!candidate) continue;
+        const existing = byEvent.get(candidate.placeId);
+        if (!existing || distanceM < existing.distanceM) {
+          byEvent.set(candidate.placeId, { candidate, distanceM });
+        }
+      }
+    }
+    for (const { candidate } of byEvent.values()) out.push(candidate);
+  }
+
   out.sort((a, b) => b.score - a.score);
   return out.slice(0, opts.maxResults ?? DEFAULT_MAX_RESULTS);
 }
