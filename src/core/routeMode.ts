@@ -1521,6 +1521,30 @@ export interface PlanItem {
    */
   duoScript?: import('./duo').DuoScript;
   /**
+   * Duo split playback (v16.2 Slice 9.5, Nov 18, 2026): the
+   * audible range of this item's shelf file, in seconds —
+   * part 1 of a split woven member sounds [0, split) and
+   * part 2 sounds [split, end), so Earl's turn beat lands
+   * mid-story at the scripted seam. The file itself is never
+   * touched: the runner hands the range to the Player, which
+   * seeks and ends the item inside the SAME bucket audio
+   * (offset playback — Miles' audio stays byte-identical).
+   * Absent on every unsplit item.
+   */
+  audioRange?: { startSec: number; endSec?: number };
+  /**
+   * Duo split membership (Slice 9.5): parts 1 and 2 of one
+   * split woven member. Part 1 keeps the member's own item
+   * id (every id-keyed reference — bridges, gates, capture —
+   * already names it); part 2 rides `${memberId}#p2`. The
+   * runner reads the pair as ONE story: part 1's settle is
+   * gate plumbing only (the story's heard/profile/boundary
+   * semantics fire at part 2's settle, on the joined
+   * outcome), and part 2 dies silently if part 1 died.
+   * Absent on every unsplit item.
+   */
+  duoPart?: { memberId: string; part: 1 | 2; splitSec: number };
+  /**
    * Humor pieces only (Unfiltered, Nov 6, 2026): this color
    * piece was DRAWN FROM THE BANK, not generated — the one
    * distinction the capture, the cooldown, and the audit

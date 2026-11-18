@@ -32,6 +32,8 @@ export interface AudioPort {
   play(): Promise<void>;
   pause(): void;
   seekBy(sec: number): void;
+  /** Absolute seek (Slice 9.5): position the loaded media at sec — the offset-playback seam. */
+  seekTo(sec: number): void;
   timeSec(): number;
   setEndedHandler(cb: (() => void) | null): void;
   setErrorHandler(cb: (() => void) | null): void;
@@ -140,6 +142,16 @@ export interface AudibleItem {
   introForm?: string;
   greetingAxis?: string;
   fallbackRung?: string | null;
+  /**
+   * Offset playback (v16.2 Slice 9.5, Nov 18, 2026): sound only
+   * this range of the item's source file — the duo split's two
+   * halves of one shelf story. startSec seeks at load; endSec
+   * ends the item there (the range-end poller settles it
+   * exactly as the element's own ended event would). The
+   * source bytes are never altered — the same file, a chosen
+   * window. Absent = the whole file, as always.
+   */
+  playRange?: { startSec: number; endSec?: number };
   // Planned silence (Nov 11, 2026): kind === 'silence' items carry
   // the named seam they were seated at ('post-climax',
   // 'post-memorial', 'corridor', 'post-story') for the
@@ -307,6 +319,13 @@ export class Player {
   private primeActive = false;
   private progressTimer: unknown = null;
   private progressFor: string | null = null;
+  // Offset playback (Slice 9.5): the current item's range-end
+  // poller. Media-time based (it reads the element's own
+  // position), so a listener pause — which freezes media time
+  // — suspends it for free; it exists only while a ranged item
+  // sounds and dies with its settle.
+  private rangeTimer: unknown = null;
+  private rangeFor: string | null = null;
   private soundStartAt: number | null = null;
   private userPaused = false;
   private heldSince: number | null = null;
@@ -1156,6 +1175,15 @@ export class Player {
       item.attempts += 1;
       const attemptStart = this.clock.now();
       this.audio.load(url);
+      // Offset playback (Slice 9.5): a ranged item starts at
+      // its offset — the seek is issued against the freshly
+      // loaded source, before play, so the element begins at
+      // the split point rather than the file's head. Retries
+      // re-seek with the reload, exactly as a fresh attempt
+      // should.
+      if (item.playRange && item.playRange.startSec > 0) {
+        this.audio.seekTo(item.playRange.startSec);
+      }
       let playError: unknown = null;
       let watchdog: unknown = null;
       const watchdogP = new Promise<never>((_resolve, reject) => {
@@ -1182,6 +1210,7 @@ export class Player {
         // Sounding.
         if (this.soundStartAt === null) this.soundStartAt = this.clock.now();
         this.armProgressWatchdog(item);
+        if (item.playRange?.endSec !== undefined) this.armRangeEnd(item);
         this.hooks.onSoundStart(item);
         if (this.isPrimeCarrierItem(item)) {
           const carrier = this.primeCarrier as { source: 'prime' | 'gesture-retry'; started: number };
@@ -1354,6 +1383,74 @@ export class Player {
   }
 
   /**
+   * Range-end poller (Slice 9.5): a ranged item ends at its
+   * endSec, not at the file's natural end. The element has no
+   * event for "reached a chosen offset", so the player polls
+   * media time (100 ms) and settles the item through the
+   * ordinary ended path when the position crosses the end.
+   * Split points are chosen inside verified silences (duo.ts),
+   * so a tick's overshoot lands in quiet, never in a word. The
+   * end is read FRESH from the item on every tick: lifting it
+   * (liftRangeEnd — the duo rejoin) disarms the poller by
+   * making the read come back undefined. Under a listener
+   * pause media time freezes, so the poller simply never
+   * crosses — no pause bookkeeping of its own.
+   */
+  private armRangeEnd(item: AudibleItem): void {
+    this.clearRangeEnd();
+    this.rangeFor = item.id;
+    this.rangeTimer = this.clock.setInterval(() => {
+      if (this.current !== item || item.settled) {
+        this.clearRangeEnd();
+        return;
+      }
+      const endSec = item.playRange?.endSec;
+      if (endSec === undefined) {
+        this.clearRangeEnd();
+        return;
+      }
+      if (this.audio.timeSec() >= endSec - 0.02) {
+        this.clearRangeEnd();
+        // This settle is OURS, not the element's — the file
+        // is mid-play by construction, so pause it, or its
+        // remaining audio bleeds under the next item. (A
+        // natural end needs no pause: the element already
+        // stopped on its own.)
+        this.audio.pause();
+        this.handleEnded();
+      }
+    }, 100);
+  }
+
+  private clearRangeEnd(): void {
+    if (this.rangeTimer !== null) this.clock.clearInterval(this.rangeTimer);
+    this.rangeTimer = null;
+    this.rangeFor = null;
+  }
+
+  /**
+   * Lift a sounding (or promised) item's range end (Slice 9.5,
+   * the duo rejoin): the item plays to its file's natural end
+   * instead of stopping at the split. Called by the runner
+   * when the Earl turn that was to sit at the split dies
+   * before the story reaches it — the two halves rejoin into
+   * the whole story. The caller first restores the item's
+   * durationSec to the full story length; when the item is
+   * the player's current, the progress watchdog re-arms
+   * against that restored duration here. Returns false when
+   * the item is not this player's current unsettled ranged
+   * item — the caller then edits the (not yet sounding)
+   * item's range directly.
+   */
+  liftRangeEnd(item: AudibleItem): boolean {
+    if (this.current !== item || item.settled || !item.playRange) return false;
+    delete item.playRange.endSec;
+    this.clearRangeEnd();
+    this.armProgressWatchdog(item);
+    return true;
+  }
+
+  /**
    * Arm (or re-arm, after a listener pause) the planned-silence
    * beat. On expiry the item settles sounded + completed with its
    * full composed duration — the silence was served, in full, by
@@ -1448,6 +1545,7 @@ export class Player {
     if (item.settled) return;
     item.settled = true;
     if (this.progressFor === item.id) this.clearProgressWatchdog();
+    if (this.rangeFor === item.id) this.clearRangeEnd();
     // The settle callback runs BEFORE afterSettle: an owner
     // that feeds the successor from inside its settle handler
     // (the route runner does) must not have that successor
@@ -1497,6 +1595,16 @@ export function createBrowserAudio(): AudioPort {
         el.currentTime = Math.min(Math.max(0, el.currentTime + sec), el.duration);
       } else {
         el.currentTime = Math.max(0, el.currentTime + sec);
+      }
+    },
+    seekTo(sec: number) {
+      // Issued right after load(): before metadata the seek
+      // queues against the resource and lands when it can —
+      // the standard offset-playback pattern.
+      if (Number.isFinite(el.duration) && el.duration > 0) {
+        el.currentTime = Math.min(Math.max(0, sec), el.duration);
+      } else {
+        el.currentTime = Math.max(0, sec);
       }
     },
     timeSec: () => el.currentTime,

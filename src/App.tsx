@@ -62,7 +62,8 @@ import {
   type RouteBuildStage,
   type RouteRunnerView,
 } from './core/routePlayback';
-import { finishLiveRenderBlob } from './core/audioFinish';
+import { finishLiveRenderBlob, decodeWavPcm16, findSilenceSpans } from './core/audioFinish';
+import type { DuoSilenceMap } from './core/duo';
 import { discoverEventCandidates, type EventAnchor } from './core/currentEvents';
 import type { SuggestionIntent } from './core/suggestions';
 import {
@@ -132,6 +133,43 @@ import { LEO_QA_MODEL_ID } from './services/leoPersona';
 const ROUTE_MODE_ENABLED = isRouteModeEnabled(
   import.meta.env.VITE_ROUTE_MODE as string | undefined,
 );
+
+/**
+ * Duo silence lane (v16.2 Slice 9.5): a woven member's
+ * measured audio shape for the duo pass's split decision —
+ * the shelf file fetched once, PCM-decoded, and scanned for
+ * its verified silences. Cached per audio path for the
+ * session (a member's shape never changes mid-drive, and
+ * the cache is small: a handful of members per episode).
+ * ANY failure — no path, a network miss, an undecodable
+ * file — resolves null, and the duo pass cluster-stages
+ * that member exactly as Slice 9 built. The fetch races
+ * nothing: it runs inside the plan build, beside the duo's
+ * line generation, and the opening never waits on it (the
+ * duo pass runs after the plan's shape is final).
+ */
+const duoSilenceCache = new Map<string, Promise<DuoSilenceMap | null>>();
+function duoSilenceFor(audioPath: string | null): Promise<DuoSilenceMap | null> {
+  if (!audioPath) return Promise.resolve(null);
+  const cached = duoSilenceCache.get(audioPath);
+  if (cached) return cached;
+  const pending = (async (): Promise<DuoSilenceMap | null> => {
+    try {
+      const res = await fetch(bucketUrl(audioPath));
+      if (!res.ok) return null;
+      const pcm = decodeWavPcm16(new Uint8Array(await res.arrayBuffer()));
+      if (!pcm || pcm.channels.length === 0 || pcm.sampleRate <= 0) return null;
+      const frames = pcm.channels[0]?.length ?? 0;
+      if (frames === 0) return null;
+      return { totalSec: frames / pcm.sampleRate, silences: findSilenceSpans(pcm) };
+    } catch {
+      return null;
+    }
+  })();
+  if (duoSilenceCache.size > 32) duoSilenceCache.clear();
+  duoSilenceCache.set(audioPath, pending);
+  return pending;
+}
 
 /**
  * Drive-record store (addendum 2): the shell's own localStorage
@@ -2391,6 +2429,7 @@ function MilesApp() {
           units: [...units, ...memberUnits],
           heardKeys,
           generateLines: prompt => generateDuoLinesText(prompt),
+          silenceFor: unit => duoSilenceFor(unit.audioPath),
           onEvent: (type, payload) => {
             const pos = positionRef.current;
             void emitEvent(sessionId, type, payload, {

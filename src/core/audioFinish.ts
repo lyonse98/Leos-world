@@ -234,3 +234,83 @@ export async function finishLiveRenderBlob(
     return blob;
   }
 }
+
+// ------------------------------------------------------------ silence spans (Slice 9.5)
+
+/** A verified quiet span inside a render, in seconds from its head. */
+export interface SilenceSpan {
+  startSec: number;
+  endSec: number;
+}
+
+/** Window length for the silence scan (25 ms — fine enough to bound a sentence pause). */
+export const SILENCE_WINDOW_SEC = 0.025;
+/**
+ * A window quieter than this counts as silence. The shelf sits
+ * at −21 dBFS RMS overall; a TTS sentence pause is near-digital
+ * quiet, orders below speech, so the threshold can sit far
+ * under any spoken window and still only catch true pauses.
+ */
+export const SILENCE_THRESHOLD_DB = -45;
+/** A quiet run must reach this long to be a sentence-boundary pause, not a stop consonant. */
+export const SILENCE_MIN_SPAN_SEC = 0.22;
+/** Quiet runs separated by less than this merge (a breath's two halves are one pause). */
+export const SILENCE_MERGE_GAP_SEC = 0.12;
+
+/**
+ * Find the silence spans of a decoded render (pure, PCM in —
+ * spans out). Windowed RMS against SILENCE_THRESHOLD_DB;
+ * runs at or beyond SILENCE_MIN_SPAN_SEC survive, close runs
+ * merge. The duo's split logic (duo.ts) consumes these spans:
+ * a split point is only ever chosen inside one, so the cut
+ * lands in quiet and can never clip a word. Empty audio (or
+ * audio with no qualifying pause) returns [].
+ */
+export function findSilenceSpans(audio: PcmAudio): SilenceSpan[] {
+  const frames = audio.channels[0]?.length ?? 0;
+  if (frames === 0 || audio.sampleRate <= 0) return [];
+  const winFrames = Math.max(1, Math.round(SILENCE_WINDOW_SEC * audio.sampleRate));
+  const winCount = Math.floor(frames / winFrames);
+  if (winCount === 0) return [];
+  const threshold = Math.pow(10, SILENCE_THRESHOLD_DB / 20);
+  const quiet: boolean[] = new Array<boolean>(winCount).fill(false);
+  for (let w = 0; w < winCount; w++) {
+    let sum = 0;
+    let n = 0;
+    for (const ch of audio.channels) {
+      for (let i = w * winFrames; i < (w + 1) * winFrames; i++) {
+        const v = ch[i] ?? 0;
+        sum += v * v;
+        n += 1;
+      }
+    }
+    quiet[w] = n > 0 && Math.sqrt(sum / n) < threshold;
+  }
+  // Runs of quiet windows → spans (in window units).
+  const runs: { start: number; end: number }[] = [];
+  let runStart = -1;
+  for (let w = 0; w <= winCount; w++) {
+    if (w < winCount && quiet[w]) {
+      if (runStart < 0) runStart = w;
+    } else if (runStart >= 0) {
+      runs.push({ start: runStart, end: w });
+      runStart = -1;
+    }
+  }
+  // Merge runs separated by a short sounded gap.
+  const mergeGapWins = Math.round(SILENCE_MERGE_GAP_SEC / SILENCE_WINDOW_SEC);
+  const merged: { start: number; end: number }[] = [];
+  for (const r of runs) {
+    const prev = merged[merged.length - 1];
+    if (prev && r.start - prev.end <= mergeGapWins) prev.end = r.end;
+    else merged.push({ ...r });
+  }
+  const minWins = Math.ceil(SILENCE_MIN_SPAN_SEC / SILENCE_WINDOW_SEC);
+  const round3 = (x: number) => Math.round(x * 1000) / 1000;
+  return merged
+    .filter(r => r.end - r.start >= minWins)
+    .map(r => ({
+      startSec: round3(r.start * SILENCE_WINDOW_SEC),
+      endSec: round3(Math.min(frames / audio.sampleRate, r.end * SILENCE_WINDOW_SEC)),
+    }));
+}

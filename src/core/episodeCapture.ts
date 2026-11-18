@@ -200,6 +200,15 @@ export interface CapturedItem {
    */
   duoScript: { speaker: string; text: string; source: string; role: string | null }[] | null;
   /**
+   * Duo split parts only (Slice 9.5, Nov 18, 2026; additive —
+   * schema stays 2): which half of a split woven member this
+   * item sounds, the member it belongs to, and the split
+   * offset (seconds into the shelf file). Null on every
+   * unsplit item — a cluster member's two records (its own
+   * story row + its duo rows) already tell its staging.
+   */
+  duoPart: { part: 1 | 2; memberId: string; splitSec: number } | null;
+  /**
    * Short cuts (Nov 12, 2026; additive — schema stays 2):
    * which VERSION of the story this item serves. 'short'
    * when the item plays the story's short cut, 'full' for
@@ -354,6 +363,9 @@ export function assemblePlanItems(plan: RoutePlan, renderedItemIds: ReadonlySet<
             role: s.role ?? null,
           }))
         : null,
+      duoPart: it.duoPart
+        ? { part: it.duoPart.part, memberId: it.duoPart.memberId, splitSec: it.duoPart.splitSec }
+        : null,
       version: it.shortCut === true ? 'short' : 'full',
       versionOf: it.shortCut === true ? (it.versionOf ?? null) : null,
       rendered: renderedItemIds.has(it.id),
@@ -387,6 +399,7 @@ export function assemblePlanItems(plan: RoutePlan, renderedItemIds: ReadonlySet<
       duoRole: null,
       duoMemberId: null,
       duoScript: null,
+      duoPart: null,
       version: 'full',
       versionOf: null,
       rendered: renderedItemIds.has('wrap-up'),

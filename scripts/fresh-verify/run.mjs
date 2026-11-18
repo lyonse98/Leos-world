@@ -75,6 +75,8 @@ const extras = {
     TESTER_ACCESS_CODE: engine.TESTER_ACCESS_CODE,
   },
   placeMemory: engine.placeMemory,
+  duo: engine.duo,
+  audioFinish: engine.audioFinish,
   profile: engine.profile,
   profileUi: {
     ProfileEditor: engine.ProfileEditor,

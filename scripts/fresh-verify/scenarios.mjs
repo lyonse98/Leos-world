@@ -105,7 +105,7 @@ async function healthyOpening(world, audio, pos = UTC, speed = 8) {
 }
 
 export async function runScenarios(Tour, extras) {
-  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, profileUi, facts, partners, freshness, currentEvents, suggestions, proposals, placeMemory, liveSpend, composeRoutePlan, hashString } = extras;
+  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, profileUi, facts, partners, freshness, currentEvents, suggestions, proposals, placeMemory, liveSpend, composeRoutePlan, hashString, duo, audioFinish } = extras;
 
   // ---------------------------------------------------------- S-01 healthy start
   suite('S-01 healthy start / opener order');
@@ -7745,5 +7745,62 @@ export async function runScenarios(Tour, extras) {
     check('the sink files on the tour\'s emit path, payload intact',
       world.eventsOf('live_spend_ask').length === 1 && world.eventsOf('live_spend_ask')[0].payload.month_micro_usd === SP_EST);
     tour.endTour();
+  }
+
+  // ---------------------------------------------------------------
+  // DS suites (Nov 18, 2026): the duo split, v16.2 Slice 9.5.
+  // The pure machinery under true mid-story Earl insertion:
+  // the silence scan over decoded PCM (audioFinish) and the
+  // snap decision (duo.pickDuoSplitSec). The staging and
+  // playback halves are pinned in the route harness (DUO-22+);
+  // here: a split point is only ever chosen inside a verified
+  // silence near the seam estimate, at its midpoint, never
+  // close enough to an edge to leave a sliver half.
+  const pcmOf = segments => {
+    const sr = 1000;
+    const total = Math.round(segments.reduce((s, [sec]) => s + sec, 0) * sr);
+    const ch = new Float32Array(total);
+    let at = 0;
+    for (const [sec, amp] of segments) {
+      const n = Math.round(sec * sr);
+      for (let i = 0; i < n && at + i < total; i++) ch[at + i] = amp;
+      at += n;
+    }
+    return { sampleRate: sr, channels: [ch] };
+  };
+
+  suite('DS-1 the silence scan: sentence pauses are found, stop gaps and unbroken speech are not silences');
+  {
+    const spans = audioFinish.findSilenceSpans(pcmOf([[2, 0.2], [0.5, 0], [1.5, 0.2]]));
+    check('a half-second pause between speech is one span, located at the pause',
+      spans.length === 1 && Math.abs(spans[0].startSec - 2) <= 0.03 && Math.abs(spans[0].endSec - 2.5) <= 0.03,
+      JSON.stringify(spans));
+    check('a 0.1 s gap is below the span floor — no span',
+      audioFinish.findSilenceSpans(pcmOf([[1, 0.2], [0.1, 0], [1, 0.2]])).length === 0);
+    check('unbroken speech has no silences',
+      audioFinish.findSilenceSpans(pcmOf([[3, 0.2]])).length === 0);
+    const edge = audioFinish.findSilenceSpans(pcmOf([[1, 0]]));
+    check('a fully quiet file is one edge-to-edge span (the picker, not the scan, fences edges)',
+      edge.length === 1 && edge[0].startSec === 0 && Math.abs(edge[0].endSec - 1) <= 0.03,
+      JSON.stringify(edge));
+  }
+
+  suite('DS-2 the snap decision: nearest qualifying silence midpoint, inside the window, never a sliver');
+  {
+    const seam = { seamCharsBefore: 867, totalChars: 1530, totalSec: 120 };
+    check('the seam estimate (56.7% of 120 s = 68.0) snaps to the silence midpoint',
+      duo.pickDuoSplitSec({ ...seam, silences: [{ startSec: 67.4, endSec: 68.6 }] }) === 68);
+    check('of two silences in the window, the nearer midpoint wins',
+      duo.pickDuoSplitSec({ ...seam, silences: [{ startSec: 64.5, endSec: 65.5 }, { startSec: 67.4, endSec: 68.6 }] }) === 68);
+    check('a silence outside the snap window is not a split',
+      duo.pickDuoSplitSec({ ...seam, silences: [{ startSec: 5, endSec: 6 }] }) === null);
+    check('a sub-floor silence at the estimate is not a split',
+      duo.pickDuoSplitSec({ ...seam, silences: [{ startSec: 67.9, endSec: 68.05 }] }) === null);
+    check('a snap that would leave a sliver at either edge is refused',
+      duo.pickDuoSplitSec({ ...seam, silences: [{ startSec: 9.5, endSec: 10.5 }] }) === null &&
+      duo.pickDuoSplitSec({ ...seam, silences: [{ startSec: 109.5, endSec: 110.5 }] }) === null);
+    check('degenerate inputs refuse: no chars, no duration',
+      duo.pickDuoSplitSec({ seamCharsBefore: 0, totalChars: 0, totalSec: 120, silences: [{ startSec: 59, endSec: 61 }] }) === null &&
+      duo.pickDuoSplitSec({ seamCharsBefore: 10, totalChars: 100, totalSec: 0, silences: [{ startSec: 59, endSec: 61 }] }) === null);
   }
 }

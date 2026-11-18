@@ -708,6 +708,26 @@ export class RoutePlanRunner {
   // nothing in playback reads these.
   private playedOrderIds: string[] = [];
   private settledUnplayed = new Map<string, { skipped: boolean }>();
+  /**
+   * Duo split bookkeeping (Slice 9.5): a sounded part 1's
+   * half-outcome, banked by member id until part 2 settles
+   * and the story's joined outcome is filed. Entries are
+   * consumed (deleted) at the tail's settle; a head whose
+   * tail never settles leaves a stale entry that nothing
+   * reads — the map dies with the runner.
+   */
+  private duoPartHeads = new Map<string, { completed: boolean; soundedMs: number }>();
+  /**
+   * Members whose turn died and whose halves rejoined (see
+   * rejoinSplitMember), by member id. The mark routes the
+   * story's settle accounting: a member rejoined BEFORE its
+   * head settled has no tail settle coming (the tail was
+   * dropped), so the head's settle completes the story; a
+   * member rejoined AFTER (seamed form) completes at its
+   * tail's settle as usual, with the served record carrying
+   * the mark. Consumed at whichever settle completes it.
+   */
+  private rejoinedMembers = new Set<string>();
   /** Bridges the feed gate skipped because their parent story was dropped stale. */
   private gateSkippedItemIds = new Set<string>();
   /** Tissue the feed gate late-skipped: its moment arrived before its render (render-ahead pipeline). */
@@ -1348,6 +1368,10 @@ export class RoutePlanRunner {
           mode: 'route',
         });
       }
+      // Duo rejoin (Slice 9.5): a turn beat that dies leaves
+      // its split member in two halves for no reason — put
+      // the story back together (see rejoinSplitMember).
+      if (it.duo?.role === 'turn' && it.duo.memberId) this.rejoinSplitMember(it.duo.memberId);
       // Drop coherence: a failed commission is a verdict, not
       // a wedge — its story sounds bridgeless, as it always
       // did before the mechanism existed.
@@ -1365,6 +1389,65 @@ export class RoutePlanRunner {
       }
     }
     this.afterTaskSettle();
+  }
+
+  /**
+   * Duo rejoin (Slice 9.5, Nov 18, 2026): the turn beat of a
+   * split member failed its render (the verification gate's
+   * rejection lands here too) — the story must play WHOLE.
+   * Two forms, by how far playback has got:
+   *   - merged: part 1 has not finished sounding. Its range
+   *     end is lifted (it plays to the file's natural end,
+   *     at the full restored duration) and part 2's entry is
+   *     dropped before the gate can feed it — the listener
+   *     hears one unbroken story, with no hole where the
+   *     beat was to sit.
+   *   - seamed: part 1 already settled at the split. Nothing
+   *     can be unplayed; part 2 simply sounds from the split
+   *     when its turn comes, so the story still plays in
+   *     full across the two items — contiguous ranges, a
+   *     breath at the seam where the beat would have been.
+   * A cluster member has no parts and nothing to rejoin.
+   * The verdict is untouched either way: it hangs on the
+   * member's id, which part 1 carries, and sounds (or not)
+   * on its own render.
+   */
+  private rejoinSplitMember(memberId: string): void {
+    const head = this.entries.find(e => e.planItem.duoPart?.part === 1 && e.planItem.duoPart.memberId === memberId);
+    const tail = this.entries.find(e => e.planItem.duoPart?.part === 2 && e.planItem.duoPart.memberId === memberId);
+    if (!head || !tail) return; // cluster member: nothing to rejoin
+    if (head.state === 'failed') return; // the member died as a story failure; its own telemetry covers it
+    this.rejoinedMembers.add(memberId);
+    let merged = false;
+    if (head.audible && !head.audible.settled) {
+      // Restore the whole-story duration BEFORE lifting the
+      // range end, so the player's re-armed watchdog (and any
+      // later duration read) sees the full length.
+      head.audible.durationSec = head.planItem.durationSec + tail.planItem.durationSec;
+      if (!this.player.liftRangeEnd(head.audible) && head.audible.playRange) {
+        // Not the player's current yet (promised or still
+        // rendering): edit the range directly — the poller
+        // arms at sound start and reads the range then.
+        delete head.audible.playRange.endSec;
+      }
+      merged = true;
+    }
+    if (merged && (tail.state === 'pending' || tail.state === 'ready')) {
+      // The tail must never sound — its audio is the second
+      // half of a story now playing whole. A render still in
+      // flight for it is discarded by runEntryTask's own
+      // dropped-state check when it lands.
+      tail.state = 'dropped';
+      this.resolvedCount += 1;
+      this.gateSkippedItemIds.add(tail.planItem.id); // episode capture: the outcome row names this drop
+    }
+    this.deps.onEvent?.('duo_member', {
+      stage: 'rejoined',
+      form: merged ? 'merged' : 'seamed',
+      member_id: memberId,
+      split_offset_sec: tail.planItem.duoPart?.splitSec ?? null,
+      mode: 'route',
+    });
   }
 
   /**
@@ -2058,6 +2141,34 @@ export class RoutePlanRunner {
           target?.audible != null && this.player.current?.id === target.audible.id;
         if (!targetSounded && !targetSounding) return; // not yet knowable: hold
       }
+      if (it.duoPart?.part === 2) {
+        // DUO CONTINUATION (Slice 9.5, Nov 18, 2026): part 2
+        // is the second half of ONE story, not a story of its
+        // own — if its head (part 1, the member's own id)
+        // dropped stale, settled unplayed, or failed to
+        // render, the tail dies with it, silently, under the
+        // same discipline as the duo dependency above. While
+        // the head has sounded or is sounding now the tail
+        // simply queues behind the turn, in plan order; any
+        // other state holds the gate defensively.
+        const headId = it.duoPart.memberId;
+        const head = this.entries.find(e => e.planItem.id === headId);
+        const headDied =
+          this.droppedStoryIds.has(headId) ||
+          this.settledUnplayed.has(headId) ||
+          (head !== undefined && head.state === 'failed');
+        if (headDied) {
+          entry.state = 'dropped';
+          this.feedCursor += 1;
+          this.resolvedCount += 1;
+          this.gateSkippedItemIds.add(it.id); // episode capture: the outcome row names this drop
+          continue;
+        }
+        const headSounded = this.playedOrderIds.includes(headId);
+        const headSounding =
+          head?.audible != null && this.player.current?.id === head.audible.id;
+        if (!headSounded && !headSounding) return; // not yet knowable: hold
+      }
       if (entry.state === 'pending') {
         const isTissue = it.kind === 'bridge' || it.kind === 'reaction' || it.kind === 'preview';
         if (isTissue && this.player.current === null) {
@@ -2253,7 +2364,20 @@ export class RoutePlanRunner {
           }
         }
       }
-      if (it.kind === 'story' && !it.portal && !it.woven && entry !== this.firstReadyStoryEntry()) {
+      if (
+        it.kind === 'story' &&
+        !it.portal &&
+        !it.woven &&
+        it.duoPart?.part !== 2 &&
+        entry !== this.firstReadyStoryEntry()
+      ) {
+        // (The duoPart exclusion above is Slice 9.5's: part 2
+        // is a SOUNDING story's second half, not a story
+        // awaiting its window — its head faced this judgment
+        // when it was gated, and a mid-story item is never
+        // window-held, late-converted, or stale-dropped. Its
+        // own dependency discipline rides the DUO CONTINUATION
+        // block above.)
         const release = it.releaseProgress ?? 0;
         const expire = it.expireProgress ?? Number.POSITIVE_INFINITY;
         // Late-presence conversion (field fix F3, Nov 12,
@@ -2979,12 +3103,26 @@ export class RoutePlanRunner {
           attempts: 0,
           settled: false,
           onSettle,
+          // Duo split (Slice 9.5): a part item sounds only its
+          // range of the shelf file (offset playback — the
+          // Player seeks and ends inside the same bytes).
+          ...(it.audioRange ? { playRange: it.audioRange } : {}),
           subject: unit.placeName,
           angleOf: unit.angle,
           anchor: { lat: unit.lat, lng: unit.lng },
           text: unit.storyText,
         };
       }
+      // Duo split guard (Slice 9.5): part 2 exists only as a
+      // range of the shelf file. With no bucket audio there is
+      // no tail to sound — synthesizing here would speak the
+      // WHOLE text a second time. Part 2 drops silently (its
+      // head's own fate decides the member's); part 1 takes
+      // the whole-text synthesis below, unranged, exactly as
+      // an unsplit story does. (In practice a split is only
+      // ever composed from a read of the shelf file, so this
+      // is a defensive fence, not an expected path.)
+      if (it.duoPart?.part === 2) return null;
       // No bucket audio (should not happen for library rows):
       // fall back to synthesising the stored text, if any.
       if (!unit.storyText) return null;
@@ -3087,9 +3225,80 @@ export class RoutePlanRunner {
         mode: 'route',
       });
     }
-    if (it.kind === 'story' && it.unit && sounded) {
+    // Duo split (Slice 9.5, Nov 18, 2026): a split member is
+    // ONE story in two items, and its settle semantics are
+    // joined. Part 1's settle is gate plumbing — it marks
+    // the story played (the turn's dependency reads exactly
+    // that) and banks its half of the outcome — while the
+    // story's own semantics (the heard record and the
+    // profile observation below) fire ONCE, at part 2's
+    // settle, on the joined outcome. A part 2 settling
+    // unplayed after a sounded head still files the outcome:
+    // the listener heard the first half and cut the story
+    // short — a cut-off, exactly as a mid-story skip reads
+    // on an unsplit story. An unsplit story takes the third
+    // branch and behaves exactly as it always has.
+    let storyOutcome: { completed: boolean; soundedMs: number } | null = null;
+    let duoTailJoinedSounded = false;
+    if (it.kind === 'story' && it.unit && it.duoPart?.part === 1) {
+      if (sounded) {
+        this.playedStoryIds.add(it.unit.id);
+        this.lastSoundedStoryId = it.id;
+        this.duoPartHeads.set(it.id, { completed: rec.completed, soundedMs: rec.soundedMs });
+        if (this.rejoinedMembers.has(it.id)) {
+          // Rejoined before the seam (merged form): the
+          // rejoin dropped the tail, so no tail settle is
+          // coming — THIS settle is the whole story's, on the
+          // head's own (whole-file) outcome, and the served
+          // record carries the rejoin's mark so the field can
+          // tell a rejoined serve from a clean split.
+          this.rejoinedMembers.delete(it.id);
+          this.duoPartHeads.delete(it.id);
+          storyOutcome = { completed: rec.completed, soundedMs: rec.soundedMs };
+          this.deps.onEvent?.('duo_member', {
+            stage: 'served',
+            member_id: it.id,
+            serve: 'split',
+            rejoined: true,
+            split_offset_sec: it.duoPart.splitSec,
+            sounded: true,
+            mode: 'route',
+          });
+        }
+      }
+    } else if (it.kind === 'story' && it.unit && it.duoPart?.part === 2) {
+      const head = this.duoPartHeads.get(it.duoPart.memberId);
+      this.duoPartHeads.delete(it.duoPart.memberId);
+      duoTailJoinedSounded = sounded || head !== undefined;
+      if (duoTailJoinedSounded) {
+        this.playedStoryIds.add(it.unit.id);
+        this.lastSoundedStoryId = it.id;
+        storyOutcome = {
+          completed: (head?.completed ?? false) && sounded && rec.completed,
+          soundedMs: (head?.soundedMs ?? 0) + rec.soundedMs,
+        };
+      }
+      // Telemetry (Slice 9.5): the split member's served
+      // outcome — the plan-time duo_member record said it
+      // WOULD split at this offset; this says it did. A
+      // seamed rejoin (the turn died after the head settled)
+      // still completes here, marked as rejoined.
+      const wasRejoined = this.rejoinedMembers.delete(it.duoPart.memberId);
+      this.deps.onEvent?.('duo_member', {
+        stage: 'served',
+        member_id: it.duoPart.memberId,
+        serve: 'split',
+        ...(wasRejoined ? { rejoined: true } : {}),
+        split_offset_sec: it.duoPart.splitSec,
+        sounded: duoTailJoinedSounded,
+        mode: 'route',
+      });
+    } else if (it.kind === 'story' && it.unit && sounded) {
       this.playedStoryIds.add(it.unit.id);
       this.lastSoundedStoryId = it.id;
+      storyOutcome = { completed: rec.completed, soundedMs: rec.soundedMs };
+    }
+    if (storyOutcome && it.kind === 'story' && it.unit) {
       this.deps.onStoryHeard?.(it.unit);
       // Profile inference (v16.2 Slice 7, Nov 16, 2026): a
       // sounded library story's outcome is the same taste
@@ -3123,8 +3332,8 @@ export class RoutePlanRunner {
           observeStoryOutcome(
             {
               topics,
-              completed: rec.completed,
-              soundedMs: rec.soundedMs,
+              completed: storyOutcome.completed,
+              soundedMs: storyOutcome.soundedMs,
               provenance: ROUTE_OUTCOME_PROVENANCE,
             },
             this.deps.profileStore,
@@ -3162,7 +3371,13 @@ export class RoutePlanRunner {
     // settle is a story boundary — the one spoken seam the
     // proposal engine judges. (An unplayed settle is an
     // internal queue event, not a seam the listener heard.)
-    if (it.kind === 'story' && sounded) this.evaluateProposalSeam(it);
+    // Slice 9.5: a split member's part-1 settle is MID-story
+    // — never a boundary; its part-2 settle is the boundary,
+    // including when the tail itself settled unplayed after
+    // a sounded head (the story ended there either way).
+    if (it.kind === 'story' && (sounded || duoTailJoinedSounded) && it.duoPart?.part !== 1) {
+      this.evaluateProposalSeam(it);
+    }
     this.notify();
   }
 

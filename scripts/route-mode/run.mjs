@@ -189,7 +189,7 @@ const pf = await import(pathToFileURL(pfOut).href);
 // the same commit; a run that executes fewer checks than
 // the floor FAILS, whatever its pass rate (enforced at the
 // final tally below).
-const MIN_CHECKS = 414;
+const MIN_CHECKS = 422;
 
 let passed = 0;
 let failed = 0;
@@ -1662,31 +1662,48 @@ execFileSync(
 const rp = await import(pathToFileURL(rpOut).href);
 
 class RealFakeAudio {
-  constructor(durMs = 400) {
+  constructor(durMs = 400, opts = {}) {
     this.durMs = durMs;
+    // Slice 9.5 media modeling (opt-in; defaults reproduce the
+    // long-standing fake exactly): timeScale speeds media time
+    // against the wall clock, and mediaDurations maps a source
+    // to its file length in media seconds — a source with a
+    // known length ends when media time reaches it (from its
+    // seek base), like a real element reaching the file's end.
+    this.timeScale = opts.timeScale ?? 1;
+    this.mediaDurations = opts.mediaDurations ?? new Map();
+    this.mediaDurationFor = opts.mediaDurationFor ?? null;
     this.src = null;
     this.played = [];
+    this.seeks = [];
     this.endedCb = null;
     this.errorCb = null;
     this.timer = null;
     this.startedAt = 0;
     this.playingSrc = null;
+    this.seekBase = 0;
   }
   load(src) {
     this.src = src;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.playingSrc = null;
+    this.seekBase = 0;
   }
   play() {
     const src = this.src;
     this.played.push(src);
     this.playingSrc = src;
     this.startedAt = Date.now();
+    const mediaSec = this.mediaDurations.get(src) ?? this.mediaDurationFor?.(src);
+    const ms =
+      mediaSec !== undefined
+        ? Math.max(1, ((mediaSec - this.seekBase) / this.timeScale) * 1000)
+        : this.durMs;
     this.timer = setTimeout(() => {
       this.playingSrc = null;
       if (this.endedCb) this.endedCb();
-    }, this.durMs);
+    }, ms);
     return Promise.resolve();
   }
   pause() {
@@ -1695,8 +1712,14 @@ class RealFakeAudio {
     this.playingSrc = null;
   }
   seekBy() {}
+  seekTo(sec) {
+    this.seekBase = sec;
+    this.seeks.push({ src: this.src, sec });
+  }
   timeSec() {
-    return this.playingSrc ? (Date.now() - this.startedAt) / 1000 : 0;
+    return this.playingSrc
+      ? this.seekBase + ((Date.now() - this.startedAt) / 1000) * this.timeScale
+      : 0;
   }
   setEndedHandler(cb) {
     this.endedCb = cb;
@@ -11112,6 +11135,251 @@ await checkAsync('DUO-20 runner: the same ask without the Earl dep files no duo 
   await until(() => runner.view().suggestionsAnswered === 1, 'the answer to sound and settle');
   assert.equal(events.filter(e => e.t === 'duo_line').length, 0, 'solo build: the suggestion channel is exactly as it was');
   runner.endTour();
+});
+
+// ---- Slice 9.5 (Nov 18, 2026): true mid-story insertion.
+// The turn beat lands at the scripted seam: the member's
+// item splits into two range items over the SAME shelf file
+// when a verified silence sits near the seam estimate, and
+// stays cluster-staged otherwise. Fixtures: 30 sentences of
+// 51 chars / 10 words each (1,530 chars, 300 words — the
+// seated members of duoSeatedPlan, re-texted); the scripted
+// seam falls after sentence 17 (867 chars ≈ 56.7%), so on a
+// 120 s measured file the estimate is 68.0 s.
+const SENT51 = 'aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj. ';
+const duoSplitUnits = () => duoFixtureUnits().map(u => ({ ...u, storyText: SENT51.repeat(30) }));
+const duoSplitSeatedPlan = () => {
+  const units = duoSplitUnits();
+  const plan = rm.seatWovenMembers(wCompose(units, 1800), units, { heardKeys: new Set() });
+  return { units, plan };
+};
+const W1_SILENCE = { totalSec: 120, silences: [{ startSec: 67.4, endSec: 68.6 }] };
+
+await checkAsync('DUO-22 split seating: a verified silence at the seam splits the member — setup / part 1 / turn / part 2 / verdict', async () => {
+  const { units, plan } = duoSplitSeatedPlan();
+  const events = [];
+  const out = await duoPass(plan, units, {
+    silenceFor: async u => (u.id === 'w1|landmark_history' ? W1_SILENCE : null),
+    onEvent: (t, p) => events.push({ t, p }),
+  });
+  const at = out.items.findIndex(i => i.id === 'w1|landmark_history');
+  assert.ok(at > 0, 'the member is in the plan');
+  const part1 = out.items[at];
+  assert.equal(part1.duoPart?.part, 1, 'part 1 keeps the member id and carries the split mark');
+  assert.equal(part1.duoPart?.memberId, 'w1|landmark_history');
+  assert.deepEqual(part1.audioRange, { startSec: 0, endSec: 68 }, 'part 1 sounds the file up to the silence midpoint');
+  assert.equal(part1.durationSec, 68);
+  assert.equal(part1.duoScript?.splitSec, 68, 'the script records the split offset');
+  assert.equal(out.items[at - 1]?.duo?.role, 'setup', 'the setup still sounds directly before the story');
+  assert.equal(out.items[at + 1]?.duo?.role, 'turn', 'the turn lands between the parts — mid-story at last');
+  const part2 = out.items[at + 2];
+  assert.equal(part2.id, 'w1|landmark_history#p2');
+  assert.equal(part2.duoPart?.part, 2);
+  assert.equal(part2.audioRange?.startSec, 68, 'part 2 resumes exactly where part 1 stopped');
+  assert.equal(part2.audioRange?.endSec, undefined, 'part 2 sounds to the file’s natural end');
+  assert.equal(part2.durationSec, 52);
+  assert.equal(part1.durationSec + part2.durationSec, 120, 'the parts sum to the MEASURED duration (120 s), not the stored estimate (300 s)');
+  assert.equal(part2.duoScript, undefined, 'the script rides part 1 only');
+  assert.equal(part1.unit, units.find(u => u.id === 'w1|landmark_history'), 'the shelf unit object is untouched — the file is never re-voiced');
+  assert.equal(out.items[at + 3]?.duo?.role, 'verdict', 'the verdict follows the whole story');
+  const milesText = part1.duoScript.segments.filter(s => s.speaker === 'miles').map(s => s.text).join('');
+  assert.equal(milesText, SENT51.repeat(30), 'the script’s Miles segments are still the shelf text byte-for-byte');
+  const dm = events.filter(e => e.t === 'duo_member');
+  assert.deepEqual(
+    dm.find(e => e.p.member_id === 'w1|landmark_history'),
+    { t: 'duo_member', p: { member_id: 'w1|landmark_history', serve: 'split', split_offset_sec: 68, mode: 'route' } },
+    'the split member files its staging with its offset',
+  );
+  assert.equal(dm.find(e => e.p.member_id === 'w2|landmark_history')?.p.serve, 'cluster', 'a member with no silence map files cluster');
+  const composed = events.find(e => e.t === 'duo_composed');
+  assert.equal(composed.p.split_members, 1);
+  assert.equal(composed.p.cluster_members, 2);
+});
+
+await checkAsync('DUO-23 no silence near the seam: the member stays cluster-staged, exactly as Slice 9 built', async () => {
+  const { units, plan } = duoSplitSeatedPlan();
+  const events = [];
+  const out = await duoPass(plan, units, {
+    silenceFor: async u =>
+      u.id === 'w1|landmark_history' ? { totalSec: 120, silences: [{ startSec: 5, endSec: 6 }] } : null,
+    onEvent: (t, p) => events.push({ t, p }),
+  });
+  assert.ok(!out.items.some(i => i.id === 'w1|landmark_history#p2'), 'no part 2 exists');
+  const at = out.items.findIndex(i => i.id === 'w1|landmark_history');
+  assert.equal(out.items[at].audioRange, undefined, 'the member sounds whole, unranged');
+  assert.equal(out.items[at].duoPart, undefined);
+  const after = out.items.slice(at + 1, at + 4).filter(i => i.duo);
+  assert.ok(after.some(i => i.duo.role === 'turn'), 'the turn rides the post-story cluster');
+  const dm = events.find(e => e.t === 'duo_member' && e.p.member_id === 'w1|landmark_history');
+  assert.equal(dm.p.serve, 'cluster');
+  assert.equal(dm.p.split_offset_sec, null, 'a cluster files no offset');
+});
+
+await checkAsync('DUO-24 silence-lane failures degrade to cluster: a throwing lane, a sub-floor silence, an edge snap', async () => {
+  const { units, plan } = duoSplitSeatedPlan();
+  const throwing = await duoPass(plan, units, {
+    silenceFor: async () => {
+      throw new Error('audio unreadable');
+    },
+  });
+  assert.ok(!throwing.items.some(i => i.duoPart), 'a throwing silence lane splits nothing and wedges nothing');
+  const short = await duoPass(plan, units, {
+    silenceFor: async u =>
+      u.id === 'w1|landmark_history' ? { totalSec: 120, silences: [{ startSec: 67.9, endSec: 68.05 }] } : null,
+  });
+  assert.ok(!short.items.some(i => i.duoPart), 'a 0.15 s gap is a stop consonant, not a sentence pause — no split');
+  const edge = await duoPass(plan, units, {
+    silenceFor: async u =>
+      u.id === 'w1|landmark_history' ? { totalSec: 120, silences: [{ startSec: 9.5, endSec: 10.5 }] } : null,
+  });
+  assert.ok(!edge.items.some(i => i.duoPart), 'a snap that would leave a sliver half is refused');
+});
+
+await checkAsync('DUO-25 silence-lane parity: a lane that reads nothing produces the Slice 9 plan, item for item', async () => {
+  const { units, plan } = duoSplitSeatedPlan();
+  const plain = await duoPass(plan, units);
+  const withLane = await duoPass(plan, units, { silenceFor: async () => null });
+  assert.equal(JSON.stringify(withLane.items), JSON.stringify(plain.items), 'null maps everywhere = the pre-9.5 plan exactly');
+  assert.equal(JSON.stringify(withLane.duoState), JSON.stringify(plain.duoState), 'the duo state is identical too');
+});
+
+const duoSplitRunnerPlan = (memberId = 's1|landmark_origin') => {
+  const base = qaPlan();
+  const at = base.items.findIndex(i => i.id === memberId);
+  const story = base.items[at];
+  const items = [...base.items];
+  const part1 = {
+    ...story,
+    durationSec: 2,
+    audioRange: { startSec: 0, endSec: 2 },
+    duoPart: { memberId, part: 1, splitSec: 2 },
+  };
+  const turn = {
+    kind: 'bridge', id: `duo:turn:${memberId}`, label: 'Earl — turn', durationSec: 3,
+    text: 'In my day the trolley stopped for less than that.', ready: true,
+    duo: { speaker: 'earl', role: 'turn', memberId }, duoForId: memberId,
+  };
+  const part2 = {
+    ...story,
+    id: `${memberId}#p2`,
+    durationSec: 2,
+    audioRange: { startSec: 2 },
+    duoPart: { memberId, part: 2, splitSec: 2 },
+  };
+  const verdict = {
+    kind: 'bridge', id: `duo:verdict:${memberId}`, label: 'Earl — verdict', durationSec: 3,
+    text: 'Fine. That one earns its keep.', ready: true,
+    duo: { speaker: 'earl', role: 'verdict', memberId }, duoForId: memberId,
+  };
+  items.splice(at, 1, part1, turn, part2, verdict);
+  return { ...base, items };
+};
+const duoSplitAudio = (memberFile, totalSec = 4) =>
+  new RealFakeAudio(250, {
+    timeScale: 10,
+    mediaDurationFor: src => (src !== null && src.includes(memberFile) ? totalSec : undefined),
+  });
+
+await checkAsync('DUO-26 runner: a split member serves setup-to-verdict around the seam — one file, two ranges, the turn between', async () => {
+  const audio = duoSplitAudio('s1%7Clandmark_origin.wav');
+  const events = [];
+  const heard = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    synthEarlUrl: async t => 'blob:earl/' + t.length,
+    onEvent: (t, p) => events.push({ t, p }),
+    onStoryHeard: u => heard.push(u.id),
+  });
+  await runner.start(duoSplitRunnerPlan());
+  await until(
+    () => events.some(e => e.t === 'duo_line' && e.p.role === 'verdict' && e.p.stage === 'sounded'),
+    'the verdict to sound after part 2',
+  );
+  const s1Plays = audio.played.map((s, i) => (s.includes('s1%7Clandmark_origin.wav') ? i : -1)).filter(i => i >= 0);
+  assert.equal(s1Plays.length, 2, 'the shelf file sounds exactly twice — part 1 and part 2, never a third take');
+  const earlPlays = audio.played.map((s, i) => (s.startsWith('blob:earl') ? i : -1)).filter(i => i >= 0);
+  assert.equal(earlPlays.length, 2, 'turn and verdict both sounded');
+  assert.ok(s1Plays[0] < earlPlays[0] && earlPlays[0] < s1Plays[1], 'the turn sounds BETWEEN the parts — mid-story');
+  assert.ok(s1Plays[1] < earlPlays[1], 'the verdict sounds after part 2');
+  assert.deepEqual(audio.seeks.map(s => s.sec), [2], 'one seek: part 2 resumes at the split offset (part 1 starts at the head, unseeked)');
+  assert.ok(audio.seeks[0].src.includes('s1%7Clandmark_origin.wav'), 'the seek lands on the same shelf file');
+  const served = events.find(e => e.t === 'duo_member' && e.p.stage === 'served');
+  assert.ok(served, 'the served record files');
+  assert.equal(served.p.serve, 'split');
+  assert.equal(served.p.split_offset_sec, 2);
+  assert.equal(served.p.sounded, true);
+  assert.deepEqual(heard.filter(id => id === 's1|landmark_origin').length, 1, 'the story is heard-recorded ONCE, at its tail’s settle');
+  runner.endTour();
+});
+
+await checkAsync('DUO-27 runner: the turn fails its render — the story rejoins and plays whole, the verdict still lands', async () => {
+  const audio = duoSplitAudio('s1%7Clandmark_origin.wav');
+  const events = [];
+  const heard = [];
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    synthEarlUrl: async t => {
+      if (t.includes('trolley')) throw new Error('verification gate: notes leak');
+      return 'blob:earl/' + t.length;
+    },
+    onEvent: (t, p) => events.push({ t, p }),
+    onStoryHeard: u => heard.push(u.id),
+  });
+  await runner.start(duoSplitRunnerPlan());
+  await until(
+    () => events.some(e => e.t === 'duo_line' && e.p.role === 'verdict' && e.p.stage === 'sounded'),
+    'the verdict to sound after the rejoined story',
+  );
+  const failed = events.find(e => e.t === 'duo_line' && e.p.stage === 'render-failed');
+  assert.equal(failed.p.role, 'turn', 'the dead beat is the turn');
+  const rejoined = events.find(e => e.t === 'duo_member' && e.p.stage === 'rejoined');
+  assert.ok(rejoined, 'the rejoin files');
+  assert.equal(rejoined.p.form, 'merged', 'the failure landed before the seam — the halves merged');
+  const s1Plays = audio.played.filter(s => s.includes('s1%7Clandmark_origin.wav'));
+  assert.equal(s1Plays.length, 1, 'the story sounds ONCE, whole — no second-half replay, no hole');
+  assert.deepEqual(audio.seeks, [], 'no seek ever happens on a rejoined story');
+  assert.deepEqual(heard.filter(id => id === 's1|landmark_origin').length, 1, 'the rejoined story is heard-recorded once');
+  const served = events.find(e => e.t === 'duo_member' && e.p.stage === 'served');
+  assert.equal(served?.p.rejoined, true, 'the served record carries the rejoin’s mark — not a clean split');
+  runner.endTour();
+});
+
+await checkAsync('DUO-28 runner: the head dies unrenderable — the tail and both beats die with it, the plan proceeds', async () => {
+  const audio = new RealFakeAudio(300);
+  const events = [];
+  const plan = duoSplitRunnerPlan('s2|landmark_origin');
+  const dead = { ...plan.items.find(i => i.id === 's2|landmark_origin').unit, audioPath: null, storyText: null };
+  for (const it of plan.items) if (it.unit?.id === dead.id) it.unit = dead;
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    synthEarlUrl: async t => 'blob:earl/' + t.length,
+    onEvent: (t, p) => events.push({ t, p }),
+  });
+  await runner.start(plan);
+  runner.onPosition({ lat: 32.86, lng: -117.25, speedMps: 8 }); // the drive reaches s3's ground: its window opens
+  await until(() => audio.played.some(s => s.includes('s3%7Clandmark_origin.wav')), 'the plan to proceed past the dead member to s3');
+  assert.ok(!audio.played.some(s => s.startsWith('blob:earl')), 'no Earl beat sounds for a story that never sounded');
+  assert.ok(!events.some(e => e.t === 'duo_member' && e.p.stage === 'served'), 'no served record for the dead member');
+  runner.onPosition(dest);
+  await until(() => runner.view().closeoutDone, 'arrival closeout past the dead member');
+  runner.endTour();
+});
+
+await checkAsync('DUO-29 capture: the split parts ride the episode record as one member in two rows', async () => {
+  const { units, plan } = duoSplitSeatedPlan();
+  const out = await duoPass(plan, units, {
+    silenceFor: async u => (u.id === 'w1|landmark_history' ? W1_SILENCE : null),
+  });
+  const capItems = ec.assemblePlanItems(out, new Set(out.items.map(i => i.id)));
+  const head = capItems.find(i => i.id === 'w1|landmark_history');
+  assert.deepEqual(head.duoPart, { part: 1, memberId: 'w1|landmark_history', splitSec: 68 }, 'part 1 captures its half');
+  const tail = capItems.find(i => i.id === 'w1|landmark_history#p2');
+  assert.ok(tail, 'part 2 has its own capture row');
+  assert.deepEqual(tail.duoPart, { part: 2, memberId: 'w1|landmark_history', splitSec: 68 }, 'part 2 captures against the same member and offset');
+  assert.equal(tail.unitId, 'w1|landmark_history', 'both rows name the same shelf story');
 });
 
 await checkAsync('DUO-21 capture: duo items and the member scripts ride the episode record', async () => {

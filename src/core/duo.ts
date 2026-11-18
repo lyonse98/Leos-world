@@ -1,17 +1,27 @@
-// The Earl duo — composition layer (v16.2 Slice 9, Nov 17, 2026).
+// The Earl duo — composition layer (v16.2 Slice 9, Nov 17, 2026;
+// Slice 9.5 mid-story insertion, Nov 18, 2026).
 //
 // Path A of the second-persona design, under the render
 // architecture Erik approved: THE LIBRARY IS NEVER RE-VOICED.
 // A woven member's shelf audio plays byte-identical; Earl's
 // lines are the only new audio — short connective segments
 // (bank first, generated pair-specific lines last) seated at
-// the member's seams as tissue items AROUND the story item:
-// a setup before it, a turn beat and a verdict after it.
-// (Mid-story audio insertion would require splitting the
-// shelf WAV at its silences — a runner segment queue — and
-// is NOT built in v1: the composed SCRIPT below records the
-// turn beat at its true sentence-boundary seam, and the beat
-// sounds in the post-story cluster, in script order.)
+// the member's seams: a setup before the story, a turn beat,
+// a verdict after it.
+//
+// Slice 9.5 makes the turn beat land MID-STORY, at the seam
+// the script always recorded: when the member's audio yields
+// a verified silence near the seam's estimated position, the
+// member's plan item splits into two range items over the
+// SAME shelf file (offset playback — the bytes are never
+// touched, re-rendered, or re-encoded) and the turn seats
+// between them: setup → story part 1 → turn → story part 2 →
+// verdict. When no clean silence exists near the seam — or
+// no silence map is wired — the member keeps the v1 shape:
+// the turn sounds in the post-story cluster, in script
+// order. Either way the script's Miles segments remain the
+// shelf text verbatim; the split is a playback staging of
+// the same words, never a different telling.
 //
 // This module is the composer-side half: eligibility and the
 // persona's fences, the speaker-tagged script (Miles'
@@ -39,6 +49,7 @@ import {
   type RoutePlan,
 } from './routeMode';
 import { bankLinesFor, duoLinesPrompt } from '../services/duoPersona';
+import type { SilenceSpan } from './audioFinish';
 
 /** Earl's measured brisk pace (audition recipe, Nov 17, 2026): chars per second. */
 export const EARL_CHARS_PER_SEC = 13.5;
@@ -65,6 +76,68 @@ export interface DuoSegment {
 export interface DuoScript {
   memberId: string;
   segments: DuoSegment[];
+  /**
+   * Slice 9.5: the split offset (seconds into the shelf file)
+   * when this member's turn beat serves mid-story; absent =
+   * the member serves as one whole item (cluster staging).
+   */
+  splitSec?: number;
+}
+
+/** A member audio's measured shape for the split decision: its true duration and its verified silences. */
+export interface DuoSilenceMap {
+  totalSec: number;
+  silences: readonly SilenceSpan[];
+}
+
+/** The seam's estimated position may drift this far (seconds) and still snap to a silence. */
+export const DUO_SPLIT_SNAP_WINDOW_SEC = 4;
+/** A silence shorter than this is a stop consonant, not a sentence pause (mirrors audioFinish's floor). */
+export const DUO_SPLIT_MIN_SILENCE_SEC = 0.22;
+/** A split may not land inside this fraction of the story at either end — the beat is a MID-story beat. */
+export const DUO_SPLIT_EDGE_FRACTION = 0.15;
+/** Each half of a split member must be at least this long — a sliver half is a stutter, not a staging. */
+export const DUO_SPLIT_MIN_PART_SEC = 5;
+
+/**
+ * Choose a split point for one member (pure): the seam's
+ * position is estimated from the script (chars before the
+ * turn ÷ total chars × the audio's measured duration — the
+ * narration pace is even enough that the estimate lands
+ * within a sentence or two), then SNAPPED to the midpoint
+ * of the nearest verified silence inside the snap window.
+ * The midpoint is the safest point of the pause — maximally
+ * far from speech on both sides, so the player's range
+ * mechanics can only ever eat quiet. Returns null when no
+ * silence qualifies (too short, too far from the estimate,
+ * or the snap would leave an edge sliver): the caller falls
+ * back to cluster staging for that member.
+ */
+export function pickDuoSplitSec(args: {
+  seamCharsBefore: number;
+  totalChars: number;
+  totalSec: number;
+  silences: readonly SilenceSpan[];
+}): number | null {
+  const { totalSec, silences } = args;
+  if (!(totalSec > 0) || args.totalChars <= 0) return null;
+  const estimate = (args.seamCharsBefore / args.totalChars) * totalSec;
+  let best: number | null = null;
+  let bestDist = Infinity;
+  for (const s of silences) {
+    if (s.endSec - s.startSec < DUO_SPLIT_MIN_SILENCE_SEC) continue;
+    const mid = (s.startSec + s.endSec) / 2;
+    const dist = Math.abs(mid - estimate);
+    if (dist <= DUO_SPLIT_SNAP_WINDOW_SEC && dist < bestDist) {
+      best = mid;
+      bestDist = dist;
+    }
+  }
+  if (best === null) return null;
+  const split = Math.round(best * 100) / 100;
+  const minPart = Math.max(DUO_SPLIT_MIN_PART_SEC, totalSec * DUO_SPLIT_EDGE_FRACTION);
+  if (split < minPart || totalSec - split < minPart) return null;
+  return split;
 }
 
 /** Per-episode duo state — lives and dies with the episode (persona doctrine: no cross-episode ledger). */
@@ -284,6 +357,15 @@ export interface DuoPassOptions {
   heardKeys: ReadonlySet<string>;
   /** The text lane (App wires generateStoryText under the duo instruction); raw output, validated here. */
   generateLines: (prompt: string) => Promise<string>;
+  /**
+   * The silence lane (Slice 9.5): a member's measured audio
+   * shape — true duration + verified silences — or null when
+   * the audio cannot be read. The App wires fetch + PCM
+   * decode + findSilenceSpans over the shelf file. Absent,
+   * failing, or silenceless all degrade the same way: that
+   * member serves cluster-staged, exactly as Slice 9 built.
+   */
+  silenceFor?: (unit: LibraryUnit) => Promise<DuoSilenceMap | null>;
   onEvent?: (type: string, payload: Record<string, unknown>) => void;
 }
 
@@ -403,6 +485,8 @@ export async function applyDuoToPlan(plan: RoutePlan, opts: DuoPassOptions): Pro
 
   let items: PlanItem[] = [...plan.items];
   const scripts = new Map<string, DuoScript>();
+  let splitMembers = 0;
+  let clusterMembers = 0;
   let bridgeBeatCount = 0;
   const bridgeBeatCap = Math.floor(eligibleBridges.length / 2);
   let anyEarl = false;
@@ -513,48 +597,123 @@ export async function applyDuoToPlan(plan: RoutePlan, opts: DuoPassOptions): Pro
 
     // Seat the audible items: setup directly before the
     // member (after its bridge in, which already sits there),
-    // turn + verdict directly after it (after its planned
-    // silence, when one rides the seam — the held breath
-    // belongs to the story, the verdict follows it).
+    // the turn at its seam, the verdict after the story (after
+    // its planned silence, when one rides the seam — the held
+    // breath belongs to the story, the verdict follows it).
     const at = items.indexOf(servedItem);
     if (at < 0) continue;
-    items[at] = { ...servedItem, duoScript: script };
     const setup = lines.find(l => l.role === 'setup');
     const turn = lines.find(l => l.role === 'turn');
     const verdict = lines.find(l => l.role === 'verdict');
-    const insertsBefore: PlanItem[] = [];
-    const insertsAfter: PlanItem[] = [];
-    if (setup) {
-      insertsBefore.push(
-        earlItem({ id: `duo:setup:${servedItem.id}`, text: setup.text, role: 'setup', memberId: servedItem.id }),
-      );
-    }
-    if (turn) {
-      insertsAfter.push(
-        earlItem({
+    const setupItem = setup
+      ? earlItem({ id: `duo:setup:${servedItem.id}`, text: setup.text, role: 'setup', memberId: servedItem.id })
+      : null;
+    const turnItem = turn
+      ? earlItem({
           id: `duo:turn:${servedItem.id}`,
           text: turn.text,
           role: 'turn',
           memberId: servedItem.id,
           duoForId: servedItem.id,
-        }),
-      );
-    }
-    if (verdict) {
-      insertsAfter.push(
-        earlItem({
+        })
+      : null;
+    const verdictItem = verdict
+      ? earlItem({
           id: `duo:verdict:${servedItem.id}`,
           text: verdict.text,
           role: 'verdict',
           memberId: servedItem.id,
           duoForId: servedItem.id,
-        }),
-      );
+        })
+      : null;
+
+    // Slice 9.5: the split decision. Only a member WITH a
+    // turn can split (the turn is the beat that lands
+    // mid-story), only when the silence lane is wired and
+    // reads the member's audio, and never on an item carrying
+    // late-presence conversion material (a converted head
+    // plays a different whole file — the split's ranges would
+    // be meaningless against it). Any miss = cluster staging.
+    let splitSec: number | null = null;
+    let splitTotalSec = 0;
+    if (turn && opts.silenceFor && !servedItem.lateTwin) {
+      let map: DuoSilenceMap | null = null;
+      try {
+        map = await opts.silenceFor(servedUnit);
+      } catch {
+        map = null; // an unreadable member audio degrades to cluster, never to a wedge
+      }
+      if (map && map.totalSec > 0) {
+        // The seam's char offset, read off the composed
+        // script: the Miles segment the turn follows.
+        const storyText = servedUnit.storyText as string;
+        const turnAt = script.segments.findIndex(s => s.speaker === 'earl' && s.role === 'turn');
+        const beforeSeg = turnAt > 0 ? script.segments[turnAt - 1] : undefined;
+        const seamChars =
+          beforeSeg && beforeSeg.speaker === 'miles'
+            ? beforeSeg.text.length
+            : Math.round(storyText.length * 0.55);
+        splitSec = pickDuoSplitSec({
+          seamCharsBefore: seamChars,
+          totalChars: storyText.length,
+          totalSec: map.totalSec,
+          silences: map.silences,
+        });
+        if (splitSec !== null) splitTotalSec = map.totalSec;
+      }
     }
-    let afterAt = at + 1;
-    if (items[afterAt]?.kind === 'silence' && items[afterAt].prevUnitId === servedItem.id) afterAt += 1;
-    items.splice(afterAt, 0, ...insertsAfter);
-    items.splice(at, 0, ...insertsBefore);
+    if (turn) {
+      // Telemetry (Slice 9.5): every turned member files its
+      // staging — split-served with its offset, or the
+      // cluster fallback — at plan time; the runner files
+      // the served outcome on the same family.
+      opts.onEvent?.('duo_member', {
+        member_id: servedItem.id,
+        serve: splitSec !== null ? 'split' : 'cluster',
+        split_offset_sec: splitSec,
+        mode: 'route',
+      });
+      if (splitSec !== null) splitMembers += 1;
+      else clusterMembers += 1;
+    }
+
+    if (splitSec !== null && turnItem) {
+      // Split staging: part 1 keeps the member's id and the
+      // script; the turn seats between the parts; part 2
+      // rides the member's fields under its part id. The
+      // parts' durations are the MEASURED split (their sum
+      // is the audio's true duration), so every downstream
+      // budget reads the split's real numbers.
+      script.splitSec = splitSec;
+      const part1: PlanItem = {
+        ...servedItem,
+        duoScript: script,
+        durationSec: splitSec,
+        audioRange: { startSec: 0, endSec: splitSec },
+        duoPart: { memberId: servedItem.id, part: 1, splitSec },
+      };
+      const part2: PlanItem = {
+        ...servedItem,
+        id: `${servedItem.id}#p2`,
+        durationSec: Math.round((splitTotalSec - splitSec) * 100) / 100,
+        audioRange: { startSec: splitSec },
+        duoPart: { memberId: servedItem.id, part: 2, splitSec },
+      };
+      items[at] = part1;
+      items.splice(at + 1, 0, turnItem, part2);
+      let tailAt = at + 3;
+      if (items[tailAt]?.kind === 'silence' && items[tailAt].prevUnitId === servedItem.id) tailAt += 1;
+      if (verdictItem) items.splice(tailAt, 0, verdictItem);
+    } else {
+      items[at] = { ...servedItem, duoScript: script };
+      const insertsAfter: PlanItem[] = [];
+      if (turnItem) insertsAfter.push(turnItem);
+      if (verdictItem) insertsAfter.push(verdictItem);
+      let afterAt = at + 1;
+      if (items[afterAt]?.kind === 'silence' && items[afterAt].prevUnitId === servedItem.id) afterAt += 1;
+      items.splice(afterAt, 0, ...insertsAfter);
+    }
+    if (setupItem) items.splice(at, 0, setupItem);
   }
 
   // ---- bridge beats (template machinery + Earl, ≤ half the bridges)
@@ -612,6 +771,8 @@ export async function applyDuoToPlan(plan: RoutePlan, opts: DuoPassOptions): Pro
 
   opts.onEvent?.('duo_composed', {
     members: state.members,
+    split_members: splitMembers,
+    cluster_members: clusterMembers,
     earl_lines: state.earlLines,
     earl_words: state.earlWords,
     eligible_words: state.eligibleWords,
