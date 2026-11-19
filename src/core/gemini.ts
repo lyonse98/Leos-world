@@ -438,7 +438,13 @@ export async function wavDurationSec(blob: Blob): Promise<number | null> {
     while (off + 8 <= buf.byteLength) {
       const id = tag(off);
       const size = view.getUint32(off + 4, true);
-      if (id === 'fmt ') byteRate = view.getUint32(off + 12, true);
+      // ByteRate is fmt-data offset +8 (chunk start +16). The
+      // field at +4 (chunk start +12) is SampleRate — reading
+      // it as the byte rate doubles every measured duration
+      // on the lane's mono 16-bit WAVs (byteRate = 2× rate),
+      // which made Earl's verification gate reject every
+      // render in the field (Nov 19, 2026: 10/10 lines).
+      if (id === 'fmt ') byteRate = view.getUint32(off + 16, true);
       if (id === 'data') {
         dataBytes = Math.min(size, buf.byteLength - (off + 8));
         break;

@@ -734,6 +734,8 @@ export class RoutePlanRunner {
   private lateSkippedItemIds = new Set<string>();
   /** Item id → when its render completed with audio in hand (capture's render verdicts). */
   private renderDoneAtMs = new Map<string, number>();
+  /** Duo item id → the error its render died with, kept for the duo_line render-failed verdict (the stage flag alone could not say why — Nov 19, 2026). */
+  private duoRenderErrorById = new Map<string, string>();
   /** Episode capture: filed at most once per runner, like the drive record. */
   private episodeOutcomeWritten = false;
   /** Movement evidence (episode capture's driven/stationary discriminator). */
@@ -1365,8 +1367,10 @@ export class RoutePlanRunner {
           role: it.duo.role,
           member_id: it.duo.memberId ?? null,
           item_id: it.id,
+          error: this.duoRenderErrorById.get(it.id) ?? null,
           mode: 'route',
         });
+        this.duoRenderErrorById.delete(it.id);
       }
       // Duo rejoin (Slice 9.5): a turn beat that dies leaves
       // its split member in two halves for no reason — put
@@ -3166,7 +3170,13 @@ export class RoutePlanRunner {
         settled: false,
         onSettle,
       };
-    } catch {
+    } catch (err) {
+      // Duo telemetry: keep the underlying error for the
+      // render-failed verdict filed in runEntryTask — the
+      // stage flag alone could not say why the line died.
+      if (it.duo) {
+        this.duoRenderErrorById.set(it.id, err instanceof Error ? err.message : String(err));
+      }
       return null;
     }
   }
