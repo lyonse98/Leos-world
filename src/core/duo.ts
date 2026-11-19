@@ -48,7 +48,8 @@ import {
   type PlanItem,
   type RoutePlan,
 } from './routeMode';
-import { bankLinesFor, duoLinesPrompt, EARL_INTRO_VARIANTS } from '../services/duoPersona';
+import { bankLinesFor, duoLinesPrompt, EARL_INTRO_VARIANTS, type EarlBankLine } from '../services/duoPersona';
+import { bridgeMoveOf, type BridgeMove } from './narration';
 import type { SilenceSpan } from './audioFinish';
 
 /** Earl's measured brisk pace (audition recipe, Nov 17, 2026): chars per second. */
@@ -466,7 +467,13 @@ export async function applyDuoToPlan(plan: RoutePlan, opts: DuoPassOptions): Pro
 
   // Eligible bridges: composed pair tissue whose pair is
   // duo-clean on both sides and does not lead into the
-  // climax (a payoff bridge stays a Miles moment).
+  // climax (a payoff bridge stays a Miles moment). A QUIET
+  // HANDOFF bridge is fenced out (rework §3.2): a duo quiet
+  // handoff is a contradiction — that seam stays Miles'
+  // alone. Each eligible bridge's move is recorded: a
+  // callback-move bridge draws its beat from the callback
+  // bank (the §3.2 exception), the rest from the bridge bank.
+  const bridgeMoveById = new Map<string, BridgeMove | null>();
   const eligibleBridges = plan.items.filter(it => {
     if (it.kind !== 'bridge' || typeof it.text !== 'string') return false;
     const prev = it.prevUnitId ? storyById.get(it.prevUnitId) : undefined;
@@ -474,6 +481,9 @@ export async function applyDuoToPlan(plan: RoutePlan, opts: DuoPassOptions): Pro
     if (next?.climax === true) return false;
     if (prev?.unit && !unitDuoClean(prev.unit)) return false;
     if (next?.unit && !unitDuoClean(next.unit)) return false;
+    const move = bridgeMoveOf(it.text);
+    if (move === 'quiet-handoff') return false;
+    bridgeMoveById.set(it.id, move);
     return true;
   });
 
@@ -512,6 +522,59 @@ export async function applyDuoToPlan(plan: RoutePlan, opts: DuoPassOptions): Pro
   state.earlWords += wordCount(introEarl);
   state.earlLines += 1;
 
+  // ---- the bank draw (rework §3.2): ONE rotation for the
+  // whole episode, shared by seam beats and member fallback
+  // verdicts. A bank line never repeats within the episode;
+  // each seat's cursor starts from the episode's eligible-
+  // bridge count, so consecutive episodes don't open their
+  // seams with the same beat; a frame-flagged line draws only
+  // while the fourth-wall ration lasts, and spends it when it
+  // seats. A draw commits only when the caller's accept
+  // predicate (the share budget) takes the line — a refused
+  // line stays in the bank, unspent.
+  const usedBankIds = new Set<string>();
+  const bankCursors = new Map<string, number>();
+  const takeBankLine = (
+    seat: 'bridge' | 'callback',
+    accept: (line: EarlBankLine) => boolean,
+  ): EarlBankLine | null => {
+    const lines = bankLinesFor(seat);
+    if (lines.length === 0) return null;
+    const start = (bankCursors.get(seat) ?? eligibleBridges.length) % lines.length;
+    for (let k = 0; k < lines.length; k++) {
+      const line = lines[(start + k) % lines.length];
+      if (usedBankIds.has(line.id)) continue;
+      if (line.frame && state.frameBreaksUsed >= DUO_MAX_FRAME_BREAKS) continue;
+      if (!accept(line)) continue;
+      usedBankIds.add(line.id);
+      bankCursors.set(seat, start + k + 1);
+      if (line.frame) state.frameBreaksUsed += 1;
+      return line;
+    }
+    return null;
+  };
+
+  // ---- seam beats, priced BEFORE member lines (allocation
+  // order, §3.4): an Earl beat at EVERY eligible seam — the
+  // ≤½-of-bridges cap is gone; the share budget is the only
+  // ceiling, and it binds member lines first. A callback-move
+  // bridge draws the callback bank (the §3.2 exception),
+  // falling back to the bridge bank when that bank is spent.
+  // Beats are priced now and seated after the member loop,
+  // appended after their bridge.
+  const seamBeats = new Map<string, string>();
+  for (const bridge of eligibleBridges) {
+    const seat = bridgeMoveById.get(bridge.id) === 'callback' ? 'callback' : 'bridge';
+    const line =
+      takeBankLine(seat, l => shareAllows(l.text)) ??
+      (seat === 'callback' ? takeBankLine('bridge', l => shareAllows(l.text)) : null);
+    if (!line) continue;
+    seamBeats.set(bridge.id, line.text);
+    state.earlWords += wordCount(line.text);
+    state.earlLines += 1;
+  }
+  let anyEarl = seamBeats.size > 0;
+
   // Short-twin pool for tight seats (unheard twins only, the
   // seating pass's own discipline).
   const twinByBase = new Map<string, LibraryUnit>();
@@ -524,9 +587,6 @@ export async function applyDuoToPlan(plan: RoutePlan, opts: DuoPassOptions): Pro
   const scripts = new Map<string, DuoScript>();
   let splitMembers = 0;
   let clusterMembers = 0;
-  let bridgeBeatCount = 0;
-  const bridgeBeatCap = Math.floor(eligibleBridges.length / 2);
-  let anyEarl = false;
 
   // ---- woven members, in plan order
   for (const member of members) {
@@ -601,11 +661,19 @@ export async function applyDuoToPlan(plan: RoutePlan, opts: DuoPassOptions): Pro
     if (lines.length === 0) {
       // Tier-1 fallback: a bank verdict after the story (a
       // generic verdict is the bank's honest job; a generic
-      // setup before a specific story is not).
-      const bank = bankLinesFor('bridge');
-      const verdictText = bank[(state.members + bridgeBeatCount) % bank.length]?.text;
-      if (verdictText && shareAllows(verdictText)) {
-        lines = [{ role: 'verdict', move: 'verdict', text: verdictText }];
+      // setup before a specific story is not). The draw rides
+      // the episode's shared bank rotation — no repeats, and
+      // a frame-flagged verdict spends its ration at the draw.
+      const bankLine = takeBankLine('bridge', l => shareAllows(l.text));
+      if (bankLine) {
+        lines = [
+          {
+            role: 'verdict',
+            move: 'verdict',
+            text: bankLine.text,
+            ...(bankLine.frame ? { frame: true } : {}),
+          },
+        ];
         fromBank = true;
       }
     }
@@ -613,13 +681,15 @@ export async function applyDuoToPlan(plan: RoutePlan, opts: DuoPassOptions): Pro
 
     // State: claims register, the story corrects them (the
     // tally Miles then inflates in writing), concessions spend.
-    // Frame breaks spend HERE, at keep time — a frame line the
-    // share filter refused never consumed the ration.
+    // GENERATED frame breaks spend HERE, at keep time — a
+    // frame line the share filter refused never consumed the
+    // ration. (A bank fallback's frame line already spent at
+    // its draw, in takeBankLine — never twice.)
     for (const l of lines) {
       state.earlWords += wordCount(l.text);
       state.earlLines += 1;
       if (l.move === 'concession') state.concessionsUsed += 1;
-      if (l.frame) state.frameBreaksUsed += 1;
+      if (l.frame && !fromBank) state.frameBreaksUsed += 1;
       if (l.role === 'setup' && l.move === 'wrong-assumption') {
         state.claims.push(l.text);
         state.corrections += 1;
@@ -757,27 +827,32 @@ export async function applyDuoToPlan(plan: RoutePlan, opts: DuoPassOptions): Pro
     if (setupItem) items.splice(at, 0, setupItem);
   }
 
-  // ---- bridge beats (template machinery + Earl, ≤ half the bridges)
-  if (bridgeBeatCap > 0) {
-    const bank = bankLinesFor('bridge');
-    const eligibleBridgeIds = new Set(eligibleBridges.map(b => b.id));
+  // ---- seat the priced seam beats: each appends after its
+  // bridge (the beat is Earl's reaction to Miles' road talk —
+  // it never replaces, precedes, or rewrites the bridge text,
+  // and the bridge's move was chosen by the existing rotation
+  // untouched). A planned silence riding immediately behind
+  // the bridge keeps the composer's position: the beat seats
+  // after the silence, never displacing it.
+  if (seamBeats.size > 0) {
     const withBeats: PlanItem[] = [];
-    for (const it of items) {
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
       withBeats.push(it);
-      if (
-        bridgeBeatCount < bridgeBeatCap &&
-        eligibleBridgeIds.has(it.id) &&
-        bank.length > 0
-      ) {
-        const text = bank[bridgeBeatCount % bank.length].text;
-        if (shareAllows(text)) {
-          withBeats.push(
-            earlItem({ id: `duo:bridge-beat:${it.id}`, text, role: 'bridge-beat', duoForId: it.id }),
-          );
-          state.earlWords += wordCount(text);
-          state.earlLines += 1;
-          bridgeBeatCount += 1;
-          anyEarl = true;
+      const beat = seamBeats.get(it.id);
+      if (beat) {
+        const beatItem = earlItem({
+          id: `duo:bridge-beat:${it.id}`,
+          text: beat,
+          role: 'bridge-beat',
+          duoForId: it.id,
+        });
+        if (items[i + 1]?.kind === 'silence') {
+          withBeats.push(items[i + 1]);
+          withBeats.push(beatItem);
+          i += 1;
+        } else {
+          withBeats.push(beatItem);
         }
       }
     }

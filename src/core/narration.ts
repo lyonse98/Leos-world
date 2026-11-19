@@ -744,6 +744,11 @@ function openingShapeOf(text: string): BridgeOpeningShape | null {
  * seeded this way knows exactly what the listener has already
  * heard.
  */
+/** Which bridge move a text performed (the composer's own fingerprint, exported for seam-side passes — the duo's quiet-handoff fence reads it). Null when it matches none (fixtures, foreign texts). */
+export function bridgeMoveOf(text: string): BridgeMove | null {
+  return moveShapeOf(text);
+}
+
 /** Which bridge move a text performed, by its fingerprint. Null when it matches none (fixtures, foreign texts). */
 function moveShapeOf(text: string): BridgeMove | null {
   if (text.includes('?')) return 'question';

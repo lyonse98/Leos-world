@@ -10971,7 +10971,7 @@ await checkAsync('DUO-11 twin controls: ample room keeps the full telling; a hea
   assert.equal(heardMember.id, tight.base.id, 'a heard twin is not a substitution candidate');
 });
 
-await checkAsync('DUO-12 bridge beats: at most half the eligible bridges earn an Earl beat, in plan order', async () => {
+await checkAsync('DUO-12 bridge beats: EVERY eligible seam earns an Earl beat, in plan order, none repeated (Nov 19 rework §3.2)', async () => {
   const stories = [0.1, 0.25, 0.4, 0.55, 0.7].map((a, i) => {
     const u = unit(`bs${i}|landmark_origin`, 32.7 + i * 0.04, { durationSec: 100 });
     return { u, item: { kind: 'story', id: u.id, label: `BS${i}`, durationSec: 100, unit: u, ready: true, anchorProgress: a } };
@@ -10992,8 +10992,13 @@ await checkAsync('DUO-12 bridge beats: at most half the eligible bridges earn an
   };
   const out = await duoPass(plan, stories.map(s => s.u));
   const beats = out.items.filter(i => i.duo?.role === 'bridge-beat');
-  assert.equal(beats.length, 2, 'four eligible bridges → two beats (the ≤½ cap), not four');
-  assert.deepEqual(beats.map(b => b.duoForId), ['bb0', 'bb1'], 'the first eligible bridges in plan order');
+  assert.equal(beats.length, 4, 'four eligible bridges → four beats (the ≤½ cap is gone), not two');
+  assert.deepEqual(beats.map(b => b.duoForId), ['bb0', 'bb1', 'bb2', 'bb3'], 'every eligible bridge in plan order');
+  assert.equal(new Set(beats.map(b => b.text)).size, 4, 'no bank line repeats within the episode (rotation memory)');
+  for (const b of beats) {
+    const at = out.items.indexOf(b);
+    assert.equal(out.items[at - 1]?.id, b.duoForId, 'each beat appends directly after its own bridge');
+  }
   assert.ok(out.items.some(i => i.duo?.role === 'intro'), 'bridge beats alone still open the two-host intro');
 });
 
