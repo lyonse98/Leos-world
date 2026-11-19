@@ -48,7 +48,7 @@ import {
   type PlanItem,
   type RoutePlan,
 } from './routeMode';
-import { bankLinesFor, duoLinesPrompt } from '../services/duoPersona';
+import { bankLinesFor, duoLinesPrompt, EARL_INTRO_VARIANTS } from '../services/duoPersona';
 import type { SilenceSpan } from './audioFinish';
 
 /** Earl's measured brisk pace (audition recipe, Nov 17, 2026): chars per second. */
@@ -369,6 +369,13 @@ export function earlCallbackBeat(rotation = 0): string | null {
 export interface DuoPassOptions {
   /** The duo gate (App: flag on + audience not Family). Off → the plan returns unchanged. */
   enabled: boolean;
+  /**
+   * Intro-variant rotation seed (rework R2): the App wires
+   * the drive-record count, so consecutive episodes rotate
+   * Earl's standing intro line and never repeat the variant
+   * back-to-back. Absent → variant 0 (the standing line).
+   */
+  introSeed?: number;
   /** The build's full unit pool (short-twin substitution reads it). */
   units: readonly LibraryUnit[];
   heardKeys: ReadonlySet<string>;
@@ -430,12 +437,15 @@ function earlItem(args: {
  * episode capture both see the duo plan). Pure but for the
  * injected generation lane; deterministic given its outputs.
  *
- * Order of work: fences → per-member short-twin substitution
- * for tight seats → per-member line generation under the
- * running duo state → bridge beats under the ≤½ cap → the
- * standing intro, seated only when Earl actually speaks in
- * the episode. The word-share budget binds throughout: when
- * it is spent, later members play solo.
+ * Order of work: fences → the standing intro priced first
+ * and guaranteed → bridge beats → per-member short-twin
+ * substitution for tight seats → per-member line generation
+ * under the running duo state → the intro seated at the
+ * head. The word-share budget binds in that allocation
+ * order: when it is spent, later members play solo. (The
+ * allocation order and the unconditional intro are the
+ * Nov 19 rework, §3.4/§3.1; the ≤½ bridge cap died there
+ * too — every eligible seam earns its beat.)
  */
 export async function applyDuoToPlan(plan: RoutePlan, opts: DuoPassOptions): Promise<RoutePlan> {
   if (!opts.enabled) return plan;
@@ -467,13 +477,23 @@ export async function applyDuoToPlan(plan: RoutePlan, opts: DuoPassOptions): Pro
     return true;
   });
 
+  // Nothing for Earl anywhere — no duo-eligible member and
+  // no eligible seam: the episode stays solo, byte-for-byte.
+  // The unconditional intro (below) never promises a co-host
+  // the episode cannot seat again.
+  if (members.length === 0 && eligibleBridges.length === 0) return plan;
+
   // The standing intro's Miles lines (template, persona doc):
   // they are duo-eligible material too, so their words stand
   // in the share denominator beside the members and bridges.
+  // Miles' first line states the phone frame in one clause
+  // (Nov 19 persona §2/§3.1); Earl's one line rotates through
+  // the standing variants, seeded by the caller.
   const minutes = Math.max(1, Math.round(driveSec / 60));
   const introMiles1 =
-    "I'm Miles. This is Earl — he rode these streets when they were streetcar lines, and crossed the bay on the ferry he crewed. I call him Grumps.";
-  const introEarl = 'And I call him "son," because it annoys him.';
+    "I'm Miles. This is Earl — we live in the phone, he's very old, and neither of us is going to explain that. I call him Grumps.";
+  const introSeed = Math.abs(Math.floor(opts.introSeed ?? 0));
+  const introEarl = EARL_INTRO_VARIANTS[introSeed % EARL_INTRO_VARIANTS.length];
   const introMiles2 = `We're headed for ${plan.destinationName} — about ${minutes} minutes of road. Let's go.`;
 
   state.eligibleWords =
@@ -483,12 +503,12 @@ export async function applyDuoToPlan(plan: RoutePlan, opts: DuoPassOptions): Pro
     wordCount(introMiles2);
   const earlBudgetWords = Math.floor(state.eligibleWords * DUO_SHARE_CAP);
   const shareAllows = (text: string): boolean => state.earlWords + wordCount(text) <= earlBudgetWords;
-  // The standing intro's Earl line is pre-counted against
-  // the budget: it seats unconditionally once Earl speaks
-  // anywhere, so the share invariant (earlWords ≤ cap) must
-  // already carry it. If the budget cannot carry even the
-  // intro line, nothing seats and the episode stays solo
-  // (the state is discarded with the unchanged plan).
+  // ALLOCATION ORDER (Nov 19 rework, §3.4): intro → seam beats
+  // → member lines. The standing intro's Earl line is priced
+  // FIRST and guaranteed — it is charged here, before any
+  // seam or member spends, so the old failure mode (the
+  // budget cannot carry the intro → the whole episode
+  // silently goes solo) cannot recur for the intro itself.
   state.earlWords += wordCount(introEarl);
   state.earlLines += 1;
 
@@ -764,7 +784,16 @@ export async function applyDuoToPlan(plan: RoutePlan, opts: DuoPassOptions): Pro
     items = withBeats;
   }
 
-  if (!anyEarl) return plan; // nothing for Earl in this episode: solo, exactly as today
+  // The presence floor (rework §3.4): an episode with at
+  // least one duo-eligible member ALWAYS opens with the
+  // two-host intro — the intro is where the show promises
+  // Earl, and the promise no longer depends on whether a
+  // member happened to earn lines under the cap. A
+  // bridge-only episode opens it when a beat seated. When
+  // neither holds (nothing eligible survived the fences —
+  // the early return above — or every seat was refused in a
+  // bridges-only episode), the plan stays solo.
+  if (!anyEarl && members.length === 0) return plan;
 
   // ---- the standing two-host intro (template, <20 s), at the head
   const introItems: PlanItem[] = [

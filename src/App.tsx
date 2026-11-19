@@ -2432,6 +2432,10 @@ function MilesApp() {
       if (duoGateOpen(ROUTE_MODE_ENABLED, routeAudience)) {
         plan = await applyDuoToPlan(plan, {
           enabled: true,
+          // Earl rework R2: the intro-variant rotation rides
+          // the drive-record count — consecutive episodes
+          // never open with the same Earl intro line.
+          introSeed: driveRecords.length,
           units: [...units, ...memberUnits],
           heardKeys,
           generateLines: prompt => generateDuoLinesText(prompt),
