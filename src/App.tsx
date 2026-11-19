@@ -3201,7 +3201,7 @@ function MilesApp() {
                     className={equalChoiceBtn}
                   >
                     Driving
-                    <span className={choiceCaption}>Just the stories — eyes on the road</span>
+                    <span className={choiceCaption}>Hands-free. Listening only.</span>
                   </button>
                   <button
                     type="button"
@@ -3212,7 +3212,7 @@ function MilesApp() {
                     className={equalChoiceBtn}
                   >
                     Passenger / Walking
-                    <span className={choiceCaption}>Stories — and you can ask Miles questions</span>
+                    <span className={choiceCaption}>You can tap, ask questions, and get stop suggestions.</span>
                   </button>
                 </div>
                 <p className="mt-3 text-center text-[11px] text-inksoft">
@@ -3264,13 +3264,13 @@ function MilesApp() {
                     <span className="flex items-center justify-center gap-2">
                       <Play className="h-6 w-6" /> Freeform
                     </span>
-                    <span className={choiceCaption}>Stories as you pass them — no destination</span>
+                    <span className={choiceCaption}>No destination. Just drive; Miles narrates what you pass.</span>
                   </button>
                   <button type="button" onClick={() => setLandingStep('route')} className={equalChoiceBtn}>
                     <span className="flex items-center justify-center gap-2">
                       <MapPin className="h-6 w-6" /> Route
                     </span>
-                    <span className={choiceCaption}>One destination — Miles plans the ride</span>
+                    <span className={choiceCaption}>Headed somewhere? Miles builds an episode for that drive.</span>
                   </button>
                 </div>
               </div>
