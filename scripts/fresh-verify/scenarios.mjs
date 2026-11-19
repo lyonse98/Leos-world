@@ -105,7 +105,7 @@ async function healthyOpening(world, audio, pos = UTC, speed = 8) {
 }
 
 export async function runScenarios(Tour, extras) {
-  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, profileUi, facts, partners, freshness, currentEvents, eventsFeed, EVENT_FEEDS, suggestions, proposals, placeMemory, liveSpend, composeRoutePlan, hashString, duo, audioFinish } = extras;
+  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, profileUi, facts, partners, freshness, currentEvents, eventsFeed, EVENT_FEEDS, suggestions, proposals, placeMemory, liveSpend, composeRoutePlan, hashString, duo, duoPersona, audioFinish } = extras;
 
   // ---------------------------------------------------------- S-01 healthy start
   suite('S-01 healthy start / opener order');
@@ -8182,5 +8182,48 @@ export async function runScenarios(Tour, extras) {
     check('degenerate inputs refuse: no chars, no duration',
       duo.pickDuoSplitSec({ seamCharsBefore: 0, totalChars: 0, totalSec: 120, silences: [{ startSec: 59, endSec: 61 }] }) === null &&
       duo.pickDuoSplitSec({ seamCharsBefore: 10, totalChars: 100, totalSec: 0, silences: [{ startSec: 59, endSec: 61 }] }) === null);
+  }
+
+  // ---------------------------------------------------------------
+  // DS-3 (Nov 19, 2026): the Earl rework — the phone-frame
+  // persona constants and the fourth-wall ration, at the pure
+  // level. The pass-level behavior (unconditional intro, every
+  // seam, allocation order, capture seats) is pinned in the
+  // route harness (DUO-30+); here: the cap is a third, the
+  // moves vocabulary carries the rename, the frame ration
+  // validates like the concession, and the refreshed bank and
+  // intro variants are the specced sizes.
+  suite('DS-3 the Earl rework: phone-frame persona constants and the frame ration');
+  {
+    check('the share cap is a third (Nov 19 rework §3.4)',
+      duo.DUO_SHARE_CAP === 0.33);
+    check('the rations coexist: ≤2 frame breaks beyond the intro, ≤1 concession',
+      duo.DUO_MAX_FRAME_BREAKS === 2 && duo.DUO_MAX_CONCESSIONS === 1);
+    const framed = duo.parseDuoLines(JSON.stringify([
+      { role: 'setup', move: 'question', text: 'I live in a phone, apparently.', frame: true },
+      { role: 'turn', move: 'old-man-beat', text: 'He can pause me. Rude.', frame: true },
+      { role: 'verdict', move: 'verdict', text: 'A third break is over the ration.', frame: true },
+    ]), duo.emptyDuoState());
+    check('frame lines validate against the ration: two survive a parse, the third drops',
+      framed.length === 2 && framed.every(l => l.frame === true));
+    check('a frame line with the ration spent is dropped; an unflagged line is untouched by it',
+      duo.parseDuoLines(JSON.stringify([{ role: 'verdict', move: 'verdict', text: 'One more.', frame: true }]),
+        { ...duo.emptyDuoState(), frameBreaksUsed: 2 }).length === 0 &&
+      duo.parseDuoLines(JSON.stringify([{ role: 'verdict', move: 'verdict', text: 'No flag here.' }]),
+        { ...duo.emptyDuoState(), frameBreaksUsed: 2 }).length === 1);
+    const bridgeBank = duoPersona.bankLinesFor('bridge');
+    check('the bridge bank is refreshed to 12 lines, exactly 4 of them frame-flagged, all inside the char cap',
+      bridgeBank.length === 12 &&
+      bridgeBank.filter(l => l.frame).length === 4 &&
+      duoPersona.EARL_BANK_LINES.every(l => l.text.length <= 140));
+    check('the intro variants are four distinct standing lines inside the char cap',
+      duoPersona.EARL_INTRO_VARIANTS.length === 4 &&
+      new Set(duoPersona.EARL_INTRO_VARIANTS).size === 4 &&
+      duoPersona.EARL_INTRO_VARIANTS.every(t => t.length <= 140));
+    check('the render profile and generation instruction carry the phone frame and the renamed move',
+      duoPersona.earlRenderPayload('Test line.').includes('lives in the phone with Miles') &&
+      duoPersona.earlRenderPayload('Test line.').endsWith('Test line.') &&
+      duoPersona.DUO_GENERATION_INSTRUCTION.includes('"old-man-beat"') &&
+      !duoPersona.DUO_GENERATION_INSTRUCTION.includes('"anachronism"'));
   }
 }

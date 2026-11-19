@@ -189,7 +189,7 @@ const pf = await import(pathToFileURL(pfOut).href);
 // the same commit; a run that executes fewer checks than
 // the floor FAILS, whatever its pass rate (enforced at the
 // final tally below).
-const MIN_CHECKS = 422;
+const MIN_CHECKS = 430;
 
 let passed = 0;
 let failed = 0;
@@ -11448,6 +11448,208 @@ await checkAsync('DUO-21 capture: duo items and the member scripts ride the epis
   assert.equal(payload.duo_state.members, 3);
   assert.equal(payload.duo_state.corrections_as_written, 2, 'the inflated tally is capture color, filed as written');
   assert.deepEqual(payload.duo_state.claims.length, 1);
+});
+
+await checkAsync('DUO-30 the intro floor: an eligible member whose lines all fail still opens the two-host intro (rework R2)', async () => {
+  const microUnit = unit('m1|landmark_history', 32.0, {
+    lng: -117.05, angle: 'landmark_history', topics: [WT], wovenEligible: true,
+    durationSec: 200, storyText: 'word '.repeat(10),
+  });
+  const microPlan = {
+    destinationName: 'Dest', destination: dest, path, driveSec: 1000, budgetSec: 1000, audience: 'standard', totalSec: 220,
+    items: [
+      { kind: 'preview', id: 'preview', label: 'Preview', durationSec: 20, text: 'PREVIEW', ready: true },
+      { kind: 'story', id: microUnit.id, label: 'M1', durationSec: 200, unit: microUnit, ready: true, woven: true, anchorProgress: 0.2 },
+    ],
+  };
+  // Eligible words 10 + 39 = 49 → budget 16. The intro's Earl
+  // line (9) is priced first and guaranteed; every bank verdict
+  // (≥11 words) is refused by what remains, and generation
+  // returns nothing — the member plays solo, but the EPISODE
+  // still opens with both hosts. The old conditional intro
+  // would have returned this plan untouched and solo.
+  const out = await duoPass(microPlan, [microUnit], { generateLines: async () => '[]' });
+  assert.notEqual(out, microPlan, 'the duo plan exists — the intro seated');
+  assert.ok(out.items.some(i => i.duo?.role === 'intro'), 'Earl speaks in the intro');
+  assert.equal(out.items.filter(i => i.duo?.memberId).length, 0, 'the member itself stayed solo');
+  assert.equal(out.duoState.members, 0);
+  assert.equal(out.duoState.earlLines, 1, 'the intro line is the episode\'s only Earl line — and it is guaranteed');
+});
+
+await checkAsync('DUO-31 the intro rotation: seeded variants cycle and never repeat back-to-back (rework R2)', async () => {
+  const { units, plan } = duoSeatedPlan();
+  const introLine = async seed => {
+    const out = await duoPass(plan, units, { introSeed: seed });
+    return out.items.find(i => i.duo?.role === 'intro')?.text;
+  };
+  const v0 = await introLine(0);
+  const v1 = await introLine(1);
+  const v2 = await introLine(2);
+  const v3 = await introLine(3);
+  const v4 = await introLine(4);
+  assert.equal(v0, 'And I call him "son," because it annoys him.', 'seed 0 is the standing variant');
+  assert.equal(new Set([v0, v1, v2, v3]).size, 4, 'four distinct variants in the bank');
+  assert.equal(v4, v0, 'the rotation wraps deterministically');
+  const unseeded = await duoPass(plan, units);
+  assert.equal(unseeded.items.find(i => i.duo?.role === 'intro')?.text, v0, 'no seed → the standing variant');
+});
+
+await checkAsync('DUO-32 the bank frame ration: frame bank lines spend the same ≤2 budget at the seams (rework R3)', async () => {
+  const items = [{ kind: 'preview', id: 'preview', label: 'Preview', durationSec: 20, text: 'PREVIEW', ready: true }];
+  const units = [];
+  for (let i = 0; i < 9; i++) {
+    const u = unit(`fs${i}|landmark_origin`, 32.7 + i * 0.03, { durationSec: 100 });
+    units.push(u);
+    items.push({ kind: 'story', id: u.id, label: `FS${i}`, durationSec: 100, unit: u, ready: true, anchorProgress: 0.08 + i * 0.1 });
+    if (i < 8) {
+      items.push({
+        kind: 'bridge', id: `fb${i}`, label: 'Bridge', durationSec: 8,
+        text: 'word '.repeat(60), prevUnitId: u.id, nextUnitId: `fs${i + 1}|landmark_origin`, ready: true,
+      });
+    }
+  }
+  const plan = {
+    destinationName: 'Dest', destination: dest, path, driveSec: 1000, budgetSec: 1000, audience: 'standard',
+    totalSec: items.reduce((s, i) => s + i.durationSec, 0), items,
+  };
+  // The rotation starts at the eligible-bridge count (8), which
+  // lands first on the bank's frame lines: two seat, the ration
+  // spends, and the remaining frame lines are skipped for
+  // non-frame lines — beats never stop, the wall just closes.
+  const out = await duoPass(plan, units);
+  const beats = out.items.filter(i => i.duo?.role === 'bridge-beat');
+  assert.equal(beats.length, 8, 'every seam still earns its beat');
+  assert.equal(new Set(beats.map(b => b.text)).size, 8, 'no repeats');
+  assert.equal(out.duoState.frameBreaksUsed, 2, 'exactly the ration spent — never a third frame line');
+  const FRAME_TEXTS = new Set([
+    'I live in a phone now. I had pockets once. Ask Miles what progress costs.',
+    'He can pause me, you know. Middle of a sentence. Nobody could pause me on the ferry.',
+    'They wrote me old and put me in a telephone. I am making the best of it. Mostly.',
+    'If I go quiet all of a sudden, he did it. There is a button, and he has no shame about it.',
+  ]);
+  assert.equal(beats.filter(b => FRAME_TEXTS.has(b.text)).length, 2, 'two frame beats sounded; the other two frame lines stayed in the bank');
+});
+
+await checkAsync('DUO-33 seam fences: a quiet handoff takes no beat and leaves the denominator; a planned silence is never displaced (rework R3)', async () => {
+  const g = i => unit(`q${i}|landmark_origin`, 32.7 + i * 0.03, { durationSec: 100 });
+  const [g1, g2, g3] = [g(1), g(2), g(3)];
+  const story = (u, a) => ({ kind: 'story', id: u.id, label: u.id, durationSec: 100, unit: u, ready: true, anchorProgress: a });
+  const plan = {
+    destinationName: 'Dest', destination: dest, path, driveSec: 1000, budgetSec: 1000, audience: 'standard', totalSec: 400,
+    items: [
+      { kind: 'preview', id: 'preview', label: 'Preview', durationSec: 20, text: 'PREVIEW', ready: true },
+      story(g1, 0.1),
+      { kind: 'bridge', id: 'qh1', label: 'Bridge', durationSec: 4, text: 'From Alpha we roll on.', prevUnitId: g1.id, nextUnitId: g2.id, ready: true },
+      story(g2, 0.4),
+      { kind: 'bridge', id: 'nb1', label: 'Bridge', durationSec: 8, text: 'word '.repeat(50), prevUnitId: g2.id, nextUnitId: g3.id, ready: true },
+      { kind: 'silence', id: 'sil1', label: 'Silence', durationSec: 3, prevUnitId: g2.id, ready: true },
+      story(g3, 0.8),
+    ],
+  };
+  const out = await duoPass(plan, [g1, g2, g3]);
+  const beats = out.items.filter(i => i.duo?.role === 'bridge-beat');
+  assert.equal(beats.length, 1, 'only the ordinary bridge earns a beat — the quiet handoff stays Miles alone');
+  assert.equal(beats[0].duoForId, 'nb1');
+  assert.equal(out.duoState.eligibleWords, 89, 'the quiet bridge is out of the share denominator too (50 bridge words + 39 intro words)');
+  const silAt = out.items.findIndex(i => i.id === 'sil1');
+  const bridgeAt = out.items.findIndex(i => i.id === 'nb1');
+  const beatAt = out.items.indexOf(beats[0]);
+  assert.ok(bridgeAt < silAt && silAt < beatAt, 'bridge → silence → beat: the silence kept the composer\'s position, the beat seated after it');
+  assert.equal(out.items.filter(i => i.kind === 'silence').length, 1, 'no silence created, moved, or destroyed');
+});
+
+await checkAsync('DUO-34 allocation order: seam beats are priced before member lines, so the cap binds members first (rework R4)', async () => {
+  const member = unit('am|landmark_history', 32.0, {
+    lng: -117.05, angle: 'landmark_history', topics: [WT], wovenEligible: true,
+    durationSec: 200, storyText: 'word '.repeat(60),
+  });
+  const g1 = unit('ag1|landmark_origin', 32.7, { durationSec: 100 });
+  const g2 = unit('ag2|landmark_origin', 32.9, { durationSec: 100 });
+  const story = (u, a, over = {}) => ({ kind: 'story', id: u.id, label: u.id, durationSec: u.durationSec ?? 100, unit: u, ready: true, anchorProgress: a, ...over });
+  const plan = {
+    destinationName: 'Dest', destination: dest, path, driveSec: 1000, budgetSec: 1000, audience: 'standard', totalSec: 500,
+    items: [
+      { kind: 'preview', id: 'preview', label: 'Preview', durationSec: 20, text: 'PREVIEW', ready: true },
+      story(g1, 0.1),
+      { kind: 'bridge', id: 'ab0', label: 'Bridge', durationSec: 8, text: 'word '.repeat(20), prevUnitId: g1.id, nextUnitId: member.id, ready: true },
+      story(member, 0.4, { woven: true }),
+      { kind: 'bridge', id: 'ab1', label: 'Bridge', durationSec: 8, text: 'word '.repeat(20), prevUnitId: member.id, nextUnitId: g2.id, ready: true },
+      story(g2, 0.8),
+    ],
+  };
+  // Eligible: 60 (member) + 40 (bridges) + 39 (intro) = 139 →
+  // budget 45. Intro 9, then the two seam beats (17 + 19) land
+  // at exactly 45 — priced first. Every member line the stub
+  // asks for is then refused, and the bank fallback with it:
+  // under the old members-first order the member would have
+  // eaten and the seams would have starved instead.
+  const gen = async () =>
+    JSON.stringify([
+      { role: 'setup', move: 'question', text: 'Wait, it used to be WHAT back then? Tell me again, slower.' },
+      { role: 'turn', move: 'old-man-beat', text: 'No ferry bell, no trolley wire, no nickel fare either.' },
+      { role: 'verdict', move: 'verdict', text: 'Fine, that one earns its keep, and I do not say that often.' },
+    ]);
+  const out = await duoPass(plan, [member, g1, g2], { generateLines: gen });
+  const beats = out.items.filter(i => i.duo?.role === 'bridge-beat');
+  assert.deepEqual(beats.map(b => b.duoForId), ['ab0', 'ab1'], 'both seams seated first');
+  assert.equal(out.items.filter(i => i.duo?.memberId === member.id).length, 0, 'the member plays solo — the cap bound it, not the seams');
+  assert.equal(out.duoState.earlWords, 45, 'intro (9) + beats (17 + 19) = the whole budget, spent in allocation order');
+  assert.ok(out.items.some(i => i.duo?.role === 'intro'), 'the intro opened the episode');
+});
+
+await checkAsync('DUO-35 the callback exception: a callback-move bridge draws the callback bank, not the bridge bank (rework R3)', async () => {
+  const g1 = unit('cg1|landmark_origin', 32.7, { durationSec: 100 });
+  const g2 = unit('cg2|landmark_origin', 32.9, { durationSec: 100 });
+  const story = (u, a) => ({ kind: 'story', id: u.id, label: u.id, durationSec: 100, unit: u, ready: true, anchorProgress: a });
+  const plan = {
+    destinationName: 'Dest', destination: dest, path, driveSec: 1000, budgetSec: 1000, audience: 'standard', totalSec: 300,
+    items: [
+      { kind: 'preview', id: 'preview', label: 'Preview', durationSec: 20, text: 'PREVIEW', ready: true },
+      story(g1, 0.2),
+      { kind: 'bridge', id: 'cb1', label: 'Bridge', durationSec: 8, text: `${'word '.repeat(60)}stays with us today.`, prevUnitId: g1.id, nextUnitId: g2.id, ready: true },
+      story(g2, 0.8),
+    ],
+  };
+  const out = await duoPass(plan, [g1, g2]);
+  const beats = out.items.filter(i => i.duo?.role === 'bridge-beat');
+  assert.equal(beats.length, 1);
+  assert.equal(
+    beats[0].text,
+    'Owed is owed. On the ferry we settled our accounts before we docked — settle this one.',
+    'the grievance bank voiced the callback seam (rotation starts at the bridge count: index 1)',
+  );
+});
+
+await checkAsync('DUO-36 capture: the host layer files distinctly — duo_seats and the frame ration (rework R5)', async () => {
+  const { units, plan } = duoSeatedPlan();
+  const out = await duoPass(plan, units);
+  const capItems = ec.assemblePlanItems(out, new Set(out.items.map(i => i.id)));
+  const payload = ec.assemblePlanCapture({
+    tourId: 'duo-36',
+    buildId: 'fresh-test',
+    context: captureCtx,
+    plan: out,
+    routePlanStarted: { destination: 'Dest', decisions: { thread: null } },
+    items: capItems,
+  });
+  assert.equal(payload.duo_seats.intro, 1, 'one intro seat, filed as its own layer');
+  assert.equal(
+    payload.duo_seats.bridge_beat,
+    out.items.filter(i => i.duo?.role === 'bridge-beat').length,
+    'the seam layer files its own count',
+  );
+  assert.equal(
+    payload.duo_seats.member,
+    out.items.filter(i => i.duo?.memberId).length,
+    'member lines file apart from the host layer',
+  );
+  assert.equal(
+    payload.duo_seats.intro + payload.duo_seats.bridge_beat + payload.duo_seats.member,
+    payload.duo_pieces,
+    'the layers sum to the duo total — density can be judged per layer on composed plans',
+  );
+  assert.equal(payload.duo_state.frame_breaks_used, out.duoState.frameBreaksUsed);
+  assert.ok(payload.duo_state.frame_breaks_used <= 2, 'the ration holds in capture');
 });
 
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);

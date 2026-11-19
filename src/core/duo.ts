@@ -908,6 +908,8 @@ export async function applyDuoToPlan(plan: RoutePlan, opts: DuoPassOptions): Pro
     members: state.members,
     split_members: splitMembers,
     cluster_members: clusterMembers,
+    bridge_beats: seamBeats.size,
+    frame_breaks: state.frameBreaksUsed,
     earl_lines: state.earlLines,
     earl_words: state.earlWords,
     eligible_words: state.eligibleWords,

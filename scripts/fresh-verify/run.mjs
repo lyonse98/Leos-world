@@ -78,6 +78,7 @@ const extras = {
   },
   placeMemory: engine.placeMemory,
   duo: engine.duo,
+  duoPersona: engine.duoPersona,
   audioFinish: engine.audioFinish,
   profile: engine.profile,
   profileUi: {

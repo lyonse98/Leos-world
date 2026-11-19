@@ -474,6 +474,19 @@ export interface RouteEpisodePlanPayload {
    * (solo plan, Family, or nothing eligible).
    */
   duo_pieces: number;
+  /**
+   * Duo host-layer seats (Earl rework R5, Nov 19, 2026;
+   * additive — schema stays 2): the composed plan's Earl
+   * pieces split by layer — the standing intro, the seam
+   * (bridge-beat) layer, and member lines — so density is
+   * judged per layer on composed plans, never on what a
+   * render failure let through.
+   */
+  duo_seats: {
+    intro: number;
+    bridge_beat: number;
+    member: number;
+  };
   duo_state: {
     earl_words: number;
     eligible_words: number;
@@ -483,6 +496,8 @@ export interface RouteEpisodePlanPayload {
     corrections: number;
     corrections_as_written: number;
     concessions_used: number;
+    /** Explicit fourth-wall lines spent (the ≤2 ration beyond the intro). */
+    frame_breaks_used: number;
   } | null;
   budget_sec: number;
   route_duration_sec: number | null;
@@ -573,6 +588,13 @@ export function assemblePlanCapture(args: {
     humor_bank_ids: args.items.filter(i => i.humor && i.humorBankId).map(i => i.humorBankId as string),
     short_cut_pieces: args.items.filter(i => i.version === 'short').length,
     duo_pieces: args.items.filter(i => i.duoRole !== null).length,
+    duo_seats: {
+      intro: args.items.filter(i => i.duoRole === 'intro').length,
+      bridge_beat: args.items.filter(i => i.duoRole === 'bridge-beat').length,
+      member: args.items.filter(
+        i => i.duoRole === 'setup' || i.duoRole === 'turn' || i.duoRole === 'verdict',
+      ).length,
+    },
     duo_state: plan.duoState
       ? {
           earl_words: plan.duoState.earlWords,
@@ -583,6 +605,7 @@ export function assemblePlanCapture(args: {
           corrections: plan.duoState.corrections,
           corrections_as_written: plan.duoState.correctionsAsWritten,
           concessions_used: plan.duoState.concessionsUsed,
+          frame_breaks_used: plan.duoState.frameBreaksUsed,
         }
       : null,
     budget_sec: plan.budgetSec,
