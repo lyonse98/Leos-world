@@ -10570,8 +10570,9 @@ check('PF-12 profile: a deleted inferred topic stays deleted until new evidence 
 // seams. The suites below pin: script integrity (Miles'
 // segments concatenate to the shelf text byte-for-byte), the
 // persona's fences (presence / memorial / somber / Protected
-// / climax / Family / preview stay Miles solo), the ≤25%
-// word-share cap (cumulative, intro pre-counted), the
+// / climax / Family / preview stay Miles solo), the ≤33%
+// word-share cap (cumulative; allocation order intro →
+// seams → members, Nov 19 rework), the
 // short-twin substitution for tight seats, the verification
 // gate's drop behavior at the runner (a failed Earl segment
 // drops — never seam-substituted, never Miles-voiced), the
@@ -10872,10 +10873,10 @@ await checkAsync('DUO-8c member fences: memorial, somber, Protected, climax, and
   }
 });
 
-await checkAsync('DUO-9 the share cap binds cumulatively: lines past 25% of eligible words are refused in seam order', async () => {
+await checkAsync('DUO-9 the share cap binds cumulatively: lines past 33% of eligible words are refused in seam order', async () => {
   const microUnit = unit('m1|landmark_history', 32.0, {
     lng: -117.05, angle: 'landmark_history', topics: [WT], wovenEligible: true,
-    durationSec: 200, storyText: 'word '.repeat(120),
+    durationSec: 200, storyText: 'word '.repeat(80),
   });
   const microPlan = {
     destinationName: 'Dest', destination: dest, path, driveSec: 1000, budgetSec: 1000, audience: 'standard', totalSec: 220,
@@ -10884,10 +10885,11 @@ await checkAsync('DUO-9 the share cap binds cumulatively: lines past 25% of elig
       { kind: 'story', id: microUnit.id, label: 'M1', durationSec: 200, unit: microUnit, ready: true, woven: true, anchorProgress: 0.2 },
     ],
   };
-  // Eligible words: 120 (member) + 28 + 12 (the intro's Miles
-  // lines) = 160 → budget 40. The intro's Earl line spends 9;
-  // setup (12) and turn (10) fit at 31; the verdict (13) would
-  // take the share to 44 — refused.
+  // Eligible words: 80 (member) + 27 + 12 (the intro's Miles
+  // lines, Nov 19 template) = 119 → budget ⌊119 × 0.33⌋ = 39.
+  // The intro's Earl line spends 9 (priced first); setup (12)
+  // and turn (10) fit at 31; the verdict (13) would take the
+  // share to 44 — refused.
   const microGen = async () =>
     JSON.stringify([
       { role: 'setup', move: 'question', text: 'Wait, it used to be WHAT back then? Tell me again, slower.' },
@@ -10896,7 +10898,7 @@ await checkAsync('DUO-9 the share cap binds cumulatively: lines past 25% of elig
     ]);
   const out = await duoPass(microPlan, [microUnit], { generateLines: microGen });
   const st = out.duoState;
-  assert.equal(st.eligibleWords, 160);
+  assert.equal(st.eligibleWords, 119);
   assert.equal(st.earlWords, 31, 'intro (9) + setup (12) + turn (10); the verdict was refused by the cap');
   assert.ok(st.earlWords <= Math.floor(st.eligibleWords * duo.DUO_SHARE_CAP), 'the share invariant holds exactly');
   const roles = out.items.filter(i => i.duo?.memberId === microUnit.id).map(i => i.duo.role);
@@ -10914,7 +10916,7 @@ await checkAsync('DUO-9 the share cap binds cumulatively: lines past 25% of elig
   assert.ok(big.duoState.earlWords > 0, 'the duo still seats under the cap');
   assert.ok(
     big.duoState.earlWords <= Math.floor(big.duoState.eligibleWords * duo.DUO_SHARE_CAP),
-    `share ${big.duoState.earlWords} ≤ 25% of ${big.duoState.eligibleWords}`,
+    `share ${big.duoState.earlWords} ≤ 33% of ${big.duoState.eligibleWords}`,
   );
 });
 

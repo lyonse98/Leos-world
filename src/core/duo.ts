@@ -28,7 +28,7 @@
 // segments are the twin's own sentences, verbatim — the
 // integrity property the harness pins), the per-episode duo
 // state (claims, the corrections tally Miles inflates IN
-// WRITING ONLY, the rationed concession), the ≤25% word-share
+// WRITING ONLY, the rationed concession), the ≤33% word-share
 // accounting over duo-eligible material, and the short-twin
 // substitution that makes room for Earl inside a tight seat
 // (the duo's seconds come out of the member's budget, never
@@ -56,8 +56,8 @@ import type { SilenceSpan } from './audioFinish';
 export const EARL_CHARS_PER_SEC = 13.5;
 /** Line discipline: an Earl line is a sentence, rarely two — never a paragraph. */
 export const EARL_LINE_MAX_CHARS = 140;
-/** Duo share cap: Earl's words ≤ this fraction of duo-eligible words (design §3). */
-export const DUO_SHARE_CAP = 0.25;
+/** Duo share cap: Earl's words ≤ this fraction of duo-eligible words (design §3; 0.25 at Slice 9 — Erik's scarcity complaint raised it to a third in the Nov 19 rework, §3.4). The guaranteed seats (intro line, first seam beat) are priced ahead of the cap and may carry a tiny episode past it by their own words alone; everything else binds exactly. */
+export const DUO_SHARE_CAP = 0.33;
 /** Per-member cap on Earl lines (design §3). */
 export const DUO_MAX_LINES_PER_MEMBER = 3;
 /** The grudging concession is rationed: at most one per episode (persona charter). */
@@ -563,16 +563,26 @@ export async function applyDuoToPlan(plan: RoutePlan, opts: DuoPassOptions): Pro
   // Beats are priced now and seated after the member loop,
   // appended after their bridge.
   const seamBeats = new Map<string, string>();
-  for (const bridge of eligibleBridges) {
+  eligibleBridges.forEach((bridge, idx) => {
+    // PRESENCE FLOOR (§3.4): the first eligible seam's beat is
+    // guaranteed, like the intro — priced ahead of the cap, so
+    // a duo-enabled episode with an eligible member or seam
+    // always has Earl in the intro AND at the first seam
+    // before any member generation spends a word. The
+    // fourth-wall ration still binds the draw itself (a
+    // guaranteed beat is a bank line, never a forced frame
+    // line).
+    const guaranteed = idx === 0;
+    const accept = (l: EarlBankLine): boolean => guaranteed || shareAllows(l.text);
     const seat = bridgeMoveById.get(bridge.id) === 'callback' ? 'callback' : 'bridge';
     const line =
-      takeBankLine(seat, l => shareAllows(l.text)) ??
-      (seat === 'callback' ? takeBankLine('bridge', l => shareAllows(l.text)) : null);
-    if (!line) continue;
+      takeBankLine(seat, accept) ??
+      (seat === 'callback' ? takeBankLine('bridge', accept) : null);
+    if (!line) return;
     seamBeats.set(bridge.id, line.text);
     state.earlWords += wordCount(line.text);
     state.earlLines += 1;
-  }
+  });
   let anyEarl = seamBeats.size > 0;
 
   // Short-twin pool for tight seats (unheard twins only, the
