@@ -10603,7 +10603,7 @@ const duo = await import(pathToFileURL(duoOut).href);
 const duoStubGen = async prompt => {
   const lines = [
     { role: 'setup', move: 'question', text: 'Wait — it used to be WHAT? Say that part again, slower.' },
-    { role: 'turn', move: 'anachronism', text: 'In my day the trolley stopped for less than that.' },
+    { role: 'turn', move: 'old-man-beat', text: 'In my day the trolley stopped for less than that.' },
     { role: 'verdict', move: 'verdict', text: 'Fine. That one earns its keep.' },
   ];
   if (prompt.includes('STORY: Woven One')) {
@@ -10652,7 +10652,7 @@ check('DUO-2 generated-line validation: roles, moves, the char cap, one line per
   const ok = duo.parseDuoLines(
     JSON.stringify([
       { role: 'setup', move: 'wrong-assumption', text: 'It used to be a goat pasture.' },
-      { role: 'turn', move: 'anachronism', text: 'Where is the ferry bell?' },
+      { role: 'turn', move: 'old-man-beat', text: 'Where is the ferry bell?' },
       { role: 'verdict', move: 'verdict', text: 'Hmph. Allowed.' },
     ]),
     st,
@@ -10684,6 +10684,45 @@ check('DUO-2 generated-line validation: roles, moves, the char cap, one line per
     duo.emptyDuoState(),
   );
   assert.equal(twoConcessions.length, 1, 'at most one concession survives a single parse');
+  // The Nov 19 moves rename: "old-man-beat" is the vocabulary;
+  // the retired "anachronism" tag is an unknown move and coerces
+  // to verdict like any other unknown — never a crash, never a
+  // surviving relic.
+  const renamed = duo.parseDuoLines(
+    JSON.stringify([
+      { role: 'turn', move: 'old-man-beat', text: 'Where is the ferry bell?' },
+      { role: 'verdict', move: 'anachronism', text: 'A retired tag.' },
+    ]),
+    duo.emptyDuoState(),
+  );
+  assert.equal(renamed.length, 2);
+  assert.equal(renamed[0].move, 'old-man-beat', 'the renamed move survives as itself');
+  assert.equal(renamed[1].move, 'verdict', 'the retired move coerces to verdict');
+  // The fourth-wall ration (Nov 19 persona §1): frame-flagged
+  // lines validate against the same kind of budget as the
+  // concession — ≤2 per episode beyond the intro.
+  const framed = duo.parseDuoLines(
+    JSON.stringify([
+      { role: 'setup', move: 'question', text: 'I live in a phone, apparently.', frame: true },
+      { role: 'turn', move: 'old-man-beat', text: 'He can pause me. Rude.', frame: true },
+      { role: 'verdict', move: 'verdict', text: 'A third break is over the ration.', frame: true },
+    ]),
+    duo.emptyDuoState(),
+  );
+  assert.equal(framed.length, 2, 'the third frame line in one parse is refused — the ration is two');
+  assert.ok(framed.every(l => l.frame === true), 'surviving frame lines keep their flag');
+  const frameSpent = { ...duo.emptyDuoState(), frameBreaksUsed: 2 };
+  assert.deepEqual(
+    duo.parseDuoLines(JSON.stringify([{ role: 'verdict', move: 'verdict', text: 'One more break.', frame: true }]), frameSpent),
+    [],
+    'a frame line with the ration spent is dropped',
+  );
+  const unframed = duo.parseDuoLines(
+    JSON.stringify([{ role: 'verdict', move: 'verdict', text: 'No flag, no ration.', frame: 'yes' }]),
+    frameSpent,
+  );
+  assert.equal(unframed.length, 1, 'only a literal true spends the ration — a truthy non-boolean is not a frame line');
+  assert.equal(unframed[0].frame, undefined);
 });
 
 check('DUO-3 the verification gate band: in-band renders pass, a notes leak and a truncation drop', () => {
@@ -10707,7 +10746,7 @@ check('DUO-4 script composition: Miles verbatim, the turn at the ~55% sentence s
   const u = unit('seam|landmark_history', 32.0, { angle: 'landmark_history', storyText: text });
   const script = duo.composeDuoScript(u, [
     { role: 'setup', move: 'question', text: 'Used to be WHAT?' },
-    { role: 'turn', move: 'anachronism', text: 'No trolley, I note.' },
+    { role: 'turn', move: 'old-man-beat', text: 'No trolley, I note.' },
     { role: 'verdict', move: 'verdict', text: 'Allowed.' },
   ]);
   assert.deepEqual(
@@ -10852,7 +10891,7 @@ await checkAsync('DUO-9 the share cap binds cumulatively: lines past 25% of elig
   const microGen = async () =>
     JSON.stringify([
       { role: 'setup', move: 'question', text: 'Wait, it used to be WHAT back then? Tell me again, slower.' },
-      { role: 'turn', move: 'anachronism', text: 'No ferry bell, no trolley wire, no nickel fare either.' },
+      { role: 'turn', move: 'old-man-beat', text: 'No ferry bell, no trolley wire, no nickel fare either.' },
       { role: 'verdict', move: 'verdict', text: 'Fine, that one earns its keep, and I do not say that often.' },
     ]);
   const out = await duoPass(microPlan, [microUnit], { generateLines: microGen });
@@ -10868,7 +10907,7 @@ await checkAsync('DUO-9 the share cap binds cumulatively: lines past 25% of elig
   const wordy = async () =>
     JSON.stringify([
       { role: 'setup', move: 'question', text: 'word '.repeat(23).trim() },
-      { role: 'turn', move: 'anachronism', text: 'word '.repeat(23).trim() },
+      { role: 'turn', move: 'old-man-beat', text: 'word '.repeat(23).trim() },
       { role: 'verdict', move: 'verdict', text: 'word '.repeat(23).trim() },
     ]);
   const big = await duoPass(plan, units, { generateLines: wordy });

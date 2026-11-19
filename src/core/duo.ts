@@ -61,6 +61,8 @@ export const DUO_SHARE_CAP = 0.25;
 export const DUO_MAX_LINES_PER_MEMBER = 3;
 /** The grudging concession is rationed: at most one per episode (persona charter). */
 export const DUO_MAX_CONCESSIONS = 1;
+/** Explicit fourth-wall lines are rationed: at most two per episode beyond the intro's standing frame line (Nov 19 persona, §1). */
+export const DUO_MAX_FRAME_BREAKS = 2;
 
 /** One turn of a duo script. Miles' segments are shelf text, verbatim. */
 export interface DuoSegment {
@@ -149,6 +151,8 @@ export interface DuoEpisodeState {
   /** The tally as Miles WRITES it — inflated, disputed, never settled (capture color only). */
   correctionsAsWritten: number;
   concessionsUsed: number;
+  /** Explicit fourth-wall lines spent this episode (the ≤2 ration beyond the intro). */
+  frameBreaksUsed: number;
   earlWords: number;
   eligibleWords: number;
   members: number;
@@ -161,6 +165,7 @@ export function emptyDuoState(): DuoEpisodeState {
     corrections: 0,
     correctionsAsWritten: 0,
     concessionsUsed: 0,
+    frameBreaksUsed: 0,
     earlWords: 0,
     eligibleWords: 0,
     members: 0,
@@ -240,10 +245,12 @@ export interface DuoLine {
   role: 'setup' | 'turn' | 'verdict';
   move: string;
   text: string;
+  /** An explicit fourth-wall line — spends against the per-episode frame ration (Nov 19 persona, §1). */
+  frame?: boolean;
 }
 
 const DUO_ROLES = new Set(['setup', 'turn', 'verdict']);
-const DUO_MOVES = new Set(['wrong-assumption', 'anachronism', 'tall-tale', 'concession', 'verdict', 'question']);
+const DUO_MOVES = new Set(['wrong-assumption', 'old-man-beat', 'tall-tale', 'concession', 'verdict', 'question']);
 
 /**
  * Mechanically validate the generation lane's raw output
@@ -251,8 +258,12 @@ const DUO_MOVES = new Set(['wrong-assumption', 'anachronism', 'tall-tale', 'conc
  * lines; a line survives only with a known role and move, at
  * most one line per role, and text inside the char cap. A
  * concession line is dropped when the episode's ration is
- * spent. Anything unparseable yields no lines — the member
- * plays solo (or takes a bank verdict), never broken.
+ * spent, and a frame-flagged line is dropped when the
+ * fourth-wall ration (≤2 beyond the intro) is spent — the
+ * rations are validated exactly alike, off the running duo
+ * state plus this parse's own spend. Anything unparseable
+ * yields no lines — the member plays solo (or takes a bank
+ * verdict), never broken.
  */
 export function parseDuoLines(raw: string, state: DuoEpisodeState): DuoLine[] {
   let parsed: unknown;
@@ -268,9 +279,10 @@ export function parseDuoLines(raw: string, state: DuoEpisodeState): DuoLine[] {
   const out: DuoLine[] = [];
   const seenRoles = new Set<string>();
   let concessions = state.concessionsUsed;
+  let frameBreaks = state.frameBreaksUsed;
   for (const entry of parsed) {
     if (typeof entry !== 'object' || entry === null) continue;
-    const { role, move, text } = entry as { role?: unknown; move?: unknown; text?: unknown };
+    const { role, move, text, frame } = entry as { role?: unknown; move?: unknown; text?: unknown; frame?: unknown };
     if (typeof role !== 'string' || !DUO_ROLES.has(role) || seenRoles.has(role)) continue;
     if (typeof text !== 'string') continue;
     const line = text.trim();
@@ -280,8 +292,13 @@ export function parseDuoLines(raw: string, state: DuoEpisodeState): DuoLine[] {
       if (concessions >= DUO_MAX_CONCESSIONS) continue;
       concessions += 1;
     }
+    const isFrame = frame === true;
+    if (isFrame) {
+      if (frameBreaks >= DUO_MAX_FRAME_BREAKS) continue;
+      frameBreaks += 1;
+    }
     seenRoles.add(role);
-    out.push({ role: role as DuoLine['role'], move: m, text: line });
+    out.push({ role: role as DuoLine['role'], move: m, text: line, ...(isFrame ? { frame: true } : {}) });
   }
   return out;
 }
@@ -540,6 +557,7 @@ export async function applyDuoToPlan(plan: RoutePlan, opts: DuoPassOptions): Pro
           storyText: servedUnit.storyText as string,
           claims: state.claims,
           concessionsUsed: state.concessionsUsed,
+          frameBreaksLeft: Math.max(0, DUO_MAX_FRAME_BREAKS - state.frameBreaksUsed),
         }),
       );
       lines = parseDuoLines(raw, state);
@@ -575,10 +593,13 @@ export async function applyDuoToPlan(plan: RoutePlan, opts: DuoPassOptions): Pro
 
     // State: claims register, the story corrects them (the
     // tally Miles then inflates in writing), concessions spend.
+    // Frame breaks spend HERE, at keep time — a frame line the
+    // share filter refused never consumed the ration.
     for (const l of lines) {
       state.earlWords += wordCount(l.text);
       state.earlLines += 1;
       if (l.move === 'concession') state.concessionsUsed += 1;
+      if (l.frame) state.frameBreaksUsed += 1;
       if (l.role === 'setup' && l.move === 'wrong-assumption') {
         state.claims.push(l.text);
         state.corrections += 1;
