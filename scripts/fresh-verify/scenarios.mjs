@@ -105,7 +105,7 @@ async function healthyOpening(world, audio, pos = UTC, speed = 8) {
 }
 
 export async function runScenarios(Tour, extras) {
-  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, profileUi, facts, partners, freshness, currentEvents, eventsFeed, EVENT_FEEDS, suggestions, proposals, placeMemory, liveSpend, composeRoutePlan, hashString, duo, duoPersona, audioFinish } = extras;
+  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, WELCOME_REACH_CEILING_M, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, profileUi, facts, partners, freshness, currentEvents, eventsFeed, EVENT_FEEDS, suggestions, proposals, placeMemory, liveSpend, composeRoutePlan, hashString, duo, duoPersona, audioFinish } = extras;
 
   // ---------------------------------------------------------- S-01 healthy start
   suite('S-01 healthy start / opener order');
@@ -5930,6 +5930,114 @@ export async function runScenarios(Tour, extras) {
       JSON.stringify(dropsFor(world, 'welcome:bay ho').map(e => e.payload)));
     check('the welcome is not heard-marked',
       !world.heard.includes('Welcome to Bay Ho'), world.heard.join(' | '));
+    tour.endTour();
+  }
+
+  // ---------------------------------------------------------------
+  // WC suites (Nov 20, 2026): the welcome reach ceiling —
+  // Erik's ruling, gate Item 6b. At freeway pace the merged
+  // reach test's span is capped at WELCOME_REACH_CEILING_M
+  // (1,500 m): the Nov 19 evening drive heard welcomes sound
+  // 1,926 m and 2,922 m out because a long welcome at 27 m/s
+  // "reaches" over 3 km. The cap binds only at freeway pace —
+  // D12-4's surface-pace deferral serve (~1,900 m at 10 m/s)
+  // is the standing control, and it still passes above.
+  // Fixture: the D12-1 Old Town shape with a ~120 s intro
+  // (reach at 27 m/s ≈ 3,300 m) — WC-1 parks the driver
+  // 2,000 m out at freeway speed (inside the span, beyond
+  // the ceiling → stale discharge); WC-2 parks at 1,200 m
+  // (inside the ceiling → sounds).
+
+  suite('WC-0 welcome reach ceiling: the pinned value is 1,500 m');
+  {
+    check('WELCOME_REACH_CEILING_M === 1500', WELCOME_REACH_CEILING_M === 1500, `value=${WELCOME_REACH_CEILING_M}`);
+  }
+
+  suite('WC-1 welcome reach ceiling: at freeway speed a shelf welcome inside its duration×speed reach but beyond the ceiling discharges at sound time');
+  {
+    resetLocalStorage();
+    // The fixture welcome runs ≈1,596 chars ≈ 123 s, so at
+    // 27 m/s its uncapped reach is ≈3,320 m — the driver
+    // parked 2,004 m out is INSIDE the old span and BEYOND
+    // the 1,500 m ceiling. Only the ceiling can discharge it.
+    const world = makeWorld(Tour, {
+      candidates: [],
+      library: [{ name: 'Balboa Park', lat: UTC.lat + 0.003, lng: UTC.lng }],
+      intros: [{
+        name: 'Old Town',
+        text: 'The banked intro to Old Town, its streets and its story. '.repeat(28),
+      }],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 90_000, synth: 12_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    const soundedLabels = watchLabels(world, tour);
+    world.candidates = [makeCandidate('Balboa Park', { lat: UTC.lat + 0.003, lng: UTC.lng })];
+    tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    for (let i = 0; i < 24 && tour.view().nowPlaying?.label !== 'Balboa Park'; i++) {
+      await world.clock.advance(5_000);
+    }
+    check('the long story is playing', tour.view().nowPlaying?.label === 'Balboa Park',
+      tour.view().nowPlaying?.label ?? 'none');
+    world.candidates = [];
+    // Enter Old Town beside its intro anchor (the fixture
+    // banks the intro at UTC): the welcome is owed and held
+    // behind Balboa.
+    world.area = { neighborhood: 'Old Town', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(3_000);
+    // The driver covers 2,004 m of freeway before Balboa ends.
+    tour.onPosition({ lat: UTC.lat + 0.018, lng: UTC.lng, speedMps: 27, headingDeg: 0 });
+    await world.clock.advance(180_000); // Balboa ends; the welcome is judged at dequeue
+    check('the long welcome committed into the waiting slot',
+      world.eventsOf('story_played').some(e => e.payload.subject === 'welcome:old town'),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    const stale = world.eventsOf('welcome_stale_dropped');
+    check('welcome_stale_dropped fired once for Old Town',
+      stale.length === 1 && stale[0].payload.subject === 'welcome:old town',
+      JSON.stringify(stale.map(e => e.payload)));
+    check('the welcome never sounded', !soundedLabels.includes('Welcome to Old Town'), soundedLabels.join(','));
+    check('the place was NOT marked heard',
+      !world.heard.some(h => h.includes('Old Town')), world.heard.join(' | '));
+    tour.endTour();
+  }
+
+  suite('WC-2 welcome reach ceiling: inside the ceiling at freeway speed the same welcome sounds');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      library: [{ name: 'Balboa Park', lat: UTC.lat + 0.003, lng: UTC.lng }],
+      intros: [{
+        name: 'Old Town',
+        text: 'The banked intro to Old Town, its streets and its story. '.repeat(28),
+      }],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 45_000, synth: 12_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    const soundedLabels = watchLabels(world, tour);
+    world.candidates = [makeCandidate('Balboa Park', { lat: UTC.lat + 0.003, lng: UTC.lng })];
+    tour.onPosition({ lat: UTC.lat + 0.003, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    for (let i = 0; i < 24 && tour.view().nowPlaying?.label !== 'Balboa Park'; i++) {
+      await world.clock.advance(5_000);
+    }
+    check('the long story is playing', tour.view().nowPlaying?.label === 'Balboa Park',
+      tour.view().nowPlaying?.label ?? 'none');
+    world.candidates = [];
+    world.area = { neighborhood: 'Old Town', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(3_000);
+    // ~1,202 m out at the same freeway speed: inside the ceiling.
+    tour.onPosition({ lat: UTC.lat + 0.0108, lng: UTC.lng, speedMps: 27, headingDeg: 0 });
+    await world.clock.advance(240_000); // Balboa ends; the welcome sounds and completes
+    check('the long welcome committed into the waiting slot',
+      world.eventsOf('story_played').some(e => e.payload.subject === 'welcome:old town'),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    check('the welcome sounded', soundedLabels.includes('Welcome to Old Town'), soundedLabels.join(','));
+    check('no stale discharge fired',
+      world.eventsOf('welcome_stale_dropped').length === 0,
+      JSON.stringify(world.eventsOf('welcome_stale_dropped').map(e => e.payload)));
+    check('the heard ledger filed the welcome',
+      world.heard.some(h => h.includes('Old Town')), world.heard.join(' | '));
     tour.endTour();
   }
 

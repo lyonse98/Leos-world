@@ -415,6 +415,23 @@ const QA_GRACE_MS = 45_000;
 const STORM_BASE_MS = 90_000;
 /** Freeway-speed threshold (the pass-by fix's gate; the ambient bed's road context reads the same constant). */
 export const FREEWAY_MPS = 15;
+/**
+ * Welcome reach ceiling (Erik's ruling, Nov 20, 2026 — gate
+ * Item 6b): at freeway pace the duration × speed welcome
+ * reach is capped at this distance. The merged reach test
+ * (Nov 16, 2026) lets a welcome span its duration at the
+ * current speed; at 27 m/s a two-minute welcome "reaches"
+ * over 3 km, and the Nov 19 evening drive heard welcomes
+ * sound 1,926 m and 2,922 m out — true by the math,
+ * non-local to the ear. The ceiling binds ONLY at freeway
+ * pace: below the line, duration × speed governs alone, so
+ * the deferral doctrine's owed welcome (D12-4: ~1,900 m at
+ * 10 m/s behind two long stories — the case Erik's Nov 16
+ * correction protected when it removed the flat 1,600 m
+ * gate) serves exactly as before. 1,500 m at freeway speed
+ * is ~55 s of road: an arrival window, not a preview.
+ */
+export const WELCOME_REACH_CEILING_M = 1500;
 
 interface BufferedText {
   subject: string;
@@ -4195,6 +4212,16 @@ export class Tour {
     // sim). The flat gate is gone; duration × speed governs
     // both arms.
     //
+    // Ceiling (Nov 20, 2026, Erik's ruling — gate Item 6b):
+    // at freeway pace the reach is capped at
+    // WELCOME_REACH_CEILING_M. This is NOT the flat gate
+    // returning: the cap binds only where the Nov 19 harm
+    // lived (freeway speed inflating the reach to 2–3 km),
+    // and below FREEWAY_MPS the duration × speed reach is
+    // the whole law, so D12-4's surface-pace deferral serve
+    // is untouched. Both arms share the capped reach, as
+    // they share everything in this block.
+    //
     // Pass-by exemption (Nov 5, mechanism — not
     // recalibration): a CONVERTED welcome (framing 'passby')
     // is true at any distance — "you passed this place" does
@@ -4210,7 +4237,10 @@ export class Tour {
         item.anchor.lat,
         item.anchor.lng,
       );
-      if (dist > Math.max(item.durationSec, 5) * speed) {
+      const reach = Math.max(item.durationSec, 5) * speed;
+      const cappedReach =
+        speed >= FREEWAY_MPS ? Math.min(reach, WELCOME_REACH_CEILING_M) : reach;
+      if (dist > cappedReach) {
         return item.storySource === 'live'
           ? { ok: false, reason: 'welcome-outrun' }
           : { ok: false, reason: 'welcome-stale' };

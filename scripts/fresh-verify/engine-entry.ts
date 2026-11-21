@@ -1,6 +1,7 @@
 // Bundle entry for the fresh-shell verification harness.
 // Bundled with esbuild (platform=node) by run.mjs; never shipped.
 export { Tour } from '../../src/core/tour';
+export { WELCOME_REACH_CEILING_M } from '../../src/core/tour';
 export { Player, makePrimeUrl } from '../../src/core/player';
 export {
   discoverCandidates,

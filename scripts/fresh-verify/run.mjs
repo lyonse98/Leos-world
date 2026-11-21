@@ -70,6 +70,7 @@ const extras = {
   CORRIDOR_SEGMENTS: engine.CORRIDOR_SEGMENTS,
   CORRIDOR_BUFFER_M: engine.CORRIDOR_BUFFER_M,
   matchCorridor: engine.matchCorridor,
+  WELCOME_REACH_CEILING_M: engine.WELCOME_REACH_CEILING_M,
   resolveFillerRegion: engine.resolveFillerRegion,
   accessGate: {
     isTesterUnlocked: engine.isTesterUnlocked,
