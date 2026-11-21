@@ -2696,7 +2696,7 @@ export async function runScenarios(Tour, extras) {
     tour.endTour();
   }
 
-  suite('A2 orientation race: queued area story discharged at dequeue, text salvaged + re-served from the bank');
+  suite('A2 orientation race: queued area story discharged at dequeue, text salvaged; the return pass serves nothing (rest-of-drive dedupe, Nov 20, 2026)');
   {
     resetLocalStorage();
     const world = makeWorld(Tour, { candidates: [], intros: [] });
@@ -2766,21 +2766,24 @@ export async function runScenarios(Tour, extras) {
     check('the generated text was salvaged into the private buffer',
       tour['buffer'].get('area:clairemont')?.text === AREA_TEXT,
       tour['buffer'].get('area:clairemont')?.text?.slice(0, 40) ?? 'none');
+    const areaCommitsPass1 = world.eventsOf('story_played').filter(e => e.payload.subject === 'area:clairemont').length;
     // A later pass (leave, return — each leg >300 m, the area
     // re-resolution threshold): the area is welcomed already, so
-    // no new welcome is owed; the slot is open again and the
-    // BANKED text voices the area story — no second generation.
+    // no new welcome is owed. Before Nov 20, 2026 the per-pass
+    // slot re-opened here and the BANKED text voiced the area
+    // story; Erik's rest-of-drive dedupe ruling (gate Item 7a)
+    // closes that: the welcome sounded this drive, so the area
+    // story stands down on the return pass too — no serve, and
+    // (the generation check below) no new spend.
     world.area = { neighborhood: 'University City', city: 'San Diego' };
     tour.onPosition({ lat: UTC.lat + 0.011, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
     await world.clock.advance(10_000);
     world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
     tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
     await world.clock.advance(90_000);
-    check('on the return pass the banked area text sounds, sourced buffered',
-      world.eventsOf('story_played').some(
-        e => e.payload.subject === 'area:clairemont' && e.payload.source === 'buffered',
-      ) &&
-        playbacksFor(world, 'area:clairemont').some(e => e.payload.sounded === true),
+    check('on the return pass the banked area text does NOT serve (rest-of-drive dedupe)',
+      world.eventsOf('story_played').filter(e => e.payload.subject === 'area:clairemont').length === areaCommitsPass1 &&
+        !playbacksFor(world, 'area:clairemont').some(e => e.payload.sounded === true),
       JSON.stringify(world.eventsOf('story_played').filter(e => e.payload.subject === 'area:clairemont').map(e => e.payload)));
     check('still exactly one Clairemont area-story generation (the bank paid, not a new spend)',
       world.genStoryPrompts.filter(p => p.includes('AREA STORY') && p.includes('Clairemont')).length === 1,
@@ -6039,6 +6042,200 @@ export async function runScenarios(Tour, extras) {
     check('the heard ledger filed the welcome',
       world.heard.some(h => h.includes('Old Town')), world.heard.join(' | '));
     tour.endTour();
+  }
+
+  // ---------------------------------------------------------------
+  // DD suites (Nov 20, 2026): evening mechanics — Erik's
+  // rulings, gate Items 7a/7b. 7a: same-place dedupe for the
+  // rest of the drive across surfaces (the Nov 19 evening
+  // failure: welcome:bay ho sounded, then a live-generated
+  // area:bay ho ~4 min later after a re-entry re-opened the
+  // per-pass slot). DD-1a replays that shape; DD-1b pins the
+  // vice-versa direction. 7b: every drive's session_end
+  // carries the counts as structured fields plus an explicit
+  // filler_ratio (DD-2).
+
+  suite('DD-1a same-place dedupe: a sounded welcome closes the place for the drive — the return pass spends no area generation and serves no area story');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: [] });
+    world.genStoryBehavior = prompt => {
+      if (prompt.includes('NEIGHBORHOOD WELCOME') && prompt.includes('Bay Ho')) {
+        return 'Welcome to Bay Ho, a small bayside neighborhood above the bay, where the streets step down toward the water. '.repeat(3);
+      }
+      if (prompt.includes('AREA STORY') && prompt.includes('Bay Ho')) {
+        return 'The story of Bay Ho, its mesa streets and canyon fingers, told as one place. '.repeat(3);
+      }
+      return 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+    };
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    // First entry: the live welcome sounds.
+    world.area = { neighborhood: 'Bay Ho', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(90_000);
+    check('the welcome sounded on the first pass',
+      playbacksFor(world, 'welcome:bay ho').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'welcome:bay ho').map(e => e.payload)));
+    const areaPromptsPass1 = world.genStoryPrompts.filter(p => p.includes('AREA STORY') && p.includes('Bay Ho')).length;
+    const areaCommitsPass1 = world.eventsOf('story_played').filter(e => e.payload.subject === 'area:bay ho').length;
+    // Leave and return (each leg >300 m, the re-resolution
+    // threshold): the per-pass slot re-opens at the fresh
+    // entry — the drive-scoped dedupe is what stands the
+    // area story down now.
+    world.area = { neighborhood: 'University City', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.011, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(10_000);
+    world.area = { neighborhood: 'Bay Ho', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(120_000);
+    check('no new area-story generation on the return pass',
+      world.genStoryPrompts.filter(p => p.includes('AREA STORY') && p.includes('Bay Ho')).length === areaPromptsPass1,
+      `pass1=${areaPromptsPass1} total=${world.genStoryPrompts.filter(p => p.includes('AREA STORY') && p.includes('Bay Ho')).length}`);
+    check('no area story committed on the return pass',
+      world.eventsOf('story_played').filter(e => e.payload.subject === 'area:bay ho').length === areaCommitsPass1,
+      JSON.stringify(world.eventsOf('story_played').filter(e => e.payload.subject === 'area:bay ho').map(e => e.payload)));
+    check('the area story never sounded on either pass',
+      !playbacksFor(world, 'area:bay ho').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'area:bay ho').map(e => e.payload)));
+    check('the welcome sounded exactly once all drive',
+      playbacksFor(world, 'welcome:bay ho').filter(e => e.payload.sounded === true).length === 1,
+      JSON.stringify(playbacksFor(world, 'welcome:bay ho').map(e => e.payload)));
+    tour.endTour();
+  }
+
+  suite('DD-1b same-place dedupe, vice versa: an area story sounded on pass 1 discharges the return pass’s owed welcome — no welcome generation spent');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], intros: [] });
+    let welcomeAllowed = false;
+    world.genStoryBehavior = prompt => {
+      if (prompt.includes('NEIGHBORHOOD WELCOME') && prompt.includes('Bay Ho')) {
+        if (!welcomeAllowed) throw new Error('welcome generation down');
+        return 'Welcome to Bay Ho, a small bayside neighborhood above the bay, where the streets step down toward the water. '.repeat(3);
+      }
+      if (prompt.includes('AREA STORY') && prompt.includes('Bay Ho')) {
+        return 'The story of Bay Ho, its mesa streets and canyon fingers, told as one place. '.repeat(3);
+      }
+      return 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+    };
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio);
+    // First entry: the welcome generation fails (the owed
+    // record re-arms on the 180 s cooldown); the generic
+    // area story sounds in the silence instead.
+    world.area = { neighborhood: 'Bay Ho', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(5_000);
+    tour.onPosition({ lat: UTC.lat + 0.007, lng: UTC.lng, speedMps: 8, headingDeg: 180 }); // a serve-cycle step inside Bay Ho
+    await world.clock.advance(120_000);
+    check('the area story sounded on the first pass',
+      playbacksFor(world, 'area:bay ho').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'area:bay ho').map(e => e.payload)));
+    check('the welcome never sounded on the first pass',
+      !playbacksFor(world, 'welcome:bay ho').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'welcome:bay ho').map(e => e.payload)));
+    const welcomePromptsPass1 = world.genStoryPrompts.filter(p => p.includes('NEIGHBORHOOD WELCOME') && p.includes('Bay Ho')).length;
+    check('the welcome was attempted on the first pass', welcomePromptsPass1 >= 1, `prompts=${welcomePromptsPass1}`);
+    // Leave and return inside the cooldown window. The
+    // welcome lane would now SUCCEED if it spent — the
+    // dedupe discharge is the only thing standing it down
+    // (orientationSpent was wiped by the fresh entry;
+    // subjectBlockReason stays null for the welcome, whose
+    // told-count keys on the welcome subject, not the area's).
+    welcomeAllowed = true;
+    world.area = { neighborhood: 'University City', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.011, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(5_000);
+    world.area = { neighborhood: 'Bay Ho', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(120_000);
+    check('no welcome generation spent on the return pass',
+      world.genStoryPrompts.filter(p => p.includes('NEIGHBORHOOD WELCOME') && p.includes('Bay Ho')).length === welcomePromptsPass1,
+      `pass1=${welcomePromptsPass1} total=${world.genStoryPrompts.filter(p => p.includes('NEIGHBORHOOD WELCOME') && p.includes('Bay Ho')).length}`);
+    check('the welcome never sounded on the return pass either',
+      !playbacksFor(world, 'welcome:bay ho').some(e => e.payload.sounded === true),
+      JSON.stringify(playbacksFor(world, 'welcome:bay ho').map(e => e.payload)));
+    tour.endTour();
+  }
+
+  suite('DD-2 filler ratio: session_end carries the counts as structured fields plus an explicit filler_ratio');
+  {
+    // A filler-only drive (generation down, the S-10 shape):
+    // fillers sounded, zero stories — the ratio is 1.
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      fillers: ['San Diego Weather Patterns', 'The Kumeyaay Homeland'],
+      genStoryBehavior: () => {
+        throw new Error('quota');
+      },
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio, BALBOA);
+    await world.clock.advance(30_000);
+    check('a filler sounded on the silent drive', world.eventsOf('filler_played').length >= 1,
+      JSON.stringify(world.eventsOf('filler_played').map(e => e.payload)));
+    tour.endTour();
+    const se = world.eventsOf('session_end');
+    check('session_end filed once', se.length === 1, `count=${se.length}`);
+    if (se.length === 1) {
+      const p = se[0].payload;
+      check('the structured counts are present and consistent with the drive',
+        p.stories_played === 0 && p.fillers_played >= 1 &&
+          typeof p.stories_dropped === 'number' && typeof p.questions_answered === 'number',
+        JSON.stringify(p));
+      check('filler_ratio is 1 when only fillers sounded', p.filler_ratio === 1, `ratio=${p.filler_ratio}`);
+      check('the legacy message string is unchanged in shape',
+        typeof p.message === 'string' && p.message.includes('stories_played=0') && p.message.includes('fillers='),
+        p.message ?? 'none');
+    }
+  }
+  {
+    // A clean story drive: stories sounded, zero fillers —
+    // the ratio is 0.
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Balboa Park', { distanceM: 100 })],
+      library: [{ name: 'Balboa Park', lat: UTC.lat, lng: UTC.lng }],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 30_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    const soundedLabels = watchLabels(world, tour);
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 0 });
+    await world.clock.advance(90_000);
+    check('the story sounded', soundedLabels.includes('Balboa Park'), soundedLabels.join(','));
+    tour.endTour();
+    const se = world.eventsOf('session_end');
+    check('session_end filed once', se.length === 1, `count=${se.length}`);
+    if (se.length === 1) {
+      const p = se[0].payload;
+      check('stories counted (welcome + the story), no fillers',
+        p.stories_played >= 2 && p.fillers_played === 0, JSON.stringify(p));
+      check('filler_ratio is 0', p.filler_ratio === 0, `ratio=${p.filler_ratio}`);
+    }
+  }
+  {
+    // An empty drive (generation down, no filler pool):
+    // nothing sounded at all — the ratio is null, not 0.
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      genStoryBehavior: () => {
+        throw new Error('quota');
+      },
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const { tour } = await healthyOpening(world, audio, BALBOA);
+    await world.clock.advance(15_000);
+    tour.endTour();
+    const se = world.eventsOf('session_end');
+    check('session_end filed once', se.length === 1, `count=${se.length}`);
+    if (se.length === 1) {
+      const p = se[0].payload;
+      check('nothing sounded', p.stories_played === 0 && p.fillers_played === 0, JSON.stringify(p));
+      check('filler_ratio is null when nothing sounded', p.filler_ratio === null, `ratio=${p.filler_ratio}`);
+    }
   }
 
   // ---------------------------------------------------------------

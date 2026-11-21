@@ -559,6 +559,25 @@ export class Tour {
    */
   private orientationSpent = new Map<string, number>();
   /**
+   * Places whose orientation SOUNDED this tour, on either
+   * surface — a welcome (`welcome:`) or a generic area story
+   * (`area:`) — keyed by lowercased place name (Nov 20, 2026,
+   * Erik's ruling — gate Item 7a). orientationSpent is
+   * per-pass: trackNeighborhood deletes its entry on every
+   * fresh area entry, so a place oriented on one pass could
+   * be oriented AGAIN by the other surface minutes later
+   * (the Nov 19 evening drive: welcome:bay ho sounded, then
+   * a live-generated area:bay ho ~4 min later after a
+   * re-entry re-opened the slot). This set is tour-scoped
+   * and never cleared mid-drive: once a place's orientation
+   * has sounded, neither surface serves it again this drive.
+   * Written only at sounded settles in onStorySettle, beside
+   * the orientationSpent writes; read by serveAreaStory,
+   * serveOwedWelcome, and judgeStory's orientation-spent
+   * discharge.
+   */
+  private orientationServed = new Set<string>();
+  /**
    * Nested-area deferral (Nov 1): the most recent ENTRY welcome's
    * anchor (a sounded mid-tour welcome — the opening welcome
    * never anchors; see trackNeighborhood), and a parent-area
@@ -2274,7 +2293,17 @@ export class Tour {
     // welcome's failure-retry never carries the entry mark (see
     // the owedWelcome field note): O15's owed first hello is
     // senior to the slot and still serves.
-    if (this.owedWelcome?.entry && this.orientationSpent.has(name.toLowerCase())) {
+    // The orientationServed half is the rest-of-drive dedupe
+    // (Nov 20, 2026 — gate Item 7a): orientationSpent is wiped
+    // by the fresh entry that created this obligation, so an
+    // orientation that sounded on an EARLIER pass of this
+    // drive is visible only in the drive-scoped set — it
+    // discharges the obligation the same way.
+    if (
+      this.owedWelcome?.entry &&
+      (this.orientationSpent.has(name.toLowerCase()) ||
+        this.orientationServed.has(name.toLowerCase()))
+    ) {
       this.welcomed.add(name.toLowerCase());
       this.owedWelcome = null;
       return;
@@ -3370,6 +3399,13 @@ export class Tour {
     // in a second voice — the stacking the field drive reported.
     // Stand down; named places and the filler lane own the gap.
     if (name && this.orientationSpent.has(name.toLowerCase())) return;
+    // Rest-of-drive dedupe (Nov 20, 2026 — gate Item 7a): the
+    // per-pass slot above re-opens on re-entry; the drive's
+    // memory does not. If this place's orientation sounded at
+    // ANY earlier point in the drive — welcome or area story —
+    // the generic area story stands down for good, banked
+    // text included (the Nov 19 evening Bay Ho double).
+    if (name && this.orientationServed.has(name.toLowerCase())) return;
     // No generic area story for a shelf-intro area (Nov 2): the
     // banked intro IS that area's overview, and the welcome path
     // owns it in every heard state (first entry → greeting
@@ -3389,7 +3425,12 @@ export class Tour {
     // salvage contract, area lane. (For a shelf-intro area the
     // stand-down above wins: the banked text simply never
     // re-serves, which is correct — it should never have been
-    // generated.)
+    // generated. Since Nov 20, 2026 the rest-of-drive dedupe
+    // guard above stands this path down in practice: banked
+    // area text exists only where an orientation already
+    // sounded this drive, which is exactly the guard's
+    // condition. The path stays as the salvage contract's
+    // shape, behind the guard.)
     if (name) {
       const banked = this.buffer.get(subject);
       if (banked) {
@@ -4074,6 +4115,11 @@ export class Tour {
         // `area:` fallback for the same area stands down in
         // serveAreaStory.
         this.orientationSpent.set(name, this.clock.now());
+        // Rest-of-drive dedupe (Nov 20, 2026 — gate Item 7a):
+        // the sounded welcome also closes the place's
+        // orientation for the WHOLE drive, across surfaces
+        // and across re-entries (see orientationServed).
+        this.orientationServed.add(name);
         // Nested-area anchor (Nov 1): a sounded ENTRY welcome
         // (deferrable — the mid-tour kind) is the child whose
         // footprint later parent entries are judged against in
@@ -4092,6 +4138,10 @@ export class Tour {
         // deferred welcome's maturity check finds nothing owed).
         const name = subject.slice('area:'.length);
         this.orientationSpent.set(name, this.clock.now());
+        // Rest-of-drive dedupe (Nov 20, 2026 — gate Item 7a):
+        // vice versa — a sounded area story closes the place's
+        // owed welcome for the whole drive too.
+        this.orientationServed.add(name);
         if (this.deferredWelcome?.name.toLowerCase() === name) {
           this.deferredWelcome = null;
         }
@@ -4256,10 +4306,16 @@ export class Tour {
     // truth. If the welcome spent this pass's slot, the area
     // story stands down; its text is salvaged unheard in
     // onStorySettle.
+    // The orientationServed half (Nov 20, 2026 — gate Item
+    // 7a) widens the ledger from this pass to the whole
+    // drive: a re-entry between the story's generation and
+    // its dequeue wipes orientationSpent, and without the
+    // drive-scoped set the doubled orientation would sound.
     if (
       item.storySource === 'live' &&
       subject.startsWith('area:') &&
-      this.orientationSpent.has(subject.slice('area:'.length))
+      (this.orientationSpent.has(subject.slice('area:'.length)) ||
+        this.orientationServed.has(subject.slice('area:'.length)))
     ) {
       return { ok: false, reason: 'orientation-spent' };
     }
@@ -5934,6 +5990,27 @@ export class Tour {
       ms_from_tour_start: this.clock.now() - this.tourStartAt,
       kind: 'summary',
       message: `stories_played=${this.counts.storiesPlayed} stories_dropped=${this.counts.storiesDropped} fillers=${this.counts.fillersPlayed} questions=${this.counts.questionsAnswered}`,
+      // Standing drive metrics (Nov 20, 2026 — gate Item 7b):
+      // the same totals as structured fields, with the filler
+      // ratio explicit — fillers / (stories + fillers) — the
+      // Nov 19 evening drive's parity (5 fillers against 5
+      // stories) being the shape this exists to catch at a
+      // glance in the drive record. Null when nothing sounded
+      // at all: a drive with no stories and no fillers has no
+      // ratio, not a zero. The message string above is
+      // unchanged for every existing reader.
+      stories_played: this.counts.storiesPlayed,
+      stories_dropped: this.counts.storiesDropped,
+      fillers_played: this.counts.fillersPlayed,
+      questions_answered: this.counts.questionsAnswered,
+      filler_ratio:
+        this.counts.storiesPlayed + this.counts.fillersPlayed > 0
+          ? Math.round(
+              (this.counts.fillersPlayed /
+                (this.counts.storiesPlayed + this.counts.fillersPlayed)) *
+                1000,
+            ) / 1000
+          : null,
     });
     this.phase = 'ended';
     if (this.backstopTimer !== null) this.clock.clearTimeout(this.backstopTimer);
