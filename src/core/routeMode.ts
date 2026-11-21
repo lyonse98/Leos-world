@@ -320,6 +320,103 @@ export function progressAlongPath(p: GeoPoint, path: GeoPoint[]): number {
   return Math.max(0, Math.min(1, bestProgress));
 }
 
+/**
+ * One point's anchoring geometry against a route path (road
+ * anchoring, Nov 20, 2026 — design §1.1): the two distances
+ * the graded negotiation prices. Lateral is the nearest
+ * distance to the polyline. Along-track is where the
+ * projection falls relative to the DRIVEN SPAN: inside it,
+ * the driver passes the point; behind the origin or beyond
+ * the destination, the driver never reaches it at any speed,
+ * ever — the Nov 19 corridor imports sat ON the I-5 line
+ * (lateral ≈ 0) and were wrong on this axis alone.
+ * progressAlongPath clamps into [0, 1] and cannot express
+ * the displacement; this projection can. Displacement is
+ * measured as the point's component along the end segment's
+ * direction past the end vertex — an approximation (a point
+ * nearest a middle segment is inside by construction), and
+ * the design's distances carry the same ± tolerance.
+ */
+export interface AnchorProjection {
+  /** Nearest distance to the polyline, metres. */
+  lateralM: number;
+  /** Arc position of the projection along the path, metres, clamped to [0, spanM]. */
+  alongM: number;
+  /** Total path length, metres. */
+  spanM: number;
+  /** Along-track metres the point sits BEHIND the origin (0 when inside the span). */
+  behindM: number;
+  /** Along-track metres the point sits PAST the destination (0 when inside the span). */
+  beyondM: number;
+}
+
+export function projectionAlongPath(p: GeoPoint, path: GeoPoint[]): AnchorProjection {
+  if (path.length === 0) {
+    return { lateralM: Number.POSITIVE_INFINITY, alongM: 0, spanM: 0, behindM: 0, beyondM: 0 };
+  }
+  if (path.length === 1) {
+    return { lateralM: haversineM(p, path[0]), alongM: 0, spanM: 0, behindM: 0, beyondM: 0 };
+  }
+  // One equirectangular frame for the whole path (the
+  // pointSegmentM approximation, held consistent across
+  // segments so arc positions compare).
+  const kx = Math.cos((path[0].lat * Math.PI) / 180) * 111320;
+  const ky = 111320;
+  const X = (pt: GeoPoint): number => pt.lng * kx;
+  const Y = (pt: GeoPoint): number => pt.lat * ky;
+  const px = X(p);
+  const py = Y(p);
+  const segLens: number[] = [];
+  let spanM = 0;
+  for (let i = 0; i < path.length - 1; i++) {
+    const l = haversineM(path[i], path[i + 1]);
+    segLens.push(l);
+    spanM += l;
+  }
+  let bestLateral = Number.POSITIVE_INFINITY;
+  let bestAlong = 0;
+  let bestSeg = 0;
+  let bestT = 0;
+  let acc = 0;
+  for (let i = 0; i < path.length - 1; i++) {
+    const ax = X(path[i]);
+    const ay = Y(path[i]);
+    const dx = X(path[i + 1]) - ax;
+    const dy = Y(path[i + 1]) - ay;
+    const lenSq = dx * dx + dy * dy;
+    const t = lenSq === 0 ? 0 : Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
+    const lateral = Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+    if (lateral < bestLateral) {
+      bestLateral = lateral;
+      bestAlong = acc + t * segLens[i];
+      bestSeg = i;
+      bestT = t;
+    }
+    acc += segLens[i];
+  }
+  // Out-of-span displacement: only a point whose nearest
+  // ground is an end vertex can sit outside the span, and
+  // its displacement is its component along that end
+  // segment's direction, past the vertex.
+  let behindM = 0;
+  let beyondM = 0;
+  if (bestSeg === 0 && bestT === 0) {
+    const dx = X(path[1]) - X(path[0]);
+    const dy = Y(path[1]) - Y(path[0]);
+    const len = Math.hypot(dx, dy);
+    if (len > 0) behindM = Math.max(0, -(((px - X(path[0])) * dx + (py - Y(path[0])) * dy) / len));
+  }
+  if (bestSeg === path.length - 2 && bestT === 1) {
+    const a = path[path.length - 2];
+    const b = path[path.length - 1];
+    const dx = X(b) - X(a);
+    const dy = Y(b) - Y(a);
+    const len = Math.hypot(dx, dy);
+    if (len > 0) beyondM = Math.max(0, ((px - X(b)) * dx + (py - Y(b)) * dy) / len);
+  }
+  return { lateralM: bestLateral, alongM: bestAlong, spanM, behindM, beyondM };
+}
+
 /** Google encoded-polyline decoder (Routes API overview polyline). */
 export function decodePolyline(encoded: string): GeoPoint[] {
   const pts: GeoPoint[] = [];
@@ -1600,6 +1697,27 @@ export interface PlanItem {
    */
   woven?: boolean;
   /**
+   * Woven members only (road anchoring, Nov 20, 2026): the
+   * member's two-axis anchoring price at seating time —
+   * lateral metres to the route, along-track metres behind
+   * the origin / past the destination, and the combined
+   * factor that priced its seat. Filed on the item so the
+   * episode capture carries it (design §3: the cost curves
+   * tune from field episodes, and a demoted story leaves a
+   * diagnosable trace). Absent on every non-member item.
+   */
+  anchorCost?: { lateralM: number; behindM: number; beyondM: number; factor: number };
+  /**
+   * Woven members only (road anchoring §1.5, Nov 20, 2026):
+   * this member is the episode's ONE keystone excursion — a
+   * far member (below the ordinary cost floor) seated as a
+   * deliberate, announced range off the road, inside the
+   * excursion caps. Its bridges carry the standing woven
+   * framing, which already announces the range honestly
+   * ("clear across the county"). Absent on ordinary members.
+   */
+  keystone?: boolean;
+  /**
    * Late-presence conversion (field fix F3, Nov 12, 2026):
    * the story's own WOVEN TWIN, attached by the composer when
    * the pool holds one unheard and unseated. A presence-
@@ -1778,6 +1896,17 @@ export interface RoutePlan {
    * route_plan_started decisions record.
    */
   threadCarried: ThreadCarried | null;
+  /**
+   * Road anchoring (Nov 20, 2026): the thread-carry verdict
+   * (design §1.3) — the first seating pass's judgment of the
+   * thread cast's aggregate anchoredness, carried on the
+   * plan so the thread-carried top-up pass and
+   * assessThreadCarried read the SAME judgment the seating
+   * pass acted on. Null until a seating pass runs (compose
+   * never judges); a demoted thread (carries=false) keeps
+   * its flavor powers and seats no members.
+   */
+  threadCarry?: ThreadCarryVerdict | null;
   /**
    * The preview item's facts (consolidation §§1–2), for the
    * decisions record: whether the composed preview promises
@@ -4700,7 +4829,15 @@ export function planDoomedStoryIds(
  */
 export function assessThreadCarried(plan: RoutePlan): ThreadCarried {
   const fraction = geoCoverageFraction(plan);
-  const active = plan.thread !== null && fraction < THREAD_CARRIED_FLOOR;
+  // Road anchoring (Nov 20, 2026): a thread the seating pass
+  // demoted to flavor (threadCarry.carries=false — its cast
+  // is mostly far) anchors no carried rebuild, however quiet
+  // the road: the mode exists to let a LOCAL thread carry an
+  // episode, and a demoted thread's members are exactly what
+  // the carry test refused. Plans no seating pass has judged
+  // (threadCarry absent) assess exactly as before.
+  const active =
+    plan.thread !== null && fraction < THREAD_CARRIED_FLOOR && plan.threadCarry?.carries !== false;
   return {
     active,
     geoCoverageFraction: fraction,
@@ -4786,6 +4923,179 @@ function memberGaps(items: PlanItem[], driveSec: number, openDeparture = false):
   }
   if (cursor < driveSec) gaps.push({ start: cursor, end: driveSec, prev, next: null });
   return gaps.filter(g => (openDeparture || g.prev !== null) && g.start < climaxStart);
+}
+
+// ------------------------------------------------------------ road anchoring (Nov 20, 2026)
+//
+// The graded negotiation (road-anchoring-design-2026-11-20,
+// Erik's Item 3 ruling at the Nov 20 gate): distance argues,
+// it doesn't veto. Anchoring enters member selection as a
+// MULTIPLIER on the ranking score — never a per-member
+// binary gate (the rejected design) — priced on two axes
+// (projectionAlongPath): lateral distance to the polyline,
+// and along-track displacement outside the driven span.
+// Three harder rules ride on the graded core:
+//  - the thread-carry test (§1.3): the cast's aggregate
+//    anchoredness decides whether a thread seats members at
+//    all, or demotes to flavor (seatWovenMembers);
+//  - the presence wall (§1.4): a presence-register corridor
+//    segment seats off-route only when its extent overlaps
+//    the driven extent — register truth, absolute, the one
+//    binary that survives (corridorPinInDrivenSpan, applied
+//    at the portal-hop lane in composeRoutePlan);
+//  - the keystone excursion (§1.5): ONE far member per
+//    episode may seat above the ordinary cost range,
+//    announced as an excursion, capped (seatWovenMembers).
+// The constants below are the tuning surface; plan capture
+// records every seated member's price (PlanItem.anchorCost)
+// so the curves tune from field episodes, not from argument
+// (design §3/§4).
+
+/** The local band: a combined anchoring factor at or above this is low-cost ground (the carry test's unit). */
+export const ANCHOR_LOCAL_FACTOR = 0.5;
+
+/**
+ * The ordinary-seating floor: a member whose combined factor
+ * falls below this does not seat in the ordinary pass — it
+ * can only enter as the episode's one keystone excursion.
+ * This boundary is the "normal cost range" §1.5 names: at
+ * the design's anchor points it admits a story ~15 km off
+ * the road inside the span, and refuses one ~5 km behind the
+ * origin however close to the road's line it sits.
+ */
+export const MEMBER_COST_FLOOR = 0.2;
+
+/**
+ * The keystone excursion caps (§1.5, Erik's ruling: one
+ * announced far member per episode, capped ~25–30 km — the
+ * band's top, 30 km, taken): lateral distance to the route,
+ * and along-track displacement outside the span, each. An
+ * excursion ranges off THIS drive; a member displaced
+ * farther than the cap in either axis is another drive's
+ * story entirely. The presence wall is never waived for a
+ * keystone (corridor members are not member candidacy in
+ * any case — candidacy is landmark-class).
+ */
+export const KEYSTONE_LATERAL_CAP_M = 30000;
+export const KEYSTONE_DISPLACEMENT_CAP_M = 30000;
+
+/** The thread-carry bar (§1.3): a cast carries when at least this share of its minutes sit in the local band. */
+export const THREAD_CARRY_LOCAL_SHARE = 0.5;
+
+/**
+ * Lateral credit (design §1.2): full credit inside the
+ * landmark radius (3 km — LANDMARK_PATH_RADIUS_M, the
+ * composer's standing local radius), about half at 8 km,
+ * about a tenth at 25 km. Log-log interpolation between the
+ * anchor points (a power law through all three); past
+ * 25 km the last slope extends to a floor, so credit keeps
+ * shrinking without ever quite reaching zero — distance
+ * argues, it doesn't veto.
+ */
+function lateralCredit(lateralM: number): number {
+  const pts: ReadonlyArray<readonly [number, number]> = [
+    [3000, 1],
+    [8000, 0.5],
+    [25000, 0.1],
+  ];
+  if (!(lateralM > pts[0][0])) return 1;
+  for (let i = 1; i < pts.length; i++) {
+    if (lateralM <= pts[i][0]) {
+      const [x0, y0] = pts[i - 1];
+      const [x1, y1] = pts[i];
+      const t = (Math.log(lateralM) - Math.log(x0)) / (Math.log(x1) - Math.log(x0));
+      return Math.exp(Math.log(y0) + t * (Math.log(y1) - Math.log(y0)));
+    }
+  }
+  const [x0, y0] = pts[pts.length - 2];
+  const [x1, y1] = pts[pts.length - 1];
+  const slope = (Math.log(y1) - Math.log(y0)) / (Math.log(x1) - Math.log(x0));
+  return Math.max(0.02, y1 * Math.exp(slope * (Math.log(lateralM) - Math.log(x1))));
+}
+
+/**
+ * Along-track credit: free inside the driven span, then a
+ * steep quadratic falloff in kilometres of displacement —
+ * 2 km behind the start keeps ~⅗ of a member's pull, 5 km
+ * keeps ~⅕, 12 km ~1/24. A member 15 km behind the start is
+ * not a bit worse than one 2 km behind; it is unreachable,
+ * and the curve says so (design §1.2).
+ */
+function alongCredit(displacementM: number): number {
+  if (!(displacementM > 0)) return 1;
+  const km = displacementM / 1000;
+  return 1 / (1 + (km / 2.5) ** 2);
+}
+
+/** A story's anchoring price against a route (design §1.2). */
+export interface AnchorCost {
+  /** Lateral distance to the route polyline, metres. */
+  lateralM: number;
+  /** Along-track metres behind the origin (0 inside the span). */
+  behindM: number;
+  /** Along-track metres past the destination (0 inside the span). */
+  beyondM: number;
+  /** The combined multiplier on the ranking score, 0..1. */
+  factor: number;
+  /** In the local band — low combined cost (factor ≥ ANCHOR_LOCAL_FACTOR). */
+  local: boolean;
+}
+
+export function anchorCostFor(pin: GeoPoint, path: GeoPoint[]): AnchorCost {
+  const proj = projectionAlongPath(pin, path);
+  const factor = lateralCredit(proj.lateralM) * alongCredit(Math.max(proj.behindM, proj.beyondM));
+  return {
+    lateralM: proj.lateralM,
+    behindM: proj.behindM,
+    beyondM: proj.beyondM,
+    factor,
+    local: factor >= ANCHOR_LOCAL_FACTOR,
+  };
+}
+
+/**
+ * The presence wall's interim test (design §1.4 + §3): TRUE
+ * when a corridor segment's extent overlaps the driven
+ * extent, judged on the shelf row's single pin (≈ the
+ * segment midpoint): the pin must sit on the driven road
+ * (within the landmark radius laterally) with its projection
+ * inside the driven span (the standing 250 m corridor
+ * buffer forgiving pin placement at the span's ends). The
+ * full extent build — start/end coordinates per segment,
+ * from the finite corridor census — replaces this test with
+ * true extent overlap; until then the interim's error
+ * direction is the design's stated safe one: a long segment
+ * whose midpoint sits outside the span may still overlap it,
+ * so borderline segments over-drop. Over-dropping is the
+ * safe direction (the field failure was presence copy
+ * served for ground the driver never covered).
+ */
+export function corridorPinInDrivenSpan(u: { lat: number; lng: number }, path: GeoPoint[]): boolean {
+  const proj = projectionAlongPath({ lat: u.lat, lng: u.lng }, path);
+  return (
+    proj.lateralM <= LANDMARK_PATH_RADIUS_M && proj.behindM <= 250 && proj.beyondM <= 250
+  );
+}
+
+/**
+ * The thread-carry verdict (design §1.3), computed by the
+ * first seating pass and carried on the plan: the cast's
+ * aggregate anchoredness — the share of cast minutes (the
+ * thread's topic carriers already in the plan, plus the
+ * members the pass proposes) sitting in the local band.
+ * carries=false demotes the thread to flavor: it still ranks
+ * geo stories and colors bridges, but it seats no members
+ * and anchors no thread-carried rebuild.
+ */
+export interface ThreadCarryVerdict {
+  /** The thread seats members (false = demoted to flavor). */
+  carries: boolean;
+  /** Local-band share of the cast's minutes, 0..1. */
+  localShare: number;
+  /** The cast's total minutes, in seconds of telling. */
+  castSec: number;
+  /** The cast's local-band minutes, in seconds of telling. */
+  localSec: number;
 }
 
 /**

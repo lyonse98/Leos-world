@@ -221,6 +221,24 @@ export interface CapturedItem {
   version: 'full' | 'short';
   versionOf: string | null;
   /**
+   * Woven members only (road anchoring, Nov 20, 2026;
+   * additive — schema stays 2): the member's two-axis
+   * anchoring price at seating time, as filed on the plan
+   * item — lateral metres to the route, along-track metres
+   * behind the origin / past the destination, and the
+   * combined factor. Null on every non-member item. This is
+   * the tuning record for the cost curves and the answer to
+   * any future "why wasn't X in my episode" (the demoted
+   * leave a priced trace, design §3/§4).
+   */
+  anchorCost: { lateralM: number; behindM: number; beyondM: number; factor: number } | null;
+  /**
+   * Woven members only (road anchoring §1.5, Nov 20, 2026;
+   * additive — schema stays 2): this member seated as the
+   * episode's ONE keystone excursion. False everywhere else.
+   */
+  keystone: boolean;
+  /**
    * Audio in hand when the plan row was filed (at opening
    * settle). False no longer means dropped: under the
    * render-ahead pipeline the piece may still render ahead of
@@ -368,6 +386,8 @@ export function assemblePlanItems(plan: RoutePlan, renderedItemIds: ReadonlySet<
         : null,
       version: it.shortCut === true ? 'short' : 'full',
       versionOf: it.shortCut === true ? (it.versionOf ?? null) : null,
+      anchorCost: it.anchorCost ?? null,
+      keystone: it.keystone === true,
       rendered: renderedItemIds.has(it.id),
       fromSubject: it.prevUnitId ? (subjectByUnitId.get(it.prevUnitId) ?? null) : null,
       toSubject: it.nextUnitId ? (subjectByUnitId.get(it.nextUnitId) ?? null) : null,
@@ -402,6 +422,8 @@ export function assemblePlanItems(plan: RoutePlan, renderedItemIds: ReadonlySet<
       duoPart: null,
       version: 'full',
       versionOf: null,
+      anchorCost: null,
+      keystone: false,
       rendered: renderedItemIds.has('wrap-up'),
       fromSubject: null,
       toSubject: null,
