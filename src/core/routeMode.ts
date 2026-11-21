@@ -5245,6 +5245,18 @@ export function wovenMemberCandidates(
  * (the normal pass's seats included): the second call
  * tops the episode up, it does not seat a second cast.
  *
+ * ROAD ANCHORING (Nov 20, 2026 — the graded negotiation,
+ * road-anchoring-design): candidates are priced against
+ * the route on two axes (lateral + along-track) and the
+ * price multiplies their ranking score within the standing
+ * class rungs; below MEMBER_COST_FLOOR a member seats only
+ * as the episode's one keystone excursion (inside the
+ * §1.5 caps, marked on its item, its price filed for
+ * capture); and before any of that, the thread-carry test
+ * judges the cast's aggregate anchoredness — a mostly-far
+ * cast demotes the thread to flavor and this pass seats
+ * nothing (the plan returns with only the verdict added).
+ *
  * Pure and deterministic — no network, no clock — so the
  * harness and the grader run the very code the App runs.
  * Returns the plan unchanged (same object) when nothing
@@ -5297,6 +5309,96 @@ export function seatWovenMembers(
     .map(i => i.unit as LibraryUnit);
   if (candidates.length === 0 && !(carried && alreadySeated.length > 0)) return plan;
 
+  // ---------------------------------------------------------- road anchoring (Nov 20, 2026)
+  // Price every candidate against the route (anchorCostFor:
+  // lateral + along-track), then three judgments, in order:
+  // the carry test on the cast, the cost-adjusted seating
+  // order with its ordinary floor, and the one keystone
+  // excursion. The portal discount (§1.5, narrow form) is
+  // folded into the effective factor here: a HOUSE member
+  // whose follow-on — the stronger story it portals into —
+  // is already in the plan AND anchored has its own distance
+  // discounted to the local band (the listener is being
+  // handed off, not relocated); the discount dies when the
+  // follow-on is itself far. The OTHER portal sense — the
+  // range-off-road hop (PlanItem.portal, a topic-chained
+  // seat) — is a member for cost purposes and gets NO
+  // discount: if it did, the exception would re-admit the
+  // exact seats this item exists to stop (§1.5's warning;
+  // hops are priced by the wall in compose, not here).
+  const costOf = new Map<string, AnchorCost>();
+  const costFor = (u: LibraryUnit): AnchorCost => {
+    let c = costOf.get(u.id);
+    if (!c) {
+      c = anchorCostFor({ lat: u.lat, lng: u.lng }, plan.path);
+      costOf.set(u.id, c);
+    }
+    return c;
+  };
+  const planStoryUnits = plan.items
+    .filter(i => i.kind === 'story' && i.unit)
+    .map(i => i.unit as LibraryUnit);
+  const factorOf = new Map<string, number>();
+  for (const u of candidates) {
+    let f = costFor(u).factor;
+    if (isHouseStory(u)) {
+      const followAnchored = planStoryUnits.some(
+        t => t.id !== u.id && isPortalTarget(u, t) && costFor(t).factor >= ANCHOR_LOCAL_FACTOR,
+      );
+      if (followAnchored) f = Math.max(f, ANCHOR_LOCAL_FACTOR);
+    }
+    factorOf.set(u.id, f);
+  }
+  // The cost-adjusted seating order: the multiplier rides
+  // the ranking score (the telling's length — candidacy's
+  // strength proxy) WITHIN the standing class rungs (Family
+  // rank, house rank stay above it, as everywhere).
+  const famRankOf = (u: LibraryUnit): number => (plan.audience === 'family' ? familyRankOf(u) : 0);
+  const adjusted = [...candidates].sort(
+    (a, b) =>
+      famRankOf(a) - famRankOf(b) ||
+      houseRank(a) - houseRank(b) ||
+      b.durationSec * (factorOf.get(b.id) ?? 1) - a.durationSec * (factorOf.get(a.id) ?? 1) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+  // The thread-carry test (§1.3), judged on the cast: the
+  // thread's topic carriers already in the plan (geo seats,
+  // hops, the anchor — destination-role stories price by
+  // their own geometry, which puts them in the span) plus
+  // the members this pass proposes (adjusted order, up to
+  // the cap's room), weighted by MINUTES, not member count —
+  // a long far telling weighs what it costs the listener.
+  // Computed once and carried on the plan (plan.threadCarry)
+  // so the top-up call and assessThreadCarried read the same
+  // judgment; a demoted thread returns here with its flavor
+  // intact and seats nothing.
+  let carryVerdict = plan.threadCarry ?? null;
+  if (!carryVerdict) {
+    let castSec = 0;
+    let localSec = 0;
+    const tally = (sec: number, factor: number): void => {
+      castSec += sec;
+      if (factor >= ANCHOR_LOCAL_FACTOR) localSec += sec;
+    };
+    for (const it of plan.items) {
+      if (it.kind === 'story' && it.unit && it.unit.topics.includes(thread.topic)) {
+        tally(it.durationSec, costFor(it.unit).factor);
+      }
+    }
+    const room = Math.max(0, cap - alreadySeated.length);
+    for (const u of adjusted.slice(0, room)) tally(u.durationSec, factorOf.get(u.id) ?? 1);
+    carryVerdict = {
+      carries: castSec === 0 || localSec / castSec >= THREAD_CARRY_LOCAL_SHARE,
+      localShare: castSec === 0 ? 1 : localSec / castSec,
+      castSec,
+      localSec,
+    };
+  }
+  if (!carryVerdict.carries) return { ...plan, threadCarry: carryVerdict };
+  // The episode's keystone budget: spent when a prior pass
+  // already seated the excursion (its item carries the mark).
+  let keystoneUsed = plan.items.some(i => i.woven === true && i.keystone === true);
+
   let items: PlanItem[] = [...plan.items];
   // The episode's bridge ledger, continued (field fix lane
   // 1b): this pass authors INTO a composed episode, so its
@@ -5346,7 +5448,12 @@ export function seatWovenMembers(
   // framing pass below authors WILL have promised it, and
   // the hop off the road is framed as one (offRoute), never
   // as ground ahead.
-  const insertIntoGap = (cand: LibraryUnit, gap: MemberGap, asClimax: boolean): void => {
+  const insertIntoGap = (
+    cand: LibraryUnit,
+    gap: MemberGap,
+    asClimax: boolean,
+    asKeystone = false,
+  ): void => {
     // Version assignment (short cuts, Nov 12, 2026): a
     // member seats into a SILENT gap — sparse context by
     // construction, so the verdict resolves FULL in
@@ -5356,10 +5463,13 @@ export function seatWovenMembers(
     // sounding stories in the gap's decile; forward gap =
     // the silent span itself. The thread-carried member
     // climax is a climax seat — always full (asClimax skips
-    // the swap entirely).
+    // the swap entirely). A keystone excursion (road
+    // anchoring §1.5) is likewise a peak seat: it plays FULL
+    // (the short-cut doctrine's own keystone rule — keystone
+    // seats always play full).
     let served = cand;
     let short = false;
-    if (!asClimax) {
+    if (!asClimax && !asKeystone) {
       const twin = memberTwins.get(cand.id);
       if (twin && twin.id !== cand.id && !usedIds.has(twin.id)) {
         const supply = spanSupply[progressBucket(Math.min(0.999, gap.start / driveSec))] ?? 0;
@@ -5371,6 +5481,7 @@ export function seatWovenMembers(
         }
       }
     }
+    const memberCost = costFor(cand);
     const memberItem: PlanItem = {
       kind: 'story',
       id: served.id,
@@ -5380,6 +5491,18 @@ export function seatWovenMembers(
       ready: true,
       anchorProgress: gap.start / driveSec,
       woven: true,
+      // Road anchoring (Nov 20, 2026): the price this seat
+      // paid, filed on the item for the episode capture —
+      // the candidate's own pin prices the seat (a short-cut
+      // swap serves the same place at another length, so the
+      // price is the base candidate's).
+      anchorCost: {
+        lateralM: Math.round(memberCost.lateralM),
+        behindM: Math.round(memberCost.behindM),
+        beyondM: Math.round(memberCost.beyondM),
+        factor: Math.round(memberCost.factor * 1000) / 1000,
+      },
+      ...(asKeystone ? { keystone: true } : {}),
       ...(asClimax ? { climax: true } : {}),
       ...(short ? { shortCut: true, versionOf: cand.id } : {}),
     };
@@ -5541,6 +5664,17 @@ export function seatWovenMembers(
     );
   };
 
+  // Keystone eligibility (road anchoring §1.5): inside the
+  // excursion caps on BOTH axes. Shared by the designation
+  // below and the general loop's keystone pass.
+  const keystoneEligible = (u: LibraryUnit): boolean => {
+    const c = costFor(u);
+    return (
+      c.lateralM <= KEYSTONE_LATERAL_CAP_M &&
+      Math.max(c.behindM, c.beyondM) <= KEYSTONE_DISPLACEMENT_CAP_M
+    );
+  };
+
   // The climax designation (thread-carried mode only, and
   // only when the road crowned nothing): reserve the
   // strongest member BEFORE general seating and place it
@@ -5549,6 +5683,20 @@ export function seatWovenMembers(
   // final-third room fits it is the fallback. Its span
   // then closes later gaps to members exactly as a
   // composed climax's does (memberGaps reads the item).
+  // Road anchoring (Nov 20, 2026): "strongest" reads the
+  // cost-adjusted order (adjusted[0]), and the designee
+  // must be able to hold the seat — ordinarily priced
+  // (factor at the floor), or the episode's keystone
+  // excursion when far (§1.5 is framed on exactly this
+  // seat: the thread climax is the episode's peak, the one
+  // deliberate excursion). A top candidate beyond the
+  // excursion caps designates nothing; the general loop
+  // still seats what it can.
+  const designateAsKeystone =
+    adjusted.length > 0 &&
+    (factorOf.get(adjusted[0].id) ?? 1) < MEMBER_COST_FLOOR &&
+    !keystoneUsed &&
+    keystoneEligible(adjusted[0]);
   if (
     carried &&
     plan.climaxUnitId === null &&
@@ -5560,9 +5708,11 @@ export function seatWovenMembers(
     // episode; nothing follows it, so a house there could
     // never carry its payload. The member rules below govern
     // a house's seating instead.
-    !isHouseStory(candidates[0])
+    !isHouseStory(adjusted[0]) &&
+    // Anchoring eligibility: ordinarily priced, or the keystone.
+    ((factorOf.get(adjusted[0].id) ?? 1) >= MEMBER_COST_FLOOR || designateAsKeystone)
   ) {
-    const cand = candidates[0];
+    const cand = adjusted[0];
     const zoneStartSec = CLIMAX_ZONE_START * driveSec;
     const fits = memberGaps(items, driveSec, true)
       .filter(g => !portalSpan(g))
@@ -5587,10 +5737,12 @@ export function seatWovenMembers(
       )[0];
     if (fits) {
       carriedClimax = cand;
+      if (designateAsKeystone) keystoneUsed = true;
       insertIntoGap(
         cand,
         { start: fits.atSec, end: fits.gap.end, prev: fits.gap.prev, next: fits.gap.next },
         true,
+        designateAsKeystone,
       );
     }
   }
@@ -5611,31 +5763,62 @@ export function seatWovenMembers(
   // episode fills from the geo pool and non-house members
   // as usual.
   const houseMembersSeated = (): number => seated.filter(u => isHouseStory(u)).length;
-  for (const cand of candidates) {
-    if (seated.length >= cap) break;
-    if (usedIds.has(cand.id) || usedPlaces.has(cand.placeKey)) continue;
-    // The largest silent gap this candidate fits entirely
-    // inside (earliest first on a tie) — the sim's placement
-    // rule, recomputed per seat because each member splits
-    // the gap it took. Thread-carried mode reads the same
-    // gaps with the departure edge open: a member may
-    // anchor the episode's start.
+  // One seating attempt (the placement + house rules above,
+  // unchanged): the largest silent gap the candidate fits
+  // entirely inside, recomputed per seat because each member
+  // splits the gap it took. Thread-carried mode reads the
+  // same gaps with the departure edge open: a member may
+  // anchor the episode's start. Returns whether it seated.
+  const attemptSeat = (cand: LibraryUnit, asKeystone: boolean): boolean => {
+    if (seated.length >= cap) return false;
+    if (usedIds.has(cand.id) || usedPlaces.has(cand.placeKey)) return false;
     const gaps = memberGaps(items, driveSec, carried)
       .filter(g => g.end - g.start >= cand.durationSec && !portalSpan(g))
       .sort((a, b) => b.end - b.start - (a.end - a.start) || a.start - b.start);
     let gap: MemberGap | null = gaps[0] ?? null;
     if (isHouseStory(cand)) {
-      if (houseMembersSeated() >= 1) continue;
+      if (houseMembersSeated() >= 1) return false;
       gap =
         gaps.find(g => {
           if (g.prev?.unit && isHouseStory(g.prev.unit)) return false;
           const nextUnit = g.next?.unit;
           return nextUnit !== undefined && isPortalTarget(cand, nextUnit);
         }) ?? null;
-      if (!gap) continue;
+      if (!gap) return false;
     }
-    if (!gap) continue;
-    insertIntoGap(cand, gap, false);
+    if (!gap) return false;
+    insertIntoGap(cand, gap, false, asKeystone);
+    return true;
+  };
+  // The ordinary pass (road anchoring, Nov 20, 2026):
+  // candidates at or above the cost floor, in cost-adjusted
+  // order — so when the seats run out, the far members are
+  // the ones that fall off (the negotiation resolving at the
+  // margin, §1.2). Below-floor candidates wait for the
+  // keystone pass.
+  for (const cand of adjusted) {
+    if (seated.length >= cap) break;
+    if ((factorOf.get(cand.id) ?? 1) < MEMBER_COST_FLOOR) continue;
+    attemptSeat(cand, false);
+  }
+  // The keystone pass (§1.5): ONE far member per episode may
+  // still seat — the strongest below-floor candidate inside
+  // the excursion caps, in candidacy's base order (strength
+  // before price: the excursion is the story that EARNED its
+  // range). It seats under the same placement and house
+  // rules as any member, marked as the excursion. Beyond
+  // the caps, or with the budget already spent (a prior pass
+  // or the carried-climax designation), nothing far seats.
+  if (!keystoneUsed && seated.length < cap) {
+    for (const cand of candidates) {
+      if ((factorOf.get(cand.id) ?? 1) >= MEMBER_COST_FLOOR) continue;
+      if (usedIds.has(cand.id) || usedPlaces.has(cand.placeKey)) continue;
+      if (!keystoneEligible(cand)) continue;
+      if (attemptSeat(cand, true)) {
+        keystoneUsed = true;
+        break;
+      }
+    }
   }
   if (seated.length === 0) return plan;
   if (!carried && seated.length === alreadySeated.length) return plan;
@@ -5762,6 +5945,10 @@ export function seatWovenMembers(
     items,
     totalSec: items.reduce((s, it) => s + it.durationSec, 0),
     actsSummary,
+    // The carry verdict this pass acted on (road anchoring
+    // §1.3) rides the plan out — the top-up call and the
+    // assessment read it instead of re-judging the cast.
+    threadCarry: carryVerdict,
     wovenMembers: { count: seated.length, topics: [thread.topic], unitIds },
     ...(carriedClimax
       ? {
