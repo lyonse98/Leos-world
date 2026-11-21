@@ -373,10 +373,17 @@ export function projectionAlongPath(p: GeoPoint, path: GeoPoint[]): AnchorProjec
     segLens.push(l);
     spanM += l;
   }
+  // The winning segment is chosen by CLAMPED distance (the
+  // nearest ground on the driven road), but the reported
+  // decomposition reads the UNCLAMPED projection onto that
+  // segment's line: lateral is the perpendicular distance to
+  // the line, and the arc position runs past the span's ends
+  // — so a point on the road's own line beyond the
+  // destination reads lateral ≈ 0 with its whole distance in
+  // beyondM, not double-counted in both.
+  let bestClamped = Number.POSITIVE_INFINITY;
   let bestLateral = Number.POSITIVE_INFINITY;
   let bestAlong = 0;
-  let bestSeg = 0;
-  let bestT = 0;
   let acc = 0;
   for (let i = 0; i < path.length - 1; i++) {
     const ax = X(path[i]);
@@ -384,37 +391,24 @@ export function projectionAlongPath(p: GeoPoint, path: GeoPoint[]): AnchorProjec
     const dx = X(path[i + 1]) - ax;
     const dy = Y(path[i + 1]) - ay;
     const lenSq = dx * dx + dy * dy;
-    const t = lenSq === 0 ? 0 : Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lenSq));
-    const lateral = Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
-    if (lateral < bestLateral) {
-      bestLateral = lateral;
-      bestAlong = acc + t * segLens[i];
-      bestSeg = i;
-      bestT = t;
+    const tRaw = lenSq === 0 ? 0 : ((px - ax) * dx + (py - ay) * dy) / lenSq;
+    const t = Math.max(0, Math.min(1, tRaw));
+    const clamped = Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+    if (clamped < bestClamped) {
+      bestClamped = clamped;
+      bestLateral =
+        lenSq === 0 ? clamped : Math.abs((px - ax) * dy - (py - ay) * dx) / Math.sqrt(lenSq);
+      bestAlong = acc + tRaw * segLens[i];
     }
     acc += segLens[i];
   }
-  // Out-of-span displacement: only a point whose nearest
-  // ground is an end vertex can sit outside the span, and
-  // its displacement is its component along that end
-  // segment's direction, past the vertex.
-  let behindM = 0;
-  let beyondM = 0;
-  if (bestSeg === 0 && bestT === 0) {
-    const dx = X(path[1]) - X(path[0]);
-    const dy = Y(path[1]) - Y(path[0]);
-    const len = Math.hypot(dx, dy);
-    if (len > 0) behindM = Math.max(0, -(((px - X(path[0])) * dx + (py - Y(path[0])) * dy) / len));
-  }
-  if (bestSeg === path.length - 2 && bestT === 1) {
-    const a = path[path.length - 2];
-    const b = path[path.length - 1];
-    const dx = X(b) - X(a);
-    const dy = Y(b) - Y(a);
-    const len = Math.hypot(dx, dy);
-    if (len > 0) beyondM = Math.max(0, ((px - X(b)) * dx + (py - Y(b)) * dy) / len);
-  }
-  return { lateralM: bestLateral, alongM: bestAlong, spanM, behindM, beyondM };
+  return {
+    lateralM: bestLateral,
+    alongM: Math.max(0, Math.min(spanM, bestAlong)),
+    spanM,
+    behindM: Math.max(0, -bestAlong),
+    beyondM: Math.max(0, bestAlong - spanM),
+  };
 }
 
 /** Google encoded-polyline decoder (Routes API overview polyline). */
