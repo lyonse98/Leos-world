@@ -9666,13 +9666,22 @@ check('planned silence: the composer seats composed beats at named seams only (N
     // — if the house member seats into the gap, its
     // payload is the story right after it. The Alpha house
     // has no link to anything and must never seat.
+    // The candidates carry EXPLICIT far pins (the pre-
+    // anchoring wCand default): their pins shape the composed
+    // plan's gap geometry through Delta's compose seat (its
+    // span sits at the route's start), which is the geometry
+    // this suite was built on. Under road anchoring Bailey's
+    // seat rides the §1.5 portal discount — its Gill payload
+    // is in the plan and anchored — the exception working as
+    // designed; the portal-or-nothing assertions below are
+    // unchanged.
     const plan = stage([
       wGeo('ga|landmark_origin', 32.71, 120, 'Geo A'),
       wGeo('gb|landmark_origin', 32.73, 120, 'Geo B'),
       wGeo('irving gill|landmark_origin', 32.88, 500, 'Irving Gill'),
-      wCand('bailey|landmark_history', 200, { placeName: 'Wheeler Bailey/ Irving Gill House' }),
-      wCand('alpha|landmark_history', 200, { placeName: 'Alpha Spec House' }),
-      wCand('delta|landmark_history', 200, { placeName: 'Delta Fort' }),
+      wCand('bailey|landmark_history', 200, { placeName: 'Wheeler Bailey/ Irving Gill House', lat: 32.0, lng: -117.05 }),
+      wCand('alpha|landmark_history', 200, { placeName: 'Alpha Spec House', lat: 32.0, lng: -117.05 }),
+      wCand('delta|landmark_history', 200, { placeName: 'Delta Fort', lat: 32.0, lng: -117.05 }),
     ]);
     const members = memberIds(plan);
     assert.ok(members.includes('bailey|landmark_history'), 'the subject-linked house member seats');
