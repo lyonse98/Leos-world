@@ -88,6 +88,7 @@ import {
   CORRIDOR_SEGMENTS,
   matchCorridor,
   nearestPointOnSegment,
+  type CorridorMatch,
   type CorridorSegment,
 } from '../data/corridors';
 import {
@@ -624,15 +625,19 @@ export class Tour {
     null;
   /**
    * Corridor-pending (Erik's ruling, Nov 15, 2026 — the
-   * speed-regime priority that absorbs corridor fix 3): ONE
-   * retained corridor item, held when its at-speed offer lands
-   * 'buffer' behind a waiter it may not displace. At the next
-   * story transition it is promoted into the waiting slot ahead
-   * of uncommitted Tier-1 pendings — but only while the driver
-   * is still on its segment and still at speed; otherwise it is
-   * dropped (corridor_pending_dropped) and the segment's claim
-   * is released. Below FREEWAY_MPS nothing is ever retained:
-   * the historical buffer-and-retry behavior is untouched.
+   * speed-regime priority that absorbs corridor fix 3;
+   * re-keyed to road class Nov 20, 2026, gate Item 1): ONE
+   * retained corridor item, held when its freeway-pace offer
+   * lands 'buffer' behind a waiter it may not displace. At the
+   * next story transition it is promoted into the waiting slot
+   * ahead of uncommitted Tier-1 pendings — but only while the
+   * driver is still on its segment; otherwise it is dropped
+   * (corridor_pending_dropped) and the segment's claim is
+   * released. Freeway pace is the road's verdict now (see
+   * freewayPace): a segment match at any speed, or the
+   * speedometer at FREEWAY_MPS. Off every segment and below
+   * the line nothing is ever retained: the historical
+   * buffer-and-retry behavior is untouched.
    */
   private corridorPending: { segment: CorridorSegment; item: AudibleItem } | null = null;
   /**
@@ -2464,27 +2469,64 @@ export class Tour {
 
   // ------------------------------------------------------------ corridors (O16, Q11)
 
+  /**
+   * Freeway pace (Nov 15, 2026, re-keyed Nov 20, 2026 — gate
+   * Item 1): the regime the corridor lane answers to. As built
+   * it was the speedometer's verdict alone — at or above
+   * FREEWAY_MPS — and Day 14 broke it: freeway traffic sat
+   * below the line for a whole drive, the regime judged the
+   * car to be at surface pace, and not one corridor story
+   * served on a drive that never left the freeway. Erik's
+   * ruling re-keys the trigger to the ROAD: a driver matched
+   * onto a banked freeway segment (matchCorridor — inside the
+   * calibrated buffer, heading in agreement) is at freeway
+   * pace at any speed. Speed remains a way in: it also covers
+   * freeway ground the bank doesn't carry. The match way in
+   * requires a heading — corridors.ts' own doctrine calls a
+   * heading-less match provisional (containment alone cannot
+   * separate the carriageways, or a freeway from the frontage
+   * road paralleling it inside the same buffer), so at crawl
+   * with no heading the speed rule stands alone: the status
+   * quo, never worse. Failure mode, stated plainly: on a
+   * freeway stretch with no banked segment, and on fixes
+   * where the GPS heading has dropped out in stop-and-go
+   * traffic, the lane behaves exactly as it did before this
+   * ruling until a headed fix (or the speed) engages it.
+   * `knownMatch` lets a caller that already matched this fix
+   * pass its verdict in instead of matching twice.
+   */
+  private freewayPace(pos: Position, segmentId?: string, knownMatch?: CorridorMatch | null): boolean {
+    if (pos.speedMps >= FREEWAY_MPS) return true;
+    if (pos.headingDeg === null) return false;
+    const match =
+      knownMatch !== undefined
+        ? knownMatch
+        : matchCorridor({ lat: pos.lat, lng: pos.lng, heading: pos.headingDeg });
+    if (!match) return false;
+    return segmentId === undefined || match.segment.id === segmentId;
+  }
+
   private checkCorridorTrigger(pos: Position): void {
     if (this.phase !== 'active') return;
     const match = matchCorridor({ lat: pos.lat, lng: pos.lng, heading: pos.headingDeg });
-    // Corridor-pending perishability (Nov 15, 2026): the
-    // retained at-speed item is judged on every fix, on this
-    // tick's own match — off its segment (or off every segment)
-    // it dies here as segment-exit; still on it but below the
-    // regime line it dies as speed. Judging at promotion time
-    // alone would let a dead item squat through a long story
-    // and be discovered only at the transition it was meant
-    // to serve.
+    // Corridor-pending perishability (Nov 15, 2026; re-keyed
+    // Nov 20, 2026): the retained item is judged on every fix,
+    // on this tick's own match — off its segment (or off every
+    // segment) it dies here as segment-exit. Speed no longer
+    // judges it: a driver crawling on the segment in traffic
+    // is still on the segment, and the retained story is
+    // still the road's story (gate Item 1). Judging at
+    // promotion time alone would let a dead item squat
+    // through a long story and be discovered only at the
+    // transition it was meant to serve.
     if (this.corridorPending) {
       if (!match || match.segment.id !== this.corridorPending.segment.id) {
         this.dropCorridorPending('segment-exit');
-      } else if (pos.speedMps < FREEWAY_MPS) {
-        this.dropCorridorPending('speed');
       }
     }
     if (!match) return;
     const segment = match.segment;
-    if (pos.speedMps >= FREEWAY_MPS) {
+    if (this.freewayPace(pos, segment.id, match)) {
       this.corridorEligible.add(segment.id);
     }
     if (
@@ -2578,21 +2620,26 @@ export class Tour {
       },
     });
     this.inflight.add(subject);
-    // Speed-regime priority (Erik's ruling, Nov 15, 2026): at
-    // or above FREEWAY_MPS the corridor is the biggest
-    // bang-for-buck story on a fast artery, so its offer is
-    // priority-class against ordinary waiters, and a 'buffer'
-    // landing is RETAINED (corridor-pending) instead of
-    // dropped — at the next transition it claims the slot
-    // ahead of uncommitted Tier-1 pendings while the driver is
-    // still on the segment. Below the line nothing changes:
+    // Freeway-pace priority (Erik's ruling, Nov 15, 2026;
+    // re-keyed to road class Nov 20, 2026 — gate Item 1): at
+    // freeway pace the corridor is the biggest bang-for-buck
+    // story on a fast artery, so its offer is priority-class
+    // against ordinary waiters, and a 'buffer' landing is
+    // RETAINED (corridor-pending) instead of dropped — at the
+    // next transition it claims the slot ahead of uncommitted
+    // Tier-1 pendings while the driver is still on the
+    // segment. Freeway pace is no longer the speedometer's
+    // word alone: this serve only ever fires on a matched
+    // segment, and a match at any speed is the regime (see
+    // freewayPace) — traffic crawling on the freeway gets the
+    // freeway's queue. Outside the regime nothing changes:
     // non-priority offer, buffer drops, later ticks retry —
-    // Erik's Nov 5 no-corridor-priority ruling survives intact
-    // at surface pace.
-    const atSpeed = (this.position?.speedMps ?? 0) >= FREEWAY_MPS;
-    const landed = this.player.offerStory(item, false, { priorityClass: atSpeed });
+    // Erik's Nov 5 no-corridor-priority ruling survives
+    // intact at surface pace, off the freeway.
+    const inRegime = this.position ? this.freewayPace(this.position, segment.id) : false;
+    const landed = this.player.offerStory(item, false, { priorityClass: inRegime });
     if (landed === 'buffer') {
-      if (atSpeed) {
+      if (inRegime) {
         this.retainCorridorPending(segment, item);
       } else {
         this.inflight.delete(subject);
@@ -2601,7 +2648,7 @@ export class Tour {
   }
 
   /**
-   * Retain a corridor item whose at-speed offer landed
+   * Retain a corridor item whose freeway-pace offer landed
    * 'buffer' (Nov 15, 2026). One deep, newest wins: any
    * previously retained item is dropped as replaced (two
    * corridor serves can be in flight across an interchange;
@@ -2640,7 +2687,9 @@ export class Tour {
    * per-fix judgments in checkCorridorTrigger (the eager path
    * usually drops first; this is the same law read at the
    * promotion edge, for fixes that arrived while no trigger
-   * ran). The stale judge (>450 m past the segment exit) is
+   * ran). Speed is not among the reasons (Nov 20, 2026 —
+   * gate Item 1): on the segment, at any speed, the item may
+   * serve. The stale judge (>450 m past the segment exit) is
    * NOT duplicated here: a promoted item carries its segment
    * geometry into judgeStory at dequeue, which kills it there
    * if it has run too far — and that drop consumes the
@@ -2651,7 +2700,6 @@ export class Tour {
     if (!pending) return null;
     if (!this.position) return 'segment-exit';
     if (this.corridorConsumed.has(pending.segment.id)) return 'consumed';
-    if (this.position.speedMps < FREEWAY_MPS) return 'speed';
     const match = matchCorridor({
       lat: this.position.lat,
       lng: this.position.lng,
@@ -2788,7 +2836,7 @@ export class Tour {
       // new candidate.
       if (this.portalObligation && (await this.servePortalTarget())) return;
       // Corridor-pending promotion (Nov 15, 2026): a retained
-      // at-speed corridor item claims an empty waiting slot
+      // freeway-pace corridor item claims an empty waiting slot
       // ahead of fresh candidates, the same claim the player's
       // refill hook gives it at story transitions. (Refills
       // cover the transitions; a cycle can also find the slot

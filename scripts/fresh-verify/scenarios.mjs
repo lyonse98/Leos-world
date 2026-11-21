@@ -516,10 +516,11 @@ export async function runScenarios(Tour, extras) {
     // Nov 15, 2026 (speed-regime priority): at 27 m/s this
     // offer is priority-class, so the displacement now files
     // as displaced-priority — the anchor arithmetic above is
-    // still the fixture's math, and FP-6b re-proves the
-    // fresher/anchor path behaviorally below the regime line,
-    // where the offer is judged exactly as it was when this
-    // suite was written.
+    // still the fixture's math. (Nov 20, 2026: the regime is
+    // keyed to the road now, so FP-6b no longer re-proves a
+    // below-the-line fresher path for corridor offers — on
+    // the segment there isn't one; the fresher law's pins
+    // live in the ordinary lane, FP-3.)
     check('corridor item displaces the waiter (displaced-priority at speed)', drops.some(d => d.payload.reason === 'displaced-priority'), JSON.stringify(drops.map(d => d.payload)));
     const committed2 = world.eventsOf('story_played');
     const corridorCommit = committed2.find(e => e.payload.subject === `corridor:${seg.id}`);
@@ -4569,6 +4570,13 @@ export async function runScenarios(Tour, extras) {
   //      while the driver is still on-segment at speed. Below
   //      the line the corridor lane is byte-identical to the
   //      Nov 5 ruling's shape. (Absorbs corridor fix 3.)
+  //      RE-KEYED Nov 20, 2026 (gate Item 1): freeway pace is
+  //      the road's verdict — a banked-segment match at any
+  //      speed engages the same priority + retention, and
+  //      speed no longer kills a retained item on its
+  //      segment. FP-5c / FP-6 / FP-6b are re-pinned to the
+  //      new keying; the RC suites below pin the Day-14 shape
+  //      end-to-end.
   //  (3) The welcome lane shares the serve cycle's
   //      density-sets-the-cut rule via versionedEntry: where
   //      an intro twin exists and the ground is dense, the
@@ -4804,7 +4812,13 @@ export async function runScenarios(Tour, extras) {
     const soundedLabels = watchLabels(world, tour);
     await world.clock.advance(40_000); // greeting + opener + welcome; Alpha playing (90 s)
     world.candidates = [makeCandidate('Waiter Place', { lat: mid.lat, lng: mid.lng, distanceM: 0 })];
-    tour.onPosition({ lat: mid.lat, lng: mid.lng, speedMps: 8, headingDeg: mid.heading });
+    // The waiter slots from a heading-less fix at the
+    // midpoint: since the Nov 20, 2026 road-class re-key, a
+    // headed on-segment fix serves the corridor on the spot
+    // (RC-1) — the choreography needs the trigger stood down
+    // until the offer moment, and a heading-less crawl fix
+    // makes no road-class claim (RC-3's boundary).
+    tour.onPosition({ lat: mid.lat, lng: mid.lng, speedMps: 8, headingDeg: null });
     await world.clock.advance(3_000); // waiter slotted behind Alpha
     check('waiter slotted behind the playing story',
       world.eventsOf('story_played').some(e => e.payload.subject === 'waiter place'),
@@ -4844,11 +4858,15 @@ export async function runScenarios(Tour, extras) {
     await world.clock.advance(40_000); // opening done; Alpha playing (45 s)
     const p1 = fpAlong(seg, 0.05);
     world.candidates = [makeCandidate('Tier One Museum', { tier1: true, lat: start.lat, lng: start.lng })];
-    tour.onPosition({ lat: p1.lat, lng: p1.lng, speedMps: 8, headingDeg: p1.heading });
+    // Tier One slots from OFF the segment: since the Nov 20,
+    // 2026 road-class re-key, an on-segment fix serves the
+    // corridor into the empty slot on the spot (RC-1), which
+    // would collapse the staging below.
+    tour.onPosition({ lat: p1.lat, lng: p1.lng + 0.005, speedMps: 8, headingDeg: p1.heading });
     await world.clock.advance(3_000); // Tier One slotted as the waiter
     const p2 = fpAlong(seg, 0.12);
     world.candidates = [makeCandidate('Tier Two Castle', { tier1: true, lat: start.lat, lng: start.lng })];
-    tour.onPosition({ lat: p2.lat, lng: p2.lng, speedMps: 8, headingDeg: p2.heading });
+    tour.onPosition({ lat: p2.lat, lng: p2.lng + 0.005, speedMps: 8, headingDeg: p2.heading });
     await world.clock.advance(3_000); // Tier Two offered → pending lane
     check('Tier Two waits in the pending lane (not committed)',
       !world.eventsOf('story_played').some(e => e.payload.subject === 'tier two castle'),
@@ -4902,7 +4920,10 @@ export async function runScenarios(Tour, extras) {
     await world.clock.advance(40_000);
     const p1 = fpAlong(seg, 0.05);
     world.candidates = [makeCandidate('Tier One Museum', { tier1: true, lat: start.lat, lng: start.lng })];
-    tour.onPosition({ lat: p1.lat, lng: p1.lng, speedMps: 8, headingDeg: p1.heading });
+    // Tier One slots from OFF the segment (the Nov 20, 2026
+    // road-class re-key serves an on-segment fix's corridor
+    // on the spot — RC-1).
+    tour.onPosition({ lat: p1.lat, lng: p1.lng + 0.005, speedMps: 8, headingDeg: p1.heading });
     await world.clock.advance(3_000); // Tier One slotted
     tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 27, headingDeg: heading });
     await world.clock.advance(3_000); // corridor offer buffers → retained
@@ -4922,7 +4943,13 @@ export async function runScenarios(Tour, extras) {
     tour.endTour();
   }
 
-  suite('FP-5c speed regime: the retained item is dropped when speed falls below the line');
+  // FP-5c as first pinned (Nov 15, 2026) asserted the retained
+  // item DIED when speed fell below the line on its segment.
+  // Erik's Nov 20, 2026 ruling (gate Item 1) repeals exactly
+  // that: the regime is keyed to the road, so a slowdown ON
+  // the segment is traffic, not an exit. The suite below is
+  // the same fixture with the verdict reversed.
+  suite('FP-5c road class: the retained item SURVIVES a slowdown on its segment and promotes (Nov 20 re-key)');
   {
     resetLocalStorage();
     const { seg, start, heading } = fpPickSeg();
@@ -4940,29 +4967,41 @@ export async function runScenarios(Tour, extras) {
     await world.clock.advance(40_000);
     const p1 = fpAlong(seg, 0.05);
     world.candidates = [makeCandidate('Tier One Museum', { tier1: true, lat: start.lat, lng: start.lng })];
-    tour.onPosition({ lat: p1.lat, lng: p1.lng, speedMps: 8, headingDeg: p1.heading });
+    // Tier One slots from OFF the segment (the Nov 20, 2026
+    // road-class re-key serves an on-segment fix's corridor
+    // on the spot — RC-1).
+    tour.onPosition({ lat: p1.lat, lng: p1.lng + 0.005, speedMps: 8, headingDeg: p1.heading });
     await world.clock.advance(3_000); // Tier One slotted
     tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 27, headingDeg: heading });
     await world.clock.advance(3_000); // corridor offer buffers → retained
-    // Slow down ON the segment: the regime ends, the item dies.
+    // Slow down ON the segment: traffic, not an exit — under
+    // the road-class keying the retained item stands.
     tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 8, headingDeg: heading });
     await world.clock.advance(2_000);
-    const dropped = world.eventsOf('corridor_pending_dropped');
-    check('the drop marker fired with reason speed',
-      dropped.length === 1 && dropped[0].payload.segment_id === seg.id && dropped[0].payload.reason === 'speed',
-      JSON.stringify(dropped.map(e => e.payload)));
-    // Leave the ground so no ordinary-lane re-serve can occur.
-    tour.onPosition({ lat: start.lat, lng: start.lng + 0.05, speedMps: 8, headingDeg: heading });
-    await world.clock.advance(200_000);
-    check('no promotion ever fired', world.eventsOf('corridor_pending_promoted').length === 0);
-    check('the corridor story never committed or sounded',
-      !world.eventsOf('story_played').some(e => e.payload.subject === `corridor:${seg.id}`) &&
-        !soundedLabels.includes(seg.displayName),
-      soundedLabels.join(','));
+    check('no corridor-pending drop fired for the on-segment slowdown',
+      world.eventsOf('corridor_pending_dropped').length === 0,
+      JSON.stringify(world.eventsOf('corridor_pending_dropped').map(e => e.payload)));
+    // Alpha ends → Tier One dequeues → the refill promotes
+    // the retained item, exactly as FP-5's at-speed case.
+    await world.clock.advance(60_000);
+    const promoted = world.eventsOf('corridor_pending_promoted');
+    check('the promotion marker fired for this segment',
+      promoted.length === 1 && promoted[0].payload.segment_id === seg.id,
+      JSON.stringify(promoted.map(e => e.payload)));
+    await world.clock.advance(120_000); // Tier One plays out; the corridor story sounds
+    check('the corridor story sounded after Tier One',
+      soundedLabels.includes(seg.displayName), soundedLabels.join(','));
     tour.endTour();
   }
 
-  suite('FP-6 speed regime: below the line the corridor lane is unchanged (buffer drops, no retention, segment unconsumed)');
+  // FP-6 as first pinned (Nov 15, 2026) asserted a below-speed
+  // offer on an eligible segment landed 'buffer' and died
+  // unretained. Erik's Nov 20, 2026 ruling (gate Item 1)
+  // repeals that for on-segment offers: the offer below is
+  // made from ON the segment, so the road's verdict is
+  // freeway pace and the buffer landing is retained. The
+  // fixture is unchanged; the verdict is reversed.
+  suite('FP-6 road class: a below-speed offer ON a freeway segment is retained and promoted (the lane answers to the road)');
   {
     resetLocalStorage();
     const { seg, start, heading } = fpPickSeg();
@@ -4979,10 +5018,10 @@ export async function runScenarios(Tour, extras) {
     const soundedLabels = watchLabels(world, tour);
     tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 8, headingDeg: heading });
     tour.start(false);
-    // Earn eligibility with a fast tick while the opening gate
-    // still bars corridor serves (the serve aborts, the
-    // eligibility banks) — the only way to reach a below-speed
-    // offer on an eligible segment.
+    // Eligibility banks on the match itself now (the fast
+    // tick is kept from the original fixture — under the
+    // re-key even the slow tick before it banks the segment,
+    // which RC-1 proves end-to-end).
     tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 27, headingDeg: heading });
     await world.clock.advance(2_000);
     await world.clock.advance(40_000); // opening done; Alpha playing
@@ -4996,30 +5035,42 @@ export async function runScenarios(Tour, extras) {
     await world.clock.advance(3_000); // Tier One slotted
     world.candidates = [];
     // The below-speed offer meets the Tier-1 waiter and lands
-    // 'buffer' — historically the end of it.
+    // 'buffer' — under the road's verdict it is RETAINED,
+    // silently: no marker fires at offer time either way.
     tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 8, headingDeg: heading });
     await world.clock.advance(3_000);
-    check('no corridor-pending marker fired below the line',
+    check('no corridor-pending marker fired at the below-speed on-segment offer (retention is silent)',
       world.eventsOf('corridor_pending_promoted').length === 0 && world.eventsOf('corridor_pending_dropped').length === 0,
       JSON.stringify([...world.eventsOf('corridor_pending_promoted'), ...world.eventsOf('corridor_pending_dropped')].map(e => e.payload)));
-    await world.clock.advance(150_000); // Alpha and Tier One play out
-    check('the buffered corridor story never committed or sounded (no retention below the line)',
-      !world.eventsOf('story_played').some(e => e.payload.subject === `corridor:${seg.id}`) &&
-        !soundedLabels.includes(seg.displayName),
+    await world.clock.advance(150_000); // Alpha ends → Tier One dequeues → promotion → corridor sounds
+    const promoted = world.eventsOf('corridor_pending_promoted');
+    check('the retained item promoted at the transition',
+      promoted.length === 1 && promoted[0].payload.segment_id === seg.id,
+      JSON.stringify(promoted.map(e => e.payload)));
+    check('the corridor story committed and sounded',
+      world.eventsOf('story_played').some(e => e.payload.subject === `corridor:${seg.id}`) &&
+        soundedLabels.includes(seg.displayName),
       soundedLabels.join(','));
-    // The segment was never consumed by the drop: a later
-    // at-speed pass serves it through the ordinary lane.
+    // The sounded serve consumed the segment: a later pass
+    // at speed does not serve it again this drive.
     tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 27, headingDeg: heading });
-    await world.clock.advance(3_000);
-    check('the segment serves on a later pass (the buffer drop consumed nothing)',
-      world.eventsOf('story_played').some(e => e.payload.subject === `corridor:${seg.id}`),
-      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
     await world.clock.advance(60_000);
-    check('and it sounds', soundedLabels.includes(seg.displayName), soundedLabels.join(','));
+    check('the segment stays consumed (exactly one corridor serve this drive)',
+      world.eventsOf('story_played').filter(e => e.payload.subject === `corridor:${seg.id}`).length === 1,
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
     tour.endTour();
   }
 
-  suite('FP-6b speed regime: below the line the fresher/anchor law still governs displacement (corridor fix 1, unregimented)');
+  // FP-6b as first pinned (Nov 15, 2026) asserted the
+  // below-speed on-segment offer displaced by fresher, the
+  // regime being off. Erik's Nov 20, 2026 ruling (gate
+  // Item 1) repeals that: on the segment the offer is
+  // priority-class at any speed, so the same fixture now
+  // falls by priority. The fresher law itself is untouched
+  // where it still governs — the ordinary lane (FP-3) and
+  // non-regime offers; a corridor offer is simply never one
+  // of those while its driver is on the segment.
+  suite('FP-6b road class: on-segment at crawl the corridor offer displaces by priority, not fresher (Nov 20 re-key)');
   {
     resetLocalStorage();
     const { seg, start, heading } = fpPickSeg();
@@ -5045,21 +5096,165 @@ export async function runScenarios(Tour, extras) {
     world.candidates = [makeCandidate('Waiter Place', { lat: waiterPos.lat, lng: waiterPos.lng, distanceM: 60 })];
     tour.onPosition({ lat: waiterPos.lat, lng: waiterPos.lng, speedMps: 8, headingDeg: mid.heading });
     await world.clock.advance(3_000); // waiter slotted (off-segment: no trigger fires)
-    // Step onto the midpoint BELOW the line: the offer is the
-    // historical one — fresher, measured from the nearest
-    // point on the segment (fix 1), and it wins.
+    // Step onto the midpoint BELOW the line: the driver is on
+    // a freeway, so the offer is the regime's — priority —
+    // and the waiter falls by priority, not fresher.
     tour.onPosition({ lat: mid.lat, lng: mid.lng, speedMps: 8, headingDeg: mid.heading });
     await world.clock.advance(3_000);
     const drops = world.eventsOf('story_dropped');
-    check('below the line the corridor item displaces by fresher, not priority',
-      drops.some(d => d.payload.reason === 'displaced-fresher') &&
-        !drops.some(d => d.payload.reason === 'displaced-priority'),
+    check('on-segment at crawl the corridor item displaces by priority, not fresher',
+      drops.some(d => d.payload.reason === 'displaced-priority') &&
+        !drops.some(d => d.payload.reason === 'displaced-fresher'),
       JSON.stringify(drops.map(d => d.payload)));
     check('the corridor story committed',
       world.eventsOf('story_played').some(e => e.payload.subject === `corridor:${seg.id}`),
       JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
     await world.clock.advance(150_000);
     check('the corridor story sounds after the playing story', soundedLabels.includes(seg.displayName), soundedLabels.join(','));
+    tour.endTour();
+  }
+
+  // ---------------------------------------------------------- RC: corridor by road class (Erik's ruling, Nov 20, 2026 — gate Item 1)
+  // Day 14 (Nov 18, final-five day 5): freeform in freeway
+  // traffic, speeds below the 15 m/s line the whole drive —
+  // the speed regime judged surface pace and ZERO corridor
+  // stories served. The regime's trigger is the road now:
+  // a matchCorridor hit (banked freeway segment, heading in
+  // agreement) is freeway pace at any speed. RC-1 replays
+  // Day 14 end-to-end without ever crossing the line; RC-2
+  // holds a retained item through a traffic slowdown with a
+  // Tier-1 pending behind it; RC-3 pins the provisional-match
+  // boundary (no heading at crawl → no road-class claim).
+
+  suite('RC-1 road class: the Day-14 replay — an all-crawl freeway drive gets the freeway queue (priority displacement at 7 m/s)');
+  {
+    resetLocalStorage();
+    const { seg, start, heading } = fpPickSeg();
+    const mid = fpAlong(seg, 0.5);
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: start.lat, lng: start.lng, distanceM: 100 })],
+      library: [
+        { name: 'Alpha Park', lat: start.lat, lng: start.lng },
+        seg.displayName,
+        { name: 'Waiter Place', lat: mid.lat, lng: mid.lng },
+      ],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 90_000 }));
+    const tour = await startAt(world, audio, start, 8, heading);
+    const soundedLabels = watchLabels(world, tour);
+    await world.clock.advance(40_000); // opening done; Alpha playing (90 s). Every fix this drive is ≤8 m/s.
+    // Slot the ordinary waiter from OFF the segment (an
+    // on-segment nudge would fire the corridor trigger first).
+    world.candidates = [makeCandidate('Waiter Place', { lat: mid.lat, lng: mid.lng, distanceM: 0 })];
+    tour.onPosition({ lat: mid.lat, lng: mid.lng + 0.005, speedMps: 8, headingDeg: mid.heading });
+    await world.clock.advance(3_000);
+    check('waiter slotted behind the playing story',
+      world.eventsOf('story_played').some(e => e.payload.subject === 'waiter place'),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    world.candidates = [];
+    // Step onto the segment at traffic crawl: the match banks
+    // eligibility and the offer takes the freeway's queue
+    // position — priority over the ordinary waiter.
+    tour.onPosition({ lat: mid.lat, lng: mid.lng, speedMps: 7, headingDeg: mid.heading });
+    await world.clock.advance(3_000);
+    const drops = world.eventsOf('story_dropped');
+    check('the waiter is displaced by priority at crawl (road class, not fresher, not speed)',
+      drops.some(d => d.payload.reason === 'displaced-priority') &&
+        !drops.some(d => d.payload.reason === 'displaced-fresher'),
+      JSON.stringify(drops.map(d => d.payload)));
+    check('the corridor story committed on an all-crawl drive',
+      world.eventsOf('story_played').some(e => e.payload.subject === `corridor:${seg.id}`),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    await world.clock.advance(150_000); // Alpha ends; the corridor story sounds
+    check('the corridor story sounds after the playing story',
+      soundedLabels.includes(seg.displayName), soundedLabels.join(','));
+    check('no corridor-pending drop fired anywhere on the drive',
+      world.eventsOf('corridor_pending_dropped').length === 0,
+      JSON.stringify(world.eventsOf('corridor_pending_dropped').map(e => e.payload)));
+    tour.endTour();
+  }
+
+  suite('RC-2 road class: a retained item holds through a traffic slowdown and still promotes ahead of a Tier-1 pending');
+  {
+    resetLocalStorage();
+    const { seg, start, heading } = fpPickSeg();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: start.lat, lng: start.lng, distanceM: 100 })],
+      library: [
+        { name: 'Alpha Park', lat: start.lat, lng: start.lng },
+        seg.displayName,
+        { name: 'Tier One Museum', lat: start.lat, lng: start.lng },
+        { name: 'Tier Two Castle', lat: start.lat, lng: start.lng },
+      ],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 45_000 }));
+    const tour = await startAt(world, audio, start, 8, heading);
+    const soundedLabels = watchLabels(world, tour);
+    await world.clock.advance(40_000); // opening done; Alpha playing (45 s)
+    const p1 = fpAlong(seg, 0.05);
+    world.candidates = [makeCandidate('Tier One Museum', { tier1: true, lat: start.lat, lng: start.lng })];
+    // Tier One slots from OFF the segment: since the Nov 20,
+    // 2026 road-class re-key, an on-segment fix serves the
+    // corridor into the empty slot on the spot (RC-1), which
+    // would collapse the staging below.
+    tour.onPosition({ lat: p1.lat, lng: p1.lng + 0.005, speedMps: 8, headingDeg: p1.heading });
+    await world.clock.advance(3_000); // Tier One slotted as the waiter
+    const p2 = fpAlong(seg, 0.12);
+    world.candidates = [makeCandidate('Tier Two Castle', { tier1: true, lat: start.lat, lng: start.lng })];
+    tour.onPosition({ lat: p2.lat, lng: p2.lng + 0.005, speedMps: 8, headingDeg: p2.heading });
+    await world.clock.advance(3_000); // Tier Two offered → pending lane
+    tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 27, headingDeg: heading });
+    await world.clock.advance(3_000); // at-speed corridor offer buffers → retained (FP-5's shape)
+    // Traffic closes in: crawl fixes ON the segment, heading
+    // held. The retained item must not die of the slowdown.
+    tour.onPosition({ lat: p2.lat, lng: p2.lng, speedMps: 6, headingDeg: p2.heading });
+    await world.clock.advance(2_000);
+    tour.onPosition({ lat: p1.lat, lng: p1.lng, speedMps: 5, headingDeg: p1.heading });
+    await world.clock.advance(2_000);
+    check('no corridor-pending drop fired through the crawl (no speed death on-segment)',
+      world.eventsOf('corridor_pending_dropped').length === 0,
+      JSON.stringify(world.eventsOf('corridor_pending_dropped').map(e => e.payload)));
+    await world.clock.advance(45_000); // Alpha ends → Tier One dequeues → promotion
+    const promoted = world.eventsOf('corridor_pending_promoted');
+    check('the promotion marker fired for this segment',
+      promoted.length === 1 && promoted[0].payload.segment_id === seg.id,
+      JSON.stringify(promoted.map(e => e.payload)));
+    await world.clock.advance(200_000); // everything plays out
+    const order = ['Alpha Park', 'Tier One Museum', seg.displayName, 'Tier Two Castle'].map(l => soundedLabels.indexOf(l));
+    check('sounding order: Alpha → Tier One → corridor → Tier Two (the crawl changed nothing)',
+      order.every(i => i >= 0) && order[0] < order[1] && order[1] < order[2] && order[2] < order[3],
+      soundedLabels.join(','));
+    tour.endTour();
+  }
+
+  suite('RC-3 road class: a heading-less crawl fix makes no road-class claim (the provisional-match boundary)');
+  {
+    resetLocalStorage();
+    const { seg, start, heading } = fpPickSeg();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      library: [seg.displayName],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 45_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    // Onto the segment at crawl with NO heading: containment
+    // matches, but a heading-less match is provisional
+    // (corridors.ts' doctrine) — no eligibility, no serve.
+    tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 6, headingDeg: null });
+    await world.clock.advance(3_000);
+    check('no corridor serve while the fix is heading-less',
+      !world.eventsOf('story_played').some(e => e.payload.subject === `corridor:${seg.id}`),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    check('no corridor-pending marker fired either',
+      world.eventsOf('corridor_pending_promoted').length === 0 && world.eventsOf('corridor_pending_dropped').length === 0,
+      JSON.stringify([...world.eventsOf('corridor_pending_promoted'), ...world.eventsOf('corridor_pending_dropped')].map(e => e.payload)));
+    // The same ground at the same crawl, heading present:
+    // the road-class claim engages and the segment serves.
+    tour.onPosition({ lat: start.lat, lng: start.lng, speedMps: 6, headingDeg: heading });
+    await world.clock.advance(3_000);
+    check('the segment serves once a headed fix lands',
+      world.eventsOf('story_played').some(e => e.payload.subject === `corridor:${seg.id}`),
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
     tour.endTour();
   }
 
