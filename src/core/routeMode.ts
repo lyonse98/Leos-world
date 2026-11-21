@@ -3872,6 +3872,21 @@ export function composeRoutePlan(
     const hopTwins = wovenTwinsByBase(portalAll);
     for (const cand of portalAll) {
       if (shadowedByTwin(cand, hopTwins)) continue;
+      // The presence wall (road anchoring §1.4, Nov 20,
+      // 2026 — absolute): a presence-register corridor
+      // segment seats off-route only when its extent
+      // overlaps the driven extent. Corridor tellings are
+      // written as if the listener is ON the stretch;
+      // serving one for a stretch the driver never traverses
+      // is a falsehood in the copy, not a distance
+      // preference, so this lane gets no graded negotiation
+      // and no keystone waiver. Interim form: the pin test
+      // (corridorPinInDrivenSpan). The wall judges the
+      // presence original only — a corridor story whose
+      // woven twin stands in the pool is shadowed above and
+      // the TWIN is scored in its place: woven register is
+      // told ABOUT the place and may honestly travel.
+      if (cand.angle === 'corridor' && !corridorPinInDrivenSpan(cand, path)) continue;
       // The portal climax is never ALSO a hop: it already holds
       // the tail slot (consolidation §4).
       if (climaxUnitId !== null && cand.id === climaxUnitId) continue;
