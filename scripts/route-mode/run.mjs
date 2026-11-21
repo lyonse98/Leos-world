@@ -189,7 +189,7 @@ const pf = await import(pathToFileURL(pfOut).href);
 // the same commit; a run that executes fewer checks than
 // the floor FAILS, whatever its pass rate (enforced at the
 // final tally below).
-const MIN_CHECKS = 430;
+const MIN_CHECKS = 446;
 
 let passed = 0;
 let failed = 0;
@@ -4847,8 +4847,18 @@ const WT = 'Military & Bases';
 const wGeo = (id, lat, dur = 120, name) =>
   unit(id, lat, { topics: [WT], placeName: name, durationSec: dur });
 const wCand = (id, dur, extra = {}) =>
-  unit(id, 32.0, {
-    lng: -117.05,
+  unit(id, 32.8, {
+    // Member ground (road anchoring re-stage, Nov 20, 2026):
+    // mid-span, ~7.5 km east of the road — off-corridor for
+    // candidacy (>3 km), inside the driven span, priced in
+    // the local band (factor ≈ 0.52), so these suites keep
+    // testing SEATING, not anchoring. The pre-anchoring
+    // default (lat 32.0) sat ~78 km BEHIND the origin: under
+    // the two-axis price that is correctly ~zero pull, and
+    // every member would have fallen to the keystone lane.
+    // Suites that mean to test distance place their units
+    // explicitly (the anchoring suites below).
+    lng: -117.17,
     angle: 'landmark_history',
     topics: [WT],
     durationSec: dur,
@@ -11650,6 +11660,296 @@ await checkAsync('DUO-36 capture: the host layer files distinctly — duo_seats 
   );
   assert.equal(payload.duo_state.frame_breaks_used, out.duoState.frameBreaksUsed);
   assert.ok(payload.duo_state.frame_breaks_used <= 2, 'the ration holds in capture');
+});
+
+// ---- road anchoring (Nov 20, 2026) ----
+// The graded negotiation (road-anchoring-design-2026-11-20,
+// Erik's Item 3 ruling): distance as a multiplier on member
+// ranking (two axes — lateral + along-track), the aggregate
+// thread-carry test, the presence wall for corridor
+// segments, and the one keystone excursion per episode.
+// Fixture discipline mirrors production (App.tsx staging):
+// woven members arrive as memberUnits — the member fetch's
+// separate lane — never as compose units, so the portal-hop
+// lane cannot spend them before seating prices them.
+const ATOPIC = 'Sport';
+const aGeo = (id, lat, dur = 200, topics = [ATOPIC]) =>
+  unit(id, lat, { topics, durationSec: dur, placeName: id.split('|')[0] });
+const aCand = (id, lat, lng, dur, extra = {}) =>
+  unit(id, lat, { lng, angle: 'landmark_event', topics: [ATOPIC], durationSec: dur, wovenEligible: true, placeName: id.split('|')[0], ...extra });
+const aSpine = () => [
+  aGeo('ga|landmark_origin', 32.71, 120),
+  aGeo('gb|landmark_origin', 32.72, 120),
+  aGeo('gc|landmark_origin', 32.73, 120),
+  aGeo('gd|landmark_origin', 32.88, 500),
+];
+const aCompose = (units, driveSec, memberUnits = []) => {
+  const plan = rm.composeRoutePlan(units, path, dest, 'Dest',
+    { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: driveSec, driveSec, memberUnits });
+  plan.driveSec = driveSec;
+  plan.budgetSec = driveSec;
+  return plan;
+};
+const aMemberItems = plan => plan.items.filter(i => i.woven && i.unit);
+
+check('anchoring projection: a point beside mid-span is inside, with its lateral distance', () => {
+  const p = rm.projectionAlongPath({ lat: 32.8, lng: -117.215 }, path); // ~3.3 km east
+  assert.ok(Math.abs(p.lateralM - 3300) < 250, `lateral ${p.lateralM}`);
+  assert.equal(p.behindM, 0);
+  assert.equal(p.beyondM, 0);
+  assert.ok(p.alongM > 9000 && p.alongM < 13000, `along ${p.alongM}`);
+});
+
+check('anchoring projection: a point on the road line outside the span reads lateral ≈ 0, its distance in the displacement axis', () => {
+  const behind = rm.projectionAlongPath({ lat: 32.59, lng: -117.25 }, path); // ~12 km south of the origin, on the line
+  assert.ok(behind.lateralM < 300, `lateral ${behind.lateralM}`);
+  assert.ok(behind.behindM > 11500 && behind.behindM < 13000, `behind ${behind.behindM}`);
+  assert.equal(behind.beyondM, 0);
+  const beyond = rm.projectionAlongPath({ lat: 33.02, lng: -117.25 }, path); // ~13 km past the destination, on the line
+  assert.ok(beyond.lateralM < 300, `lateral ${beyond.lateralM}`);
+  assert.ok(beyond.beyondM > 12500 && beyond.beyondM < 14500, `beyond ${beyond.beyondM}`);
+  assert.equal(beyond.behindM, 0);
+});
+
+check('anchoring projection: a point past the destination on the road line is BEYOND', () => {
+  const p = rm.projectionAlongPath({ lat: 32.95, lng: -117.25 }, path); // ~5.5 km past dest
+  assert.ok(p.beyondM > 4800 && p.beyondM < 6200, `beyond ${p.beyondM}`);
+  assert.equal(p.behindM, 0);
+});
+
+check('anchoring cost: the design anchor points — full credit inside 3 km, ~half at 8 km, ~a tenth at 25 km', () => {
+  const at = km => rm.anchorCostFor({ lat: 32.8, lng: -117.25 + km / 93.5 }, path);
+  assert.equal(at(2).factor, 1);
+  assert.ok(Math.abs(at(8).factor - 0.5) < 0.06, `8km ${at(8).factor}`);
+  assert.ok(Math.abs(at(25).factor - 0.1) < 0.03, `25km ${at(25).factor}`);
+  assert.equal(at(3.3).local, true);
+  assert.equal(at(7).local, true, 'inside 8 km is local band');
+  assert.equal(at(12).local, false);
+});
+
+check('anchoring cost: along-track displacement prices steeply even ON the road line', () => {
+  const behind2 = rm.anchorCostFor({ lat: 32.682, lng: -117.25 }, path); // ~2 km behind origin
+  const behind12 = rm.anchorCostFor({ lat: 32.592, lng: -117.25 }, path); // ~12 km behind origin
+  assert.ok(behind2.factor > 0.5 && behind2.factor < 0.7, `2km behind ${behind2.factor}`);
+  assert.ok(behind12.factor < 0.06, `12km behind ${behind12.factor}`);
+  assert.ok(behind12.factor < rm.MEMBER_COST_FLOOR, '12 km behind is below the ordinary floor');
+});
+
+check('anchoring wall (unit): a pin in the driven span passes; behind-span and parallel-road pins fail', () => {
+  assert.equal(rm.corridorPinInDrivenSpan({ lat: 32.8, lng: -117.235 }, path), true, 'on the road, mid-span');
+  assert.equal(rm.corridorPinInDrivenSpan({ lat: 33.02, lng: -117.25 }, path), false, 'on the line, ~13 km out of span');
+  assert.equal(rm.corridorPinInDrivenSpan({ lat: 32.8, lng: -117.05 }, path), false, 'mid-span projection, ~18 km lateral (a parallel road)');
+});
+
+check('anchoring members (the Nov 19 analog): the local member seats ordinarily, the ~27 km member seats ONLY as keystone, the behind-origin member does not seat', () => {
+  const pif = aCand('pif|landmark_event', 32.8, -117.215, 250);       // 3.3 km lateral, mid-span
+  const pcr = aCand('pcr|landmark_event', 32.8, -116.957, 320);       // ~27.4 km lateral, mid-span, strongest
+  const delmar = aCand('delmar|landmark_event', 32.975, -117.26, 280); // ~12.7 km BEHIND origin
+  const units = aSpine();
+  const members = [pif, pcr, delmar];
+  const plan = aCompose(units, 2400, members);
+  assert.equal(plan.thread?.topic, ATOPIC, `thread topic ${plan.thread?.topic}`);
+  const seated = rm.seatWovenMembers(plan, [...units, ...members], { heardKeys: new Set() });
+  const memberList = aMemberItems(seated);
+  const byId = Object.fromEntries(memberList.map(i => [i.id, i]));
+  assert.ok(byId['pif|landmark_event'], 'the local member seats');
+  assert.equal(byId['pif|landmark_event'].keystone, undefined, 'the local member is no excursion');
+  assert.ok(byId['pif|landmark_event'].anchorCost.factor >= 0.5, `pif factor ${byId['pif|landmark_event'].anchorCost.factor}`);
+  assert.ok(byId['pcr|landmark_event'], 'the far member seats — as the excursion');
+  assert.equal(byId['pcr|landmark_event'].keystone, true, 'pcr is marked the keystone');
+  assert.ok(byId['pcr|landmark_event'].anchorCost.factor < rm.MEMBER_COST_FLOOR, `pcr factor ${byId['pcr|landmark_event'].anchorCost.factor} is below the floor — it could only enter as keystone`);
+  assert.ok(!byId['delmar|landmark_event'], 'the second far member does not seat — one excursion per episode');
+  assert.equal(memberList.filter(i => i.keystone).length, 1, 'exactly one keystone');
+  assert.equal(seated.threadCarry?.carries, true, 'the cast is mostly local — the thread carries');
+});
+
+check('anchoring keystone caps: a member beyond 30 km lateral never seats, even with the excursion unspent', () => {
+  const local = aCand('loc|landmark_event', 32.8, -117.215, 250);
+  const far35 = aCand('far35|landmark_event', 32.8, -116.876, 320); // ~35 km lateral
+  const units = aSpine();
+  const plan = aCompose(units, 2400, [local, far35]);
+  const seated = rm.seatWovenMembers(plan, [...units, local, far35], { heardKeys: new Set() });
+  const ids = aMemberItems(seated).map(i => i.id);
+  assert.ok(ids.includes('loc|landmark_event'));
+  assert.ok(!ids.includes('far35|landmark_event'), 'beyond the lateral cap: no seat, no excursion');
+});
+
+check('anchoring keystone caps: a member displaced beyond 30 km behind the origin never seats', () => {
+  const local = aCand('loc|landmark_event', 32.8, -117.215, 250);
+  const behind35 = aCand('behind35|landmark_event', 32.385, -117.25, 320); // ~35 km behind, on the line
+  const units = aSpine();
+  const plan = aCompose(units, 2400, [local, behind35]);
+  const seated = rm.seatWovenMembers(plan, [...units, local, behind35], { heardKeys: new Set() });
+  const ids = aMemberItems(seated).map(i => i.id);
+  assert.ok(!ids.includes('behind35|landmark_event'), 'beyond the displacement cap: no seat');
+});
+
+const aBarePlan = (items, driveSec = 1800) => ({
+  destinationName: 'Dest', destination: dest, path, audience: 'standard',
+  driveSec, budgetSec: driveSec, items, totalSec: items.reduce((s, i) => s + i.durationSec, 0),
+  skippedHeard: 0, climaxUnitId: null, climaxSubject: null, climaxMode: 'natural',
+  thread: { topic: ATOPIC, memberIds: [], score: 3, anchorKind: 'topic', anchorKey: ATOPIC, label: ATOPIC },
+  actsSummary: {
+    opening: { stories: 1, landmark: 1, corridor: 0 },
+    middle: { stories: 1, landmark: 1, corridor: 0 },
+    climax: { stories: 1, landmark: 1, corridor: 0 },
+  },
+  previewFacts: null, previewContext: null, wovenMembers: { count: 0, topics: [], unitIds: [] },
+});
+const aStoryItem = (u, anchorProgress) => ({
+  kind: 'story', id: u.id, label: u.placeName, durationSec: u.durationSec, unit: u, ready: true, anchorProgress,
+});
+
+check('anchoring carry test: a mostly-far cast demotes the thread to flavor — no members seat, and the carried mode stays off', () => {
+  const bareItems = [
+    aStoryItem(aGeo('s1|landmark_origin', 32.75, 200, ['Coast']), 0.2),
+    aStoryItem(aGeo('s2|landmark_origin', 32.8, 200, ['Coast']), 0.5),
+  ];
+  const plan = aBarePlan(bareItems);
+  const units = [
+    aCand('loc|landmark_event', 32.8, -117.215, 250),
+    aCand('far1|landmark_event', 32.8, -116.957, 300),
+    aCand('far2|landmark_event', 32.75, -116.957, 300),
+    aCand('far3|landmark_event', 32.85, -116.957, 300),
+  ];
+  const seated = rm.seatWovenMembers(plan, units, { heardKeys: new Set() });
+  assert.equal(aMemberItems(seated).length, 0, 'a demoted thread seats no members — not even its one local candidate');
+  assert.equal(seated.threadCarry?.carries, false, 'the verdict is recorded on the plan');
+  assert.ok(seated.threadCarry.localShare < 0.5, `local share ${seated.threadCarry.localShare}`);
+  const tc = rm.assessThreadCarried(seated);
+  assert.equal(tc.active, false, 'a demoted thread anchors no thread-carried rebuild, however quiet the road');
+});
+
+check('anchoring carry test: a mostly-local cast carries and seats (control for the demotion)', () => {
+  const members = [
+    aCand('l1|landmark_event', 32.8, -117.215, 250),
+    aCand('l2|landmark_event', 32.78, -117.22, 240),
+    aCand('l3|landmark_event', 32.82, -117.21, 230),
+    aCand('far|landmark_event', 32.8, -116.957, 300),
+  ];
+  const plan0 = aCompose(aSpine(), 2400, members);
+  const seated = rm.seatWovenMembers(plan0, [...aSpine(), ...members], { heardKeys: new Set() });
+  assert.equal(seated.threadCarry?.carries, true);
+  const seatedMembers = aMemberItems(seated);
+  assert.ok(seatedMembers.length >= 3, `members ${seatedMembers.map(i => i.id)}`);
+  const far = seatedMembers.find(i => i.id === 'far|landmark_event');
+  if (far) assert.equal(far.keystone, true, 'the one far member rides as the excursion');
+});
+
+check('anchoring portal discount: a far house member with an ANCHORED follow-on in the plan seats ordinarily (no keystone mark)', () => {
+  const carrier = aGeo('carrier|landmark_origin', 32.75, 600); // on-path topic carrier (the cast's local minutes)
+  const gill = aGeo('irving gill|landmark_origin', 32.88, 300); // the payload, on the road — anchored
+  const house = aCand('bailey|landmark_history', 32.8, -117.036, 200, {
+    placeName: 'Wheeler Bailey/ Irving Gill House', topics: [ATOPIC, 'Architecture'],
+  });
+  const plan = aBarePlan([aStoryItem(carrier, 0.1), aStoryItem(gill, 0.8)]);
+  const seated = rm.seatWovenMembers(plan, [carrier, gill, house], { heardKeys: new Set() });
+  const item = seated.items.find(i => i.id === 'bailey|landmark_history');
+  assert.ok(item?.woven, 'the house member seats');
+  assert.equal(item.keystone, undefined, 'it seats ORDINARILY — the discount lifted it over the floor, so no excursion was spent');
+  assert.ok(item.anchorCost.factor < rm.MEMBER_COST_FLOOR, `its raw price ${item.anchorCost.factor} is below the floor — only the discount seats it ordinarily`);
+});
+
+check('anchoring portal discount dies when the follow-on is itself far: the same house can then enter only as the keystone', () => {
+  const carrier = aGeo('carrier|landmark_origin', 32.75, 600);
+  const gillFar = unit('irving gill|landmark_origin', 32.8, {
+    lng: -117.036, topics: [ATOPIC], durationSec: 300, placeName: 'Irving Gill',
+  }); // the payload as a far plan item (a hop's unit) — NOT anchored
+  const house = aCand('bailey|landmark_history', 32.8, -117.036, 200, {
+    placeName: 'Wheeler Bailey/ Irving Gill House', topics: [ATOPIC, 'Architecture'],
+  });
+  const plan = aBarePlan([aStoryItem(carrier, 0.1), aStoryItem(gillFar, 0.8)]);
+  const seated = rm.seatWovenMembers(plan, [carrier, gillFar, house], { heardKeys: new Set() });
+  const item = seated.items.find(i => i.id === 'bailey|landmark_history');
+  assert.ok(item?.woven, 'the house member still seats — through the excursion lane');
+  assert.equal(item.keystone, true, 'with no discount it is below the floor, so its seat is the keystone');
+});
+
+// The Nov 19, 2026 morning drive, replayed (gate pack Item 3):
+// I-5 South, UC → Naval Base San Diego, the Balboa Stadium /
+// Sport thread. The plan the field captured seated two
+// corridor segments from the far side of the county and a
+// Sport member at Potato Chip Rock, each announced by its
+// bridge as "clear across the county". Distances from the
+// design note's table (shelf pins vs a simplified I-5 S
+// centerline, ±1 km); the spine below keeps the design's
+// decisive seats.
+const I5S_PATH = [
+  { lat: 32.855, lng: -117.240 },
+  { lat: 32.815, lng: -117.215 },
+  { lat: 32.775, lng: -117.190 },
+  { lat: 32.735, lng: -117.170 },
+  { lat: 32.700, lng: -117.150 },
+  { lat: 32.685, lng: -117.135 },
+];
+const NBSD = { lat: 32.685, lng: -117.135 };
+const u19 = (id, lat, lng, extra = {}) => unit(id, lat, { lng, placeName: id.split('|')[0], ...extra });
+const geo19 = () => [
+  u19('geisel library|landmark_origin', 32.853, -117.238, { topics: ['University'], durationSec: 180 }),
+  u19('scripps institution|landmark_origin', 32.862, -117.243, { topics: ['Coast', 'Science'], durationSec: 200 }),
+  u19('kate sessions park|landmark_origin', 32.795, -117.205, { topics: [], durationSec: 170 }),
+  u19('washington street skatepark|landmark_event', 32.750, -117.168, { topics: ['Sport'], durationSec: 180 }),
+  u19('balboa park golf course|landmark_event', 32.715, -117.150, { topics: ['Sport'], durationSec: 200 }),
+  u19('balboa stadium|landmark_event', 32.690, -117.140, { topics: ['Sport'], durationSec: 220 }),
+  u19('nassco|landmark_origin', 32.687, -117.137, { topics: [], durationSec: 240 }),
+  // The two imported corridor segments (presence register, Coast-chained).
+  u19('i-5 south: encinitas to solana beach|corridor', 33.015, -117.265, { angle: 'corridor', topics: ['Coast'], durationSec: 240 }),
+  u19('i-5 south: through san onofre|corridor', 33.375, -117.555, { angle: 'corridor', topics: ['Coast'], durationSec: 240 }),
+  // Control: a corridor segment whose pin sits on the driven road's span.
+  u19('i-5 south: mission bay|corridor', 32.775, -117.160, { angle: 'corridor', topics: ['Coast'], durationSec: 200 }),
+];
+const members19 = () => [
+  u19('pacific islander festival|landmark_event-woven-v1', 32.770, -117.228, { angle: 'landmark_event-woven-v1', topics: ['Sport'], durationSec: 250, wovenEligible: true }),
+  u19('potato chip rock|landmark_event', 32.955, -116.975, { topics: ['Sport'], durationSec: 320, wovenEligible: true }),
+  u19('del mar races|landmark_event', 32.975, -117.260, { topics: ['Sport'], durationSec: 280, wovenEligible: true }),
+];
+const compose19 = () => {
+  const plan = rm.composeRoutePlan(geo19(), I5S_PATH, NBSD, 'Naval Base San Diego',
+    { destinationText: 'Naval Base San Diego', arrivalTimeMs: null, tone: null, topics: [] },
+    { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 2700, driveSec: 2700, memberUnits: members19() });
+  plan.driveSec = 2700;
+  plan.budgetSec = 2700;
+  return plan;
+};
+
+check('anchoring nov 19 replay: both imported corridor segments drop on extent failure; the on-span control segment still serves', () => {
+  const plan = compose19();
+  const ids = plan.items.filter(i => i.unit).map(i => i.unit.id);
+  assert.ok(!ids.includes('i-5 south: encinitas to solana beach|corridor'), 'Encinitas→Solana Beach is gone');
+  assert.ok(!ids.includes('i-5 south: through san onofre|corridor'), 'Through San Onofre is gone');
+  assert.ok(ids.includes('i-5 south: mission bay|corridor'), 'the control segment on the driven span still serves');
+  assert.equal(plan.thread?.topic, 'Sport', `the Sport thread is detected (got ${plan.thread?.topic})`);
+});
+
+check('anchoring nov 19 replay: after seating, the imports stay out, Potato Chip Rock is keystone-or-absent, the local member is kept, the thread carries', () => {
+  const plan = rm.seatWovenMembers(compose19(), [...geo19(), ...members19()], { heardKeys: new Set() });
+  const ids = plan.items.filter(i => i.unit).map(i => i.unit.id);
+  assert.ok(!ids.some(id => id.includes('encinitas')), 'no Encinitas seat anywhere in the final plan');
+  assert.ok(!ids.some(id => id.includes('san onofre')), 'no San Onofre seat anywhere in the final plan');
+  const pcr = plan.items.find(i => i.unit?.id === 'potato chip rock|landmark_event');
+  if (pcr && pcr.woven) assert.equal(pcr.keystone, true, 'Potato Chip Rock, if it seats as a member, seats as the keystone');
+  assert.ok(ids.includes('pacific islander festival|landmark_event-woven-v1'), 'the local member is kept');
+  assert.ok(ids.includes('washington street skatepark|landmark_event'), 'the on-route Sport story is in the episode');
+  assert.ok(ids.includes('balboa park golf course|landmark_event'), 'the second on-route Sport story is in the episode');
+  assert.equal(plan.threadCarry?.carries, true, 'the thread still carries — as a local thread');
+  assert.ok(plan.items.filter(i => i.keystone).length <= 1, 'at most one keystone in the episode');
+});
+
+check('anchoring capture: a seated member record carries its anchor cost and keystone mark; other items carry null/false', () => {
+  const pif = aCand('pif|landmark_event', 32.8, -117.215, 250);
+  const pcr = aCand('pcr|landmark_event', 32.8, -116.957, 320);
+  const units = aSpine();
+  const plan = aCompose(units, 2400, [pif, pcr]);
+  const seated = rm.seatWovenMembers(plan, [...units, pif, pcr], { heardKeys: new Set() });
+  const records = ec.assemblePlanItems(seated, new Set());
+  const pcrRec = records.find(r => r.id === 'pcr|landmark_event');
+  assert.equal(pcrRec.keystone, true, 'the excursion is marked in the capture');
+  assert.ok(pcrRec.anchorCost && pcrRec.anchorCost.factor < rm.MEMBER_COST_FLOOR, 'its price is filed');
+  assert.ok(pcrRec.anchorCost.lateralM > 25000, `lateral filed in metres (${pcrRec.anchorCost.lateralM})`);
+  const geoRec = records.find(r => r.id === 'ga|landmark_origin');
+  assert.equal(geoRec.anchorCost, null, 'a geo story carries no member price');
+  assert.equal(geoRec.keystone, false, 'a geo story is no excursion');
 });
 
 console.log(`\nroute-mode harness: ${passed} passed, ${failed} failed`);
