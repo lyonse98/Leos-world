@@ -9059,6 +9059,30 @@ check('authority: build A → build B — A is stale at its gate, B unaffected; 
   assert.equal(auth.current()?.kind, 'route-tour');
 });
 
+check('authority: destination change retires the build in place — release fails its next checkpoint; a rebuild claims cleanly', () => {
+  const auth = new sa.SessionAuthority();
+  // A freeform tour is already running when the build starts:
+  // the build claims over it (the tour yields only at a
+  // handover), exactly as in App.
+  const free = auth.claim('freeform-tour', 'freeform-1');
+  const build = auth.claim('route-build', 'route-A');
+  assert.equal(auth.isCurrent(build), true);
+  // The Change tap (Nov 23, 2026): App releases the build's
+  // own claim — no new intent is installed.
+  auth.release(build);
+  assert.equal(auth.isCurrent(build), false, 'the retired build fails its next superseded() checkpoint and discards silently');
+  assert.equal(auth.current(), null, 'the release gave the session up — no phantom intent installed');
+  assert.equal(auth.isCurrent(free), false, 'the running freeform claim is not resurrected by the release');
+  // Change-then-rebuild: a fresh build claims and holds; the
+  // retired build waking late (its finally, its release)
+  // cannot touch the successor.
+  const rebuilt = auth.claim('route-build', 'route-B');
+  assert.equal(auth.isCurrent(rebuilt), true);
+  auth.release(build);
+  assert.equal(auth.isCurrent(rebuilt), true, 'the stale build releasing late left the rebuild in place');
+  assert.equal(auth.current()?.id, 'route-B');
+});
+
 await checkAsync('arbitration gate: build pending → freeform starts → the build\'s handover refuses and its runner never sounds', async () => {
   const auth = new sa.SessionAuthority();
   const audio = new RealFakeAudio();

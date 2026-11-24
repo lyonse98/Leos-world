@@ -894,6 +894,13 @@ function MilesApp() {
   const [routeAudience, setRouteAudience] = useState<RouteAudience>('standard');
   const [routeStatus, setRouteStatus] = useState('');
   const [routeBuilding, setRouteBuilding] = useState(false);
+  // Change destination (Nov 23, 2026): the destination the
+  // in-flight build actually captured at its Build tap. The
+  // form field stays editable while a build runs, so the
+  // field's text is NOT evidence of where the build is
+  // headed — this snapshot is, and the building state's
+  // Change row displays it.
+  const [routeBuildingDest, setRouteBuildingDest] = useState('');
   // Build staging honesty (Nov 4, 2026): the build's current
   // phase (its label rides the status line) and its filed
   // failure — a dead build renders a dedicated failed state
@@ -947,6 +954,13 @@ function MilesApp() {
   const sessionAuthority = sessionAuthorityRef.current;
   const freeformClaimRef = useRef<SessionClaim | null>(null);
   const routeClaimRef = useRef<SessionClaim | null>(null);
+  // The in-flight build's claim (Nov 23, 2026): held so the
+  // intake's Change control can retire the build through the
+  // authority — releasing it makes the build's next
+  // superseded() checkpoint discard the build silently.
+  // Cleared at handover, where the claim upgrades to the
+  // tour's and routeClaimRef takes over.
+  const routeBuildClaimRef = useRef<SessionClaim | null>(null);
 
   /**
    * End the live route tour, if any (the endRoute path,
@@ -1289,6 +1303,7 @@ function MilesApp() {
     routePickResolveRef.current = null;
     setRoutePicker(null);
     setRouteBuilding(true);
+    setRouteBuildingDest(routeDest.trim());
     setRouteFailure(null);
     setRouteBuildStage('route');
     setRouteStatus(ROUTE_BUILD_STAGE_LABELS.route);
@@ -1312,6 +1327,7 @@ function MilesApp() {
     // that replaced it. One route_build_superseded files for
     // the record, however many checkpoints notice.
     let claim = sessionAuthority.claim('route-build', sessionId);
+    routeBuildClaimRef.current = claim;
     let supersedeFiled = false;
     const superseded = (): boolean => {
       if (sessionAuthority.isCurrent(claim)) return false;
@@ -2544,6 +2560,7 @@ function MilesApp() {
       engineRef.current?.endTour();
       claim = sessionAuthority.claim('route-tour', sessionId);
       routeClaimRef.current = claim;
+      routeBuildClaimRef.current = null;
       // Hand the plan to the runner primed at the tap (above):
       // same runner, same element, latch already earned inside
       // the gesture window — item 1 now begins as a normal play,
@@ -2777,6 +2794,41 @@ function MilesApp() {
     stopRouteTour();
   };
 
+  /**
+   * Change destination (Nov 23, 2026 — field fix). Erik set a
+   * destination, the build started, and he wanted a different
+   * one — the intake gave him no way to say so: the build had
+   * captured the destination at its tap, editing the field was
+   * inert, and the only exit was abandoning the build to a
+   * freeform start (his build filed route_build_superseded and
+   * the episode never played). This is that exit, in the open:
+   * picker pauses resolve as a Back, the build's claim is
+   * released back to the authority so its next superseded()
+   * checkpoint files the event and discards plan + runner
+   * silently — it never stages, never feeds, never sounds —
+   * and the form resets to the destination field with its
+   * text preserved for the edit. A freeform tour already
+   * running is untouched: releasing the build's claim
+   * installs no new intent and resurrects none, and the
+   * handover that would have yielded the tour never comes.
+   * Mirrors startTour's build retirement, minus the tour.
+   */
+  const changeRouteDestination = () => {
+    routePickResolveRef.current?.(null);
+    routePickResolveRef.current = null;
+    setRoutePicker(null);
+    seamPickResolveRef.current?.(null);
+    seamPickResolveRef.current = null;
+    setSeamPicker(null);
+    if (routeBuildClaimRef.current) {
+      sessionAuthority.release(routeBuildClaimRef.current);
+      routeBuildClaimRef.current = null;
+    }
+    setRouteBuilding(false);
+    setRouteFailure(null);
+    setRouteStatus('');
+  };
+
   // The route build's failed state (Nov 4, 2026), rendered by
   // BOTH route forms: a plain-language message and a Try again
   // that restarts the build cleanly (buildRoute mints a fresh
@@ -2802,6 +2854,28 @@ function MilesApp() {
         </button>
       </div>
     ) : null;
+
+  // Change destination (Nov 23, 2026): while a build is in
+  // flight — composing, or paused at the fork / seam picker —
+  // both route forms show the destination the build captured
+  // (the snapshot, not the editable field's text) with its
+  // Change control, in the same shape as the choice step's
+  // 'Riding: … Change' row. Past handover the building flag
+  // is off and the route screen owns the frame: no row.
+  const routeDestChangeBlock = routeBuilding ? (
+    <div className="mt-3 flex items-center justify-center gap-2 text-xs font-semibold text-inksoft">
+      <span>
+        Headed to <span className="font-bold text-ink">{routeBuildingDest}</span>
+      </span>
+      <button
+        type="button"
+        onClick={changeRouteDestination}
+        className="font-bold text-sagedeep underline underline-offset-2"
+      >
+        Change
+      </button>
+    </div>
+  ) : null;
 
   // Route choice (Nov 5, 2026): the fork picker's taps. The
   // confirm settles the paused build's promise with the
@@ -3348,6 +3422,7 @@ function MilesApp() {
                       ? 'Building…'
                       : 'Build my route'}
               </button>
+              {routeDestChangeBlock}
               {routeStatus && <p className="mt-2 text-center text-xs leading-relaxed text-inksoft">{routeStatus}</p>}
               {routePickerBlock}
               {seamPickerBlock}
@@ -3549,6 +3624,7 @@ function MilesApp() {
                           ? 'Building…'
                           : 'Build my route'}
                   </button>
+                  {routeDestChangeBlock}
                   {routeStatus && <p className="mt-3 text-center text-xs leading-relaxed text-inksoft">{routeStatus}</p>}
                   {routePickerBlock}
                   {seamPickerBlock}
