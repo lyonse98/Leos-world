@@ -1,6 +1,6 @@
 // GENERATED — do not hand-edit. Built by
 // scripts/route-mode/build-route-presence.mjs from
-// presence-classes.csv (3629 rows, the Nov 4, 2026
+// presence-classes.csv (3632 rows, the Nov 4, 2026
 // presence audit). The route build joins library rows to this
 // map at runtime, so no DB change is needed for route mode to
 // know a story's presence register.
@@ -3369,6 +3369,9 @@ export const ROUTE_PRESENCE: Record<string, RoutePresenceEntry> = {
   "north chapel|landmark_building": { presence: "mixed", protected: false },
   "sail ho golf course|landmark_sports": { presence: "safe", protected: false },
   "ntc command center|landmark_building": { presence: "safe", protected: false },
+  "san diego ostrich ranch|landmark_origin": { presence: "safe", protected: false },
+  "escondido|landmark_people": { presence: "safe", protected: false },
+  "kit carson park|landmark_origin": { presence: "mixed", protected: false },
   "sr-75 north: imperial beach to coronado cays|corridor-woven-v1": { presence: "safe", protected: false },
   "sr-75 north: coronado cays to coronado|corridor-woven-v1": { presence: "safe", protected: false },
   "coronado ferry landing|landmark_event-woven-v1": { presence: "safe", protected: false },

@@ -1,6 +1,6 @@
 // GENERATED — do not hand-edit. Built by
 // scripts/route-mode/build-route-tags.mjs from story-tags.csv
-// (4254 rows, Nov 1 tone/topic tagging). The route
+// (4257 rows, Nov 1 tone/topic tagging). The route
 // composer joins library-index rows to this map at runtime, so no
 // DB change is needed for route mode to see tone/topic tags.
 
@@ -4266,6 +4266,9 @@ export const ROUTE_TAGS: Record<string, RouteTagEntry> = {
   "north chapel|landmark_building": { topics: [], tone: "reverent", toneSecondary: "reflective" },
   "sail ho golf course|landmark_sports": { topics: [], tone: "warm", toneSecondary: "reflective" },
   "ntc command center|landmark_building": { topics: [], tone: "reflective", toneSecondary: "warm" },
+  "san diego ostrich ranch|landmark_origin": { topics: ["Boom & Bust"], tone: "light", toneSecondary: "warm" },
+  "escondido|landmark_people": { topics: ["Food & Drink"], tone: "warm", toneSecondary: "reflective" },
+  "kit carson park|landmark_origin": { topics: ["folklore"], tone: "grand", toneSecondary: "reflective" },
 };
 
 export function tagsFor(placeKey: string, angle: string): RouteTagEntry {
