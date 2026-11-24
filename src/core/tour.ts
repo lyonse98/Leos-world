@@ -2682,6 +2682,13 @@ export class Tour {
     // non-priority offer, buffer drops, later ticks retry —
     // Erik's Nov 5 no-corridor-priority ruling survives
     // intact at surface pace, off the freeway.
+    // (Nov 24, 2026: Erik ruled the rest of the Nov 15
+    // speed-regime sketch — at freeway pace a corridor story
+    // holding the waiting slot can no longer be displaced by
+    // a Tier-1 or ordinary newcomer. That law lives in
+    // mayDisplace, where both items are visible; this lane's
+    // offer — and its retention choreography against a
+    // Tier-1 waiter — is unchanged.)
     const inRegime = this.position ? this.freewayPace(this.position, segment.id) : false;
     const landed = this.player.offerStory(item, false, { priorityClass: inRegime });
     if (landed === 'buffer') {
@@ -4409,6 +4416,51 @@ export class Tour {
     if (this.opening !== 'open' && this.opening !== 'failed') return false;
     if (this.player.latch !== 'earned') return false;
     if (this.qaPhase !== 'idle') return false;
+    // Freeway-pace ordering (Erik's ruling, Nov 24, 2026 —
+    // the freeform limb of his Nov 15 speed-regime sketch,
+    // ruled at last): at freeway pace the queue order is
+    // welcome → corridor → Tier-1 → everything else. The
+    // consequence that lands HERE is the corridor WAITER's
+    // protection: a corridor story holding the waiting slot
+    // outranks every non-welcome, non-corridor newcomer, on
+    // either displacement kind (the Nov 24 field case: a
+    // Tier-1 offer displaced the I-15 North: Rancho
+    // Peñasquitos to Rancho Bernardo corridor story 411 m
+    // from its anchor, 11.8 s into its wait —
+    // displaced-priority, at freeway pace, by the class the
+    // corridor now outranks).
+    // The reverse contest — a corridor NEWCOMER against a
+    // Tier-1 waiter — does NOT land here, deliberately: it
+    // already has a settled choreography from the Nov 15
+    // ruling (the offer lands 'buffer', the item is retained
+    // as corridor-pending, and at the next refill it claims
+    // the empty slot ahead of uncommitted Tier-1 pendings —
+    // FP-5's pins). A Tier-1 story already committed to the
+    // slot keeps it; the corridor's rank over Tier-1
+    // expresses against the pendings, which is what
+    // "competitive" has meant in this lane since Nov 15.
+    // Untouched, deliberately: the welcome's seniority (a
+    // reserved/welcome newcomer still displaces a corridor
+    // waiter), corridor succession (a corridor newcomer may
+    // still displace a corridor waiter — the segment behind
+    // yields to the segment under the car, and judgeStory's
+    // overshoot law kills a stale waiter at dequeue either
+    // way), and EVERYTHING below freeway pace — this block
+    // runs only inside the regime, so the Nov 5
+    // no-corridor-priority ruling survives intact at surface
+    // pace, off the freeway.
+    if (this.position && this.freewayPace(this.position)) {
+      const waiterCorridor = waiter.storySource === 'corridor';
+      const newcomerCorridor = newcomer.storySource === 'corridor';
+      if (
+        waiterCorridor &&
+        !newcomerCorridor &&
+        !newcomer.reserved &&
+        !(newcomer.subject ?? '').startsWith('welcome:')
+      ) {
+        return false;
+      }
+    }
     if (waiter.reserved || waiter.tier1) return false;
     if (kind === 'priority') return true;
     // Fresher: materially closer or materially newer.

@@ -537,6 +537,163 @@ export async function runScenarios(Tour, extras) {
     tour.endTour();
   }
 
+  // ---------------------------------------------------------- FP-7 freeway-pace ordering (Erik's ruling, Nov 24, 2026)
+  // The freeform limb of the Nov 15 speed-regime sketch, ruled
+  // after the Nov 24 Safari Park drive: at freeway pace the
+  // queue order is welcome → corridor → Tier-1 → everything
+  // else. The Nov 15/20 build had given the corridor lane
+  // priority-class OFFERS and the refill lane, but the slot
+  // contest itself still ranked Tier-1 above corridor both
+  // ways — and on Nov 24 a Tier-1 offer displaced the I-15
+  // North: Rancho Peñasquitos to Rancho Bernardo corridor
+  // story (displaced-priority, 411 m from its anchor, 11.8 s
+  // into its wait). These fixtures pin the contest both ways
+  // at freeway pace, plus the surface-pace control where the
+  // Nov 5 no-corridor-priority ruling must survive untouched.
+  const fp7Drops = (world, subject) =>
+    world.eventsOf('story_dropped').filter(e => e.payload.subject === subject);
+  const fp7Seg = () => {
+    const MPD_LAT = 111_320;
+    const mpdLng = lat => MPD_LAT * Math.cos((lat * Math.PI) / 180);
+    const distM = (a, b) => Math.hypot((b.lat - a.lat) * MPD_LAT, (b.lng - a.lng) * mpdLng(a.lat));
+    const segLen = s => s.polyline.reduce((acc, p, i) => (i === 0 ? 0 : acc + distM(p, s.polyline[i - 1])), 0);
+    const seg = CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
+    const total = segLen(seg);
+    let acc = 0;
+    let mid = null;
+    for (let i = 1; i < seg.polyline.length; i++) {
+      const a = seg.polyline[i - 1];
+      const b = seg.polyline[i];
+      const leg = distM(b, a);
+      if (acc + leg >= total * 0.5) {
+        const t = (total * 0.5 - acc) / leg;
+        mid = {
+          lat: a.lat + (b.lat - a.lat) * t,
+          lng: a.lng + (b.lng - a.lng) * t,
+          heading: ((Math.atan2((b.lng - a.lng) * mpdLng(a.lat), (b.lat - a.lat) * MPD_LAT) * 180) / Math.PI + 360) % 360,
+        };
+        break;
+      }
+      acc += leg;
+    }
+    const offSeg = { lat: mid.lat, lng: mid.lng + 500 / mpdLng(mid.lat) }; // 500 m east: outside the corridor buffer
+    return { seg, mid, offSeg };
+  };
+
+  suite('FP-7a freeway pace: a Tier-1 offer cannot displace a waiting corridor story (Nov 24 replay)');
+  {
+    resetLocalStorage();
+    const { seg, mid } = fp7Seg();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: seg.polyline[0].lat, lng: seg.polyline[0].lng, distanceM: 100 })],
+      library: [
+        { name: 'Alpha Park', lat: seg.polyline[0].lat, lng: seg.polyline[0].lng },
+        seg.displayName,
+        { name: 'Tier Tower', lat: mid.lat, lng: mid.lng },
+      ],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 90_000 }));
+    const tour = await startAt(world, audio, seg.polyline[0], 8, mid.heading);
+    const labels = watchLabels(world, tour);
+    await world.clock.advance(40_000); // greeting + opener + welcome; Alpha playing (90 s)
+    // Onto the segment at freeway speed: the corridor offer
+    // takes the empty waiting slot behind Alpha.
+    tour.onPosition({ lat: mid.lat, lng: mid.lng, speedMps: 27, headingDeg: mid.heading });
+    await world.clock.advance(3_000);
+    check('corridor story holds the waiting slot', tour.view().upNext === seg.displayName, `upNext=${tour.view().upNext}`);
+    // A Tier-1 landmark is offered against the corridor
+    // waiter, still at freeway pace: under the Nov 24 ruling
+    // it must NOT displace — it pends behind the corridor.
+    world.candidates = [makeCandidate('Tier Tower', { tier1: true, lat: mid.lat, lng: mid.lng, distanceM: 60 })];
+    tour.onPosition({ lat: mid.lat, lng: mid.lng, speedMps: 27, headingDeg: mid.heading });
+    await world.clock.advance(3_000);
+    const corridorDrops = fp7Drops(world, `corridor:${seg.id}`);
+    check('no displaced-priority drop for the corridor story', corridorDrops.length === 0, JSON.stringify(corridorDrops.map(d => d.payload)));
+    check('corridor story still holds the slot', tour.view().upNext === seg.displayName, `upNext=${tour.view().upNext}`);
+    await world.clock.advance(300_000);
+    const storyOrder = labels.filter(l => !l.startsWith('Welcome to '));
+    check('play order: Alpha, corridor, then the pended Tier-1',
+      storyOrder.slice(0, 3).join(',') === `Alpha Park,${seg.displayName},Tier Tower`, labels.join(','));
+    tour.endTour();
+  }
+
+  suite('FP-7b freeway pace: a corridor offer against a Tier-1 waiter keeps the Nov 15 retention choreography');
+  {
+    resetLocalStorage();
+    const { seg, mid, offSeg } = fp7Seg();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: seg.polyline[0].lat, lng: seg.polyline[0].lng, distanceM: 100 })],
+      library: [
+        { name: 'Alpha Park', lat: seg.polyline[0].lat, lng: seg.polyline[0].lng },
+        seg.displayName,
+        { name: 'Tier Tower', lat: offSeg.lat, lng: offSeg.lng },
+      ],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 90_000 }));
+    const tour = await startAt(world, audio, seg.polyline[0], 8, mid.heading);
+    const labels = watchLabels(world, tour);
+    await world.clock.advance(40_000); // Alpha playing
+    // Slot the Tier-1 as waiter from off-segment ground (no
+    // corridor trigger fires out there).
+    world.candidates = [makeCandidate('Tier Tower', { tier1: true, lat: offSeg.lat, lng: offSeg.lng, distanceM: 60 })];
+    tour.onPosition({ lat: offSeg.lat, lng: offSeg.lng, speedMps: 8, headingDeg: mid.heading });
+    await world.clock.advance(3_000);
+    check('Tier-1 holds the waiting slot', tour.view().upNext === 'Tier Tower', `upNext=${tour.view().upNext}`);
+    // Onto the segment at freeway speed: the corridor offer
+    // meets the committed Tier-1 waiter. The Nov 24 ruling
+    // protects corridor WAITERS; it does not depose committed
+    // Tier-1 waiters — the offer lands buffer, the item is
+    // retained, and it promotes into the slot the moment the
+    // Tier-1 takes the element (the Nov 15 choreography,
+    // FP-5's pins, unchanged).
+    tour.onPosition({ lat: mid.lat, lng: mid.lng, speedMps: 27, headingDeg: mid.heading });
+    await world.clock.advance(3_000);
+    const tierDrops = fp7Drops(world, 'tier tower');
+    check('the Tier-1 waiter is NOT displaced by the corridor offer',
+      tierDrops.length === 0, JSON.stringify(tierDrops.map(d => d.payload)));
+    check('Tier-1 still holds the slot (corridor retained, not slotted)',
+      tour.view().upNext === 'Tier Tower', `upNext=${tour.view().upNext}`);
+    await world.clock.advance(300_000);
+    const promoted = world.eventsOf('corridor_pending_promoted').filter(e => e.payload.segment_id === seg.id);
+    check('the retained corridor item promotes at the transition', promoted.length >= 1,
+      JSON.stringify(world.eventsOf('corridor_pending_promoted').map(e => e.payload)));
+    const storyOrder = labels.filter(l => !l.startsWith('Welcome to '));
+    check('sounding order: Alpha → Tier-1 → corridor',
+      storyOrder.slice(0, 3).join(',') === `Alpha Park,Tier Tower,${seg.displayName}`, labels.join(','));
+    tour.endTour();
+  }
+
+  suite('FP-7c surface pace (off the freeway): the Tier-1 still displaces the corridor waiter — Nov 5 preserved');
+  {
+    resetLocalStorage();
+    const { seg, mid, offSeg } = fp7Seg();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: seg.polyline[0].lat, lng: seg.polyline[0].lng, distanceM: 100 })],
+      library: [
+        { name: 'Alpha Park', lat: seg.polyline[0].lat, lng: seg.polyline[0].lng },
+        seg.displayName,
+        { name: 'Tier Tower', lat: offSeg.lat, lng: offSeg.lng },
+      ],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 90_000 }));
+    const tour = await startAt(world, audio, seg.polyline[0], 8, mid.heading);
+    await world.clock.advance(40_000); // Alpha playing
+    tour.onPosition({ lat: mid.lat, lng: mid.lng, speedMps: 27, headingDeg: mid.heading });
+    await world.clock.advance(3_000);
+    check('corridor story holds the waiting slot', tour.view().upNext === seg.displayName, `upNext=${tour.view().upNext}`);
+    // Off the freeway at surface pace, the same Tier-1 offer
+    // the freeway pace refused now displaces as it always
+    // has: the Nov 24 ruling is a regime law, not a lane law.
+    world.candidates = [makeCandidate('Tier Tower', { tier1: true, lat: offSeg.lat, lng: offSeg.lng, distanceM: 60 })];
+    tour.onPosition({ lat: offSeg.lat, lng: offSeg.lng, speedMps: 8, headingDeg: mid.heading });
+    await world.clock.advance(3_000);
+    const corridorDrops = fp7Drops(world, `corridor:${seg.id}`);
+    check('at surface pace the corridor waiter is displaced (displaced-priority)',
+      corridorDrops.some(d => d.payload.reason === 'displaced-priority'), JSON.stringify(corridorDrops.map(d => d.payload)));
+    check('Tier-1 takes the slot', tour.view().upNext === 'Tier Tower', `upNext=${tour.view().upNext}`);
+    tour.endTour();
+  }
+
   // ---------------------------------------------------------- S-10 filler lane
   suite('S-10 filler lane (F1/F2/F5/F9/F10/F12)');
   {

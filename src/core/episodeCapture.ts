@@ -717,6 +717,13 @@ export interface EpisodeOutcomeAccounting {
    */
   renderResults?: CapturedRenderResult[];
   /**
+   * Stall rescues fired during playback (route stall fix,
+   * Nov 24, 2026; optional — accountings that predate the
+   * mechanism omit it). Supplied by the runner at close; see
+   * CapturedStallRescue.
+   */
+  stallRescues?: CapturedStallRescue[];
+  /**
    * Re-bridge commissions fired (or cap-blocked) at drive
    * time when stories dropped stale (drop coherence, Nov 4,
    * 2026; optional — accountings that predate the mechanism
@@ -774,6 +781,48 @@ export interface CapturedRenderResult {
    * is still complete in the plan row).
    */
   result: 'pre-start' | 'ahead' | 'skipped-late' | 'failed' | 'pending';
+  /**
+   * The scrubbed render error (name + message only) when the
+   * verdict is 'failed' and the failure recorded one — duo
+   * items record theirs at the render seam (stall/render fix,
+   * Nov 24, 2026: the Nov 24 field failures reached the record
+   * with no error at all, and an undiagnosable failure is a
+   * second failure). Absent on non-failed verdicts; null on a
+   * failure that recorded nothing.
+   */
+  error?: string | null;
+}
+
+/**
+ * One stall rescue (route stall fix, Nov 24, 2026): the feed
+ * gate held an item on a progress reading that had frozen
+ * (the driver diverged from the composed path — Nov 24's
+ * UTC → Safari Park drive: progress stuck at 0.175, the I-5
+ * item stale-windowed, and the rendered, positionally-next
+ * I-15 corridor item never released), the stage sat empty
+ * while the driver kept moving, and the runner rescued:
+ * 'reanchor' released the next ready story positionally
+ * relevant to the driver's ACTUAL position (item_id names
+ * it; skipped_item_ids names what the rescue stepped over,
+ * in plan order); 'exhausted' found nothing relevant and
+ * declared plan exhaustion, handing over to the freeform
+ * tail. Additive on the outcome row — rows that predate the
+ * mechanism carry an empty list.
+ */
+export interface CapturedStallRescue {
+  action: 'reanchor' | 'exhausted';
+  /** The story the re-anchor released; null on 'exhausted'. */
+  item_id: string | null;
+  /** Plan items the rescue resolved without sounding, in plan order. */
+  skipped_item_ids: string[];
+  /** How long the stage had been empty when the rescue fired. */
+  silence_ms: number;
+  /** The driver's distance from the composed path at the rescue (m). */
+  distance_to_path_m: number;
+  /** The (frozen) path progress reading at the rescue. */
+  progress: number;
+  /** Whether the corridor guard's pause stood when the rescue fired (it latches on divergence and lifts only on return — most real stalls present guard-paused; the rescue voids the wait through the guard override). */
+  guard_paused: boolean;
 }
 
 /**
@@ -830,6 +879,8 @@ export interface RouteEpisodeOutcomePayload {
   render_results: CapturedRenderResult[];
   /** Re-bridge commissions (drop coherence); empty when none fired — and on rows that predate the field. */
   commissions: CapturedCommission[];
+  /** Stall rescues (route stall fix, Nov 24, 2026); empty when none fired — and on rows that predate the field. */
+  stall_rescues: CapturedStallRescue[];
   /** Bridge items that sounded via the render-failure seam fallback (field fix F5); empty when none — and on rows that predate the field. */
   seam_fallbacks: string[];
   /** Ms from plan-fix until the render queue drained; null if it never did before close. */
@@ -881,6 +932,7 @@ export function assembleOutcomeCapture(
     dropped,
     render_results: acc.renderResults ? [...acc.renderResults] : [],
     commissions: acc.commissions ? [...acc.commissions] : [],
+    stall_rescues: acc.stallRescues ? [...acc.stallRescues] : [],
     seam_fallbacks: acc.seamFallbackItemIds ? [...acc.seamFallbackItemIds] : [],
     render_queue_drained_ms: acc.queueDrainedMs ?? null,
     heard_unit_ids: [...acc.heardUnitIds],

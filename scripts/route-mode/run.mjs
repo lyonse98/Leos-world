@@ -189,7 +189,7 @@ const pf = await import(pathToFileURL(pfOut).href);
 // the same commit; a run that executes fewer checks than
 // the floor FAILS, whatever its pass rate (enforced at the
 // final tally below).
-const MIN_CHECKS = 446;
+const MIN_CHECKS = 451;
 
 let passed = 0;
 let failed = 0;
@@ -6227,6 +6227,228 @@ await checkAsync('capture: a throwing outcome dep leaves the tour identical', as
   runner.onPosition({ lat: 32.9, lng: -117.25 }); // arrival
   await until(() => runner.view().closeoutDone, 'arrival closeout completed despite the throwing capture dep');
   assert.equal(runner.view().endedKind, 'arrival-owed', 'the closeout completed exactly as without capture');
+});
+
+// ---- stall rescue + duo render errors (Nov 24, 2026) ----
+// The Safari Park field drive, replayed: a windowed story
+// stale-drops, the next windowed story's release never comes
+// because the runner's progress froze (the driver diverged
+// from the composed path), and the gate holds silence while
+// the driver keeps moving. The rescue must re-anchor to the
+// ready story by the driver's ACTUAL position — or, with
+// nothing relevant ahead, declare exhaustion and hand over
+// to the freeform tail. Stall bounds ride the deps seam at
+// harness scale; production runs the STALL_* constants.
+const stallPlan = (cUnit, dUnit) => {
+  const aU = unit('a|landmark_origin', 32.71);
+  const bU = unit('b|landmark_origin', 32.8);
+  const dU = dUnit ?? unit('d|landmark_origin', 32.88);
+  const items = [
+    { kind: 'story', id: aU.id, label: 'A', durationSec: 60, unit: aU, ready: true },
+    { kind: 'bridge', id: 'br-ab', label: 'Bridge', durationSec: 6, text: 'BRIDGE AB', prevUnitId: aU.id, nextUnitId: bU.id, ready: true },
+    { kind: 'story', id: bU.id, label: 'B', durationSec: 60, unit: bU, ready: true, anchorProgress: 0.45, releaseProgress: 0.3, expireProgress: 0.6 },
+    { kind: 'bridge', id: 'br-bc', label: 'Bridge', durationSec: 6, text: 'BRIDGE BC', prevUnitId: bU.id, nextUnitId: cUnit.id, ready: true },
+    { kind: 'story', id: cUnit.id, label: 'C', durationSec: 60, unit: cUnit, ready: true, anchorProgress: 0.9, releaseProgress: 0.85, expireProgress: 0.99 },
+    { kind: 'bridge', id: 'br-cd', label: 'Bridge', durationSec: 6, text: 'BRIDGE CD', prevUnitId: cUnit.id, nextUnitId: dU.id, ready: true },
+    { kind: 'story', id: dU.id, label: 'D', durationSec: 60, unit: dU, ready: true },
+  ];
+  return { destinationName: 'Dest', destination: dest, path, driveSec: 1000, budgetSec: 1000, items, wrapUp: null };
+};
+const stallTuning = { silenceMs: 60_000, offPathSilenceMs: 900, offPathM: 1500, reanchorRadiusM: 6000, movingNetM: 50 };
+const driveStallToHold = async (runner, events) => {
+  await runner.start(stallPlan(runner.__cUnit, runner.__dUnit));
+  // Two fixes deep into segment 2: progress reads 0.75 — past
+  // B's expire (0.6), short of C's release (0.85).
+  runner.onPosition({ lat: 32.85, lng: -117.25 });
+  runner.onPosition({ lat: 32.85, lng: -117.25 });
+  await until(
+    () => events.some(e => e.kind === 'story_dropped' && e.payload.subject === 'b|landmark_origin'),
+    'B stale-drops at the gate',
+  );
+};
+
+await checkAsync('stall rescue: frozen gate re-anchors to the ready story at the driver’s actual position (Nov 24 replay)', async () => {
+  const events = [];
+  const outcomes = [];
+  const audio = new RealFakeAudio(300);
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onEvent: (kind, payload) => events.push({ kind, payload }),
+    episodeIds: { tourId: 'route-stall-1', buildId: 'fresh-test' },
+    onEpisodeOutcome: p => outcomes.push(p),
+    stallTuning,
+  });
+  runner.__cUnit = unit('c|landmark_origin', 32.85, { lng: -117.2 });
+  await driveStallToHold(runner, events);
+  // The driver diverges east of the path and keeps moving:
+  // progress stays pinned at segment 2's midpoint (0.75)
+  // while the fixes march north, ~145 m apart.
+  for (let i = 0; i < 3; i++) {
+    runner.onPosition({ lat: 32.85 + i * 0.0013, lng: -117.2 });
+    await new Promise(r => setTimeout(r, 60));
+  }
+  assert.equal(
+    events.filter(e => e.kind === 'route_stall_rescue').length,
+    0,
+    'no rescue inside the silence bound — an honest wait is not a stall',
+  );
+  // The march runs well past the bound: br-bc settles after
+  // B's drop and re-arms the silence clock, and the
+  // conviction is evaluated on fix arrival — the fixes must
+  // still be coming when the bound passes.
+  for (let i = 3; i < 32; i++) {
+    runner.onPosition({ lat: 32.85 + i * 0.0013, lng: -117.2 });
+    await new Promise(r => setTimeout(r, 100));
+    if (events.some(e => e.kind === 'route_stall_rescue')) break;
+  }
+  const rescue = events.find(e => e.kind === 'route_stall_rescue');
+  assert.ok(rescue, 'the rescue fired once the silence bound passed');
+  assert.equal(rescue.payload.action, 'reanchor');
+  assert.equal(rescue.payload.item_id, 'c|landmark_origin', 'the released story is the one at the driver’s actual position');
+  assert.deepEqual(rescue.payload.skipped_item_ids, [], 'the held story was the head — nothing stood between the cursor and it');
+  await until(() => audio.played.some(s => s.includes('c%7Clandmark_origin.wav')), 'the re-anchored story sounds');
+  await until(() => audio.played.some(s => s.includes('d%7Clandmark_origin.wav')), 'the plan resumes in order behind it (bridge, then D)');
+  runner.endTour();
+  assert.equal(outcomes.length, 1);
+  const out = outcomes[0];
+  assert.equal(out.stall_rescues.length, 1, 'the rescue rides the outcome record');
+  assert.equal(out.stall_rescues[0].action, 'reanchor');
+  const bDrop = out.dropped.find(d => d.id === 'b|landmark_origin');
+  assert.ok(bDrop && bDrop.reason === 'stale-window', 'B’s stale drop is unchanged by the rescue');
+  const brDrop = out.dropped.find(d => d.id === 'br-bc');
+  assert.ok(brDrop && brDrop.reason === 'parent-dropped', 'B’s bridge died with it, as ever');
+  assert.ok(out.played_item_ids.includes('c|landmark_origin'), 'C is in the played list');
+});
+
+await checkAsync('stall rescue: nothing positionally relevant ahead → exhaustion hands over to the freeform tail', async () => {
+  const events = [];
+  const outcomes = [];
+  const audio = new RealFakeAudio(300);
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onEvent: (kind, payload) => events.push({ kind, payload }),
+    episodeIds: { tourId: 'route-stall-2', buildId: 'fresh-test' },
+    onEpisodeOutcome: p => outcomes.push(p),
+    stallTuning,
+  });
+  runner.__cUnit = unit('c|landmark_origin', 32.85, { lng: -116.9 }); // ~33 km east: not this drive's ground
+  runner.__dUnit = unit('d|landmark_origin', 32.88, { lng: -116.9 }); // D too — on-path D would sit inside the re-anchor radius of the march and the rescue would (rightly) release it instead
+  await driveStallToHold(runner, events);
+  for (let i = 0; i < 32; i++) {
+    runner.onPosition({ lat: 32.85 + i * 0.0013, lng: -117.2 });
+    await new Promise(r => setTimeout(r, 100));
+    if (events.some(e => e.kind === 'route_stall_rescue')) break;
+  }
+  const rescue = events.find(e => e.kind === 'route_stall_rescue');
+  assert.ok(rescue, 'the rescue fired');
+  assert.equal(rescue.payload.action, 'exhausted');
+  assert.equal(rescue.payload.item_id, null);
+  await until(() => runner.view().closeoutDone, 'the overrun closeout completes');
+  assert.equal(runner.view().endedKind, 'overrun');
+  assert.equal(runner.view().freeformTail, true, 'the freeform tail is the handover — never dead air');
+  assert.equal(outcomes.length, 1);
+  const out = outcomes[0];
+  assert.equal(out.end_reason, 'overrun');
+  assert.equal(out.stall_rescues.length, 1);
+  assert.equal(out.stall_rescues[0].action, 'exhausted');
+  const cDrop = out.dropped.find(d => d.id === 'c|landmark_origin');
+  assert.ok(cDrop && cDrop.reason === 'stall-exhausted', `C's drop names the rescue (got ${cDrop && cDrop.reason})`);
+  const dDrop = out.dropped.find(d => d.id === 'd|landmark_origin');
+  assert.ok(dDrop && dDrop.reason === 'stall-exhausted', 'the stories behind C resolve with it');
+  runner.endTour();
+});
+
+// Duo render fix (Nov 24, 2026): one retry before a line
+// drops, and the error — scrubbed — in BOTH the duo_line
+// event and the outcome's render_results. The Nov 24 drive
+// lost seven lines with no diagnosable cause; these suites
+// pin that a failure now names itself, and that a transient
+// failure costs nothing.
+const duoPlan = () => {
+  const aU = unit('a|landmark_origin', 32.71);
+  const bU = unit('b|landmark_origin', 32.8);
+  const items = [
+    { kind: 'story', id: aU.id, label: 'A', durationSec: 60, unit: aU, ready: true },
+    { kind: 'bridge', id: 'duo-beat-1', label: 'Earl beat', durationSec: 5, text: 'EARL BEAT TEXT', duo: { speaker: 'earl', role: 'bridge-beat' }, ready: true },
+    { kind: 'story', id: bU.id, label: 'B', durationSec: 60, unit: bU, ready: true },
+  ];
+  return { destinationName: 'Dest', destination: dest, path, driveSec: 1000, budgetSec: 1000, items, wrapUp: null };
+};
+
+await checkAsync('duo render: a first-attempt failure retries once and the line sounds', async () => {
+  const events = [];
+  const audio = new RealFakeAudio(300);
+  let earlCalls = 0;
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    synthEarlUrl: async () => {
+      earlCalls += 1;
+      if (earlCalls === 1) throw new Error('synthesis hiccup');
+      return 'blob:earl/ok';
+    },
+    onEvent: (kind, payload) => events.push({ kind, payload }),
+  });
+  await runner.start(duoPlan());
+  assert.equal(earlCalls, 2, 'exactly one retry followed the failed first attempt');
+  assert.equal(events.filter(e => e.kind === 'duo_line' && e.payload.stage === 'render-failed').length, 0, 'no render-failed verdict for a line that landed');
+  await until(() => audio.played.includes('blob:earl/ok'), 'the retried Earl line sounds');
+  await until(() => audio.played.some(s => s.includes('b%7Clandmark_origin.wav')), 'the story behind the beat sounds');
+  runner.endTour();
+});
+
+await checkAsync('duo render: a twice-failed line drops with its error in the event AND the outcome render_results', async () => {
+  const events = [];
+  const outcomes = [];
+  const audio = new RealFakeAudio(300);
+  let earlCalls = 0;
+  const runner = new rp.RoutePlanRunner({
+    audio,
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    synthEarlUrl: async () => {
+      earlCalls += 1;
+      throw new Error('verification gate rejected the render: measured 4.20s, expected 2.00s');
+    },
+    onEvent: (kind, payload) => events.push({ kind, payload }),
+    episodeIds: { tourId: 'route-duo-err', buildId: 'fresh-test' },
+    onEpisodeOutcome: p => outcomes.push(p),
+  });
+  await runner.start(duoPlan());
+  assert.equal(earlCalls, 2, 'one retry, then the line drops — the gate’s standards are unchanged');
+  const failed = events.find(e => e.kind === 'duo_line' && e.payload.stage === 'render-failed');
+  assert.ok(failed, 'the render-failed verdict filed');
+  assert.ok(
+    typeof failed.payload.error === 'string' && failed.payload.error.includes('verification gate rejected'),
+    `the event carries the scrubbed error (got ${JSON.stringify(failed.payload.error)})`,
+  );
+  await until(() => audio.played.some(s => s.includes('b%7Clandmark_origin.wav')), 'the story behind the dead beat still sounds, bridgeless');
+  runner.endTour();
+  assert.equal(outcomes.length, 1);
+  const rr = outcomes[0].render_results.find(r => r.id === 'duo-beat-1');
+  assert.ok(rr && rr.result === 'failed', 'the outcome render verdict is failed');
+  assert.ok(
+    typeof rr.error === 'string' && rr.error.includes('verification gate rejected'),
+    `the outcome render_results carries the error (got ${JSON.stringify(rr && rr.error)})`,
+  );
+});
+
+await checkAsync('duo render: no Earl seam wired — the failure records its reason instead of null', async () => {
+  const events = [];
+  const runner = new rp.RoutePlanRunner({
+    audio: new RealFakeAudio(300),
+    synthUrl: async t => 'blob:audio/' + encodeURIComponent(t.slice(0, 16)),
+    onEvent: (kind, payload) => events.push({ kind, payload }),
+  });
+  await runner.start(duoPlan());
+  const failed = events.find(e => e.kind === 'duo_line' && e.payload.stage === 'render-failed');
+  assert.ok(failed, 'the render-failed verdict filed');
+  assert.ok(
+    typeof failed.payload.error === 'string' && failed.payload.error.includes('Earl seam not wired'),
+    `the no-seam failure names itself (got ${JSON.stringify(failed.payload.error)})`,
+  );
+  runner.endTour();
 });
 
 // ---- render-ahead pipeline (Nov 4, 2026) ----

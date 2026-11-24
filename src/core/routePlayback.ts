@@ -111,6 +111,7 @@ import {
   pathLengthM,
   type CapturedCommission,
   type CapturedRenderResult,
+  type CapturedStallRescue,
   type EpisodeCaptureContext,
   type RouteEpisodeOutcomePayload,
   type RouteEpisodePlanPayload,
@@ -120,6 +121,7 @@ import {
   bridgeTextFor,
   buildBridgeContext,
   decideCloseout,
+  distanceToPathM,
   estimateDurationSec,
   hasArrived,
   haversineM,
@@ -520,6 +522,65 @@ export const LATE_PRESENCE_FRACTION_POINT = 0.9;
 /** The planned-silence length a doubly-failed bridge converts to (field fix F5): a breath, the planned-silence family's size. */
 export const FALLBACK_SEAM_SILENCE_SEC = 3;
 
+/**
+ * Stall rescue (Nov 24, 2026 — the Safari Park field drive):
+ * the feed gate holds a windowed story on its release
+ * progress, and progress is a projection onto the COMPOSED
+ * path — a driver who takes a different road (SR-52 → I-15
+ * direct, against a plan composed via I-5 and the coast)
+ * freezes the projection while he keeps driving, and the
+ * gate's wait becomes unbounded dead air: no item releases,
+ * and exhaustion never declares because the held entry never
+ * resolves. The rescue watches for that shape — the stage
+ * empty, the driver demonstrably moving, the silence well
+ * past anything the episode composes — and repairs it (see
+ * maybeStallRescue). The silence bound is set against the
+ * episode's own materials: composed silence beats run a few
+ * seconds (FALLBACK_SEAM_SILENCE_SEC is 3), tissue gaps are
+ * the 700 ms breath — 45 s of empty stage at driving speed
+ * is an order of magnitude past any honest wait, and the
+ * field failure it answers ran ~4 minutes.
+ */
+export const STALL_SILENCE_MS = 45_000;
+/**
+ * The off-path bound + shorter silence: beyond this distance
+ * from the composed path the path's progress readings are
+ * meaningless (the corridor guard's own tolerance is 200 m;
+ * the anchoring presence wall prices pins at 3 km lateral),
+ * so a shorter silence convicts — the driver is not coming
+ * back to the window the gate is holding.
+ */
+export const STALL_OFF_PATH_M = 1_500;
+export const STALL_OFF_PATH_SILENCE_MS = 20_000;
+/**
+ * Re-anchor relevance: a ready story whose anchor sits
+ * within this distance of the driver's ACTUAL position is
+ * positionally relevant — the anchoring design's corridor
+ * presence wall (3 km lateral) is the strictest reading; a
+ * corridor story's anchor is its segment's midpoint, so the
+ * radius must also cover "the driver is on, or entering,
+ * the segment the story covers" for typical segment lengths.
+ */
+export const STALL_REANCHOR_RADIUS_M = 5_000;
+/** Net displacement across the silence window that proves the driver is moving (a parked car's GPS wander is tens of metres; any real driving clears this in seconds). */
+const STALL_MOVING_NET_M = 75;
+/** Progress movement (fraction of path) at or below which the reading counts as frozen since the stage emptied. */
+const STALL_PROGRESS_EPSILON = 0.001;
+
+/**
+ * A render error, scrubbed for the record (stall/render fix,
+ * Nov 24, 2026): name + message only — never a stack, never
+ * a URL or key the underlying client may have embedded —
+ * whitespace-collapsed and length-capped. The duo_line event
+ * and the outcome's render_results both carry this shape, so
+ * the next failed Earl line names its own cause.
+ */
+function scrubRenderError(err: unknown): string {
+  const raw = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+  const clean = raw.replace(/[\s\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 160);
+  return clean.length > 0 ? clean : 'unknown render error';
+}
+
 /** routeMode's spokenSec, mirrored (bridges estimate at 150 wpm, floored at 3 s) — the runner stays import-light. */
 function spokenSecEstimate(text: string): number {
   const words = text.trim().split(/\s+/).filter(Boolean).length;
@@ -674,6 +735,20 @@ export interface RouteRunnerDeps {
    * Absent = capture is not wired for this runner.
    */
   episodeIds?: { tourId: string; buildId: string };
+  /**
+   * Stall-rescue tuning (Nov 24, 2026): a harness seam ONLY —
+   * the App never passes it and production runs the exported
+   * STALL_* constants. The route harness compresses the
+   * silence bounds so a replayed stall resolves in seconds
+   * of wall-clock instead of the field's 45.
+   */
+  stallTuning?: {
+    silenceMs?: number;
+    offPathSilenceMs?: number;
+    offPathM?: number;
+    reanchorRadiusM?: number;
+    movingNetM?: number;
+  };
 }
 
 let runnerSeq = 0;
@@ -734,8 +809,35 @@ export class RoutePlanRunner {
   private lateSkippedItemIds = new Set<string>();
   /** Item id → when its render completed with audio in hand (capture's render verdicts). */
   private renderDoneAtMs = new Map<string, number>();
-  /** Duo item id → the error its render died with, kept for the duo_line render-failed verdict (the stage flag alone could not say why — Nov 19, 2026). */
+  /**
+   * Duo item id → the scrubbed error its render died with,
+   * kept for the duo_line render-failed verdict (the stage
+   * flag alone could not say why — Nov 19, 2026) AND for the
+   * outcome's render_results (Nov 24, 2026: the verdict filed
+   * the error into telemetry, but the episode record — the
+   * durable one — carried none, so the Nov 24 failures are
+   * still undiagnosed). Never deleted at the verdict: the
+   * map lives for the runner's life, bounded by the plan.
+   */
   private duoRenderErrorById = new Map<string, string>();
+  /**
+   * Stall rescue state (Nov 24, 2026): when the stage last
+   * had something on it — a feed or a settle — and the path
+   * progress reading at that moment. A silence is measured
+   * from the later of the two stamps; progress is "frozen"
+   * when it has not advanced past the stamped reading since.
+   */
+  private lastFeedAtMs = 0;
+  private lastSettleAtMs = 0;
+  private activityProgress = 0;
+  /** Recent GPS fixes (position + wall-clock), pruned to the last minute — the rescue's movement evidence, read as NET displacement so GPS wander cannot fake a drive. */
+  private recentFixes: { lat: number; lng: number; atMs: number }[] = [];
+  /** The most recent fix's raw position (the re-anchor's relevance origin and the distance-to-path input). */
+  private lastFixPos: GeoPoint | null = null;
+  /** Stories a stall rescue re-anchored: the feed gate's window discipline (and suppression) stands down for them — their relevance was vouched by actual distance, and the progress instrument that would judge them is the one that froze. */
+  private reanchoredIds = new Set<string>();
+  /** Stall rescues fired this tour, in firing order (episode capture's stall_rescues). */
+  private stallRescues: CapturedStallRescue[] = [];
   /** Episode capture: filed at most once per runner, like the drive record. */
   private episodeOutcomeWritten = false;
   /** Movement evidence (episode capture's driven/stationary discriminator). */
@@ -1306,7 +1408,20 @@ export class RoutePlanRunner {
   /** One entry's render: the standing toAudibleItem seam (shelf URL or synthesis). Never throws. */
   private async runEntryTask(entry: RenderEntry): Promise<void> {
     const it = entry.planItem;
-    const audible = await this.toAudibleItem(it);
+    let audible = await this.toAudibleItem(it);
+    if (!audible && it.duo) {
+      // Duo render retry (Nov 24, 2026): a failed Earl line
+      // used to drop on its first failure — and the Nov 24
+      // field drive lost seven mid-episode duo/reaction
+      // lines that way, across two builds, while every
+      // pre-start render passed. A transient synthesis fault
+      // (a network hiccup at driving speed) should not cost
+      // the line: retry ONCE. The verification gate's
+      // standards are unchanged — a render the gate rejects
+      // twice still drops, and the second failure's error is
+      // the one the verdict files.
+      audible = await this.toAudibleItem(it);
+    }
     // Late-presence material (F3): the woven twin's audible is
     // built NOW, beside the original's, so the feed gate's
     // conversion decision later is a synchronous swap, never
@@ -1345,6 +1460,10 @@ export class RoutePlanRunner {
       entry.lateAudible = lateAudible;
       entry.state = 'ready';
       this.renderDoneAtMs.set(it.id, Date.now());
+      // A duo line that landed on its retry carries no
+      // failure: clear the first attempt's recorded error so
+      // nothing downstream can mistake it for a verdict.
+      if (it.duo) this.duoRenderErrorById.delete(it.id);
     } else if (it.kind === 'bridge' && !it.duo && (await this.applyBridgeSeamFallback(entry))) {
       // Bridge render-failure fallback (field fix F5, Nov 12,
       // 2026): the seam fallback already substituted the item
@@ -1370,7 +1489,10 @@ export class RoutePlanRunner {
           error: this.duoRenderErrorById.get(it.id) ?? null,
           mode: 'route',
         });
-        this.duoRenderErrorById.delete(it.id);
+        // The error map entry is NOT deleted here: the
+        // outcome's render_results reads it at close (Nov 24,
+        // 2026) — the verdict above is telemetry's copy, the
+        // record's copy is still owed.
       }
       // Duo rejoin (Slice 9.5): a turn beat that dies leaves
       // its split member in two halves for no reason — put
@@ -1640,6 +1762,8 @@ export class RoutePlanRunner {
       this.player.beginWithItem(entry.audible as AudibleItem);
       this.begun = true;
       this.begunAtMs = Date.now();
+      this.lastFeedAtMs = this.begunAtMs;
+      this.activityProgress = this.lastProgress;
       this.feedCursor = i + 1;
       this.filePlanStartedOnce();
       this.maybeFeed();
@@ -1950,6 +2074,7 @@ export class RoutePlanRunner {
           ),
           lateSkippedItemIds: this.lateSkippedItemIds,
           renderResults: this.renderResults(),
+          stallRescues: this.stallRescues,
           commissions: this.commissionsCapture(),
           seamFallbackItemIds: this.entries
             .filter(e => e.planItem.seamFallback && plan.items.some(p => p.id === e.planItem.id))
@@ -1999,7 +2124,18 @@ export class RoutePlanRunner {
         if (doneAt === undefined) result = 'pending';
         else result = doneAt <= mark ? 'pre-start' : 'ahead';
       }
-      out.push({ index, id: e.planItem.id, result });
+      out.push({
+        index,
+        id: e.planItem.id,
+        result,
+        // A failed duo render names its error in the record
+        // (Nov 24, 2026) — the duo_line telemetry event has
+        // carried it since Nov 19, but telemetry is a 72-hour
+        // window and the episode row is forever.
+        ...(result === 'failed'
+          ? { error: this.duoRenderErrorById.get(e.planItem.id) ?? null }
+          : {}),
+      });
     }
     if (this.wrapUpState !== 'none' && this.plan) {
       let result: CapturedRenderResult['result'];
@@ -2373,8 +2509,16 @@ export class RoutePlanRunner {
         !it.portal &&
         !it.woven &&
         it.duoPart?.part !== 2 &&
+        !this.reanchoredIds.has(it.id) &&
         entry !== this.firstReadyStoryEntry()
       ) {
+        // (The reanchored exclusion above is the stall
+        // rescue's: a re-anchored story's relevance was
+        // vouched by the driver's ACTUAL position, and the
+        // window discipline — release hold, stale drop, and
+        // the late-presence conversion that reads the same
+        // progress — stands down for it. The instrument that
+        // froze does not get a second vote.)
         // (The duoPart exclusion above is Slice 9.5's: part 2
         // is a SOUNDING story's second half, not a story
         // awaiting its window — its head faced this judgment
@@ -2442,6 +2586,10 @@ export class RoutePlanRunner {
       }
       this.player.enqueuePromised(entry.audible as AudibleItem);
       this.feedCursor += 1;
+      // Stall rescue bookkeeping: a feed is stage activity —
+      // the silence clock restarts from here.
+      this.lastFeedAtMs = Date.now();
+      this.activityProgress = this.lastProgress;
     }
     this.maybeExhaust();
   }
@@ -2455,6 +2603,252 @@ export class RoutePlanRunner {
     } else {
       void this.close('overrun');
     }
+  }
+
+  /**
+   * STALL RESCUE (Nov 24, 2026 — the Safari Park field
+   * drive). The failure this answers: the episode played its
+   * opening and the SR-52 corridor story, the I-5 corridor
+   * item stale-windowed, and the next item — the I-15
+   * Through Rancho Bernardo corridor story, rendered and
+   * positionally ahead of the driver — never released,
+   * because the runner's progress is a projection onto the
+   * COMPOSED path and the driver had diverged from that path
+   * (progress froze at 0.175 of 47,955 m while he drove on).
+   * The gate waited honestly by its own lights; exhaustion
+   * never declared because the held entry never resolved;
+   * the driver got two planned silences and one rebridge in
+   * four minutes and abandoned the session.
+   *
+   * The conviction shape, all of it required:
+   *   - the tour has begun, is not closing/closed/arrived,
+   *     and the USER pause flag does not stand (a user pause
+   *     is a command — never overridden). A GUARD pause
+   *     deliberately does NOT stand the watch down: the
+   *     guard latches when the driver leaves the corridor
+   *     and lifts only when he returns, so a permanent
+   *     divergence presents exactly as a guard pause that
+   *     never lifts — the field failure's other half. What
+   *     separates a detour being waited out from a
+   *     divergence is the movement test below: a driver
+   *     waiting out a detour either returns (the guard
+   *     lifts, the episode resumes, no conviction) or stops
+   *     moving (no conviction); a driver who keeps driving
+   *     away from the path convicts;
+   *   - no Q&A or suggestion answer is in flight (their gaps
+   *     are spoken seams, not stalls);
+   *   - the stage is EMPTY — nothing promised, and nothing
+   *     SOUNDING: no current item, or a current item the
+   *     GUARD has frozen (a guard-paused current is not a
+   *     sounding stage — the guard paused it mid-item and
+   *     only the driver's return or this rescue will ever
+   *     move it; the rescue lifts the guard first, so the
+   *     frozen item finishes before the rescued feed sounds
+   *     and nothing is ever cut). Anything genuinely
+   *     sounding or queued is the episode working, however
+   *     slowly;
+   *   - the stage has been empty for the silence bound (see
+   *     STALL_SILENCE_MS; the shorter off-path bound when the
+   *     driver is beyond STALL_OFF_PATH_M of the path);
+   *   - the driver is MOVING: net displacement across the
+   *     silence window clears STALL_MOVING_NET_M on fresh
+   *     fixes — a parked car waiting out a window is not a
+   *     stall, and GPS wander cannot fake the net;
+   *   - and, when the driver is still near the path, the
+   *     progress reading has FROZEN since the stage emptied
+   *     (on-path and advancing, the gate's wait is honest and
+   *     the window will open; off-path, the reading is
+   *     meaningless and the freeze test stands down).
+   * Evaluated on every position fix and every settle — the
+   * two moments new evidence exists.
+   */
+  private maybeStallRescue(): void {
+    if (!this.plan || !this.begun || this.closed || this.closing || this.arrivedFlag) return;
+    if (this.userPausedFlag) return;
+    if (this.qaPhase !== 'idle' || this.suggestionPhase !== 'idle') return;
+    if (this.player.promised.length > 0) return;
+    if (this.player.current !== null && !this.guardPausedFlag) return;
+    if (this.feedCursor >= this.entries.length) return;
+    const nowMs = Date.now();
+    const activityAt = Math.max(this.lastFeedAtMs, this.lastSettleAtMs, this.begunAtMs ?? 0);
+    if (activityAt <= 0) return;
+    const silenceMs = nowMs - activityAt;
+    const tuning = this.deps.stallTuning ?? {};
+    const distToPath =
+      this.lastFixPos && this.plan ? distanceToPathM(this.lastFixPos, this.plan.path) : Number.POSITIVE_INFINITY;
+    const offPath = distToPath > (tuning.offPathM ?? STALL_OFF_PATH_M);
+    const threshold = offPath
+      ? (tuning.offPathSilenceMs ?? STALL_OFF_PATH_SILENCE_MS)
+      : (tuning.silenceMs ?? STALL_SILENCE_MS);
+    if (silenceMs < threshold) return;
+    if (!offPath && this.lastProgress - this.activityProgress > STALL_PROGRESS_EPSILON) return;
+    if (!this.movingDuring(activityAt, nowMs, tuning.movingNetM ?? STALL_MOVING_NET_M)) return;
+    this.rescueStall(nowMs, silenceMs, distToPath);
+  }
+
+  /**
+   * Movement evidence for the stall conviction: net
+   * displacement between the first fix at or after the
+   * silence began and the latest fix, on fixes still fresh.
+   * Net, not summed — a stationary phone's GPS random-walk
+   * sums to hundreds of metres over a minute and nets to
+   * almost nothing.
+   */
+  private movingDuring(sinceMs: number, nowMs: number, netM: number): boolean {
+    const fixes = this.recentFixes.filter(f => f.atMs >= sinceMs);
+    if (fixes.length < 2) return false;
+    const last = fixes[fixes.length - 1];
+    if (nowMs - last.atMs > 15_000) return false; // the evidence must still be warm
+    return haversineM(fixes[0], last) >= netM;
+  }
+
+  /**
+   * The rescue, in the ruled order:
+   *   (a) RE-ANCHOR — the next READY story ahead of the feed
+   *       cursor whose anchor is positionally relevant to
+   *       the driver's ACTUAL position (within the re-anchor
+   *       radius) is released: everything unresolved between
+   *       the cursor and it is stepped over (stories dropped
+   *       'stall-bypassed', their tissue with them — the
+   *       story sounds bridgeless, the standing floor), the
+   *       story is marked re-anchored so the gate's window
+   *       discipline stands down for it, and the gate feeds
+   *       it in plan order from there. A ready re-bridge
+   *       commission INTO the rescued story is kept — it
+   *       speaks true facts from the last sounded story, and
+   *       losing it would tear the seam the commission exists
+   *       to repair. A duo part-2 is never a target: it
+   *       cannot sound without its head.
+   *   (b) EXHAUSTION — nothing ahead is positionally
+   *       relevant: every remaining entry resolves as dropped
+   *       ('stall-exhausted' for stories) and the standing
+   *       exhaustion path closes the tour as an overrun —
+   *       the handoff line and the freeform tail, the
+   *       doctrine's own answer to a plan that cannot play.
+   * Either way the rescue files route_stall_rescue and rides
+   * the outcome's stall_rescues. A rescue never touches the
+   * Player's current or promised items (the conviction
+   * requires an empty stage), never resurrects a resolved
+   * entry, and re-arms the silence clock: if the rescued
+   * story settles into another frozen hold, a later rescue
+   * may fire again on a fresh silence.
+   */
+  private rescueStall(nowMs: number, silenceMs: number, distToPath: number): void {
+    const plan = this.plan;
+    if (!plan || !this.lastFixPos) return;
+    // A standing guard pause is the wedge's other half: it
+    // latched when the driver left the corridor and lifts
+    // only on return. The rescue has judged the divergence
+    // permanent, so it voids the guard's wait the way an
+    // explicit Resume does — override set (the guard re-arms
+    // on the next corridor return, per onPosition), flag
+    // cleared, player resumed — and the re-anchored feed
+    // sounds onto the ground the driver is actually on. On
+    // the exhaustion path the same lift lets the closeout
+    // proceed unheld. The record carries the fact: most real
+    // stalls will present guard-paused.
+    const guardWasPaused = this.guardPausedFlag;
+    if (this.guardPausedFlag) {
+      this.guardOverridden = true;
+      this.guardPausedFlag = false;
+      this.player.resumeByUser();
+    }
+    const radius = this.deps.stallTuning?.reanchorRadiusM ?? STALL_REANCHOR_RADIUS_M;
+    let targetIdx = -1;
+    for (let i = this.feedCursor; i < this.entries.length; i++) {
+      const e = this.entries[i];
+      if (e.state !== 'ready' || !e.audible) continue;
+      const it = e.planItem;
+      if (it.kind !== 'story' || !it.unit) continue;
+      if (it.duoPart?.part === 2) continue;
+      if (this.droppedStoryIds.has(it.id)) continue;
+      if (haversineM(this.lastFixPos, { lat: it.unit.lat, lng: it.unit.lng }) <= radius) {
+        targetIdx = i;
+        break;
+      }
+    }
+    const base = {
+      silence_ms: Math.round(silenceMs),
+      distance_to_path_m: Math.round(distToPath),
+      progress: Math.round(this.lastProgress * 1000) / 1000,
+      guard_paused: guardWasPaused,
+    };
+    if (targetIdx >= 0) {
+      const target = this.entries[targetIdx].planItem;
+      // Keep a ready commission into the target: the feed
+      // resumes at the commission, not the story.
+      let feedIdx = targetIdx;
+      if (targetIdx > this.feedCursor) {
+        const prev = this.entries[targetIdx - 1];
+        const rec = this.commissions.get(prev.planItem.id);
+        if (rec && rec.state === 'pending' && rec.nextStoryId === target.id && prev.state === 'ready') {
+          feedIdx = targetIdx - 1;
+        }
+      }
+      const skipped: string[] = [];
+      for (let i = this.feedCursor; i < feedIdx; i++) {
+        this.bypassEntry(this.entries[i], 'stall-bypassed', skipped);
+      }
+      this.reanchoredIds.add(target.id);
+      this.feedCursor = feedIdx;
+      const record: CapturedStallRescue = {
+        action: 'reanchor',
+        item_id: target.id,
+        skipped_item_ids: skipped,
+        ...base,
+      };
+      this.stallRescues.push(record);
+      this.deps.onEvent?.('route_stall_rescue', { ...record, mode: 'route' });
+      // Re-arm the clock at the rescue itself: if the gate
+      // somehow does not feed (a dependency hold upstream of
+      // the target), the next conviction needs a fresh
+      // silence, not an immediate re-fire.
+      this.lastFeedAtMs = nowMs;
+      this.activityProgress = this.lastProgress;
+      this.maybeFeed();
+      return;
+    }
+    const skipped: string[] = [];
+    for (let i = this.feedCursor; i < this.entries.length; i++) {
+      this.bypassEntry(this.entries[i], 'stall-exhausted', skipped);
+    }
+    this.feedCursor = this.entries.length;
+    const record: CapturedStallRescue = {
+      action: 'exhausted',
+      item_id: null,
+      skipped_item_ids: skipped,
+      ...base,
+    };
+    this.stallRescues.push(record);
+    this.deps.onEvent?.('route_stall_rescue', { ...record, mode: 'route' });
+    this.maybeExhaust();
+  }
+
+  /**
+   * Resolve one entry without sounding, under the stall
+   * rescue's accounting: stories join the dropped set under
+   * the rescue's reason (their dependents die by the
+   * standing gate rules when the cursor reaches them — most
+   * are in the bypass range themselves); tissue joins the
+   * gate-skipped set, exactly as an orphaned bridge does;
+   * a pending commission closes as late (its story sounds
+   * bridgeless — or, on the exhaustion path, not at all).
+   * Already-resolved entries are untouched: a rescue never
+   * resurrects, and never double-counts.
+   */
+  private bypassEntry(entry: RenderEntry, storyReason: string, skipped: string[]): void {
+    if (entry.state === 'failed' || entry.state === 'late' || entry.state === 'dropped') return;
+    entry.state = 'dropped';
+    this.resolvedCount += 1;
+    skipped.push(entry.planItem.id);
+    if (entry.planItem.kind === 'story') {
+      this.droppedStoryIds.add(entry.planItem.id);
+      this.dropReasonById.set(entry.planItem.id, storyReason);
+    } else {
+      this.gateSkippedItemIds.add(entry.planItem.id);
+    }
+    const rec = this.commissions.get(entry.planItem.id);
+    if (rec && rec.state === 'pending') rec.state = 'late';
   }
 
   /**
@@ -2611,6 +3005,7 @@ export class RoutePlanRunner {
     if (it.portal || it.woven || it.portalClimax) return null;
     if (entry.state === 'failed' || entry.state === 'late' || entry.state === 'dropped') return null;
     if (this.droppedStoryIds.has(it.id)) return null;
+    if (this.reanchoredIds.has(it.id)) return null; // stall rescue: suppression judges by the frozen instrument — it does not sit on a re-anchored story
     if (entry === this.entries.find(e => e.planItem.kind === 'story')) return null; // the departure, by plan order
     if (entry === this.firstReadyStoryEntry()) return null; // the departure, by the gate's derivation
     return entry;
@@ -3155,10 +3550,22 @@ export class RoutePlanRunner {
     // Duo items (Slice 9) take the Earl seam instead — and with
     // no Earl seam wired they drop: Earl never sounds in Miles'
     // voice, and Miles never reads Earl's lines (§Q.6 fence).
-    if (!it.text) return null;
+    if (!it.text) {
+      // A duo line with no text fails as surely as a rejected
+      // render — record why (Nov 24, 2026: every failure path
+      // owes the record its reason, or the verdict files
+      // error: null and the failure is undiagnosable).
+      if (it.duo) this.duoRenderErrorById.set(it.id, 'duo line has no text to render');
+      return null;
+    }
     try {
       const synthFn = it.duo ? this.deps.synthEarlUrl : this.deps.synthUrl;
-      if (!synthFn) return null;
+      if (!synthFn) {
+        if (it.duo) {
+          this.duoRenderErrorById.set(it.id, 'Earl seam not wired (the duo gate was closed at this runner)');
+        }
+        return null;
+      }
       const synth = await synthFn(it.text);
       return {
         id,
@@ -3174,8 +3581,11 @@ export class RoutePlanRunner {
       // Duo telemetry: keep the underlying error for the
       // render-failed verdict filed in runEntryTask — the
       // stage flag alone could not say why the line died.
+      // Scrubbed (Nov 24, 2026): name + message only, capped —
+      // the record is durable and shared, the raw error is
+      // neither.
       if (it.duo) {
-        this.duoRenderErrorById.set(it.id, err instanceof Error ? err.message : String(err));
+        this.duoRenderErrorById.set(it.id, scrubRenderError(err));
       }
       return null;
     }
@@ -3183,6 +3593,11 @@ export class RoutePlanRunner {
 
   private onItemSettle(it: PlanItem, rec: SettleRecord): void {
     const sounded = rec.sounded;
+    // Stall rescue bookkeeping: a settle is the stage's last
+    // activity until the next feed — the silence clock reads
+    // from here (see maybeStallRescue).
+    this.lastSettleAtMs = Date.now();
+    this.activityProgress = this.lastProgress;
     // Ambient bed tap (Nov 5, 2026): a settle is a story
     // boundary — a due bed adoption lands here when it can,
     // rather than mid-story.
@@ -3377,6 +3792,7 @@ export class RoutePlanRunner {
     this.resolvedCount += 1;
     this.maybeFeed();
     this.maybeExhaust();
+    this.maybeStallRescue();
     // Unsolicited proposals (v16.2 Slice 5): a sounded story
     // settle is a story boundary — the one spoken seam the
     // proposal engine judges. (An unplayed settle is an
@@ -3434,6 +3850,16 @@ export class RoutePlanRunner {
       if (displacement > this.maxDisplacementM) this.maxDisplacementM = displacement;
     }
     if (progress > this.maxProgress) this.maxProgress = progress;
+    // Stall rescue evidence (Nov 24, 2026): every fix is
+    // banked (pruned to the last minute) whether or not the
+    // tour has begun — the rescue reads NET displacement
+    // across the silence window, so a drive's movement is
+    // provable from the fixes themselves.
+    this.lastFixPos = pos;
+    this.recentFixes.push({ lat: pos.lat, lng: pos.lng, atMs: nowMs });
+    while (this.recentFixes.length > 0 && nowMs - this.recentFixes[0].atMs > 60_000) {
+      this.recentFixes.shift();
+    }
     // Manifest hold (differentiator 3): while the episode card
     // is up, a position update refreshes the progress reading
     // only — no arrival closeout, no corridor pause, no window
@@ -3462,6 +3888,10 @@ export class RoutePlanRunner {
     // A position update is also a window event: it can open the
     // head story's window (feed it) or close it (drop it stale).
     this.maybeFeed();
+    // Stall rescue (Nov 24, 2026): a fix is also the moment a
+    // frozen gate convicts — the stage has sat empty through
+    // fix after fix while the driver kept moving.
+    this.maybeStallRescue();
     this.notify();
   }
 
