@@ -433,6 +433,66 @@ export const FREEWAY_MPS = 15;
  */
 export const WELCOME_REACH_CEILING_M = 1500;
 
+/**
+ * The walking regime (Nov 24, 2026 — Erik's ruling, after the
+ * University City walk, session cb6695f4): freeform's serving
+ * judge is speed-scaled — reach and horizon are duration ×
+ * speed — so at a walker's ~1.4 m/s the reachable window
+ * collapses to tens of meters and every anchored story judges
+ * out-of-window while fillers backfill. The shelf where he
+ * stood held 21 rows within a kilometer; he heard none of
+ * them. Below surface pace there was no regime at all:
+ * modeName() is an instantaneous speed readout, not a
+ * sustained state. This regime is that state.
+ *
+ * Detection is a movement pattern, never a single fix and
+ * never the declared ride mode (a passenger in a car is at
+ * car speed; the declaration alone forces nothing): entry
+ * needs a 90 s evidence window spanning ≥40 s whose moving
+ * samples (≥0.4 m/s) number ≥6 with a median inside the
+ * walking band [0.5, 2.2] m/s, ≥60 m of accumulated path,
+ * and NO sample above 3.2 m/s anywhere in the window (a car
+ * pulling away vetoes the window outright). Exit is fast by
+ * design: a 20 s window with ≥60 m of path and a ≥3.0 m/s
+ * median is a car, whatever came before. Standing still is
+ * neither: stillness files no moving samples, accumulates no
+ * path, and so can neither enter (a stopped car never enters)
+ * nor exit (a walker who stops is still walking).
+ */
+export const WALKING_RING_RADII_M = [400, 800, 1600, 3200];
+/**
+ * Ring radii: 400 m is the immediate ground (~5 min on foot);
+ * 800 doubles it; 1,600 m is this codebase's own driving
+ * discovery radius (the serve cycle's standing constant, so
+ * the third ring reuses the car's horizon); 3,200 m is twice
+ * that — the widest ground a telling can still be about
+ * where the walker stands. The Nov 24 welcome anchor (a
+ * neighborhood centroid 1,504 m from a walker inside the
+ * neighborhood) sits inside the third ring.
+ */
+const WALKING_BAND_MIN_MPS = 0.5;
+const WALKING_BAND_MAX_MPS = 2.2;
+const WALKING_SAMPLE_MOVING_MPS = 0.4;
+const WALKING_ENTER_WINDOW_MS = 90_000;
+const WALKING_ENTER_MIN_SPAN_MS = 40_000;
+const WALKING_ENTER_MIN_PATH_M = 60;
+const WALKING_ENTER_MIN_MOVING = 6;
+const WALKING_VETO_MPS = 3.2;
+const WALKING_EXIT_WINDOW_MS = 20_000;
+const WALKING_EXIT_MIN_PATH_M = 60;
+const WALKING_EXIT_MEDIAN_MPS = 3.0;
+/**
+ * Welcome presence bound in the regime: a welcome serves
+ * because the walker is IN the area, judged by distance to
+ * its anchor — never by speed-scaled arrival time. 1,600 m
+ * is the discovery radius: a welcome whose anchor lies
+ * inside the ground the tour is already looking at is a
+ * presence, not a preview.
+ */
+const WALKING_WELCOME_BOUND_M = 1600;
+/** How long an all-rings-empty verdict stays fresh for the filler gate. */
+const WALKING_RINGS_EMPTY_FRESH_MS = 60_000;
+
 interface BufferedText {
   subject: string;
   text: string;
@@ -676,6 +736,18 @@ export class Tour {
    * buffer-and-retry behavior is untouched.
    */
   private corridorPending: { segment: CorridorSegment; item: AudibleItem } | null = null;
+  /**
+   * Walking regime (Nov 24, 2026): the position-sample trail
+   * the detection reads (bounded to the evidence window plus
+   * slack), the regime flag itself, and the all-rings-empty
+   * verdict the filler gate reads — the clock time the last
+   * regime serve cycle exhausted every ring without finding
+   * unserved servable material (0 = no standing verdict:
+   * material found, regime off, or no cycle yet).
+   */
+  private posSamples: { lat: number; lng: number; at: number; speedMps: number }[] = [];
+  private walkingRegime = false;
+  private walkingRingsEmptyAt = 0;
   /**
    * The tour thread (P3 salvage): this tour's DELIVERED tellings in
    * hearing order, reduced to subject + angle + signature fact —
@@ -1028,6 +1100,7 @@ export class Tour {
   onPosition(pos: Position): void {
     this.position = pos;
     if (this.phase !== 'active') return;
+    this.notePositionSample(pos);
     // Meaningful movement is a serve trigger (S2).
     if (
       !this.lastCyclePos ||
@@ -1046,6 +1119,70 @@ export class Tour {
     return 'walking';
   }
 
+  /**
+   * Walking-regime detection (Nov 24, 2026): every active
+   * position fix joins the sample trail, and the trail is
+   * re-judged on each fix. The constants and their reasoning
+   * live at WALKING_RING_RADII_M's declaration. Entry and
+   * exit both file a walking_regime event — the field needs
+   * to see the regime flip, not infer it.
+   */
+  private notePositionSample(pos: Position): void {
+    const now = this.clock.now();
+    this.posSamples.push({ lat: pos.lat, lng: pos.lng, at: now, speedMps: pos.speedMps });
+    const cutoff = now - WALKING_ENTER_WINDOW_MS - 30_000;
+    while (this.posSamples.length > 0 && this.posSamples[0].at < cutoff) {
+      this.posSamples.shift();
+    }
+    this.evaluateWalkingRegime();
+  }
+
+  private evaluateWalkingRegime(): void {
+    const now = this.clock.now();
+    if (this.walkingRegime) {
+      // Exit: sustained car pace in the short window. A
+      // stopped walker files no path and no median, so
+      // stillness can never satisfy this — the regime holds.
+      const win = this.posSamples.filter(s => now - s.at <= WALKING_EXIT_WINDOW_MS);
+      if (win.length >= 3) {
+        let path = 0;
+        for (let i = 1; i < win.length; i++) {
+          path += calculateDistance(win[i - 1].lat, win[i - 1].lng, win[i].lat, win[i].lng);
+        }
+        const speeds = win.map(s => s.speedMps).sort((a, b) => a - b);
+        const median = speeds[Math.floor(speeds.length / 2)];
+        if (path >= WALKING_EXIT_MIN_PATH_M && median >= WALKING_EXIT_MEDIAN_MPS) {
+          this.walkingRegime = false;
+          this.walkingRingsEmptyAt = 0;
+          this.emit('walking_regime', { active: false });
+        }
+      }
+      return;
+    }
+    const win = this.posSamples.filter(s => now - s.at <= WALKING_ENTER_WINDOW_MS);
+    if (win.length < WALKING_ENTER_MIN_MOVING + 1) return;
+    if (win[win.length - 1].at - win[0].at < WALKING_ENTER_MIN_SPAN_MS) return;
+    // A single above-band fix anywhere in the window vetoes
+    // entry: the pattern must be unbroken walking.
+    if (win.some(s => s.speedMps > WALKING_VETO_MPS)) return;
+    const moving = win.filter(s => s.speedMps >= WALKING_SAMPLE_MOVING_MPS);
+    if (moving.length < WALKING_ENTER_MIN_MOVING) return;
+    const speeds = moving.map(s => s.speedMps).sort((a, b) => a - b);
+    const median = speeds[Math.floor(speeds.length / 2)];
+    if (median < WALKING_BAND_MIN_MPS || median > WALKING_BAND_MAX_MPS) return;
+    let path = 0;
+    for (let i = 1; i < win.length; i++) {
+      path += calculateDistance(win[i - 1].lat, win[i - 1].lng, win[i].lat, win[i].lng);
+    }
+    if (path < WALKING_ENTER_MIN_PATH_M) return;
+    this.walkingRegime = true;
+    this.emit('walking_regime', { active: true });
+    // The serve math changes under the tour's feet: re-run a
+    // cycle now rather than waiting for the next 200 m
+    // movement trigger (a walker covers 200 m in ~2.5 min).
+    void this.runServeCycle('walking-regime');
+  }
+
   // ------------------------------------------------------------ tour start (O1–O8)
 
   /**
@@ -1059,6 +1196,10 @@ export class Tour {
     this.emitSealed = false; // a new session on this instance speaks again
     this.resumeStart = resume;
     this.tourStartAt = this.clock.now();
+    // Walking-regime state is per-tour: a fresh start re-earns it.
+    this.posSamples = [];
+    this.walkingRegime = false;
+    this.walkingRingsEmptyAt = 0;
     this.sessionId =
       typeof crypto !== 'undefined' && 'randomUUID' in crypto
         ? crypto.randomUUID()
@@ -2903,11 +3044,47 @@ export class Tour {
         }
       }
       const pos = this.position;
-      const radius = this.modeName() === 'walking' ? 700 : 1600;
-      const candidates = await this.seams.discoverCandidates(
-        { lat: pos.lat, lng: pos.lng },
-        radius,
-      );
+      let candidates: facts.Candidate[];
+      if (this.walkingRegime) {
+        // Walking rings (Nov 24, 2026): discovery steps
+        // outward ring by ring, and the NEAREST ring holding
+        // unserved servable material is the cycle's whole
+        // world, ordered by proximity. A wider ring is asked
+        // only when every inner ring came back empty of
+        // material — material judged by the serve loop's own
+        // first test (not subject-blocked), so a ring full of
+        // heard or blocked names does not stop the widening.
+        candidates = [];
+        let materialFound = false;
+        for (const ring of WALKING_RING_RADII_M) {
+          const found = await this.seams.discoverCandidates(
+            { lat: pos.lat, lng: pos.lng },
+            ring,
+          );
+          const inRing = found
+            .map(c => ({ c, d: calculateDistance(pos.lat, pos.lng, c.lat, c.lng) }))
+            .filter(x => x.d <= ring)
+            .sort((a, b) => a.d - b.d);
+          const material = inRing.filter(
+            x => !this.subjectBlocked(backend.placeKeyOf(x.c.name), x.c),
+          );
+          if (material.length > 0) {
+            candidates = material.map(x => x.c);
+            materialFound = true;
+            break;
+          }
+        }
+        // The filler gate's verdict (see fillerTick): it
+        // stands only when a full ring sweep found nothing
+        // servable in any ring.
+        this.walkingRingsEmptyAt = materialFound ? 0 : this.clock.now();
+      } else {
+        const radius = this.modeName() === 'walking' ? 700 : 1600;
+        candidates = await this.seams.discoverCandidates(
+          { lat: pos.lat, lng: pos.lng },
+          radius,
+        );
+      }
       let served = false;
       const top = candidates.slice(0, 6);
       for (let i = 0; i < top.length; i++) {
@@ -3120,7 +3297,13 @@ export class Tour {
    */
   private portalTargetFor(candidate: facts.Candidate): backend.LibraryIndexEntry | null {
     if (!this.position) return null;
-    const radius = this.modeName() === 'walking' ? 700 : 1600;
+    // In the walking regime the payload's serve range is the
+    // widest ring — the same ground the judge will honor.
+    const radius = this.walkingRegime
+      ? WALKING_RING_RADII_M[WALKING_RING_RADII_M.length - 1]
+      : this.modeName() === 'walking'
+        ? 700
+        : 1600;
     const houseRef: PortalStoryRef = {
       placeKey: backend.placeKeyOf(candidate.name),
       placeName: candidate.name,
@@ -4297,7 +4480,16 @@ export class Tour {
       const reach = Math.max(item.durationSec, 5) * speed;
       const cappedReach =
         speed >= FREEWAY_MPS ? Math.min(reach, WELCOME_REACH_CEILING_M) : reach;
-      if (dist > cappedReach) {
+      // Walking regime (Nov 24, 2026): presence, not arrival
+      // time — inside the presence bound the welcome serves
+      // however slow the approach, so the Nov 24 stale-drop
+      // (a centroid anchor 1,504 m from a walker inside the
+      // neighborhood) cannot recur on foot. Regime-only: both
+      // driving arms above keep their reach exactly as ruled.
+      const limit = this.walkingRegime
+        ? Math.max(cappedReach, WALKING_WELCOME_BOUND_M)
+        : cappedReach;
+      if (dist > limit) {
         return item.storySource === 'live'
           ? { ok: false, reason: 'welcome-outrun' }
           : { ok: false, reason: 'welcome-stale' };
@@ -4327,6 +4519,25 @@ export class Tour {
       return { ok: false, reason: 'orientation-spent' };
     }
     if (item.reserved) return { ok: true };
+    // Walking regime (Nov 24, 2026): an anchored story is
+    // judged by DISTANCE alone. Inside the widest ring it is
+    // servable, and it stays servable while the walker is in
+    // its ground — no age bound, no behind-cut, no
+    // duration × speed reach — so lingering, stopping and
+    // doubling back never stale a story on foot. Beyond the
+    // widest ring it is not the walker's ground yet; the
+    // serve cycle's rings find it when he arrives.
+    if (this.walkingRegime && item.anchor && !item.regionAnchored) {
+      const dist = calculateDistance(
+        this.position.lat,
+        this.position.lng,
+        item.anchor.lat,
+        item.anchor.lng,
+      );
+      return dist <= WALKING_RING_RADII_M[WALKING_RING_RADII_M.length - 1]
+        ? { ok: true }
+        : { ok: false, reason: 'out-of-reach' };
+    }
     const duration = Math.max(item.durationSec, 5);
     const ageS = (now - (item.generatedAt ?? now)) / 1000;
     // Region-anchored stories are exempt from the point-story age
@@ -4541,6 +4752,12 @@ export class Tour {
    */
   private welcomeWouldLand(): boolean {
     if (!this.position) return true;
+    // Walking regime (Nov 24, 2026): the welcome is generated
+    // for the area the walker is standing in — presence is
+    // the whole test, and judgeStory applies it at dequeue.
+    // Projecting a pipeline against walking speed would only
+    // discharge owed welcomes the judge would have served.
+    if (this.walkingRegime) return true;
     const pos = this.position;
     const speed = Math.max(pos.speedMps, 0.5);
     const durationEst = Math.max(
@@ -4578,6 +4795,21 @@ export class Tour {
    */
   private generationWouldLand(candidate: facts.Candidate, extraDelayS = 0): boolean {
     if (!this.position) return true;
+    // Walking regime (Nov 24, 2026): the fit question is the
+    // ring question — is the candidate on the walker's ground
+    // at all? Projection and duration × speed have no meaning
+    // at walking pace; judgeStory's distance judgment is the
+    // serve-time half of the same test.
+    if (this.walkingRegime) {
+      return (
+        calculateDistance(
+          this.position.lat,
+          this.position.lng,
+          candidate.lat,
+          candidate.lng,
+        ) <= WALKING_RING_RADII_M[WALKING_RING_RADII_M.length - 1]
+      );
+    }
     const pos = this.position;
     const speed = Math.max(pos.speedMps, 0.5);
     const durationEst = Math.max(
@@ -4738,6 +4970,15 @@ export class Tour {
 
   private async prefetchTick(): Promise<void> {
     if (this.phase !== 'active' || !this.position) return;
+    // Walking regime (Nov 24, 2026): the projected prefetch is
+    // a driving lane — it banks text for ground the driver
+    // will reach in a latency horizon. A walker's discovery
+    // is the serve cycle's rings, here and now; the lane
+    // stands down (and keeps its reschedule) while it lasts.
+    if (this.walkingRegime) {
+      this.clock.setTimeout(() => void this.prefetchTick(), 25_000);
+      return;
+    }
     try {
       if (this.buffer.size < 4 && !this.seams.storyQuotaTripped()) {
         const pos = this.position;
@@ -4844,6 +5085,18 @@ export class Tour {
     }
     // Nested-area deferral maturity (Nov 1).
     this.checkDeferredWelcome();
+    // Walking backstop (Nov 24, 2026): serve cycles otherwise
+    // wait for 200 m of movement — minutes on foot — so while
+    // the walker lingers with an idle player, keep the rings
+    // verdict (and the discovery itself) fresh on the tick.
+    if (
+      this.walkingRegime &&
+      !this.player.current &&
+      !this.player.waitingStory &&
+      now - this.walkingRingsEmptyAt > WALKING_RINGS_EMPTY_FRESH_MS
+    ) {
+      void this.runServeCycle('walking-backstop');
+    }
     this.notify();
   }
 
@@ -5027,6 +5280,20 @@ export class Tour {
     if (this.clock.now() < this.plannedSilenceUntil) {
       this.silenceMs = 0;
       return;
+    }
+    // Walking regime (Nov 24, 2026): a filler may sound only
+    // when the widest ring is empty too — which the serve
+    // cycle proves with a fresh all-rings-empty verdict.
+    // Material found, no verdict yet, or a stale verdict all
+    // hold the lane: a walker's silence belongs to the rings.
+    if (this.walkingRegime) {
+      const verdictFresh =
+        this.walkingRingsEmptyAt > 0 &&
+        this.clock.now() - this.walkingRingsEmptyAt <= WALKING_RINGS_EMPTY_FRESH_MS;
+      if (!verdictFresh) {
+        this.silenceMs = 0;
+        return;
+      }
     }
     if (!this.fillerReady || this.laneStoodDown || this.pairOutstanding) {
       if (!this.trueSilence() && !this.proofSilence()) this.silenceMs = 0;

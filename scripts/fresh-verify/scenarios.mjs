@@ -694,6 +694,185 @@ export async function runScenarios(Tour, extras) {
     tour.endTour();
   }
 
+  // ---------------------------------------------------------- WK walking regime (Nov 24, 2026)
+  // The University City walk (session cb6695f4): freeform's
+  // speed-scaled judge collapsed at 1.4 m/s — 21 shelf rows
+  // within ~1 km, zero place stories served, fillers instead.
+  // The regime: sustained walking pace flips serving to
+  // distance judgment with ring-expanding discovery
+  // (400 → 800 → 1,600 → 3,200 m), welcomes by presence, and
+  // fillers only when the widest ring is empty too.
+  const wkWalk = async (world, tour, from, seconds, speedMps = 1.4) => {
+    // Feed a fix every 5 s of fake time, moving north at the
+    // given pace; returns the final position.
+    let lat = from.lat;
+    for (let t = 0; t < seconds; t += 5) {
+      lat += (speedMps * 5) / 111_320;
+      tour.onPosition({ lat, lng: from.lng, speedMps, headingDeg: 0 });
+      await world.clock.advance(5_000);
+    }
+    return { lat, lng: from.lng };
+  };
+
+  suite('WK-1 walking regime: the University City replay — place stories serve, the welcome serves by presence, no filler jumps the queue');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      area: { neighborhood: 'Clairemont', city: 'San Diego' },
+      candidates: [],
+      library: [
+        { name: 'University City', lat: 32.8553, lng: -117.2198 },
+        { name: 'Rose Canyon Fault', lat: 32.856, lng: -117.2205 },
+      ],
+      intros: [
+        {
+          name: 'University City',
+          lat: 32.8657,
+          lng: -117.22,
+          text: 'Welcome to University City, its canyon rim and quiet streets. '.repeat(4),
+        },
+      ],
+      fillers: ['San Diego Weather Patterns'],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const start = { lat: 32.849, lng: -117.22 };
+    const tour = await startAt(world, audio, start, 1.4, 0);
+    const labels = watchLabels(world, tour);
+    // Walk north for five minutes: the regime must establish
+    // on sustained walking evidence alone.
+    const mid = await wkWalk(world, tour, start, 300, 1.4);
+    const regimeEvents = world.eventsOf('walking_regime');
+    check('regime entered on sustained walking pace',
+      regimeEvents.some(e => e.payload.active === true), JSON.stringify(regimeEvents.map(e => e.payload)));
+    // Cross into University City (the area flip) with the
+    // neighborhood's cast now discoverable. The owed welcome
+    // is offered first; its shelf anchor sits ~1.4 km north
+    // at the centroid — unreachable by duration × speed at
+    // walking pace, present by the regime's bound.
+    world.area = { neighborhood: 'University City', city: 'San Diego' };
+    const flipAt = world.clock.now();
+    const fillersAtFlip = world.eventsOf('filler_played').length;
+    await wkWalk(world, tour, mid, 30, 1.4);
+    world.candidates = [
+      makeCandidate('University City', { lat: 32.8553, lng: -117.2198, distanceM: 300 }),
+      makeCandidate('Rose Canyon Fault', { lat: 32.856, lng: -117.2205, distanceM: 350 }),
+    ];
+    await wkWalk(world, tour, { lat: 32.8553, lng: -117.22 }, 300, 1.4);
+    check('the welcome served (no stale-drop at the centroid anchor)',
+      labels.includes('Welcome to University City'), labels.join(','));
+    const staleDrops = world.eventsOf('welcome_stale_dropped');
+    check('no welcome_stale_dropped filed', staleDrops.length === 0,
+      JSON.stringify(staleDrops.map(d => d.payload)));
+    check('the place stories served on foot',
+      labels.includes('University City') && labels.includes('Rose Canyon Fault'), labels.join(','));
+    const commits = world.eventsOf('story_played')
+      .filter(e => ['university city', 'rose canyon fault'].includes(e.payload.subject));
+    const lastCommitAt = commits.length ? Math.max(...commits.map(e => e.at)) : -1;
+    const jumpedFillers = world.eventsOf('filler_played')
+      .filter((e, i) => i >= fillersAtFlip && e.at > flipAt && e.at <= lastCommitAt);
+    check('no filler sounded while unserved ring stories remained',
+      commits.length === 2 && jumpedFillers.length === 0,
+      `commits=${commits.length} fillers=${JSON.stringify(jumpedFillers.map(f => f.payload))}`);
+    tour.endTour();
+  }
+
+  suite('WK-2 walking rings: a sparse pocket widens — the 1.2 km story serves from the outer ring, not a filler');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      library: [{ name: 'Far Meadow', lat: 32.8668, lng: -117.22 }],
+      fillers: ['San Diego Weather Patterns'],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const start = { lat: 32.855, lng: -117.22 };
+    const tour = await startAt(world, audio, start, 1.4, 0);
+    const labels = watchLabels(world, tour);
+    const mid = await wkWalk(world, tour, start, 90, 1.4);
+    check('regime entered', world.eventsOf('walking_regime').some(e => e.payload.active === true),
+      JSON.stringify(world.eventsOf('walking_regime').map(e => e.payload)));
+    // Nothing within 400/800 m; one story at ~1.19 km. The
+    // rings must widen to 1,600 m and serve it.
+    world.candidates = [makeCandidate('Far Meadow', { lat: 32.8668, lng: -117.22, distanceM: 1190 })];
+    const appearedAt = world.clock.now();
+    await wkWalk(world, tour, mid, 240, 1.4);
+    check('the outer-ring story served', labels.includes('Far Meadow'), labels.join(','));
+    const commit = world.eventsOf('story_played').find(e => e.payload.subject === 'far meadow');
+    const jumped = world.eventsOf('filler_played').filter(e => e.at > appearedAt && commit && e.at < commit.at);
+    check('no filler sounded between the story appearing and its serve',
+      Boolean(commit) && jumped.length === 0, JSON.stringify(jumped.map(f => f.payload)));
+    tour.endTour();
+  }
+
+  suite('WK-3 regime boundaries: a car passenger never enters; a stopped walker stays in; car speed exits');
+  {
+    resetLocalStorage();
+    // (a) Surface-speed passenger: two minutes at 8 m/s.
+    const carWorld = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park')],
+      library: ['Alpha Park'],
+    });
+    const carAudio = new FakeAudio(carWorld.clock, okPolicy());
+    const carTour = await startAt(carWorld, carAudio, UTC, 8, 180);
+    let carLat = UTC.lat;
+    for (let t = 0; t < 120; t += 10) {
+      carLat += (8 * 10) / 111_320;
+      carTour.onPosition({ lat: carLat, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+      await carWorld.clock.advance(10_000);
+    }
+    check('car passenger never enters the regime',
+      !carWorld.eventsOf('walking_regime').some(e => e.payload.active === true),
+      JSON.stringify(carWorld.eventsOf('walking_regime').map(e => e.payload)));
+    carTour.endTour();
+
+    // (b) Walker: enter, stop for two minutes, then drive off.
+    const world = makeWorld(Tour, { candidates: [], library: [] });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const start = { lat: 32.855, lng: -117.22 };
+    const tour = await startAt(world, audio, start, 1.4, 0);
+    const mid = await wkWalk(world, tour, start, 70, 1.4);
+    check('walker entered the regime',
+      world.eventsOf('walking_regime').some(e => e.payload.active === true),
+      JSON.stringify(world.eventsOf('walking_regime').map(e => e.payload)));
+    // Standing still for two minutes: no exit.
+    for (let t = 0; t < 120; t += 10) {
+      tour.onPosition({ lat: mid.lat, lng: mid.lng, speedMps: 0, headingDeg: null });
+      await world.clock.advance(10_000);
+    }
+    check('a stopped walker stays in the regime',
+      !world.eventsOf('walking_regime').some(e => e.payload.active === false),
+      JSON.stringify(world.eventsOf('walking_regime').map(e => e.payload)));
+    // Car speed: the regime exits fast.
+    let lat = mid.lat;
+    for (let t = 0; t < 30; t += 10) {
+      lat += (12 * 10) / 111_320;
+      tour.onPosition({ lat, lng: mid.lng, speedMps: 12, headingDeg: 0 });
+      await world.clock.advance(10_000);
+    }
+    check('sustained car speed exits the regime',
+      world.eventsOf('walking_regime').some(e => e.payload.active === false),
+      JSON.stringify(world.eventsOf('walking_regime').map(e => e.payload)));
+    tour.endTour();
+  }
+
+  suite('WK-4 a stopped car never enters the regime (GPS jitter is not walking)');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, { candidates: [], library: [] });
+    const audio = new FakeAudio(world.clock, okPolicy());
+    const tour = await startAt(world, audio, UTC, 0, null);
+    // Two and a half minutes of parked fixes, wobbling ±3 m.
+    for (let t = 0; t < 150; t += 10) {
+      const jitter = (t / 10) % 2 === 0 ? 0.000027 : -0.000027;
+      tour.onPosition({ lat: UTC.lat + jitter, lng: UTC.lng, speedMps: 0, headingDeg: null });
+      await world.clock.advance(10_000);
+    }
+    check('no regime entry from a parked car',
+      !world.eventsOf('walking_regime').some(e => e.payload.active === true),
+      JSON.stringify(world.eventsOf('walking_regime').map(e => e.payload)));
+    tour.endTour();
+  }
+
   // ---------------------------------------------------------- S-10 filler lane
   suite('S-10 filler lane (F1/F2/F5/F9/F10/F12)');
   {
