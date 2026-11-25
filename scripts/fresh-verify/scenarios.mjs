@@ -402,7 +402,8 @@ export async function runScenarios(Tour, extras) {
     // pavement — bank whichever segment the matcher itself returns.
     const segLen = s =>
       s.polyline.reduce((acc, p, i) => (i === 0 ? 0 : acc + Math.hypot((p.lat - s.polyline[i - 1].lat) * 111_320, (p.lng - s.polyline[i - 1].lng) * 88_000)), 0);
-    const picked = CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
+    // Segment pinned by id Nov 25, 2026 (bank extension) — see fpPickSeg's note: the longest-segment selectors all resolved to this SR-125 piece before the extension.
+    const picked = CORRIDOR_SEGMENTS.find(s => s.id === 'sr-125-nb-san-miguel-road-sweetwater-crossing') ?? CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
     const start = picked.polyline[0];
     const second = picked.polyline[1];
     const pickedHeading = ((Math.atan2(second.lng - start.lng, second.lat - start.lat) * 180) / Math.PI + 360) % 360;
@@ -458,7 +459,7 @@ export async function runScenarios(Tour, extras) {
     const mpdLng = lat => MPD_LAT * Math.cos((lat * Math.PI) / 180);
     const distM = (a, b) => Math.hypot((b.lat - a.lat) * MPD_LAT, (b.lng - a.lng) * mpdLng(a.lat));
     const segLen = s => s.polyline.reduce((acc, p, i) => (i === 0 ? 0 : acc + distM(p, s.polyline[i - 1])), 0);
-    const seg = CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
+    const seg = CORRIDOR_SEGMENTS.find(s => s.id === 'sr-125-nb-san-miguel-road-sweetwater-crossing') ?? CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
     // The point at ~50% along-track, with its leg's bearing.
     const alongPoint = (s, frac) => {
       const total = segLen(s);
@@ -555,7 +556,7 @@ export async function runScenarios(Tour, extras) {
     const mpdLng = lat => MPD_LAT * Math.cos((lat * Math.PI) / 180);
     const distM = (a, b) => Math.hypot((b.lat - a.lat) * MPD_LAT, (b.lng - a.lng) * mpdLng(a.lat));
     const segLen = s => s.polyline.reduce((acc, p, i) => (i === 0 ? 0 : acc + distM(p, s.polyline[i - 1])), 0);
-    const seg = CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
+    const seg = CORRIDOR_SEGMENTS.find(s => s.id === 'sr-125-nb-san-miguel-road-sweetwater-crossing') ?? CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
     const alongPoint = (s, frac) => {
       const total = segLen(s);
       let acc = 0;
@@ -641,7 +642,7 @@ export async function runScenarios(Tour, extras) {
     const mpdLng = lat => MPD_LAT * Math.cos((lat * Math.PI) / 180);
     const distM = (a, b) => Math.hypot((b.lat - a.lat) * MPD_LAT, (b.lng - a.lng) * mpdLng(a.lat));
     const segLen = s => s.polyline.reduce((acc, p, i) => (i === 0 ? 0 : acc + distM(p, s.polyline[i - 1])), 0);
-    const seg = CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
+    const seg = CORRIDOR_SEGMENTS.find(s => s.id === 'sr-125-nb-san-miguel-road-sweetwater-crossing') ?? CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
     const total = segLen(seg);
     let acc = 0;
     let mid = null;
@@ -1437,7 +1438,7 @@ export async function runScenarios(Tour, extras) {
     resetLocalStorage();
     const segLen = s =>
       s.polyline.reduce((acc, p, i) => (i === 0 ? 0 : acc + Math.hypot((p.lat - s.polyline[i - 1].lat) * 111_320, (p.lng - s.polyline[i - 1].lng) * 88_000)), 0);
-    const picked = CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
+    const picked = CORRIDOR_SEGMENTS.find(s => s.id === 'sr-125-nb-san-miguel-road-sweetwater-crossing') ?? CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
     const start = picked.polyline[0];
     const second = picked.polyline[1];
     const heading = ((Math.atan2(second.lng - start.lng, second.lat - start.lat) * 180) / Math.PI + 360) % 360;
@@ -3892,7 +3893,7 @@ export async function runScenarios(Tour, extras) {
     // segment, banked under whichever segment the matcher returns.
     const segLen = s =>
       s.polyline.reduce((acc, p, i) => (i === 0 ? 0 : acc + Math.hypot((p.lat - s.polyline[i - 1].lat) * 111_320, (p.lng - s.polyline[i - 1].lng) * 88_000)), 0);
-    const picked = CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
+    const picked = CORRIDOR_SEGMENTS.find(s => s.id === 'sr-125-nb-san-miguel-road-sweetwater-crossing') ?? CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
     const start = picked.polyline[0];
     const second = picked.polyline[1];
     const pickedHeading = ((Math.atan2(second.lng - start.lng, second.lat - start.lat) * 180) / Math.PI + 360) % 360;
@@ -4016,7 +4017,7 @@ export async function runScenarios(Tour, extras) {
     // WT-2's segment discipline, verbatim.
     const segLen = s =>
       s.polyline.reduce((acc, p, i) => (i === 0 ? 0 : acc + Math.hypot((p.lat - s.polyline[i - 1].lat) * 111_320, (p.lng - s.polyline[i - 1].lng) * 88_000)), 0);
-    const picked = CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
+    const picked = CORRIDOR_SEGMENTS.find(s => s.id === 'sr-125-nb-san-miguel-road-sweetwater-crossing') ?? CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
     const start = picked.polyline[0];
     const second = picked.polyline[1];
     const pickedHeading = ((Math.atan2(second.lng - start.lng, second.lat - start.lat) * 180) / Math.PI + 360) % 360;
@@ -5012,7 +5013,14 @@ export async function runScenarios(Tour, extras) {
   // itself (overlapping segments share pavement — bank
   // whichever segment the matcher returns at the start point).
   const fpPickSeg = () => {
-    const picked = CORRIDOR_SEGMENTS.filter(s => fpSegLen(s) > 4000).reduce((a, b) => (fpSegLen(a) > fpSegLen(b) ? a : b));
+    // Pinned by id (Nov 25, 2026, bank extension): this selector
+    // used to take the bank's longest segment, which was the
+    // SR-125 San Miguel Road piece until the extension added
+    // longer rural segments east (I-8 Jacumba at 10.3 km). The
+    // FP/RC choreography was built around this segment's
+    // geometry; pinning keeps the suites on their original
+    // subject as the bank grows.
+    const picked = CORRIDOR_SEGMENTS.find(s => s.id === 'sr-125-nb-san-miguel-road-sweetwater-crossing') ?? CORRIDOR_SEGMENTS.filter(s => fpSegLen(s) > 4000).reduce((a, b) => (fpSegLen(a) > fpSegLen(b) ? a : b));
     const start = picked.polyline[0];
     const second = picked.polyline[1];
     const heading = ((Math.atan2((second.lng - start.lng) * fpMpdLng(start.lat), (second.lat - start.lat) * fpMpdLat) * 180) / Math.PI + 360) % 360;

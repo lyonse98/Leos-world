@@ -1125,6 +1125,275 @@ check('v2 fetch fairness: selectFetchCandidates round-robins buckets under the b
   });
 }
 
+
+// ---- bank extension (Nov 25, 2026) ----
+// The 40 legacy corridor tellings gained segments: 10 seat
+// directly (the segment's name IS the legacy key), 30 were
+// re-keyed by copy-insert under their new segment's keying, and
+// 28 zero-telling segments got one produced fill each. These
+// fixtures run on the REAL bundled data (routeTags/routePresence),
+// the REAL copy anchors (the segments' arc midpoints, as inserted),
+// and REAL segment polylines excerpted from corridors.ts.
+{
+  const bxInput = { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] };
+  const bxIds = plan => plan.items.filter(i => i.kind === 'story').map(i => i.id);
+  const bxUnit = (id, lat, lng, angle) => ({ ...unit(id, lat), placeKey: id.split('|')[0], placeName: id, angle, lng });
+
+  check('bank extension: a re-keyed legacy telling seats on its new segment in route mode', () => {
+    const key = 'sr-78 east: safari park to san pasqual|corridor';
+    assert.ok(rtg.ROUTE_TAGS[key], 'the re-keyed telling carries a tag row under its new key');
+    assert.ok(rpd.ROUTE_PRESENCE[key], 'and a presence row under its new key');
+    assert.ok(rtg.ROUTE_TAGS['sr-78 east: segment 1|corridor'], 'the legacy original stays on the shelf under its legacy key (orphan, untouched)');
+    const bxPath = [
+      { lat: 33.099316, lng: -117.02929 },
+      { lat: 33.098505, lng: -117.027375 },
+      { lat: 33.097649, lng: -117.025487 },
+      { lat: 33.096974, lng: -117.023515 },
+      { lat: 33.097445, lng: -117.021503 },
+      { lat: 33.098454, lng: -117.019726 },
+      { lat: 33.09887, lng: -117.017674 },
+      { lat: 33.098898, lng: -117.015528 },
+      { lat: 33.098147, lng: -117.013628 },
+      { lat: 33.09671, lng: -117.012342 },
+      { lat: 33.096001, lng: -117.010425 },
+      { lat: 33.095776, lng: -117.008295 },
+      { lat: 33.095532, lng: -117.006169 },
+      { lat: 33.094918, lng: -117.004152 },
+      { lat: 33.094201, lng: -117.002184 },
+      { lat: 33.093498, lng: -117.000208 },
+      { lat: 33.092795, lng: -116.998232 },
+      { lat: 33.092101, lng: -116.996251 },
+      { lat: 33.091351, lng: -116.994305 },
+      { lat: 33.090181, lng: -116.992681 },
+      { lat: 33.088608, lng: -116.991753 },
+      { lat: 33.086872, lng: -116.991243 },
+      { lat: 33.085845, lng: -116.989635 },
+      { lat: 33.086337, lng: -116.987639 },
+      { lat: 33.087161, lng: -116.985735 },
+      { lat: 33.087895, lng: -116.983775 },
+      { lat: 33.08854, lng: -116.981784 },
+      { lat: 33.08893, lng: -116.979696 },
+      { lat: 33.08948, lng: -116.977652 },
+      { lat: 33.090029, lng: -116.975608 },
+      { lat: 33.090608, lng: -116.973576 }
+    ];
+    const bxDest = bxPath[bxPath.length - 1];
+    const units = [
+      bxUnit(key, 33.09887, -117.017669, 'corridor'),
+      bxUnit('anchor|landmark_origin', 33.1036, -117.0383, 'landmark_origin'),
+    ];
+    const plan = rm.composeRoutePlan(units, bxPath, bxDest, 'Dest', bxInput, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000 });
+    assert.ok(bxIds(plan).includes(key), 'the re-keyed telling seats on the Safari Park to San Pasqual segment');
+  });
+
+  check('bank extension: a split-half telling seats when the driver joins at the midpoint', () => {
+    // The legacy Ramona to Santa Ysabel stretch was split at
+    // Ballena, Witch Creek and Mesa Grande. This drive JOINS the
+    // stretch at Ballena — the path starts there — and the seg-4
+    // telling, re-keyed onto the Ballena to Witch Creek half,
+    // must seat from its midpoint anchor, well inside the drive.
+    const key = 'sr-78 east: ballena to witch creek|corridor';
+    const bxPath = [
+      { lat: 33.059024, lng: -116.816242 },
+      { lat: 33.059953, lng: -116.814458 },
+      { lat: 33.061533, lng: -116.813449 },
+      { lat: 33.063094, lng: -116.812453 },
+      { lat: 33.064514, lng: -116.811347 },
+      { lat: 33.065675, lng: -116.8098 },
+      { lat: 33.067234, lng: -116.80927 },
+      { lat: 33.068377, lng: -116.80772 },
+      { lat: 33.069856, lng: -116.806521 },
+      { lat: 33.071425, lng: -116.805509 },
+      { lat: 33.072872, lng: -116.804273 },
+      { lat: 33.074287, lng: -116.802971 },
+      { lat: 33.075462, lng: -116.801439 },
+      { lat: 33.076384, lng: -116.799621 },
+      { lat: 33.077763, lng: -116.798343 },
+      { lat: 33.079249, lng: -116.797145 },
+      { lat: 33.080821, lng: -116.796106 },
+      { lat: 33.082397, lng: -116.795077 },
+      { lat: 33.083881, lng: -116.793872 },
+      { lat: 33.085361, lng: -116.792834 },
+      { lat: 33.085362, lng: -116.790838 },
+      { lat: 33.084418, lng: -116.789029 },
+      { lat: 33.083479, lng: -116.78724 },
+      { lat: 33.082412, lng: -116.785798 },
+      { lat: 33.081059, lng: -116.784546 },
+      { lat: 33.079723, lng: -116.783152 },
+      { lat: 33.079184, lng: -116.781195 },
+      { lat: 33.078753, lng: -116.77912 },
+      { lat: 33.078081, lng: -116.777143 },
+      { lat: 33.077019, lng: -116.775411 },
+      { lat: 33.076063, lng: -116.773596 },
+      { lat: 33.075199, lng: -116.771714 },
+      { lat: 33.074008, lng: -116.77014 },
+      { lat: 33.072699, lng: -116.768674 },
+      { lat: 33.071475, lng: -116.767118 },
+      { lat: 33.070756, lng: -116.765164 },
+      { lat: 33.069659, lng: -116.763474 },
+      { lat: 33.068392, lng: -116.761962 },
+      { lat: 33.066834, lng: -116.760939 },
+      { lat: 33.065714, lng: -116.759392 },
+      { lat: 33.065366, lng: -116.75731 },
+      { lat: 33.065374, lng: -116.755164 },
+      { lat: 33.065381, lng: -116.753018 },
+      { lat: 33.065383, lng: -116.751945 },
+      { lat: 33.065386, lng: -116.749799 },
+      { lat: 33.065395, lng: -116.747652 },
+      { lat: 33.065845, lng: -116.745618 },
+      { lat: 33.066639, lng: -116.743693 },
+      { lat: 33.067357, lng: -116.741725 },
+      { lat: 33.067611, lng: -116.739624 },
+      { lat: 33.067388, lng: -116.737497 },
+      { lat: 33.066856, lng: -116.735456 },
+      { lat: 33.067037, lng: -116.733332 },
+      { lat: 33.067352, lng: -116.731219 },
+      { lat: 33.067523, lng: -116.729088 },
+      { lat: 33.06713, lng: -116.727004 },
+      { lat: 33.06614, lng: -116.725221 },
+      { lat: 33.065963, lng: -116.723319 },
+      { lat: 33.06745, lng: -116.722168 },
+      { lat: 33.069052, lng: -116.721213 },
+      { lat: 33.070541, lng: -116.720035 },
+      { lat: 33.07223, lng: -116.71935 },
+      { lat: 33.073981, lng: -116.718894 },
+      { lat: 33.075715, lng: -116.718322 },
+      { lat: 33.077374, lng: -116.717504 },
+      { lat: 33.078951, lng: -116.716476 },
+      { lat: 33.080491, lng: -116.715368 },
+      { lat: 33.081936, lng: -116.714124 },
+      { lat: 33.082989, lng: -116.712384 },
+      { lat: 33.084121, lng: -116.71073 },
+      { lat: 33.08541, lng: -116.709231 },
+      { lat: 33.086748, lng: -116.707808 },
+      { lat: 33.08814, lng: -116.706481 },
+      { lat: 33.089865, lng: -116.705938 },
+      { lat: 33.09118, lng: -116.704601 },
+      { lat: 33.092491, lng: -116.703167 },
+      { lat: 33.093857, lng: -116.701823 },
+      { lat: 33.095475, lng: -116.700885 },
+      { lat: 33.097089, lng: -116.699956 },
+      { lat: 33.098599, lng: -116.698794 },
+      { lat: 33.100022, lng: -116.697481 },
+      { lat: 33.101411, lng: -116.696118 },
+      { lat: 33.102714, lng: -116.694642 },
+      { lat: 33.103802, lng: -116.69294 },
+      { lat: 33.104758, lng: -116.69113 },
+      { lat: 33.105062, lng: -116.68902 },
+      { lat: 33.105402, lng: -116.686928 },
+      { lat: 33.105987, lng: -116.684898 },
+      { lat: 33.106569, lng: -116.682866 },
+      { lat: 33.107162, lng: -116.680839 },
+      { lat: 33.107757, lng: -116.678813 },
+      { lat: 33.108352, lng: -116.676786 },
+      { lat: 33.108955, lng: -116.674763 },
+      { lat: 33.109399, lng: -116.673243 }
+    ];
+    const bxDest = bxPath[bxPath.length - 1];
+    const anchorProgress = rm.progressAlongPath({ lat: 33.084101, lng: -116.788425 }, bxPath);
+    assert.ok(anchorProgress > 0.1, `the telling's anchor sits ${(anchorProgress * 100).toFixed(0)}% into the joined drive — a midpoint seat, not the origin`);
+    const units = [
+      bxUnit(key, 33.084101, -116.788425, 'corridor'),
+      bxUnit('anchor|landmark_origin', 33.1095, -116.6727, 'landmark_origin'),
+    ];
+    const plan = rm.composeRoutePlan(units, bxPath, bxDest, 'Dest', bxInput, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000 });
+    assert.ok(bxIds(plan).includes(key), 'the split-half telling seats for a driver who joined at Ballena');
+  });
+
+  check('bank extension: rotation still holds on a split segment pair (heard telling 1, telling 2 offered)', () => {
+    const base = 'i-8 east: viejas to descanso junction|corridor';
+    const second = 'i-8 east: viejas to descanso junction|corridor-2';
+    assert.ok(rtg.ROUTE_TAGS[base] && rtg.ROUTE_TAGS[second], 'both tellings of the split pair carry tag rows');
+    assert.ok(rpd.ROUTE_PRESENCE[base] && rpd.ROUTE_PRESENCE[second], 'and presence rows');
+    const bxPath = [
+      { lat: 32.838894, lng: -116.70001 },
+      { lat: 32.838905, lng: -116.697869 },
+      { lat: 32.838916, lng: -116.695729 },
+      { lat: 32.838926, lng: -116.693588 },
+      { lat: 32.838937, lng: -116.691447 },
+      { lat: 32.838948, lng: -116.689306 },
+      { lat: 32.838959, lng: -116.687166 },
+      { lat: 32.83887, lng: -116.685029 },
+      { lat: 32.838627, lng: -116.682909 },
+      { lat: 32.838366, lng: -116.680791 },
+      { lat: 32.838104, lng: -116.678673 },
+      { lat: 32.837901, lng: -116.676546 },
+      { lat: 32.837968, lng: -116.67441 },
+      { lat: 32.838306, lng: -116.672311 },
+      { lat: 32.838755, lng: -116.670239 },
+      { lat: 32.838899, lng: -116.66811 },
+      { lat: 32.838643, lng: -116.665996 },
+      { lat: 32.838169, lng: -116.663931 },
+      { lat: 32.837723, lng: -116.661859 },
+      { lat: 32.837626, lng: -116.659726 },
+      { lat: 32.83794, lng: -116.657622 },
+      { lat: 32.838384, lng: -116.655548 },
+      { lat: 32.838707, lng: -116.653446 },
+      { lat: 32.838646, lng: -116.651311 },
+      { lat: 32.838227, lng: -116.64923 },
+      { lat: 32.837768, lng: -116.647161 },
+      { lat: 32.837308, lng: -116.645091 },
+      { lat: 32.836846, lng: -116.643022 },
+      { lat: 32.836406, lng: -116.640947 },
+      { lat: 32.835858, lng: -116.638909 },
+      { lat: 32.835209, lng: -116.636913 },
+      { lat: 32.834524, lng: -116.634933 },
+      { lat: 32.833839, lng: -116.632954 },
+      { lat: 32.833032, lng: -116.631045 },
+      { lat: 32.831946, lng: -116.629342 },
+      { lat: 32.830613, lng: -116.627912 },
+      { lat: 32.829106, lng: -116.626744 },
+      { lat: 32.827501, lng: -116.625498 },
+      { lat: 32.826201, lng: -116.624026 },
+      { lat: 32.825216, lng: -116.622241 },
+      { lat: 32.824592, lng: -116.620238 },
+      { lat: 32.824354, lng: -116.618121 },
+      { lat: 32.824469, lng: -116.615987 },
+      { lat: 32.824628, lng: -116.613855 },
+      { lat: 32.824788, lng: -116.611723 },
+      { lat: 32.824921, lng: -116.609589 },
+      { lat: 32.824861, lng: -116.607451 },
+      { lat: 32.824593, lng: -116.605336 },
+      { lat: 32.824162, lng: -116.603258 },
+      { lat: 32.823719, lng: -116.601183 },
+      { lat: 32.823276, lng: -116.599109 },
+      { lat: 32.822833, lng: -116.597034 },
+      { lat: 32.822387, lng: -116.594961 },
+      { lat: 32.82193, lng: -116.592891 },
+      { lat: 32.821474, lng: -116.590821 },
+      { lat: 32.821016, lng: -116.588751 },
+      { lat: 32.820562, lng: -116.58668 },
+      { lat: 32.820271, lng: -116.584571 },
+      { lat: 32.820261, lng: -116.582434 },
+      { lat: 32.820324, lng: -116.580295 },
+      { lat: 32.820387, lng: -116.578156 },
+      { lat: 32.820452, lng: -116.576018 },
+      { lat: 32.820532, lng: -116.573879 },
+      { lat: 32.82079, lng: -116.571767 },
+      { lat: 32.821502, lng: -116.569807 },
+      { lat: 32.82236, lng: -116.567926 },
+      { lat: 32.822993, lng: -116.565929 },
+      { lat: 32.823255, lng: -116.563814 },
+      { lat: 32.823254, lng: -116.561674 },
+      { lat: 32.823258, lng: -116.559534 },
+      { lat: 32.823262, lng: -116.557197 }
+    ];
+    const bxDest = bxPath[bxPath.length - 1];
+    const pair = () => [
+      bxUnit(base, 32.837671, -116.660725, 'corridor'),
+      bxUnit(second, 32.837671, -116.660725, 'corridor-2'),
+      bxUnit('anchor|landmark_origin', 32.84044, -116.77489, 'landmark_origin'),
+    ];
+    const pools = rm.partitionRoutePools(pair(), bxPath, bxDest, { heardKeys: new Set([base]) });
+    const geoIds = pools.geoAll.map(u => u.id);
+    assert.ok(!geoIds.includes(base), 'the heard first telling is filtered');
+    assert.ok(geoIds.includes(second), 'the second telling is offered in its place');
+    const plan = rm.composeRoutePlan(pair(), bxPath, bxDest, 'Dest', bxInput, { nowMs: NOW, heardKeys: new Set([base]), budgetSecOverride: 100000 });
+    assert.ok(bxIds(plan).includes(second), 'the episode seats the second telling');
+    assert.ok(!bxIds(plan).includes(base), 'and not the heard first telling');
+  });
+}
+
 check('v2 weighting: landmark beats corridor at the same anchor (no user topics)', () => {
   const units = [unit('corr|corridor', 32.75, { angle: 'corridor' }), unit('mark|landmark_origin', 32.75)];
   const tight = rm.composeRoutePlan(units, path, dest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: NOW + 130 * 1000, tone: null, topics: [] }, { nowMs: NOW, heardKeys: new Set() });
@@ -4954,7 +5223,7 @@ const storyIds = plan => plan.items.filter(i => i.kind === 'story').map(i => i.i
 const memberIds = plan => plan.items.filter(i => i.woven).map(i => i.id);
 
 check('woven data: the bundled presence map pins the audit — Protected excluded whatever its register', () => {
-  assert.equal(Object.keys(rpd.ROUTE_PRESENCE).length, 3839, 'one row per shelf story (1,395 Phase 0+1 wiring + 10 probe presence (P7) + 20 Wave C-2 + 836 Vertex Phase 3 T1 + 62 Vertex Phase 4 T2 + 699 Vertex Phase 5 T3 + 214 Vertex Phase 6 T4 + 46 city-works remainder + 181 woven twins wave 2, wrap-ins Nov 11 + 119 gap-fill Nov 11 + 3 Phase 7 mop-up Nov 11 + 13 rural/suburban top-up Nov 11 + 10 famous houses Nov 16 + 21 content top-ups Nov 18 + 3 Escondido/San Pasqual top-ups Nov 24 + 11 county corridor sweep fills Nov 24 + 196 corridor multiplicity second tellings Nov 25) — short cuts carry NO presence rows by design (Nov 12, 2026): a twin is its base\'s other length, never woven material, so this count does not move with the 469 twins');
+  assert.equal(Object.keys(rpd.ROUTE_PRESENCE).length, 3897, 'one row per shelf story (1,395 Phase 0+1 wiring + 10 probe presence (P7) + 20 Wave C-2 + 836 Vertex Phase 3 T1 + 62 Vertex Phase 4 T2 + 699 Vertex Phase 5 T3 + 214 Vertex Phase 6 T4 + 46 city-works remainder + 181 woven twins wave 2, wrap-ins Nov 11 + 119 gap-fill Nov 11 + 3 Phase 7 mop-up Nov 11 + 13 rural/suburban top-up Nov 11 + 10 famous houses Nov 16 + 21 content top-ups Nov 18 + 3 Escondido/San Pasqual top-ups Nov 24 + 11 county corridor sweep fills Nov 24 + 196 corridor multiplicity second tellings Nov 25 + 58 bank extension rows Nov 25: 30 re-keyed legacy tellings + 28 gap fills, each mirrored from its source or parent stretch\'s audit class) — short cuts carry NO presence rows by design (Nov 12, 2026): a twin is its base\'s other length, never woven material, so this count does not move with the 469 twins');
   // Kuchamaa is Protected register: even its weave-SAFE
   // telling is never woven material.
   assert.deepEqual(rpd.presenceFor('kuchamaa', 'landmark_origin'), { presence: 'safe', protected: true });
@@ -4992,7 +5261,7 @@ check('woven data regen: deterministic, and the committed routePresence.ts is in
 const TWIN_SUFFIX = '-woven-v1';
 const twinKeysOf = map => Object.keys(map).filter(k => k.split('|')[1]?.endsWith(TWIN_SUFFIX));
 check('woven twins (data): the tag map carries all 282 twins with topics inherited from their sources', () => {
-  assert.equal(Object.keys(rtg.ROUTE_TAGS).length, 4523, 'one tag row per shelf story (1,405 Phase 0+1 wiring + 20 Wave C-2 + 836 Vertex Phase 3 T1 + 62 Vertex Phase 4 T2 + 699 Vertex Phase 5 T3 + 214 Vertex Phase 6 T4 + 46 city-works remainder + 181 woven twins wave 2, wrap-ins Nov 11 + 119 gap-fill Nov 11 + 3 Phase 7 mop-up Nov 11 + 13 rural/suburban top-up Nov 11 + 469 short cuts Nov 12 + 156 welcome cuts Nov 15 + 10 famous houses Nov 16 + 21 content top-ups Nov 18 + 3 Escondido/San Pasqual top-ups Nov 24 + 11 county corridor sweep fills Nov 24 + 59 corridor short cuts Nov 25 + 196 corridor multiplicity second tellings Nov 25)');
+  assert.equal(Object.keys(rtg.ROUTE_TAGS).length, 4581, 'one tag row per shelf story (1,405 Phase 0+1 wiring + 20 Wave C-2 + 836 Vertex Phase 3 T1 + 62 Vertex Phase 4 T2 + 699 Vertex Phase 5 T3 + 214 Vertex Phase 6 T4 + 46 city-works remainder + 181 woven twins wave 2, wrap-ins Nov 11 + 119 gap-fill Nov 11 + 3 Phase 7 mop-up Nov 11 + 13 rural/suburban top-up Nov 11 + 469 short cuts Nov 12 + 156 welcome cuts Nov 15 + 10 famous houses Nov 16 + 21 content top-ups Nov 18 + 3 Escondido/San Pasqual top-ups Nov 24 + 11 county corridor sweep fills Nov 24 + 59 corridor short cuts Nov 25 + 196 corridor multiplicity second tellings Nov 25 + 58 bank extension rows Nov 25: 30 re-keyed legacy tellings (topics/tone copied from their legacy rows) + 28 gap fills)');
   const twins = twinKeysOf(rtg.ROUTE_TAGS);
   assert.equal(twins.length, 282, 'the completed tranche twins (100) plus woven twins wave 2 (181, wrap-ins Nov 11) plus the Fallbrook twin (Phase 7 mop-up Nov 11) are index-visible');
   let coast = 0;
@@ -5021,7 +5290,7 @@ check('woven twins (data): every twin resolves weave-safe and eligible; its sour
   for (const [k, e] of Object.entries(rpd.ROUTE_PRESENCE)) {
     if (!k.split('|')[1]?.endsWith(TWIN_SUFFIX)) split[e.presence] += 1;
   }
-  assert.deepEqual(split, { bound: 359, mixed: 997, safe: 2201 }, 'the recovered audit split (195/567/502) plus the C-1 regen (2 bound / 5 mixed / 9 safe), the city-works classes (10 mixed / 5 safe), the Phase 0 probe classes (3 mixed / 7 safe), the Wave C-2 classes (4 mixed / 16 safe), the Vertex Phase 3 T1 classes (690 safe / 121 mixed / 25 bound across B1-B5 Gate 5 classify), the Vertex Phase 4 T2 classes (53 safe / 8 mixed / 1 bound, Gate 5 classify), the Vertex Phase 5 T3 classes (565 safe / 92 mixed / 42 bound across B1-B5 Gate 5 classify) and the Vertex Phase 6 T4 classes (165 safe / 40 mixed / 9 bound across B1-B3 Gate 5 classify) and the wrap-ins classes (city-works 31 safe / 7 mixed / 8 bound, Gate 5 classify; 181 wave-2 woven twins derived safe) and the gap-fill classes (95 safe / 18 mixed / 6 bound across B1-B5 Gate 5 classify) and the Phase 7 mop-up classes (1 safe / 1 bound across the new units, Gate 5 classify; the Fallbrook twin derived safe and excluded from this split by the twin rule) and the rural/suburban top-up classes (13 safe across the new units, Gate 5 classify) and the famous-houses classes (10 safe across the new units, Gate 5 classify) and the content top-ups classes (17 safe / 4 mixed across the new units, Gate 5 classify) and the Escondido/San Pasqual top-ups classes (2 safe / 1 mixed across the new units, Gate 5 classify) and the county corridor sweep classes (9 safe / 2 mixed across the new units, Gate 5 classify) and the corridor multiplicity classes (70 bound / 115 mixed / 11 safe across the new units, each mirrored from its base segment\'s audit class, Nov 25), byte-stable');
+  assert.deepEqual(split, { bound: 364, mixed: 1005, safe: 2246 }, 'the recovered audit split (195/567/502) plus the C-1 regen (2 bound / 5 mixed / 9 safe), the city-works classes (10 mixed / 5 safe), the Phase 0 probe classes (3 mixed / 7 safe), the Wave C-2 classes (4 mixed / 16 safe), the Vertex Phase 3 T1 classes (690 safe / 121 mixed / 25 bound across B1-B5 Gate 5 classify), the Vertex Phase 4 T2 classes (53 safe / 8 mixed / 1 bound, Gate 5 classify), the Vertex Phase 5 T3 classes (565 safe / 92 mixed / 42 bound across B1-B5 Gate 5 classify) and the Vertex Phase 6 T4 classes (165 safe / 40 mixed / 9 bound across B1-B3 Gate 5 classify) and the wrap-ins classes (city-works 31 safe / 7 mixed / 8 bound, Gate 5 classify; 181 wave-2 woven twins derived safe) and the gap-fill classes (95 safe / 18 mixed / 6 bound across B1-B5 Gate 5 classify) and the Phase 7 mop-up classes (1 safe / 1 bound across the new units, Gate 5 classify; the Fallbrook twin derived safe and excluded from this split by the twin rule) and the rural/suburban top-up classes (13 safe across the new units, Gate 5 classify) and the famous-houses classes (10 safe across the new units, Gate 5 classify) and the content top-ups classes (17 safe / 4 mixed across the new units, Gate 5 classify) and the Escondido/San Pasqual top-ups classes (2 safe / 1 mixed across the new units, Gate 5 classify) and the county corridor sweep classes (9 safe / 2 mixed across the new units, Gate 5 classify) and the corridor multiplicity classes (70 bound / 115 mixed / 11 safe across the new units, each mirrored from its base segment\'s audit class, Nov 25) and the bank extension classes (5 bound / 8 mixed / 45 safe across the 58 new units, each mirrored from its source or parent stretch\'s audit class, Nov 25), byte-stable');
 });
 check('woven twins (data): index support counts the twins, and the member fetch can return them', () => {
   // The REAL shipped index (every tag-map key), all placed on
@@ -10712,14 +10981,19 @@ check('short cuts (capture): the plan records which version each item serves', (
 
 check('short cuts (data): the generator reproduces the committed module byte for byte', () => {
   const before = readFileSync(join(repoRoot, 'src/data/shortCuts.ts'), 'utf8');
-  // Canonical sources are the two batches' COMBINED manifest + ledger
-  // (Nov 12 short cuts + Nov 15 welcome cuts), assembled in the Nov 15
-  // run dir — the generator's no-arg defaults remain the Nov 12 files.
+  // Canonical sources are the COMBINED manifest + ledger the
+  // committed module was built from. Through Nov 15 that was the
+  // welcome-cuts assembly (625 pairs); the corridor multiplicity
+  // program (Nov 25) rebuilt the module from its own combined
+  // manifest (684 pairs) without updating this check's args — the
+  // stale pointer is corrected here (Nov 25, bank extension):
+  // regen from the multiplicity manifest reproduces the committed
+  // module byte for byte.
   const wsRoot = join(repoRoot, '..');
   execFileSync('node', [
     join(repoRoot, 'scripts/route-mode/build-short-cuts.mjs'),
-    join(wsRoot, 'welcome-cuts-2026-11-15/work/combined-manifest.csv'),
-    join(wsRoot, 'welcome-cuts-2026-11-15/work/combined-ledger.csv'),
+    join(wsRoot, 'corridor-multiplicity-2026-11-25/short-cuts-run/combined-manifest.csv'),
+    join(wsRoot, 'corridor-multiplicity-2026-11-25/short-cuts-run/combined-ledger.csv'),
     join(wsRoot, 'story-tags.csv'),
   ], { cwd: repoRoot, stdio: 'pipe' });
   assert.equal(readFileSync(join(repoRoot, 'src/data/shortCuts.ts'), 'utf8'), before, 'regen is deterministic and the committed file is in sync');
