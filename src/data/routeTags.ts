@@ -1,6 +1,6 @@
 // GENERATED — do not hand-edit. Built by
 // scripts/route-mode/build-route-tags.mjs from story-tags.csv
-// (4257 rows, Nov 1 tone/topic tagging). The route
+// (4268 rows, Nov 1 tone/topic tagging). The route
 // composer joins library-index rows to this map at runtime, so no
 // DB change is needed for route mode to see tone/topic tags.
 
@@ -4269,6 +4269,17 @@ export const ROUTE_TAGS: Record<string, RouteTagEntry> = {
   "san diego ostrich ranch|landmark_origin": { topics: ["Boom & Bust"], tone: "light", toneSecondary: "warm" },
   "escondido|landmark_people": { topics: ["Food & Drink"], tone: "warm", toneSecondary: "reflective" },
   "kit carson park|landmark_origin": { topics: ["folklore"], tone: "grand", toneSecondary: "reflective" },
+  "lake hodges|landmark_people": { topics: ["Water"], tone: "light", toneSecondary: "warm" },
+  "daley ranch|landmark_origin": { topics: ["Boom & Bust"], tone: "warm", toneSecondary: "reflective" },
+  "lawrence welk resort|landmark_origin": { topics: ["Music"], tone: "warm", toneSecondary: "reflective" },
+  "grape day park|landmark_origin": { topics: ["Food & Drink"], tone: "light", toneSecondary: "warm" },
+  "stone brewing|landmark_origin": { topics: ["Boom & Bust"], tone: "somber", toneSecondary: "reflective" },
+  "san marcos|landmark_origin": { topics: ["Rail"], tone: "reflective", toneSecondary: "warm" },
+  "lake san marcos|landmark_origin": { topics: ["Water"], tone: "light", toneSecondary: "warm" },
+  "mission trails regional park|landmark_origin": { topics: ["San Diego River"], tone: "warm", toneSecondary: "reflective" },
+  "san elijo lagoon|landmark_origin": { topics: ["Coast"], tone: "warm", toneSecondary: "reflective" },
+  "agua hedionda lagoon|landmark_origin": { topics: ["Coast"], tone: "light", toneSecondary: "warm" },
+  "viejas band|landmark_origin": { topics: ["Deep Time"], tone: "reflective", toneSecondary: "warm" },
 };
 
 export function tagsFor(placeKey: string, angle: string): RouteTagEntry {
