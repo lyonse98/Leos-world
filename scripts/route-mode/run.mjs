@@ -4954,7 +4954,7 @@ const storyIds = plan => plan.items.filter(i => i.kind === 'story').map(i => i.i
 const memberIds = plan => plan.items.filter(i => i.woven).map(i => i.id);
 
 check('woven data: the bundled presence map pins the audit — Protected excluded whatever its register', () => {
-  assert.equal(Object.keys(rpd.ROUTE_PRESENCE).length, 3643, 'one row per shelf story (1,395 Phase 0+1 wiring + 10 probe presence (P7) + 20 Wave C-2 + 836 Vertex Phase 3 T1 + 62 Vertex Phase 4 T2 + 699 Vertex Phase 5 T3 + 214 Vertex Phase 6 T4 + 46 city-works remainder + 181 woven twins wave 2, wrap-ins Nov 11 + 119 gap-fill Nov 11 + 3 Phase 7 mop-up Nov 11 + 13 rural/suburban top-up Nov 11 + 10 famous houses Nov 16 + 21 content top-ups Nov 18 + 3 Escondido/San Pasqual top-ups Nov 24 + 11 county corridor sweep fills Nov 24) — short cuts carry NO presence rows by design (Nov 12, 2026): a twin is its base\'s other length, never woven material, so this count does not move with the 469 twins');
+  assert.equal(Object.keys(rpd.ROUTE_PRESENCE).length, 3839, 'one row per shelf story (1,395 Phase 0+1 wiring + 10 probe presence (P7) + 20 Wave C-2 + 836 Vertex Phase 3 T1 + 62 Vertex Phase 4 T2 + 699 Vertex Phase 5 T3 + 214 Vertex Phase 6 T4 + 46 city-works remainder + 181 woven twins wave 2, wrap-ins Nov 11 + 119 gap-fill Nov 11 + 3 Phase 7 mop-up Nov 11 + 13 rural/suburban top-up Nov 11 + 10 famous houses Nov 16 + 21 content top-ups Nov 18 + 3 Escondido/San Pasqual top-ups Nov 24 + 11 county corridor sweep fills Nov 24 + 196 corridor multiplicity second tellings Nov 25) — short cuts carry NO presence rows by design (Nov 12, 2026): a twin is its base\'s other length, never woven material, so this count does not move with the 469 twins');
   // Kuchamaa is Protected register: even its weave-SAFE
   // telling is never woven material.
   assert.deepEqual(rpd.presenceFor('kuchamaa', 'landmark_origin'), { presence: 'safe', protected: true });
@@ -4992,7 +4992,7 @@ check('woven data regen: deterministic, and the committed routePresence.ts is in
 const TWIN_SUFFIX = '-woven-v1';
 const twinKeysOf = map => Object.keys(map).filter(k => k.split('|')[1]?.endsWith(TWIN_SUFFIX));
 check('woven twins (data): the tag map carries all 282 twins with topics inherited from their sources', () => {
-  assert.equal(Object.keys(rtg.ROUTE_TAGS).length, 4268, 'one tag row per shelf story (1,405 Phase 0+1 wiring + 20 Wave C-2 + 836 Vertex Phase 3 T1 + 62 Vertex Phase 4 T2 + 699 Vertex Phase 5 T3 + 214 Vertex Phase 6 T4 + 46 city-works remainder + 181 woven twins wave 2, wrap-ins Nov 11 + 119 gap-fill Nov 11 + 3 Phase 7 mop-up Nov 11 + 13 rural/suburban top-up Nov 11 + 469 short cuts Nov 12 + 156 welcome cuts Nov 15 + 10 famous houses Nov 16 + 21 content top-ups Nov 18 + 3 Escondido/San Pasqual top-ups Nov 24 + 11 county corridor sweep fills Nov 24)');
+  assert.equal(Object.keys(rtg.ROUTE_TAGS).length, 4523, 'one tag row per shelf story (1,405 Phase 0+1 wiring + 20 Wave C-2 + 836 Vertex Phase 3 T1 + 62 Vertex Phase 4 T2 + 699 Vertex Phase 5 T3 + 214 Vertex Phase 6 T4 + 46 city-works remainder + 181 woven twins wave 2, wrap-ins Nov 11 + 119 gap-fill Nov 11 + 3 Phase 7 mop-up Nov 11 + 13 rural/suburban top-up Nov 11 + 469 short cuts Nov 12 + 156 welcome cuts Nov 15 + 10 famous houses Nov 16 + 21 content top-ups Nov 18 + 3 Escondido/San Pasqual top-ups Nov 24 + 11 county corridor sweep fills Nov 24 + 59 corridor short cuts Nov 25 + 196 corridor multiplicity second tellings Nov 25)');
   const twins = twinKeysOf(rtg.ROUTE_TAGS);
   assert.equal(twins.length, 282, 'the completed tranche twins (100) plus woven twins wave 2 (181, wrap-ins Nov 11) plus the Fallbrook twin (Phase 7 mop-up Nov 11) are index-visible');
   let coast = 0;
@@ -5021,7 +5021,7 @@ check('woven twins (data): every twin resolves weave-safe and eligible; its sour
   for (const [k, e] of Object.entries(rpd.ROUTE_PRESENCE)) {
     if (!k.split('|')[1]?.endsWith(TWIN_SUFFIX)) split[e.presence] += 1;
   }
-  assert.deepEqual(split, { bound: 289, mixed: 882, safe: 2190 }, 'the recovered audit split (195/567/502) plus the C-1 regen (2 bound / 5 mixed / 9 safe), the city-works classes (10 mixed / 5 safe), the Phase 0 probe classes (3 mixed / 7 safe), the Wave C-2 classes (4 mixed / 16 safe), the Vertex Phase 3 T1 classes (690 safe / 121 mixed / 25 bound across B1-B5 Gate 5 classify), the Vertex Phase 4 T2 classes (53 safe / 8 mixed / 1 bound, Gate 5 classify), the Vertex Phase 5 T3 classes (565 safe / 92 mixed / 42 bound across B1-B5 Gate 5 classify) and the Vertex Phase 6 T4 classes (165 safe / 40 mixed / 9 bound across B1-B3 Gate 5 classify) and the wrap-ins classes (city-works 31 safe / 7 mixed / 8 bound, Gate 5 classify; 181 wave-2 woven twins derived safe) and the gap-fill classes (95 safe / 18 mixed / 6 bound across B1-B5 Gate 5 classify) and the Phase 7 mop-up classes (1 safe / 1 bound across the new units, Gate 5 classify; the Fallbrook twin derived safe and excluded from this split by the twin rule) and the rural/suburban top-up classes (13 safe across the new units, Gate 5 classify) and the famous-houses classes (10 safe across the new units, Gate 5 classify) and the content top-ups classes (17 safe / 4 mixed across the new units, Gate 5 classify) and the Escondido/San Pasqual top-ups classes (2 safe / 1 mixed across the new units, Gate 5 classify) and the county corridor sweep classes (9 safe / 2 mixed across the new units, Gate 5 classify), byte-stable');
+  assert.deepEqual(split, { bound: 359, mixed: 997, safe: 2201 }, 'the recovered audit split (195/567/502) plus the C-1 regen (2 bound / 5 mixed / 9 safe), the city-works classes (10 mixed / 5 safe), the Phase 0 probe classes (3 mixed / 7 safe), the Wave C-2 classes (4 mixed / 16 safe), the Vertex Phase 3 T1 classes (690 safe / 121 mixed / 25 bound across B1-B5 Gate 5 classify), the Vertex Phase 4 T2 classes (53 safe / 8 mixed / 1 bound, Gate 5 classify), the Vertex Phase 5 T3 classes (565 safe / 92 mixed / 42 bound across B1-B5 Gate 5 classify) and the Vertex Phase 6 T4 classes (165 safe / 40 mixed / 9 bound across B1-B3 Gate 5 classify) and the wrap-ins classes (city-works 31 safe / 7 mixed / 8 bound, Gate 5 classify; 181 wave-2 woven twins derived safe) and the gap-fill classes (95 safe / 18 mixed / 6 bound across B1-B5 Gate 5 classify) and the Phase 7 mop-up classes (1 safe / 1 bound across the new units, Gate 5 classify; the Fallbrook twin derived safe and excluded from this split by the twin rule) and the rural/suburban top-up classes (13 safe across the new units, Gate 5 classify) and the famous-houses classes (10 safe across the new units, Gate 5 classify) and the content top-ups classes (17 safe / 4 mixed across the new units, Gate 5 classify) and the Escondido/San Pasqual top-ups classes (2 safe / 1 mixed across the new units, Gate 5 classify) and the county corridor sweep classes (9 safe / 2 mixed across the new units, Gate 5 classify) and the corridor multiplicity classes (70 bound / 115 mixed / 11 safe across the new units, each mirrored from its base segment\'s audit class, Nov 25), byte-stable');
 });
 check('woven twins (data): index support counts the twins, and the member fetch can return them', () => {
   // The REAL shipped index (every tag-map key), all placed on
@@ -10652,21 +10652,22 @@ check('short cuts SC-7: measured durations price the windows — never the 55–
     Math.abs((over.expireProgress ?? 0) - expectedExpire) < 1e-9,
     `the window expires on the served duration (${over.expireProgress} vs ${expectedExpire})`,
   );
-  // The bundled duration map's own shape: 625 measured
-  // values (469 Nov 12 + 156 welcome cuts Nov 15), the
-  // over-90 s tail carried verbatim.
+  // The bundled duration map's own shape: 684 measured
+  // values (469 Nov 12 + 156 welcome cuts Nov 15 + 59
+  // corridor cuts Nov 25), the over-90 s tail carried
+  // verbatim.
   const durs = Object.values(rsc.SHORT_CUT_DURATION_SEC);
-  assert.equal(durs.length, 625);
-  assert.equal(Math.max(...durs), 100.7);
+  assert.equal(durs.length, 684);
+  assert.equal(Math.max(...durs), 101.2);
   assert.equal(Math.min(...durs), 37.0);
-  assert.equal(durs.filter(d => d > 90).length, 44, 'the over-target tail is real data, carried verbatim');
-  assert.equal(durs.filter(d => d < 55).length, 2);
+  assert.equal(durs.filter(d => d > 90).length, 49, 'the over-target tail is real data, carried verbatim');
+  assert.equal(durs.filter(d => d < 55).length, 3);
 });
 
 check('short cuts (data): the bundled map carries all 625 production pairs, wired to tags and presence', () => {
   const pairs = Object.entries(rsc.SHORT_CUT_TWIN_OF);
-  assert.equal(pairs.length, 625, 'one pair per production manifest row');
-  assert.equal(Object.keys(rsc.SHORT_CUT_BASE_OF).length, 625);
+  assert.equal(pairs.length, 684, 'one pair per production manifest row');
+  assert.equal(Object.keys(rsc.SHORT_CUT_BASE_OF).length, 684);
   for (const [baseId, twinId] of pairs) {
     assert.equal(rsc.SHORT_CUT_BASE_OF[twinId], baseId, `${twinId} maps back`);
     assert.equal(rm.canonicalStoryId(twinId), baseId, 'canonicalStoryId strips the suffix');

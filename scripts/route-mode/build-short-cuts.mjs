@@ -15,7 +15,7 @@
 // unification keys on it), and the duration map carries the
 // MEASURED seconds, because window math must price the audio
 // that actually exists, never the 55–90 s design target
-// (43 shipped twins measure over 90 s, max 100.7 s; one
+// (49 shipped twins measure over 90 s, max 101.2 s; one
 // measures 37.0 s).
 //
 // DETERMINISTIC: the output is a pure function of the two
@@ -155,8 +155,9 @@ const out = `// GENERATED — do not hand-edit. Built by
 // scripts/route-mode/build-short-cuts.mjs from the short-cuts
 // programs' combined manifest + production ledgers
 // (short-cuts-2026-11-12/ + welcome-cuts-2026-11-15/work/
+// + corridor-multiplicity-2026-11-25/short-cuts-run/
 // combined-manifest.csv + combined-ledger.csv: ${pairs.length}
-// pairs, Nov 12 + Nov 15, 2026).
+// pairs, Nov 12 + Nov 15 + Nov 25, 2026).
 //
 // Short cuts (Nov 12, 2026, Erik's ruling): the same story at
 // a second length — a library row whose angle is the base
@@ -181,7 +182,7 @@ ${baseOf}
  * production ledger's probe of the rendered file). Window
  * and pace math price these numbers, never the program's
  * 55–90 s design target: the shipped twins measure
- * 37.0–100.7 s.
+ * 37.0–101.2 s.
  */
 export const SHORT_CUT_DURATION_SEC: Record<string, number> = {
 ${durOf}
