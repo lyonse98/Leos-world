@@ -125,6 +125,7 @@ import {
   estimateDurationSec,
   hasArrived,
   haversineM,
+  isCorridorAngle,
   isDestinationArea,
   isOffCorridor,
   isShortCutAngle,
@@ -2551,7 +2552,7 @@ export class RoutePlanRunner {
           !(this.plan && it.unit && isDestinationArea(it.unit, this.plan.destination))
         ) {
           const lateFraction =
-            it.unit?.angle === 'corridor'
+            it.unit && isCorridorAngle(it.unit.angle)
               ? LATE_PRESENCE_FRACTION_CORRIDOR
               : LATE_PRESENCE_FRACTION_POINT;
           const lateThreshold =

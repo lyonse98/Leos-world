@@ -123,6 +123,7 @@ export interface NetSeams {
   findCachedStory: typeof backend.findCachedStory;
   putCachedStory: typeof backend.putCachedStory;
   fetchHeardTopics: typeof backend.fetchHeardTopics;
+  fetchHeardStoryTexts: typeof backend.fetchHeardStoryTexts;
   recordHeard: typeof backend.recordHeard;
   recordLike: typeof backend.recordLike;
   emitEvent: typeof backend.emitEvent;
@@ -152,6 +153,7 @@ const realSeams: NetSeams = {
   findCachedStory: backend.findCachedStory,
   putCachedStory: backend.putCachedStory,
   fetchHeardTopics: backend.fetchHeardTopics,
+  fetchHeardStoryTexts: backend.fetchHeardStoryTexts,
   recordHeard: backend.recordHeard,
   recordLike: backend.recordLike,
   emitEvent: backend.emitEvent,
@@ -365,6 +367,27 @@ const SHORT_CUT_SUFFIX = ' (short cut)';
 
 function isShortCutAngle(angle: string): boolean {
   return angle.endsWith(SHORT_CUT_SUFFIX);
+}
+
+/**
+ * Corridor multiplicity (Nov 25, 2026): a segment's second
+ * distinct telling rides the shelf under the SAME place_key
+ * with angle 'corridor-<n>' ('corridor-2' first). Family
+ * order is the corridor lane's deal order: the base telling
+ * first, then ascending n; any non-family candidate angle
+ * (the shelf carries none under a segment key) deals last.
+ * routeMode owns the same predicate as its corridor CLASS
+ * test; this file keeps its own copy, per the discipline of
+ * the helpers above.
+ */
+function isCorridorAngle(angle: string): boolean {
+  return angle === 'corridor' || /^corridor-\d+$/.test(angle);
+}
+
+function corridorAngleRank(angle: string): number {
+  if (!isCorridorAngle(angle)) return Number.MAX_SAFE_INTEGER;
+  if (angle === 'corridor') return 0;
+  return parseInt(angle.slice('corridor-'.length), 10);
 }
 
 /**
@@ -766,6 +789,16 @@ export class Tour {
    * selection-engine memory (no pacing, no sequencing — a filter).
    */
   private heardTopics = new Set<string>();
+  /**
+   * The same ledger projected to verbatim story texts — the
+   * only (place, angle)-identifying evidence it holds, and the
+   * corridor lane's rotation key (Nov 25, 2026): two tellings
+   * of one segment share a place key, so the place-keyed set
+   * above cannot tell them apart; their texts can. Hydrated
+   * beside heardTopics; route mode has always derived its
+   * heard keys from this same projection.
+   */
+  private heardStoryTexts = new Set<string>();
 
   // Settle/lateness stamps (P1 salvage): commit-time context and
   // sound-start truth per story item, joined at settle to file A's
@@ -1379,6 +1412,12 @@ export class Tour {
       }
     } catch {
       /* the ledger is a filter, not a dependency — the tour runs without it */
+    }
+    try {
+      const texts = await this.seams.fetchHeardStoryTexts(this.userKey);
+      for (const text of texts) this.heardStoryTexts.add(text);
+    } catch {
+      /* same standing: without the texts the corridor lane deals its first telling, as it always has */
     }
   }
 
@@ -2755,24 +2794,49 @@ export class Tour {
       this.inflight.delete(subject);
       return;
     }
-    const entry = this.libraryIndex.find(
-      e =>
-        e.place_key === backend.placeKeyOf(segment.displayName) &&
-        e.angle !== 'filler' &&
-        !INTRO_ANGLES.has(e.angle) &&
-        !isWovenTwinAngle(e.angle) &&
-        // Corridor serves keep the presence original at full
-        // length: a segment is a sparse, fast context, and
-        // the lane's geometry is written against the full
-        // telling (short cuts, Nov 12, 2026 — no version
-        // decision in this lane).
-        !isShortCutAngle(e.angle),
-    );
-    if (!entry) {
+    // Corridor multiplicity (Nov 25, 2026): a segment may hold
+    // several distinct full tellings — the angle family
+    // 'corridor', 'corridor-2', … under the one place_key (the
+    // shelf carries only family angles + versions under a
+    // segment key, so the exclusion set below and the family
+    // are the same set on real data). The lane deals them in
+    // family order (base first), skipping any telling whose
+    // verbatim text the cross-day ledger already holds, so
+    // the next drive on this segment hears the telling it
+    // hasn't. When every telling is heard, the base telling
+    // serves again: a repeat beats silence, which is what
+    // the single-telling shelf always did. Versions stay
+    // refused as candidates (woven twins, short cuts):
+    // corridor serves keep the presence original at full
+    // length — a segment is a sparse, fast context, and the
+    // lane's geometry is written against the full telling
+    // (short cuts, Nov 12, 2026 — no version decision here).
+    const family = this.libraryIndex
+      .filter(
+        e =>
+          e.place_key === backend.placeKeyOf(segment.displayName) &&
+          e.angle !== 'filler' &&
+          !INTRO_ANGLES.has(e.angle) &&
+          !isWovenTwinAngle(e.angle) &&
+          !isShortCutAngle(e.angle),
+      )
+      .sort((a, b) => corridorAngleRank(a.angle) - corridorAngleRank(b.angle));
+    if (family.length === 0) {
       this.inflight.delete(subject);
       return; // banked only in the fresh shell; no banked row → no corridor serve
     }
-    const row = await this.seams.fetchLibraryRow(entry.place_key, entry.angle);
+    let row: backend.LibraryRow | null = null;
+    let firstFetched: backend.LibraryRow | null = null;
+    for (const entry of family) {
+      const fetched = await this.seams.fetchLibraryRow(entry.place_key, entry.angle);
+      if (!fetched) continue;
+      if (!firstFetched) firstFetched = fetched;
+      if (!this.heardStoryTexts.has(fetched.story_text)) {
+        row = fetched;
+        break;
+      }
+    }
+    row = row ?? firstFetched;
     if (!row || this.phase !== 'active') {
       this.inflight.delete(subject);
       return;
@@ -4268,6 +4332,10 @@ export class Tour {
       // the same set tomorrow's hydration rebuilds from the
       // backend's record (recordHeard, below) of this very telling.
       if (subject) this.heardTopics.add(subject);
+      // And its verbatim text joins the text set, so the corridor
+      // rotation (and any text-keyed judge) sees this tour's own
+      // deliveries exactly as tomorrow's hydration will.
+      if (item.text) this.heardStoryTexts.add(item.text);
       if ((item.tier1 ?? false) && told >= 2) this.retellUsed.add(subject);
       if (item.storySource === 'library' && item.angleOf) {
         const set = this.dealtAngles.get(subject) ?? new Set<string>();

@@ -1068,6 +1068,63 @@ check('v2 fetch fairness: selectFetchCandidates round-robins buckets under the b
 
 }
 
+// ---- corridor multiplicity (Nov 25, 2026) ----
+// A segment's second distinct telling rides the SAME
+// place_key at angle 'corridor-2'. The family is corridor
+// class in every rule (rank, cap, retirement); heard state
+// stays per telling (unit id place_key|angle); the shared
+// place_key keeps the one-unit-per-place tiling law, so the
+// two tellings can never seat in one episode.
+{
+  const mInput = { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] };
+  const mIds = plan => plan.items.filter(i => i.kind === 'story').map(i => i.id);
+  const segUnits = () => [
+    unit('seg|corridor', 32.8, { angle: 'corridor', placeName: 'Seg' }),
+    unit('seg|corridor-2', 32.8, { angle: 'corridor-2', placeName: 'Seg' }),
+    unit('other|landmark_origin', 32.75),
+  ];
+
+  check('multiplicity: the corridor family predicate and class rank', () => {
+    assert.equal(rm.isCorridorAngle('corridor'), true);
+    assert.equal(rm.isCorridorAngle('corridor-2'), true);
+    assert.equal(rm.isCorridorAngle('corridor-10'), true);
+    assert.equal(rm.isCorridorAngle('corridor-woven-v1'), false, 'a woven twin is a version, not a family member');
+    assert.equal(rm.isCorridorAngle('corridor (short cut)'), false, 'a short cut is a version, not a family member');
+    assert.equal(rm.isCorridorAngle('landmark_origin'), false);
+    assert.equal(rm.angleClassRank('corridor-2'), 1, 'a numbered telling ranks as corridor narration (last)');
+    assert.equal(rm.angleClassRank('corridor'), 1);
+    assert.equal(rm.angleClassRank('landmark_origin'), 0);
+  });
+
+  check('multiplicity: partition hears per telling — the heard base leaves corridor-2 selectable', () => {
+    const pools = rm.partitionRoutePools(segUnits(), path, dest, { heardKeys: new Set(['seg|corridor']) });
+    const geoIds = pools.geoAll.map(u => u.id);
+    assert.ok(!geoIds.includes('seg|corridor'), 'the heard base telling is filtered');
+    assert.ok(geoIds.includes('seg|corridor-2'), 'the unheard second telling stays selectable');
+    assert.equal(pools.skippedHeard, 1);
+  });
+
+  check('multiplicity: both tellings unheard — partition candidated both, an episode seats at most one', () => {
+    const pools = rm.partitionRoutePools(segUnits(), path, dest, { heardKeys: new Set() });
+    const geoIds = pools.geoAll.map(u => u.id);
+    assert.ok(geoIds.includes('seg|corridor') && geoIds.includes('seg|corridor-2'), 'both tellings are candidates');
+    const plan = rm.composeRoutePlan(segUnits(), path, dest, 'Dest', mInput, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000 });
+    const seated = mIds(plan).filter(id => id === 'seg|corridor' || id === 'seg|corridor-2');
+    assert.equal(seated.length, 1, `one place per episode: exactly one telling of the segment seats, got ${seated.join(',')}`);
+  });
+
+  check('multiplicity: the lifetime cap retires BOTH tellings of the shared place', () => {
+    const counts = new Map([[rm.normalizePlaceName('Seg'), 3]]);
+    const pools = rm.partitionRoutePools(segUnits(), path, dest, { heardKeys: new Set(), corridorTellingCounts: counts });
+    const geoIds = pools.geoAll.map(u => u.id);
+    assert.ok(!geoIds.includes('seg|corridor') && !geoIds.includes('seg|corridor-2'), 'the cap is about the stretch: both tellings retire');
+    assert.ok(pools.retiredStretches.has('seg'));
+    const plan = rm.composeRoutePlan(segUnits(), path, dest, 'Dest', mInput, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, corridorTellingCounts: counts });
+    assert.equal(plan.corridorRetiredStretches, 1);
+    assert.ok(mIds(plan).includes('other|landmark_origin'), 'the rest of the plan is unaffected');
+  });
+}
+
 check('v2 weighting: landmark beats corridor at the same anchor (no user topics)', () => {
   const units = [unit('corr|corridor', 32.75, { angle: 'corridor' }), unit('mark|landmark_origin', 32.75)];
   const tight = rm.composeRoutePlan(units, path, dest, 'Dest', { destinationText: 'Dest', arrivalTimeMs: NOW + 130 * 1000, tone: null, topics: [] }, { nowMs: NOW, heardKeys: new Set() });

@@ -537,6 +537,90 @@ export async function runScenarios(Tour, extras) {
     tour.endTour();
   }
 
+  // ---------------------------------------------------------- CM-1 corridor multiplicity rotation (Nov 25, 2026)
+  // A segment holding TWO distinct full tellings (angles
+  // 'corridor' + 'corridor-2' under the one place_key) must
+  // ROTATE across days, keyed by the cross-day ledger's
+  // verbatim story texts: fresh ledger → the base telling;
+  // base heard → the second telling; both heard → the base
+  // again (a repeat beats silence — the single-telling shelf's
+  // standing behavior). Before this build the lane took
+  // .find() — the first row, every drive, forever — and a
+  // second telling could never serve. The played audio src
+  // (library/<segment>/corridor.wav vs corridor-2.wav) is the
+  // observable that tells the tellings apart.
+  suite('CM-1 corridor multiplicity: same-segment tellings rotate by heard text');
+  {
+    const MPD_LAT = 111_320;
+    const mpdLng = lat => MPD_LAT * Math.cos((lat * Math.PI) / 180);
+    const distM = (a, b) => Math.hypot((b.lat - a.lat) * MPD_LAT, (b.lng - a.lng) * mpdLng(a.lat));
+    const segLen = s => s.polyline.reduce((acc, p, i) => (i === 0 ? 0 : acc + distM(p, s.polyline[i - 1])), 0);
+    const seg = CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
+    const alongPoint = (s, frac) => {
+      const total = segLen(s);
+      let acc = 0;
+      for (let i = 1; i < s.polyline.length; i++) {
+        const a = s.polyline[i - 1];
+        const b = s.polyline[i];
+        const leg = distM(b, a);
+        if (acc + leg >= total * frac) {
+          const t = (total * frac - acc) / leg;
+          return {
+            lat: a.lat + (b.lat - a.lat) * t,
+            lng: a.lng + (b.lng - a.lng) * t,
+            heading: ((Math.atan2((b.lng - a.lng) * mpdLng(a.lat), (b.lat - a.lat) * MPD_LAT) * 180) / Math.PI + 360) % 360,
+          };
+        }
+        acc += leg;
+      }
+      const last = s.polyline[s.polyline.length - 1];
+      return { lat: last.lat, lng: last.lng, heading: 180 };
+    };
+    const mid = alongPoint(seg, 0.5);
+    const textOf = angle => `The library story of ${seg.displayName} (${angle}). `.repeat(40);
+    const runDrive = async heardTexts => {
+      resetLocalStorage();
+      const world = makeWorld(Tour, {
+        candidates: [makeCandidate('Alpha Park', { lat: seg.polyline[0].lat, lng: seg.polyline[0].lng, distanceM: 100 })],
+        library: [
+          { name: 'Alpha Park', lat: seg.polyline[0].lat, lng: seg.polyline[0].lng },
+          { name: seg.displayName, angles: ['corridor', 'corridor-2'] },
+        ],
+      });
+      world.seams.fetchHeardStoryTexts = async () => heardTexts;
+      const audio = new FakeAudio(world.clock, okPolicy({ library: 90_000 }));
+      const tour = await startAt(world, audio, seg.polyline[0], 8, mid.heading);
+      const soundedLabels = watchLabels(world, tour);
+      await world.clock.advance(40_000); // greeting + opener + welcome; Alpha playing
+      tour.onPosition({ lat: mid.lat, lng: mid.lng, speedMps: 27, headingDeg: mid.heading });
+      await world.clock.advance(150_000); // Alpha ends; the corridor telling sounds
+      const segSrcs = audio.log
+        .filter(e => e.src && e.src.includes('library/') && e.src.includes('/corridor'))
+        .map(e => e.src);
+      tour.endTour();
+      return { soundedLabels, segSrcs };
+    };
+    const fresh = await runDrive([]);
+    check('fresh ledger: the corridor story sounds', fresh.soundedLabels.includes(seg.displayName), fresh.soundedLabels.join(','));
+    check(
+      'fresh ledger: the BASE telling serves (corridor.wav, not corridor-2.wav)',
+      fresh.segSrcs.some(s => s.endsWith('/corridor.wav')) && !fresh.segSrcs.some(s => s.endsWith('/corridor-2.wav')),
+      fresh.segSrcs.join(','),
+    );
+    const baseHeard = await runDrive([textOf('corridor')]);
+    check(
+      'base heard: rotation deals the SECOND telling (corridor-2.wav)',
+      baseHeard.segSrcs.some(s => s.endsWith('/corridor-2.wav')) && !baseHeard.segSrcs.some(s => s.endsWith('/corridor.wav')),
+      baseHeard.segSrcs.join(','),
+    );
+    const bothHeard = await runDrive([textOf('corridor'), textOf('corridor-2')]);
+    check(
+      'both heard: the base telling serves again (repeat beats silence)',
+      bothHeard.segSrcs.some(s => s.endsWith('/corridor.wav')) && !bothHeard.segSrcs.some(s => s.endsWith('/corridor-2.wav')),
+      bothHeard.segSrcs.join(','),
+    );
+  }
+
   // ---------------------------------------------------------- FP-7 freeway-pace ordering (Erik's ruling, Nov 24, 2026)
   // The freeform limb of the Nov 15 speed-regime sketch, ruled
   // after the Nov 24 Safari Park drive: at freeway pace the

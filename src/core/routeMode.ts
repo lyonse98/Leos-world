@@ -809,7 +809,7 @@ export function progressBucket(progress: number): number {
  * narration last.
  */
 export function angleClassRank(angle: string): number {
-  return angle === 'corridor' ? 1 : 0;
+  return isCorridorAngle(angle) ? 1 : 0;
 }
 
 // ------------------------------------------------------------ composer v3: acts (commit B)
@@ -963,6 +963,23 @@ export const SHORT_CUT_SUFFIX = ' (short cut)';
 
 export function isShortCutAngle(angle: string): boolean {
   return angle.endsWith(SHORT_CUT_SUFFIX);
+}
+
+/**
+ * Corridor multiplicity (Nov 25, 2026): a segment's second
+ * distinct telling rides the shelf under the SAME place_key
+ * with angle 'corridor-<n>' ('corridor-2' first). Corridor
+ * class membership is the FAMILY, not the single base angle —
+ * angle-class rank, the lifetime telling cap, stretch
+ * retirement, thread and pin rules all read this predicate,
+ * so a numbered telling is corridor narration in every rule
+ * that governs corridor narration. (Short cuts of a family
+ * member — 'corridor-2 (short cut)' — are versions, not
+ * members: partition excludes them before any class test,
+ * exactly like the base's own twin.)
+ */
+export function isCorridorAngle(angle: string): boolean {
+  return angle === 'corridor' || /^corridor-\d+$/.test(angle);
 }
 
 /** "placeKey|baseAngle" → the short-cut unit a pool carries for it, when it carries one. */
@@ -2243,7 +2260,7 @@ export function partitionRoutePools(
   const retiredStretches = new Set<string>();
   if (opts.corridorTellingCounts) {
     for (const u of units) {
-      if (u.angle !== 'corridor') continue;
+      if (!isCorridorAngle(u.angle)) continue;
       if ((opts.corridorTellingCounts.get(normalizePlaceName(u.placeName)) ?? 0) >= CORRIDOR_TELLING_CAP) {
         retiredStretches.add(u.placeKey);
       }
@@ -2268,7 +2285,7 @@ export function partitionRoutePools(
       continue;
     }
     if (u.angle === 'neighborhood_intro') continue;
-    if (u.angle === 'corridor' && retiredStretches.has(u.placeKey)) continue;
+    if (isCorridorAngle(u.angle) && retiredStretches.has(u.placeKey)) continue;
     if (family && familyHardExcluded(u)) continue;
     if (inCorridor(u)) geoAll.push(u);
     else portalAll.push(u);
@@ -2454,7 +2471,7 @@ export function resolveThreadCandidates(args: {
   for (const [placeKey, group] of byPlaceAll) {
     if (group.length < THREAD_MIN_SCORE) continue;
     if (placeKey === args.destinationPlaceKey) continue;
-    if (group.every(u => u.angle === 'corridor')) continue;
+    if (group.every(u => isCorridorAngle(u.angle))) continue;
     const anchor = groupAnchorPoint(group);
     if (haversineM(anchor, destination) <= DESTINATION_AREA_M) continue;
     if (haversineM(anchor, origin) <= DESTINATION_AREA_M) continue;
@@ -2506,7 +2523,7 @@ export function resolveThreadCandidates(args: {
   {
     const byRoad = new Map<string, LibraryUnit[]>();
     for (const u of geoPool) {
-      if (u.angle !== 'corridor') continue;
+      if (!isCorridorAngle(u.angle)) continue;
       const road = u.placeName.split(':')[0].trim();
       if (!road) continue;
       const list = byRoad.get(road) ?? [];
@@ -3880,7 +3897,7 @@ export function composeRoutePlan(
       // woven twin stands in the pool is shadowed above and
       // the TWIN is scored in its place: woven register is
       // told ABOUT the place and may honestly travel.
-      if (cand.angle === 'corridor' && !corridorPinInDrivenSpan(cand, path)) continue;
+      if (isCorridorAngle(cand.angle) && !corridorPinInDrivenSpan(cand, path)) continue;
       // The portal climax is never ALSO a hop: it already holds
       // the tail slot (consolidation §4).
       if (climaxUnitId !== null && cand.id === climaxUnitId) continue;
@@ -4611,7 +4628,7 @@ export function composeRoutePlan(
     const line = actLines[actIndexForProgress(it.anchorProgress ?? 0)];
     line.stories += 1;
     if (it.unit.angle.startsWith('landmark')) line.landmark += 1;
-    else if (it.unit.angle === 'corridor') line.corridor += 1;
+    else if (isCorridorAngle(it.unit.angle)) line.corridor += 1;
   }
 
   // Member seeking (the member-fetch lever): the plan asks
@@ -5846,7 +5863,7 @@ export function seatWovenMembers(
     const line = actLines[actIndexForProgress(it.anchorProgress ?? 0)];
     line.stories += 1;
     if (it.unit.angle.startsWith('landmark')) line.landmark += 1;
-    else if (it.unit.angle === 'corridor') line.corridor += 1;
+    else if (isCorridorAngle(it.unit.angle)) line.corridor += 1;
   }
   const unitIds = items.filter(i => i.woven && i.unit).map(i => (i.unit as LibraryUnit).id);
 

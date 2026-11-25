@@ -423,6 +423,7 @@ export function makeWorld(Tour, opts = {}) {
       world.cachedStories.push(rec);
     },
     fetchHeardTopics: async () => [],
+    fetchHeardStoryTexts: async () => [],
     recordHeard: async (_session, _userKey, topic) => {
       world.heard.push(topic);
     },
