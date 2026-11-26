@@ -25,6 +25,7 @@ import { isPortalTarget } from './housePortal';
 import { activePartners, partnerForUnit, PARTNERS, type Partner } from '../data/partners';
 import { profileRankOf, profileWeightMap } from './profileRank';
 import { SHORT_CUT_DURATION_SEC } from '../data/shortCuts';
+import { CORRIDOR_SEGMENTS, corridorSpansIntersect, type CorridorSegment } from '../data/corridors';
 
 export { isHouseStory } from './houseClass';
 export { findPortalTarget, houseSubjectLink, isPortalTarget } from './housePortal';
@@ -2236,8 +2237,10 @@ export interface RoutePools {
  * is only their shared home): greet/filler/intro angles are
  * never route candidacy; heard units are out at story level;
  * a retired stretch's corridor rows are out of every lane;
- * under the Family coloring, hard-class units are out of
- * every lane.
+ * a corridor row whose span an already-selected sibling
+ * segment's row claimed is out (offset seating rule,
+ * Nov 25, 2026); under the Family coloring, hard-class units
+ * are out of every lane.
  */
 export function partitionRoutePools(
   units: LibraryUnit[],
@@ -2270,6 +2273,24 @@ export function partitionRoutePools(
   const geoAll: LibraryUnit[] = [];
   const portalAll: LibraryUnit[] = [];
   const priorHeard: LibraryUnit[] = [];
+  // Span dedupe (offset seating rule, Nov 25, 2026): the
+  // corridor arm banked OFFSET segments whose spans overlap
+  // their parents' — a parent and its twin are different
+  // place_keys telling substantially the same ground, and the
+  // one-unit-per-place tiling law cannot see across keys. The
+  // spans of corridor units already selected into the geo pool
+  // are held here; a later corridor candidate whose span
+  // intersects an already-selected span (same freeway +
+  // direction, a DIFFERENT segment) leaves candidacy entirely.
+  // Members of one segment's own family (corridor, corridor-2
+  // under the one key) resolve to the same segment and never
+  // dedupe each other — the composer's per-place tiling still
+  // seats at most one of them. A unit whose place name is not
+  // a banked segment's display name has no span to judge and
+  // passes through exactly as before.
+  const selectedCorridorSpans: CorridorSegment[] = [];
+  const corridorSegmentOf = (u: LibraryUnit): CorridorSegment | null =>
+    CORRIDOR_SEGMENTS.find(s => s.displayName === u.placeName) ?? null;
   for (const u of units) {
     if (u.angle === 'neighborhood_intro_greet' || u.angle === 'filler' || u.angle === 'filler_hosted') continue;
     // Short cuts (Nov 12, 2026): a twin row is version
@@ -2287,8 +2308,24 @@ export function partitionRoutePools(
     if (u.angle === 'neighborhood_intro') continue;
     if (isCorridorAngle(u.angle) && retiredStretches.has(u.placeKey)) continue;
     if (family && familyHardExcluded(u)) continue;
-    if (inCorridor(u)) geoAll.push(u);
-    else portalAll.push(u);
+    if (inCorridor(u)) {
+      if (isCorridorAngle(u.angle)) {
+        const segment = corridorSegmentOf(u);
+        if (segment) {
+          if (
+            selectedCorridorSpans.some(
+              s => s.id !== segment.id && corridorSpansIntersect(segment, s),
+            )
+          ) {
+            continue; // span already selected under a sibling segment's key
+          }
+          if (!selectedCorridorSpans.some(s => s.id === segment.id)) {
+            selectedCorridorSpans.push(segment);
+          }
+        }
+      }
+      geoAll.push(u);
+    } else portalAll.push(u);
   }
   return { geoAll, portalAll, priorHeard, skippedHeard, retiredStretches };
 }

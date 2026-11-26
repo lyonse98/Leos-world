@@ -8322,7 +8322,36 @@ export function matchCorridor(
   bufferM: number = CORRIDOR_BUFFER_M
 ): CorridorMatch | null {
   let best: CorridorMatch | null = null;
+  for (const candidate of matchCorridorCandidates(pos, bufferM)) {
+    if (!best || candidate.distanceM < best.distanceM) best = candidate;
+  }
+  return best;
+}
+
+/**
+ * EVERY segment the listener is on (offset seating rule,
+ * Nov 25, 2026): the same containment + heading test as
+ * matchCorridor, but one match per segment instead of a single
+ * winner — each segment's nearest in-buffer leg. With the
+ * corridor arm's offset segments banked, a mid-stretch position
+ * sits inside a parent AND its offset twin (and sometimes the
+ * previous parent's offset); the serve layer needs the full
+ * candidate set so a suppressed winner cannot starve the ground
+ * behind it (candidate fall-through) and so it can judge the
+ * candidates against each other (entry recency). Order is bank
+ * order; each segment appears at most once.
+ */
+export function matchCorridorCandidates(
+  pos: {
+    lat: number;
+    lng: number;
+    heading?: number | null;
+  },
+  bufferM: number = CORRIDOR_BUFFER_M
+): CorridorMatch[] {
+  const out: CorridorMatch[] = [];
   for (const segment of CORRIDOR_SEGMENTS) {
+    let best: CorridorMatch | null = null;
     for (let i = 0; i < segment.polyline.length - 1; i++) {
       const a = segment.polyline[i];
       const b = segment.polyline[i + 1];
@@ -8341,8 +8370,73 @@ export function matchCorridor(
         best = { segment, distanceM, bearingDeg: bearing };
       }
     }
+    if (best) out.push(best);
   }
-  return best;
+  return out;
+}
+
+// ------------------------------------------------- span overlap (Nov 25, 2026)
+// The offset seating rule's ground truth: how much of one
+// segment's road is the SAME road as another's. Two segments
+// share ground when their polylines coincide — an offset twin
+// is drawn from its parent's own geometry, so shared ground
+// sits within metres, while segments that merely ABUT at a
+// boundary vertex diverge immediately. The measure is
+// therefore a coincidence length, not a buffer overlap: the
+// metres of A's polyline lying within
+// CORRIDOR_SPAN_COINCIDENCE_M of B's polyline (A's legs
+// subdivided at ≤20 m, midpoints tested).
+//
+// CALIBRATION (Nov 25, 2026, measured over the real
+// 410-segment bank): abutting same-freeway/direction pairs
+// measure ≤49 m; genuinely shared ground (parent ↔ offset,
+// offset ↔ offset, parent ↔ the offset that covers it whole)
+// measures ≥749 m. CORRIDOR_SPAN_OVERLAP_MIN_M = 400 sits an
+// order of magnitude from both classes.
+export const CORRIDOR_SPAN_COINCIDENCE_M = 40;
+export const CORRIDOR_SPAN_OVERLAP_MIN_M = 400;
+
+const spanOverlapCache = new Map<string, number>();
+
+/** Metres of `a`'s polyline that lie on `b`'s road (see above). Cached per ordered pair — the bank is static. */
+export function corridorSpanOverlapM(a: CorridorSegment, b: CorridorSegment): number {
+  const key = `${a.id}|${b.id}`;
+  const cached = spanOverlapCache.get(key);
+  if (cached !== undefined) return cached;
+  let total = 0;
+  for (let i = 0; i < a.polyline.length - 1; i++) {
+    const p = a.polyline[i];
+    const q = a.polyline[i + 1];
+    const lp = toLocalM(p, p);
+    const lq = toLocalM(p, q);
+    const legM = Math.hypot(lq.x - lp.x, lq.y - lp.y);
+    const steps = Math.max(1, Math.ceil(legM / 20));
+    for (let s = 0; s < steps; s++) {
+      const t = (s + 0.5) / steps;
+      const mid = { lat: p.lat + (q.lat - p.lat) * t, lng: p.lng + (q.lng - p.lng) * t };
+      let best = Number.POSITIVE_INFINITY;
+      for (let j = 0; j < b.polyline.length - 1; j++) {
+        const { distanceM } = pointToSegmentM(mid, b.polyline[j], b.polyline[j + 1]);
+        if (distanceM < best) best = distanceM;
+      }
+      if (best <= CORRIDOR_SPAN_COINCIDENCE_M) total += legM / steps;
+    }
+  }
+  spanOverlapCache.set(key, total);
+  return total;
+}
+
+/**
+ * Do two segments narrate the same ground? Same freeway, same
+ * direction, and a coincidence length past the calibrated
+ * minimum. A segment always "intersects" itself by this
+ * measure; callers that mean OTHER segments exclude identity
+ * themselves (the corridor family shares one segment, and its
+ * members must never dedupe each other).
+ */
+export function corridorSpansIntersect(a: CorridorSegment, b: CorridorSegment): boolean {
+  if (a.freeway !== b.freeway || a.direction !== b.direction) return false;
+  return corridorSpanOverlapM(a, b) > CORRIDOR_SPAN_OVERLAP_MIN_M;
 }
 
 export interface CorridorProgress {

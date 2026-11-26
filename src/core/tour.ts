@@ -86,7 +86,10 @@ import {
 } from '../content/commentary';
 import {
   CORRIDOR_SEGMENTS,
+  corridorProgressM,
+  corridorSpansIntersect,
   matchCorridor,
+  matchCorridorCandidates,
   nearestPointOnSegment,
   type CorridorMatch,
   type CorridorSegment,
@@ -759,6 +762,30 @@ export class Tour {
    * buffer-and-retry behavior is untouched.
    */
   private corridorPending: { segment: CorridorSegment; item: AudibleItem } | null = null;
+  /**
+   * Offset seating rule (Nov 25, 2026 — the corridor arm's
+   * flagged prerequisite, Erik's ruling: build it before the
+   * publish): the ground this tour has already narrated. When
+   * a corridor telling SOUNDS, or drops stale after commitment
+   * (the settle path's consumption conditions), its segment's
+   * span joins this covered set; any other segment whose span
+   * intersects covered ground on the same freeway+direction
+   * stands down for the rest of the tour — a parent and its
+   * offset twin never both narrate their shared stretch in one
+   * drive. Per-tour, in-memory only: nothing is persisted, and
+   * a mid-tour history clear (forgetCrossDayHeard) deliberately
+   * does NOT touch it — clearing history must not resurrect
+   * ground this drive has already told.
+   */
+  private corridorCovered: CorridorSegment[] = [];
+  /**
+   * Segments stood down by covered ground this tour, mapped to
+   * the segment whose telling covered them. The stand-down
+   * files corridor_suppressed_covered exactly once per segment
+   * (its first suppression), so field sessions can show why a
+   * stretch stayed silent without a per-tick event flood.
+   */
+  private corridorStoodDown = new Map<string, string>();
   /**
    * Walking regime (Nov 24, 2026): the position-sample trail
    * the detection reads (bounded to the evidence window plus
@@ -2772,13 +2799,83 @@ export class Tour {
     return segmentId === undefined || match.segment.id === segmentId;
   }
 
+  /**
+   * The covered segment standing between `segment` and a serve,
+   * if any (offset seating rule, Nov 25, 2026): the first
+   * sounded/stale-dropped span on the same freeway+direction
+   * whose ground intersects this segment's. A segment never
+   * covers itself here — its own serve is fenced by
+   * corridorConsumed, and the corridor family (corridor /
+   * corridor-2 tellings of the ONE segment) rotates within the
+   * segment, never against it.
+   */
+  private corridorCoveredBy(segment: CorridorSegment): CorridorSegment | null {
+    for (const covered of this.corridorCovered) {
+      if (covered.id === segment.id) continue;
+      if (corridorSpansIntersect(segment, covered)) return covered;
+    }
+    return null;
+  }
+
+  /**
+   * A sibling segment whose corridor item is COMMITTED but not
+   * yet settled — offered, retained, or sounding (its
+   * `corridor:<id>` inflight claim is held from the trigger's
+   * claim until its settle). While such a sibling stands, an
+   * overlapping candidate waits: the sibling's settle will
+   * either cover the ground (sounded / stale-dropped — the
+   * candidate then stands down for real) or release the claim
+   * (a serve that aborted before commitment — the candidate is
+   * free again on the next tick). Without this, candidate
+   * fall-through would mint the twin's item during the ~90 s
+   * the winner's telling sounds over their shared ground, and
+   * the two would narrate it back to back. No event files
+   * here: nothing has been suppressed yet, only deferred.
+   */
+  private corridorCommittedSibling(segment: CorridorSegment): CorridorSegment | null {
+    for (const key of this.inflight) {
+      if (!key.startsWith('corridor:')) continue;
+      const id = key.slice('corridor:'.length);
+      if (id === segment.id) continue;
+      const sibling = CORRIDOR_SEGMENTS.find(s => s.id === id);
+      if (sibling && corridorSpansIntersect(segment, sibling)) return sibling;
+    }
+    return null;
+  }
+
+  /**
+   * Stand a segment down for the rest of the tour (offset
+   * seating rule, Nov 25, 2026): its ground was already
+   * narrated by `covering`'s telling. Files
+   * corridor_suppressed_covered exactly once per segment per
+   * tour — the field's answer to "why did that stretch stay
+   * silent" (Erik's standing diagnosis need) — and records the
+   * stand-down so the trigger's candidate filter and the
+   * pending perishability judge read the same fact.
+   */
+  private standDownCorridor(segment: CorridorSegment, covering: CorridorSegment): void {
+    if (this.corridorStoodDown.has(segment.id) || this.corridorConsumed.has(segment.id)) return;
+    this.corridorStoodDown.set(segment.id, covering.id);
+    this.emit('corridor_suppressed_covered', {
+      segment_id: segment.id,
+      covering_segment_id: covering.id,
+    });
+  }
+
   private checkCorridorTrigger(pos: Position): void {
     if (this.phase !== 'active') return;
-    const match = matchCorridor({ lat: pos.lat, lng: pos.lng, heading: pos.headingDeg });
+    // Offset seating rule (Nov 25, 2026): the trigger judges
+    // EVERY segment containing this fix, not the single nearest
+    // winner — a mid-stretch fix sits inside a parent and its
+    // offset twin at once, and the old single-match read let
+    // the array's earlier entry starve the other forever.
+    const candidates = matchCorridorCandidates({ lat: pos.lat, lng: pos.lng, heading: pos.headingDeg });
     // Corridor-pending perishability (Nov 15, 2026; re-keyed
-    // Nov 20, 2026): the retained item is judged on every fix,
-    // on this tick's own match — off its segment (or off every
-    // segment) it dies here as segment-exit. Speed no longer
+    // Nov 20, 2026): the retained item is judged on every fix —
+    // off its segment (or off every segment) it dies here as
+    // segment-exit. "On its segment" is candidate membership
+    // now (the seating rule's read): the retained segment must
+    // still contain the fix, nearest or not. Speed no longer
     // judges it: a driver crawling on the segment in traffic
     // is still on the segment, and the retained story is
     // still the road's story (gate Item 1). Judging at
@@ -2786,25 +2883,62 @@ export class Tour {
     // through a long story and be discovered only at the
     // transition it was meant to serve.
     if (this.corridorPending) {
-      if (!match || match.segment.id !== this.corridorPending.segment.id) {
+      const pendingSegmentId = this.corridorPending.segment.id;
+      if (!candidates.some(c => c.segment.id === pendingSegmentId)) {
         this.dropCorridorPending('segment-exit');
       }
     }
-    if (!match) return;
-    const segment = match.segment;
-    if (this.freewayPace(pos, segment.id, match)) {
-      this.corridorEligible.add(segment.id);
+    if (candidates.length === 0) return;
+    for (const candidate of candidates) {
+      if (this.freewayPace(pos, candidate.segment.id, candidate)) {
+        this.corridorEligible.add(candidate.segment.id);
+      }
     }
-    if (
-      this.corridorEligible.has(segment.id) &&
-      !this.corridorConsumed.has(segment.id) &&
-      !this.inflight.has(`corridor:${segment.id}`)
-    ) {
-      // Claim synchronously (before any await): GPS ticks arrive
-      // ~1 Hz and must not mint duplicate corridor serves.
-      this.inflight.add(`corridor:${segment.id}`);
-      void this.serveCorridor(segment);
+    // Winner selection among the surviving candidates:
+    //  - consumed segments are spent (Q11);
+    //  - a segment whose ground is already covered stands down
+    //    (suppression) — and its standing down must not starve
+    //    the ground: the next candidate is judged in the same
+    //    tick (candidate fall-through);
+    //  - among the survivors, ENTRY RECENCY wins: the segment
+    //    whose entry the driver passed most recently — the
+    //    least along-track distance since its entry
+    //    (corridorProgressM's alongM). A through-driver meets
+    //    each parent at its entry (alongM ≈ 0) long before the
+    //    offset twin can win a tick, and the parent's serve
+    //    covers the twin; a mid-stretch joiner's freshest entry
+    //    is the offset's own join vertex, so the offset framed
+    //    from his join serves him. Nearest-leg distance breaks
+    //    exact ties, the discipline matchCorridor always kept.
+    let winner: CorridorMatch | null = null;
+    let winnerAlongM = Number.POSITIVE_INFINITY;
+    for (const candidate of candidates) {
+      const segment = candidate.segment;
+      if (this.corridorConsumed.has(segment.id)) continue;
+      const covering = this.corridorCoveredBy(segment);
+      if (covering) {
+        this.standDownCorridor(segment, covering);
+        continue;
+      }
+      if (!this.corridorEligible.has(segment.id)) continue;
+      if (this.inflight.has(`corridor:${segment.id}`)) continue;
+      if (this.corridorCommittedSibling(segment)) continue;
+      const alongM = corridorProgressM(segment, pos).alongM;
+      if (
+        !winner ||
+        alongM < winnerAlongM ||
+        (alongM === winnerAlongM && candidate.distanceM < winner.distanceM)
+      ) {
+        winner = candidate;
+        winnerAlongM = alongM;
+      }
     }
+    if (!winner) return;
+    const segment = winner.segment;
+    // Claim synchronously (before any await): GPS ticks arrive
+    // ~1 Hz and must not mint duplicate corridor serves.
+    this.inflight.add(`corridor:${segment.id}`);
+    void this.serveCorridor(segment);
   }
 
   private async serveCorridor(segment: CorridorSegment): Promise<void> {
@@ -2998,12 +3132,22 @@ export class Tour {
     if (!pending) return null;
     if (!this.position) return 'segment-exit';
     if (this.corridorConsumed.has(pending.segment.id)) return 'consumed';
-    const match = matchCorridor({
+    const candidates = matchCorridorCandidates({
       lat: this.position.lat,
       lng: this.position.lng,
       heading: this.position.headingDeg,
     });
-    if (!match || match.segment.id !== pending.segment.id) return 'segment-exit';
+    if (!candidates.some(c => c.segment.id === pending.segment.id)) return 'segment-exit';
+    // Covered ground (offset seating rule, Nov 25, 2026): a
+    // sibling's telling sounded over this segment's span while
+    // the item waited — the retained claim is spent, and the
+    // stand-down files beside the drop so the field can see
+    // the suppression, not just the perishability.
+    const covering = this.corridorCoveredBy(pending.segment);
+    if (covering) {
+      this.standDownCorridor(pending.segment, covering);
+      return 'covered';
+    }
     return null;
   }
 
@@ -4033,6 +4177,16 @@ export class Tour {
       (rec.sounded || rec.dropReason === 'stale_highway' || rec.dropReason === 'stale-behind')
     ) {
       this.corridorConsumed.add(item.corridorSegmentId);
+      // Covered ground (offset seating rule, Nov 25, 2026):
+      // the same settle that consumes the segment covers its
+      // span — sounded, or dropped stale after commitment, the
+      // stretch has had its telling for this tour, and every
+      // overlapping sibling stands down (see
+      // checkCorridorTrigger's winner selection).
+      const coveredSegment = CORRIDOR_SEGMENTS.find(s => s.id === item.corridorSegmentId);
+      if (coveredSegment && !this.corridorCovered.some(s => s.id === coveredSegment.id)) {
+        this.corridorCovered.push(coveredSegment);
+      }
     }
     // Synthesis stand-down bookkeeping (the resolve-path economy).
     if (!rec.sounded && rec.failKind === 'synthesis') {

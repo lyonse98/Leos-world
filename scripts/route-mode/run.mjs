@@ -103,6 +103,24 @@ execFileSync(
 );
 const rsc = await import(pathToFileURL(rscOut).href);
 
+// The corridor segment bank (offset seating rule, Nov 25,
+// 2026): the partition-dedupe suites below resolve real
+// parent/offset spans, so the bank is bundled beside routeMode.
+const cdOut = join(mkdtempSync(join(tmpdir(), 'corridors-')), 'corridors.mjs');
+execFileSync(
+  join(repoRoot, 'node_modules', '.bin', 'esbuild'),
+  [
+    join(repoRoot, 'src', 'data', 'corridors.ts'),
+    '--bundle',
+    '--format=esm',
+    '--platform=node',
+    `--outfile=${cdOut}`,
+    '--log-level=warning',
+  ],
+  { stdio: 'inherit' },
+);
+const cd = await import(pathToFileURL(cdOut).href);
+
 // The Color Puck pass (audience coloring, Nov 5, 2026),
 // bundled beside routeMode/narration: its suites drive the
 // pass directly with stubbed generation — zero live calls.
@@ -189,7 +207,7 @@ const pf = await import(pathToFileURL(pfOut).href);
 // the same commit; a run that executes fewer checks than
 // the floor FAILS, whatever its pass rate (enforced at the
 // final tally below).
-const MIN_CHECKS = 451;
+const MIN_CHECKS = 463;
 
 let passed = 0;
 let failed = 0;
@@ -1122,6 +1140,105 @@ check('v2 fetch fairness: selectFetchCandidates round-robins buckets under the b
     const plan = rm.composeRoutePlan(segUnits(), path, dest, 'Dest', mInput, { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000, corridorTellingCounts: counts });
     assert.equal(plan.corridorRetiredStretches, 1);
     assert.ok(mIds(plan).includes('other|landmark_origin'), 'the rest of the plan is unaffected');
+  });
+}
+
+
+// ---- offset seating: partition span dedupe (Nov 25, 2026) ----
+// The corridor arm banked OFFSET segments whose spans overlap
+// their parents' (parent Pacific Beach → Mission Bay; its twin
+// Pacific Beach → Old Town, drawn from the parent's mid-stretch
+// to the next boundary). They are DIFFERENT place_keys, so the
+// one-unit-per-place tiling law cannot see across them: without
+// a span rule, one episode could tile parent + twin over the
+// same ground. The partition now drops a corridor candidate
+// whose span intersects an already-selected corridor unit's
+// span (same freeway + direction, different segment). These
+// fixtures run on the REAL bank: the I-5 SB La Jolla → Old Town
+// chain, units anchored on their own segments' polylines, the
+// route path drawn along the chain itself.
+{
+  const segById = new Map(cd.CORRIDOR_SEGMENTS.map(s => [s.id, s]));
+  const chainIds = [
+    'i-5-sb-la-jolla-pacific-beach',
+    'i-5-sb-pacific-beach-mission-bay',
+    'i-5-sb-mission-bay-old-town',
+    'i-5-sb-old-town-mission-hills',
+  ];
+  const chainPath = [];
+  for (const id of chainIds) for (const p of segById.get(id).polyline) chainPath.push({ lat: p.lat, lng: p.lng });
+  const chainDest = chainPath[chainPath.length - 1];
+  const segUnit = (segId, angle = 'corridor') => {
+    const seg = segById.get(segId);
+    const anchor = seg.polyline[Math.floor(seg.polyline.length / 2)];
+    const placeKey = seg.displayName.toLowerCase();
+    return {
+      id: `${placeKey}|${angle}`,
+      placeKey,
+      placeName: seg.displayName,
+      angle,
+      lat: anchor.lat,
+      lng: anchor.lng,
+      durationSec: 120,
+      topics: [],
+      tone: 'warm',
+      toneSecondary: null,
+      audioPath: `x/${placeKey}/${angle}.wav`,
+      storyText: 'word '.repeat(300),
+    };
+  };
+  const PB_MB = 'i-5-sb-pacific-beach-mission-bay';
+  const PB_OT_OFFSET = 'i-5-sb-pacific-beach-mission-bay-offset';
+  const MB_OT = 'i-5-sb-mission-bay-old-town';
+  const OT_MH = 'i-5-sb-old-town-mission-hills';
+  const corridorNames = pools => pools.geoAll.filter(u => rm.isCorridorAngle(u.angle)).map(u => u.placeName);
+  const nameOf = id => segById.get(id).displayName;
+
+  check('seating dedupe: parent selected first — its offset twin leaves candidacy, abutting parents stay', () => {
+    const pools = rm.partitionRoutePools(
+      [segUnit(PB_MB), segUnit(PB_OT_OFFSET), segUnit(MB_OT), segUnit(OT_MH)],
+      chainPath, chainDest, { heardKeys: new Set() },
+    );
+    const names = corridorNames(pools);
+    assert.ok(names.includes(nameOf(PB_MB)), 'the parent is selected');
+    assert.ok(!names.includes(nameOf(PB_OT_OFFSET)), 'the offset twin is deduped against the parent’s span');
+    assert.ok(names.includes(nameOf(MB_OT)), 'the abutting next parent is NOT deduped (boundary touch is not shared ground)');
+    assert.ok(names.includes(nameOf(OT_MH)), 'the following parent is selected');
+  });
+
+  check('seating dedupe: offset selected first — both parents it covers leave candidacy, the chain resumes after it', () => {
+    const pools = rm.partitionRoutePools(
+      [segUnit(PB_OT_OFFSET), segUnit(PB_MB), segUnit(MB_OT), segUnit(OT_MH)],
+      chainPath, chainDest, { heardKeys: new Set() },
+    );
+    const names = corridorNames(pools);
+    assert.ok(names.includes(nameOf(PB_OT_OFFSET)), 'the offset is selected');
+    assert.ok(!names.includes(nameOf(PB_MB)), 'the parent’s first half is the offset’s ground');
+    assert.ok(!names.includes(nameOf(MB_OT)), 'the Mission Bay → Old Town parent lies inside the offset’s span');
+    assert.ok(names.includes(nameOf(OT_MH)), 'the chain resumes at Old Town → Mission Hills');
+  });
+
+  check('seating dedupe: a segment’s own family never dedupes itself (corridor + corridor-2 both stay)', () => {
+    const pools = rm.partitionRoutePools(
+      [segUnit(PB_MB, 'corridor'), segUnit(PB_MB, 'corridor-2'), segUnit(PB_OT_OFFSET)],
+      chainPath, chainDest, { heardKeys: new Set() },
+    );
+    const ids = pools.geoAll.map(u => u.id);
+    assert.ok(ids.includes(`${nameOf(PB_MB).toLowerCase()}|corridor`) && ids.includes(`${nameOf(PB_MB).toLowerCase()}|corridor-2`), 'both tellings of the one segment remain candidates');
+    assert.ok(!corridorNames(pools).includes(nameOf(PB_OT_OFFSET)), 'the twin is still deduped');
+  });
+
+  check('seating dedupe: an episode over parent + offset ground seats exactly one of them', () => {
+    const plan = rm.composeRoutePlan(
+      [segUnit(PB_OT_OFFSET), segUnit(PB_MB), segUnit(MB_OT), segUnit(OT_MH)],
+      chainPath, chainDest, 'Dest',
+      { destinationText: 'Dest', arrivalTimeMs: null, tone: null, topics: [] },
+      { nowMs: NOW, heardKeys: new Set(), budgetSecOverride: 100000 },
+    );
+    const pairNames = new Set([nameOf(PB_MB), nameOf(PB_OT_OFFSET)]);
+    const seatedPair = plan.items.filter(i => i.kind === 'story' && i.unit && pairNames.has(i.unit.placeName));
+    assert.equal(seatedPair.length, 1, `exactly one of parent/offset seats, got ${seatedPair.map(i => i.unit.placeName).join(',')}`);
+    assert.equal(seatedPair[0].unit.placeName, nameOf(PB_OT_OFFSET), 'the partition winner (the offset, first in input) is the one that seats');
   });
 }
 

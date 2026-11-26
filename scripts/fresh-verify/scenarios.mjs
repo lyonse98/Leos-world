@@ -622,6 +622,200 @@ export async function runScenarios(Tour, extras) {
     );
   }
 
+  // ---------------------------------------------------------- SR-1 offset seating rule (Nov 25, 2026)
+  // The corridor arm's step-zero fixture, promoted from its
+  // modelled form (corridor-arm-2026-11-25/step-zero-fixture.mjs)
+  // to the REAL Tour over the REAL 410-segment bank: the I-5 SB
+  // La Jolla → Old Town chain, whose four parents each carry a
+  // banked offset twin. The seating rule (candidate fall-through
+  // + covered-ground suppression + entry recency) must seat ONE
+  // telling per stretch: a through-driver hears the pure parent
+  // chain; a mid-stretch joiner hears the Pacific Beach → Old
+  // Town offset (framed from his join), the Mission Bay → Old
+  // Town parent stands down as covered, and the chain resumes.
+  // Zero same-ground overlaps in both drives (spans measured on
+  // the trace, the audit fixture's own measure). The joiner
+  // drive also clears listening history mid-drive (after the
+  // offset's span is covered): the covered set is per-tour
+  // state, so the stand-down must survive the clear.
+  suite('SR-1 offset seating: one telling per stretch, framed from the entry');
+  {
+    const R_EARTH = 6371000;
+    const havM = (a, b) => {
+      const dLa = ((b.lat - a.lat) * Math.PI) / 180;
+      const dLo = ((b.lng - a.lng) * Math.PI) / 180;
+      const h = Math.sin(dLa / 2) ** 2 + Math.cos((a.lat * Math.PI) / 180) * Math.cos((b.lat * Math.PI) / 180) * Math.sin(dLo / 2) ** 2;
+      return 2 * R_EARTH * Math.asin(Math.sqrt(h));
+    };
+    const bearingOf = (a, b) => (Math.atan2((b.lng - a.lng) * Math.cos((a.lat * Math.PI) / 180), b.lat - a.lat) * 180 / Math.PI + 360) % 360;
+    const byId = new Map(CORRIDOR_SEGMENTS.map(s => [s.id, s]));
+    const chainIds = [
+      'i-5-sb-la-jolla-pacific-beach',
+      'i-5-sb-pacific-beach-mission-bay',
+      'i-5-sb-mission-bay-old-town',
+      'i-5-sb-old-town-mission-hills',
+    ];
+    const srSegs = [...chainIds, ...chainIds.map(id => `${id}-offset`)].map(id => byId.get(id));
+    const nameToId = new Map(srSegs.map(s => [s.displayName, s.id]));
+    // The audit fixture's trace: the chained parent polylines,
+    // resampled every ~75 m with cumulative distance + heading.
+    const tracePts = [];
+    for (const id of chainIds) {
+      for (const p of byId.get(id).polyline) {
+        if (!tracePts.length || havM(tracePts[tracePts.length - 1], p) > 5) tracePts.push(p);
+      }
+    }
+    const trace = [];
+    {
+      let dist = 0;
+      for (let i = 1; i < tracePts.length; i++) {
+        const a = tracePts[i - 1];
+        const b = tracePts[i];
+        const leg = havM(a, b);
+        const steps = Math.max(1, Math.round(leg / 75));
+        for (let k = trace.length ? 1 : 0; k <= steps; k++) {
+          const t = k / steps;
+          const p = { lat: a.lat + (b.lat - a.lat) * t, lng: a.lng + (b.lng - a.lng) * t };
+          if (trace.length) dist += havM(trace[trace.length - 1], p);
+          trace.push({ ...p, distM: dist, headingDeg: bearingOf(a, b) });
+        }
+      }
+    }
+    const spanOnTrace = seg => {
+      let lo = Infinity;
+      let hi = -Infinity;
+      for (const p of seg.polyline) {
+        let bd = Infinity;
+        let bdM = 0;
+        for (const t of trace) {
+          const d = havM(p, t);
+          if (d < bd) { bd = d; bdM = t.distM; }
+        }
+        lo = Math.min(lo, bdM);
+        hi = Math.max(hi, bdM);
+      }
+      return [lo, hi];
+    };
+    const pbSpan = spanOnTrace(byId.get('i-5-sb-pacific-beach-mission-bay'));
+    const joinM = Math.round((pbSpan[0] + pbSpan[1]) / 2);
+    const midOf = s => s.polyline[Math.floor(s.polyline.length / 2)];
+
+    const driveSR = async (startDistM, clearAtM = null) => {
+      resetLocalStorage();
+      const startPt = trace.reduce((a, b) => (Math.abs(b.distM - startDistM) < Math.abs(a.distM - startDistM) ? b : a));
+      const world = makeWorld(Tour, {
+        candidates: [makeCandidate('Alpha Park', { lat: startPt.lat, lng: startPt.lng, distanceM: 100 })],
+        library: [
+          { name: 'Alpha Park', lat: startPt.lat, lng: startPt.lng },
+          ...srSegs.map(s => ({ name: s.displayName, angles: ['corridor'], lat: midOf(s).lat, lng: midOf(s).lng })),
+        ],
+      });
+      const audio = new FakeAudio(world.clock, okPolicy({ library: 75_000 }));
+      const tour = await startAt(world, audio, startPt, 26.8, startPt.headingDeg);
+      const labels = watchLabels(world, tour);
+      await world.clock.advance(40_000); // greeting + opener + welcome; Alpha playing
+      let cleared = false;
+      let prev = startPt;
+      for (const fix of trace) {
+        if (fix.distM <= startDistM) continue;
+        tour.onPosition({ lat: fix.lat, lng: fix.lng, speedMps: 26.8, headingDeg: fix.headingDeg });
+        await world.clock.advance(Math.max(50, ((fix.distM - prev.distM) / 26.8) * 1000));
+        prev = fix;
+        if (clearAtM !== null && !cleared && fix.distM >= clearAtM) {
+          tour.forgetCrossDayHeard();
+          cleared = true;
+        }
+      }
+      await world.clock.advance(30_000);
+      tour.endTour();
+      const soundedIds = labels.filter(l => nameToId.has(l)).map(l => nameToId.get(l));
+      const staleIds = world
+        .eventsOf('story_dropped')
+        .filter(
+          e =>
+            typeof e.payload.subject === 'string' &&
+            e.payload.subject.startsWith('corridor:') &&
+            (e.payload.reason === 'stale_highway' || e.payload.reason === 'stale-behind'),
+        )
+        .map(e => e.payload.subject.slice('corridor:'.length));
+      const toldSet = new Set([...soundedIds, ...staleIds]);
+      const told = world
+        .eventsOf('story_played')
+        .map(e => e.payload.subject)
+        .filter(s => typeof s === 'string' && s.startsWith('corridor:'))
+        .map(s => s.slice('corridor:'.length))
+        .filter(id => toldSet.has(id));
+      let overlaps = 0;
+      for (let i = 0; i < told.length; i++) {
+        for (let j = i + 1; j < told.length; j++) {
+          const a = spanOnTrace(byId.get(told[i]));
+          const b = spanOnTrace(byId.get(told[j]));
+          if (Math.min(a[1], b[1]) > Math.max(a[0], b[0])) overlaps += 1;
+        }
+      }
+      const suppressed = world
+        .eventsOf('corridor_suppressed_covered')
+        .map(e => ({ segment: e.payload.segment_id, covering: e.payload.covering_segment_id }));
+      return { told, overlaps, suppressed, cleared };
+    };
+
+    const through = await driveSR(0);
+    check(
+      'through-driver: the first telling is the La Jolla → Pacific Beach parent',
+      through.told[0] === 'i-5-sb-la-jolla-pacific-beach',
+      through.told.join(','),
+    );
+    check(
+      'through-driver: the parent chain progresses in order (PB → Mission Bay, then Mission Bay → Old Town)',
+      through.told.indexOf('i-5-sb-pacific-beach-mission-bay') > through.told.indexOf('i-5-sb-la-jolla-pacific-beach') &&
+        through.told.indexOf('i-5-sb-mission-bay-old-town') > through.told.indexOf('i-5-sb-pacific-beach-mission-bay'),
+      through.told.join(','),
+    );
+    check(
+      'through-driver: no offset ever tells (the parents cover their twins)',
+      through.told.every(id => !id.endsWith('-offset')),
+      through.told.join(','),
+    );
+    check('through-driver: zero same-ground overlaps', through.overlaps === 0, through.told.join(','));
+    check(
+      'through-driver: the La Jolla offset files corridor_suppressed_covered under its parent',
+      through.suppressed.some(
+        s => s.segment === 'i-5-sb-la-jolla-pacific-beach-offset' && s.covering === 'i-5-sb-la-jolla-pacific-beach',
+      ),
+      JSON.stringify(through.suppressed),
+    );
+
+    const joiner = await driveSR(joinM, 10_500);
+    check(
+      'joiner: the first telling is the Pacific Beach → Old Town offset, framed from his join',
+      joiner.told[0] === 'i-5-sb-pacific-beach-mission-bay-offset',
+      joiner.told.join(','),
+    );
+    check(
+      'joiner: the Mission Bay → Old Town parent never tells (its ground is the offset’s)',
+      !joiner.told.includes('i-5-sb-mission-bay-old-town'),
+      joiner.told.join(','),
+    );
+    check(
+      'joiner: the chain resumes — the Old Town → Mission Hills parent tells',
+      joiner.told.includes('i-5-sb-old-town-mission-hills'),
+      joiner.told.join(','),
+    );
+    check('joiner: zero same-ground overlaps', joiner.overlaps === 0, joiner.told.join(','));
+    check(
+      'joiner: the Mission Bay → Old Town parent files corridor_suppressed_covered under the offset',
+      joiner.suppressed.some(
+        s => s.segment === 'i-5-sb-mission-bay-old-town' && s.covering === 'i-5-sb-pacific-beach-mission-bay-offset',
+      ),
+      JSON.stringify(joiner.suppressed),
+    );
+    check(
+      'joiner: the mid-drive history clear landed, and the covered stand-down survived it (no resurrection)',
+      joiner.cleared && !joiner.told.includes('i-5-sb-mission-bay-old-town'),
+      `cleared=${joiner.cleared} told=${joiner.told.join(',')}`,
+    );
+  }
+
   // ---------------------------------------------------------- FP-7 freeway-pace ordering (Erik's ruling, Nov 24, 2026)
   // The freeform limb of the Nov 15 speed-regime sketch, ruled
   // after the Nov 24 Safari Park drive: at freeway pace the
