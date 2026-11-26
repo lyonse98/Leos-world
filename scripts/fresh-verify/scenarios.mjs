@@ -4911,12 +4911,24 @@ export async function runScenarios(Tour, extras) {
     }
     // Boundary discipline at the same midpoint: 240 m retains the
     // segment itself; 260 m (beyond the shipped buffer) does not.
+    // Corridor-arm maintenance (Nov 25, 2026): this stretch now carries
+    // an offset twin ('I-805 North: Mission Valley to University City',
+    // banked with the corridor arm) whose sub-chord passes 0.2 m nearer
+    // these displaced points than the parent's single 2,737 m chord, so
+    // inside the buffer the match may be the parent or its twin — both
+    // are this stretch of I-805 northbound, and retaining either is the
+    // discipline this suite measures. The 260 m side is strengthened to
+    // match: beyond the buffer, neither the parent nor the twin may
+    // answer. (Test maintenance only, in the bank-extension selector-
+    // pinning pattern: no check removed, the boundary asserted at the
+    // same two distances.)
+    const twin = CORRIDOR_SEGMENTS.find(s => s.id === 'i-805-nb-mission-valley-kearny-mesa-offset');
     const p240 = off(mid, brg + 90, 240);
     const m240 = matchCorridor({ lat: p240.lat, lng: p240.lng, heading: brg });
-    check('240 m off-chord retains the segment itself', m240?.segment === seg, `got ${m240?.segment.displayName ?? 'null'}`);
+    check('240 m off-chord retains the segment itself', m240?.segment === seg || (!!twin && m240?.segment === twin), `got ${m240?.segment.displayName ?? 'null'}`);
     const p260 = off(mid, brg + 90, 260);
     const m260 = matchCorridor({ lat: p260.lat, lng: p260.lng, heading: brg });
-    check('260 m off-chord no longer returns the segment', m260?.segment !== seg, `got ${m260?.segment.displayName ?? 'null'}`);
+    check('260 m off-chord no longer returns the segment', m260?.segment !== seg && (!twin || m260?.segment !== twin), `got ${m260?.segment.displayName ?? 'null'}`);
   }
 
   // ---------------------------------------------------------- PF user profile
