@@ -101,13 +101,35 @@ export function lsJsonSet(key: keyof typeof LS, value: unknown): void {
   }
 }
 
+function mintDeviceKey(): string {
+  return `leo-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
+}
+
 /** Device identity for heard_stories (contract D), minted once. */
 export function deviceKey(): string {
   let key = lsGet('userKey');
   if (!key) {
-    key = `leo-${Math.random().toString(36).slice(2, 10)}${Date.now().toString(36)}`;
+    key = mintDeviceKey();
     lsSet('userKey', key);
   }
+  return key;
+}
+
+/**
+ * Rotate the device identity (history reset, Nov 25, 2026):
+ * the heard_stories ledger is scoped to this key, so a fresh
+ * key makes every row the old key filed invisible to this
+ * device — the listener reads as a first-time user without
+ * deleting anything server-side (the anon client cannot
+ * delete ledger rows, and Erik's testing reset must not need
+ * a server round-trip). The old key's rows stay in the table,
+ * orphaned; nothing reads them back. Returns the new key.
+ */
+export function rotateDeviceKey(): string {
+  const previous = lsGet('userKey');
+  let key = mintDeviceKey();
+  if (key === previous) key = mintDeviceKey();
+  lsSet('userKey', key);
   return key;
 }
 

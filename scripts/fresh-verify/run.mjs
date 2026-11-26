@@ -82,6 +82,7 @@ const extras = {
   duoPersona: engine.duoPersona,
   audioFinish: engine.audioFinish,
   profile: engine.profile,
+  historyReset: engine.historyReset,
   profileUi: {
     ProfileEditor: engine.ProfileEditor,
     formFromProfile: engine.formFromProfile,
