@@ -7,7 +7,8 @@
 // fence in core/profile.ts).
 
 import { useRef, useState } from 'react';
-import { Download, Trash2, Upload, X } from 'lucide-react';
+import { Download, History, Trash2, Upload, X } from 'lucide-react';
+import { clearListeningHistory } from './core/historyReset';
 import {
   ACTIVITY_OPTIONS,
   BUDGET_COMFORT_OPTIONS,
@@ -381,11 +382,25 @@ function OverlayShell({
 
 const confidenceWord = (c: number): string => (c >= 0.7 ? 'Strong' : c >= 0.4 ? 'Building' : 'Faint');
 
-export function YourMilesScreen({ onClose }: { onClose: () => void }) {
+export function YourMilesScreen({
+  onClose,
+  onHistoryCleared,
+}: {
+  onClose: () => void;
+  /**
+   * Fired after a listening-history clear (Nov 25, 2026): the
+   * shell's seam for telling a live tour to forget its
+   * cross-day heard state (Tour.forgetCrossDayHeard), so the
+   * cleared state is observed without an app restart.
+   */
+  onHistoryCleared?: () => void;
+}) {
   const [profile, setProfile] = useState<MilesProfile>(() => loadProfile());
   const [form, setForm] = useState<DeclaredForm>(() => formFromProfile(loadProfile()));
   const [importMsg, setImportMsg] = useState<string | null>(null);
   const [confirmWipe, setConfirmWipe] = useState(false);
+  const [confirmClearHistory, setConfirmClearHistory] = useState(false);
+  const [historyMsg, setHistoryMsg] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   const refresh = () => {
@@ -473,6 +488,59 @@ export function YourMilesScreen({ onClose }: { onClose: () => void }) {
               </button>
             </div>
           ))}
+        </div>
+      )}
+
+      <p className="mt-8 text-base font-extrabold text-ink">Listening history</p>
+      <p className="text-xs leading-relaxed text-inksoft">
+        Testing Miles on your own drives? Every story you hear is remembered, so your usual
+        routes run dry. Clear the listening history and Miles treats you as a first-time
+        listener again — every story, welcome, and corridor telling can play once more. Your
+        tastes above stay exactly as they are.
+      </p>
+      <button
+        type="button"
+        onClick={() => {
+          setHistoryMsg(null);
+          setConfirmClearHistory(true);
+        }}
+        className="mt-3 flex w-full items-center justify-center gap-2 rounded-full bg-cream2 px-4 py-3 text-sm font-bold text-ink transition hover:bg-sage/25"
+      >
+        <History className="h-4 w-4" /> Clear listening history
+      </button>
+      {historyMsg && (
+        <p className="mt-2 text-center text-xs font-semibold text-inksoft">{historyMsg}</p>
+      )}
+
+      {confirmClearHistory && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-ink/45 px-6">
+          <div className="w-full max-w-sm rounded-[2rem] bg-cream p-6 text-ink shadow-2xl shadow-ink/30">
+            <p className="text-base font-extrabold">Clear listening history?</p>
+            <p className="mt-2 text-sm leading-relaxed text-inksoft">
+              Miles will forget every story, welcome, and corridor telling you have heard, and
+              treat you as a first-time listener. This clears listening history only — your
+              tastes and settings stay — and it cannot be undone.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                clearListeningHistory();
+                onHistoryCleared?.();
+                setConfirmClearHistory(false);
+                setHistoryMsg('Listening history cleared — every story can play again.');
+              }}
+              className="mt-5 w-full rounded-full bg-red-800 px-6 py-3.5 text-sm font-bold text-cream shadow-lg shadow-red-800/25 transition active:scale-[0.99]"
+            >
+              Clear history
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmClearHistory(false)}
+              className="mt-2 w-full py-2 text-center text-sm font-bold text-inksoft underline underline-offset-2"
+            >
+              Keep my history
+            </button>
+          </div>
         </div>
       )}
 

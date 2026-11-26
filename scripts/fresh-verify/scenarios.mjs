@@ -105,7 +105,7 @@ async function healthyOpening(world, audio, pos = UTC, speed = 8) {
 }
 
 export async function runScenarios(Tour, extras) {
-  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, WELCOME_REACH_CEILING_M, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, profileUi, facts, partners, freshness, currentEvents, eventsFeed, EVENT_FEEDS, suggestions, proposals, placeMemory, liveSpend, composeRoutePlan, hashString, duo, duoPersona, audioFinish } = extras;
+  const { CORRIDOR_SEGMENTS, CORRIDOR_BUFFER_M, matchCorridor, WELCOME_REACH_CEILING_M, resolveFillerRegion, accessGate, ambience, intro, routeInterItemGapMs, profile, profileRank, profileUi, facts, partners, freshness, currentEvents, eventsFeed, EVENT_FEEDS, suggestions, proposals, placeMemory, liveSpend, composeRoutePlan, hashString, duo, duoPersona, audioFinish, historyReset } = extras;
 
   // ---------------------------------------------------------- S-01 healthy start
   suite('S-01 healthy start / opener order');
@@ -1872,6 +1872,210 @@ export async function runScenarios(Tour, extras) {
     check('Tier-1 place told, then retold once in-tour (Q14 intact)',
       commits() === 2, `commits=${commits()}`);
     tour.endTour();
+  }
+
+  // ---------------------------------------------------------- HR-1 clear listening history (Nov 25, 2026)
+  // Erik's testing reset: stories marked heard are ineligible;
+  // after the clear the SAME stories are eligible again — on
+  // the landmark path (cross-tour, through the device-key
+  // rotation the production ledger keys on), the welcome path
+  // (in-tour, through Tour.forgetCrossDayHeard), and the
+  // corridor path (per-telling rotation returns to the base
+  // telling). The profile and the tester unlock survive.
+  suite('HR-1 clear listening history: heard → clear → eligible again');
+  {
+    // ---- landmark path, cross-tour (the tester's flow)
+    resetLocalStorage();
+    localStorage.setItem('leo_user_key', 'leo-hr-landmark');
+    const topicsByKey = new Map([['leo-hr-landmark', ['Balboa Park']]]);
+    const wireLedger = world => {
+      world.seams.fetchHeardTopics = async k => topicsByKey.get(k) ?? [];
+      world.seams.fetchHeardStoryTexts = async () => [];
+    };
+    {
+      const world = makeWorld(Tour, {
+        candidates: [makeCandidate('Balboa Park'), makeCandidate('Cabrillo Point')],
+        library: ['Balboa Park', 'Cabrillo Point'],
+      });
+      wireLedger(world);
+      const audio = new FakeAudio(world.clock, okPolicy());
+      const tour = await startAt(world, audio, UTC);
+      for (let i = 0; i < 30 && !world.eventsOf('story_playback').some(e => e.payload.subject === 'cabrillo point'); i++) {
+        await world.clock.advance(5_000);
+      }
+      check('HR landmark: the heard story is ineligible before the clear',
+        !world.eventsOf('story_played').some(e => e.payload.subject === 'balboa park'),
+        JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+      check('HR landmark: the unheard story serves before the clear',
+        world.eventsOf('story_playback').some(e => e.payload.subject === 'cabrillo point'));
+      tour.endTour();
+    }
+    const landmarkClear = historyReset.clearListeningHistory();
+    check('HR landmark: the clear rotates the device key',
+      landmarkClear.newDeviceKey !== 'leo-hr-landmark' &&
+        localStorage.getItem('leo_user_key') === landmarkClear.newDeviceKey,
+      `new=${landmarkClear.newDeviceKey}`);
+    {
+      const world = makeWorld(Tour, {
+        candidates: [makeCandidate('Balboa Park')],
+        library: ['Balboa Park'],
+      });
+      wireLedger(world);
+      const audio = new FakeAudio(world.clock, okPolicy());
+      const tour = await startAt(world, audio, UTC);
+      await world.clock.advance(60_000);
+      check('HR landmark: the same story is eligible again after the clear',
+        world.eventsOf('story_played').some(e => e.payload.subject === 'balboa park'),
+        JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+      tour.endTour();
+    }
+
+    // ---- welcome path, in-tour (no restart)
+    resetLocalStorage();
+    localStorage.setItem('leo_user_key', 'leo-hr-welcome');
+    {
+      const world = makeWorld(Tour, { candidates: [], intros: ['Clairemont', 'Linda Vista'] });
+      const hrWelcomePlayed = (w, subject) => w.eventsOf('story_played').filter(e => e.payload.subject === subject);
+      const hrWelcomePromptsFor = (w, name) => w.genStoryPrompts.filter(pr => pr.includes('NEIGHBORHOOD WELCOME') && pr.includes(name));
+      world.seams.fetchHeardTopics = async () => ['Clairemont', 'Linda Vista'];
+      const audio = new FakeAudio(world.clock, okPolicy());
+      const { tour } = await healthyOpening(world, audio);
+      world.area = { neighborhood: 'Clairemont', city: 'San Diego' };
+      tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+      await world.clock.advance(60_000);
+      const clairemont = hrWelcomePlayed(world, 'welcome:clairemont');
+      check('HR welcome: a heard area gets the LIVE alternate before the clear',
+        clairemont.length === 1 && clairemont[0]?.payload.source === 'live',
+        JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+      check('HR welcome: the heard shelf intro never plays before the clear',
+        !audio.log.some(e => typeof e.src === 'string' && e.src.endsWith('library/clairemont/neighborhood_intro.wav')));
+      // The clear, mid-tour: stores + the tour's own cross-day sets.
+      historyReset.clearListeningHistory();
+      tour.forgetCrossDayHeard();
+      world.area = { neighborhood: 'Linda Vista', city: 'San Diego' };
+      tour.onPosition({ lat: UTC.lat + 0.02, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+      await world.clock.advance(90_000);
+      const linda = hrWelcomePlayed(world, 'welcome:linda vista');
+      check('HR welcome: after the in-tour clear the next heard area serves its SHELF intro',
+        linda.length === 1 && linda[0]?.payload.source === 'library',
+        JSON.stringify(world.eventsOf('story_played').map(e => [e.payload.subject, e.payload.source])));
+      check('HR welcome: no live alternate is generated for it after the clear',
+        hrWelcomePromptsFor(world, 'Linda Vista').length === 0,
+        `prompts=${hrWelcomePromptsFor(world, 'Linda Vista').length}`);
+      check('HR welcome: the tour itself is unharmed by the mid-tour clear',
+        tour.view().phase === 'active', tour.view().phase);
+      tour.endTour();
+    }
+
+    // ---- corridor path, cross-tour (per-telling rotation resets)
+    {
+      const MPD_LAT = 111_320;
+      const mpdLng = lat => MPD_LAT * Math.cos((lat * Math.PI) / 180);
+      const distM = (a, b) => Math.hypot((b.lat - a.lat) * MPD_LAT, (b.lng - a.lng) * mpdLng(a.lat));
+      const segLen = s => s.polyline.reduce((acc, p, i) => (i === 0 ? 0 : acc + distM(p, s.polyline[i - 1])), 0);
+      const seg = CORRIDOR_SEGMENTS.find(s => s.id === 'sr-125-nb-san-miguel-road-sweetwater-crossing') ?? CORRIDOR_SEGMENTS.filter(s => segLen(s) > 4000).reduce((a, b) => (segLen(a) > segLen(b) ? a : b));
+      const alongPoint = (s, frac) => {
+        const total = segLen(s);
+        let acc = 0;
+        for (let i = 1; i < s.polyline.length; i++) {
+          const a = s.polyline[i - 1];
+          const b = s.polyline[i];
+          const leg = distM(b, a);
+          if (acc + leg >= total * frac) {
+            const t = (total * frac - acc) / leg;
+            return {
+              lat: a.lat + (b.lat - a.lat) * t,
+              lng: a.lng + (b.lng - a.lng) * t,
+              heading: ((Math.atan2((b.lng - a.lng) * mpdLng(a.lat), (b.lat - a.lat) * MPD_LAT) * 180) / Math.PI + 360) % 360,
+            };
+          }
+          acc += leg;
+        }
+        const last = s.polyline[s.polyline.length - 1];
+        return { lat: last.lat, lng: last.lng, heading: 180 };
+      };
+      const mid = alongPoint(seg, 0.5);
+      const baseText = `The library story of ${seg.displayName} (corridor). `.repeat(40);
+      const textsByKey = new Map();
+      const runCorridorDrive = async presetKey => {
+        resetLocalStorage();
+        if (presetKey) localStorage.setItem('leo_user_key', presetKey);
+        const world = makeWorld(Tour, {
+          candidates: [makeCandidate('Alpha Park', { lat: seg.polyline[0].lat, lng: seg.polyline[0].lng, distanceM: 100 })],
+          library: [
+            { name: 'Alpha Park', lat: seg.polyline[0].lat, lng: seg.polyline[0].lng },
+            { name: seg.displayName, angles: ['corridor', 'corridor-2'] },
+          ],
+        });
+        world.seams.fetchHeardStoryTexts = async k => textsByKey.get(k) ?? [];
+        const audio = new FakeAudio(world.clock, okPolicy({ library: 90_000 }));
+        const tour = await startAt(world, audio, seg.polyline[0], 8, mid.heading);
+        await world.clock.advance(40_000);
+        tour.onPosition({ lat: mid.lat, lng: mid.lng, speedMps: 27, headingDeg: mid.heading });
+        await world.clock.advance(150_000);
+        const segSrcs = audio.log
+          .filter(e => e.src && e.src.includes('library/') && e.src.includes('/corridor'))
+          .map(e => e.src);
+        tour.endTour();
+        return segSrcs;
+      };
+      textsByKey.set('leo-hr-corridor', [baseText]);
+      const heardDrive = await runCorridorDrive('leo-hr-corridor');
+      check('HR corridor: base telling heard → the second telling serves',
+        heardDrive.some(s => s.endsWith('/corridor-2.wav')) && !heardDrive.some(s => s.endsWith('/corridor.wav')),
+        heardDrive.join(','));
+      // The clear rotates the key; the next drive presets
+      // nothing — deviceKey() returns the rotated key, whose
+      // ledger is empty.
+      resetLocalStorage();
+      localStorage.setItem('leo_user_key', 'leo-hr-corridor');
+      historyReset.clearListeningHistory();
+      const freshDrive = await runCorridorDrive(null);
+      check('HR corridor: after the clear the BASE telling serves again',
+        freshDrive.some(s => s.endsWith('/corridor.wav')) && !freshDrive.some(s => s.endsWith('/corridor-2.wav')),
+        freshDrive.join(','));
+    }
+
+    // ---- the store contract: everything heard-shaped goes,
+    // ---- profile + access + place tray records stay
+    resetLocalStorage();
+    profile.setDeclaredTaste('cuisines', ['seafood'], 'hr-sim');
+    profile.setSeedState('completed');
+    localStorage.setItem('miles_tester_unlocked', '1');
+    localStorage.setItem('leo_user_key', 'leo-hr-stores');
+    for (const store of historyReset.HISTORY_RESET_STORES) localStorage.setItem(store.raw, 'x');
+    localStorage.setItem('leo_route_drives', JSON.stringify([{
+      destinationName: 'Old Town', destinationPlaceKey: 'old town', threadTopic: null,
+      playedSubjects: ['Balboa Park'], owedSubjects: ['Old Town'], endedAt: Date.now(),
+    }]));
+    proposals.recordProposal(proposals.localProposalStore, {
+      placeId: 'place:cafe', name: 'Corner Cafe', kind: 'eat', primaryReason: 'open-now',
+      closesAtMs: null, hoursFetchedAt: Date.now(), offeredAt: Date.now(), sessionId: 's1',
+      state: 'spoken', flavor: 'place', passedAt: null,
+    });
+    proposals.recordProposal(proposals.localProposalStore, {
+      placeId: 'memory:old town', name: 'Old Town', kind: 'story', primaryReason: 'place-memory',
+      closesAtMs: null, hoursFetchedAt: Date.now(), offeredAt: Date.now(), sessionId: 's1',
+      state: 'spoken', flavor: 'place-memory', passedAt: Date.now(),
+    });
+    const res = historyReset.clearListeningHistory();
+    check('HR stores: every history store is deleted',
+      historyReset.HISTORY_RESET_STORES.every(s => localStorage.getItem(s.raw) === null),
+      historyReset.HISTORY_RESET_STORES.filter(s => localStorage.getItem(s.raw) !== null).map(s => s.raw).join(','));
+    check('HR stores: the result names the stores it cleared',
+      res.clearedStoreKeys.length === historyReset.HISTORY_RESET_STORES.length);
+    check('HR stores: the profile survives the clear',
+      profile.getProfile().tastes.cuisines.join() === 'seafood' &&
+        profile.shouldOfferSeed() === false);
+    check('HR stores: the tester unlock survives the clear',
+      accessGate.isTesterUnlocked() === true);
+    check('HR stores: place-memory tray records drop, place records stay',
+      proposals.loadProposalRecords(proposals.localProposalStore).map(r => r.flavor).join() === 'place' &&
+        res.trayCallbacksDropped === 1,
+      JSON.stringify(proposals.loadProposalRecords(proposals.localProposalStore).map(r => r.flavor)));
+    check('HR stores: place-memory has no source left after the clear',
+      placeMemory.deriveCallbackCandidates([], new Set(), Date.now()).length === 0);
+    profile.wipeProfile();
   }
 
   // ---------------------------------------------------------- W: mid-tour shelf welcomes (Erik, Oct 30)

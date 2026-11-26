@@ -3446,7 +3446,12 @@ function MilesApp() {
           </button>
         </main>
         {profilePanel === 'seed' && <SeedCard onDone={() => setProfilePanel('none')} />}
-        {profilePanel === 'miles' && <YourMilesScreen onClose={() => setProfilePanel('none')} />}
+        {profilePanel === 'miles' && (
+          <YourMilesScreen
+            onClose={() => setProfilePanel('none')}
+            onHistoryCleared={() => engineRef.current?.forgetCrossDayHeard()}
+          />
+        )}
       </div>
     );
   }
@@ -3662,7 +3667,12 @@ function MilesApp() {
           </button>
         </main>
         {profilePanel === 'seed' && <SeedCard onDone={() => setProfilePanel('none')} />}
-        {profilePanel === 'miles' && <YourMilesScreen onClose={() => setProfilePanel('none')} />}
+        {profilePanel === 'miles' && (
+          <YourMilesScreen
+            onClose={() => setProfilePanel('none')}
+            onHistoryCleared={() => engineRef.current?.forgetCrossDayHeard()}
+          />
+        )}
       </div>
     );
   }

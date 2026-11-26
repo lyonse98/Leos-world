@@ -1404,21 +1404,61 @@ export class Tour {
    * candidate. A failed fetch degrades to in-tour memory only.
    */
   private async loadHeardTopics(): Promise<void> {
+    // The key is captured up front: a history clear mid-flight
+    // rotates it (forgetCrossDayHeard), and a stale hydration
+    // landing afterwards must not re-fill the cleared sets
+    // with the old key's ledger.
+    const key = this.userKey;
     try {
-      const topics = await this.seams.fetchHeardTopics(this.userKey);
+      const topics = await this.seams.fetchHeardTopics(key);
+      if (key !== this.userKey) return;
       for (const topic of topics) {
-        const key = backend.placeKeyOf(topic);
-        if (key) this.heardTopics.add(key);
+        const placeKey = backend.placeKeyOf(topic);
+        if (placeKey) this.heardTopics.add(placeKey);
       }
     } catch {
       /* the ledger is a filter, not a dependency — the tour runs without it */
     }
     try {
-      const texts = await this.seams.fetchHeardStoryTexts(this.userKey);
+      const texts = await this.seams.fetchHeardStoryTexts(key);
+      if (key !== this.userKey) return;
       for (const text of texts) this.heardStoryTexts.add(text);
     } catch {
       /* same standing: without the texts the corridor lane deals its first telling, as it always has */
     }
+  }
+
+  /**
+   * History clear (Nov 25, 2026 — historyReset.ts): the shell
+   * calls this when the listener clears listening history, so
+   * a LIVE tour observes the cleared state without a restart.
+   * Only the CROSS-DAY sets are forgotten — the topics and
+   * verbatim texts hydrated from previous days' ledger — and
+   * the tour adopts the rotated device key, so everything it
+   * files from here lands under the fresh identity. This
+   * tour's own ledgers (toldCount, corridorConsumed, welcomed,
+   * the thread) deliberately stand: a story that sounded
+   * minutes ago in THIS drive is not re-served mid-drive, and
+   * the tour's coherence is untouched. From the next serve
+   * cycle on, every not-yet-told-this-drive story is eligible
+   * again, exactly as for a first-time listener.
+   */
+  forgetCrossDayHeard(): void {
+    this.heardTopics.clear();
+    this.heardStoryTexts.clear();
+    // This tour's own deliveries re-join the heard set (they
+    // were filed into it at their settles, beside the cross-day
+    // entries): the clear is about PREVIOUS days, and a place
+    // heard minutes ago in this drive must still read as heard
+    // — e.g. a place-memory callback must never claim "still
+    // unheard" over a story this drive already told. (The
+    // text set needs no such repair: this tour's corridor and
+    // angle re-serves are fenced by corridorConsumed and
+    // dealtAngles, which stand.)
+    for (const subject of this.toldCount.keys()) {
+      if (subject) this.heardTopics.add(subject);
+    }
+    this.userKey = backend.deviceKey();
   }
 
   private pickGreeting(resume: boolean) {
