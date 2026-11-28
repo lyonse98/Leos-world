@@ -271,7 +271,7 @@ export interface CapturedItem {
   conditional?: string;
 }
 
-const INTRO_ANGLES = new Set(['neighborhood_intro', 'neighborhood_intro_greet']);
+const INTRO_ANGLES = new Set(['neighborhood_intro', 'neighborhood_intro_greet', 'neighborhood_intro_entry']);
 /**
  * Generated gap stories are shelved under a fresh audio key
  * carrying one of these suffixes — the standing marker, and

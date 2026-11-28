@@ -337,7 +337,40 @@ const WELCOME_LIVE_DEADLINE_MS = 12_000;
 const INTRO_ANGLES: ReadonlySet<string> = new Set([
   'neighborhood_intro',
   'neighborhood_intro_greet',
+  'neighborhood_intro_entry',
 ]);
+/**
+ * The entry-anchored welcome variant (Nov 28, 2026 — Erik's
+ * ruling, the welcome-fix program's Half-2 contract). The
+ * welcome angle FAMILY is three sibling angles under one
+ * place_key, mirroring the corridor family ('corridor',
+ * 'corridor-2', …) and its isCorridorAngle predicate:
+ *  - 'neighborhood_intro'        — the plain row (re-entry voice);
+ *  - 'neighborhood_intro_greet'  — the greeting row (first-heard voice);
+ *  - 'neighborhood_intro_entry'  — the ENTRY-ANCHORED variant:
+ *    a telling written for a driver who is already inside the
+ *    place, anchored at the ENTRY POINT (where this drive
+ *    crossed in) rather than the neighborhood centroid.
+ * All three share the one welcome subject (`welcome:<name>`),
+ * so the spend is family-style, exactly like a corridor
+ * rotation pair: hearing ANY family member — original or
+ * entry variant — spends the place's welcome for the drive,
+ * and a stale judgment of any member spends nothing (see
+ * onStorySettle's welcome-stale branch). Serving selection
+ * lives in shelfIntroItem (the variant is preferred once the
+ * driver is deep inside, past the entry point; the original
+ * serves at approach), and its judging register lives in
+ * judgeStory (boundary distance to the ENTRY anchor, no
+ * freeway ceiling — servable across the whole crossing
+ * window). A library production run generates at most one
+ * entry variant per place, as a sibling row beside the two
+ * existing angles.
+ */
+const ENTRY_WELCOME_ANGLE = 'neighborhood_intro_entry';
+
+function isEntryWelcomeAngle(angle: string | undefined): boolean {
+  return angle === ENTRY_WELCOME_ANGLE;
+}
 /**
  * Woven twins (Nov 4, 2026): the woven tranche's host-told
  * retellings ride the shelf as sibling rows whose angle is
@@ -458,6 +491,44 @@ export const FREEWAY_MPS = 15;
  * is ~55 s of road: an arrival window, not a preview.
  */
 export const WELCOME_REACH_CEILING_M = 1500;
+
+/**
+ * Welcome footprint radius (Nov 28, 2026 — Erik's ruling,
+ * the welcome-fix batch): neighborhoods carry no polygons in
+ * this shell (see NESTED_AREA_RADIUS_M's note), so the honest
+ * boundary geometry for a shelf welcome is its anchor plus a
+ * district-scale radius — the same 1,200 m the nested-area
+ * deferral already uses as "still inside the child". A
+ * library welcome is judged by BOUNDARY distance — how far
+ * the driver is from the footprint's edge (max(0, dist −
+ * radius)) — not by distance to the centroid pin: the Nov 27
+ * drive lost all four of its library welcomes to the centroid
+ * test while the driver was entering or inside the place
+ * (University City died at 1,701 m the second it was offered;
+ * Tierrasanta's centroid sits ~3 km south of its SR-52
+ * crossing, so no centroid test can ever pass there). The
+ * ceiling above still binds the arm where the driver has
+ * already left (anchor astern, or the area resolved onward):
+ * Erik's Nov 20 law is untouched there.
+ */
+const WELCOME_FOOTPRINT_RADIUS_M = 1200;
+/**
+ * Welcome judge speed floor for a tour whose first welcome
+ * has not yet sounded (Nov 28, 2026): the reach test prices a
+ * telling by the speed the driver will actually cover ground
+ * at, and an instantaneous GPS read at a standing start is
+ * ≈0 — on Nov 27 the University City opening welcome was
+ * judged 14 s after the tap, at a standstill, and died with
+ * a ~0 m window. Until the first welcome sounds, the judge's
+ * speed never falls below this surface-crawl floor (5 m/s
+ * ≈ 18 km/h); after it, the smoothed speed stands on its
+ * own with the historical 0.5 m/s floor. The smoothing
+ * itself (welcomeJudgeSpeedMps) is the recent median / path
+ * speed over the position trail, so a merge dip or a single
+ * dropped fix cannot zero the window either.
+ */
+const WELCOME_JUDGE_FLOOR_MPS = 5;
+const WELCOME_JUDGE_WINDOW_MS = 45_000;
 
 /**
  * The walking regime (Nov 24, 2026 — Erik's ruling, after the
@@ -707,6 +778,30 @@ export class Tour {
    * first unspoken one is the debt.
    */
   private passbySalvage: { name: string; fact: string } | null = null;
+  /**
+   * Whether any welcome has SOUNDED this tour (Nov 28, 2026):
+   * the welcome judge's speed floor (WELCOME_JUDGE_FLOOR_MPS)
+   * stands only until the first welcome sounds — the opening
+   * phase is where a standing start can zero the reach window.
+   */
+  private welcomeSoundedThisTour = false;
+  /**
+   * Stale-conversion watch (Nov 28, 2026): a shelf welcome
+   * judged stale while its driver was already beyond the
+   * footprint (anchor astern) but the area had not yet
+   * resolved onward below the pass-by gate's terms — the
+   * place is NOT spent (see onStorySettle), and when the area
+   * next resolves onward at freeway pace, trackNeighborhood
+   * fires the pass-by conversion from this record, the same
+   * rescue the live lane's checkpoint 3 performs. Any area
+   * change consumes the watch, fired or lapsed. One watch at
+   * a time: a newer stale welcome replaces an older record,
+   * as with the fold-in salvage's one-debt discipline.
+   */
+  private staleConversionWatch: {
+    name: string;
+    entryPos?: { lat: number; lng: number };
+  } | null = null;
 
   // Telling ledger (§3)
   private inflight = new Set<string>();
@@ -786,6 +881,17 @@ export class Tour {
    * stretch stayed silent without a per-tick event flood.
    */
   private corridorStoodDown = new Map<string, string>();
+  /**
+   * Segments whose serve found NO banked row in the library
+   * index this tour (Nov 28, 2026): the family-empty return in
+   * serveCorridor used to be silent, which is why the Nov 27
+   * drive's second tour — 6.5 min of highway driving with zero
+   * corridor offers — was unexplained in its own telemetry.
+   * corridor_no_banked_row now files exactly once per segment
+   * per tour, mirroring corridor_suppressed_covered's
+   * once-per-segment discipline.
+   */
+  private corridorNoRowFiled = new Set<string>();
   /**
    * Walking regime (Nov 24, 2026): the position-sample trail
    * the detection reads (bounded to the evidence window plus
@@ -1259,6 +1365,12 @@ export class Tour {
     // Walking-regime state is per-tour: a fresh start re-earns it.
     this.posSamples = [];
     this.walkingRegime = false;
+    // Welcome-fix state is per-tour likewise (Nov 28, 2026):
+    // the judge's opening speed floor re-earns, and a stale
+    // watch from a prior start on this instance must not fire
+    // into a new tour.
+    this.welcomeSoundedThisTour = false;
+    this.staleConversionWatch = null;
     this.walkingRingsEmptyAt = 0;
     this.sessionId =
       typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -2034,7 +2146,7 @@ export class Tour {
       const heardIntro =
         this.subjectBlockReason(backend.placeKeyOf(name), null) === 'crossday' ||
         this.introHeardCrossDay(name);
-      const shelf = await this.shelfIntroItem(name, false, heardIntro);
+      const shelf = await this.shelfIntroItem(name, false, heardIntro, entryFix);
       if (this.phase !== 'active') return;
       if (shelf) {
         this.welcomeState = 'ready';
@@ -2320,18 +2432,46 @@ export class Tour {
    * bookkeeping is one ledger; only the filed angle differs,
    * honestly, in the §8 vocabulary. Null when the chosen variant
    * has no row or no audio.
+   *
+   * A THIRD variant joins the family on Nov 28, 2026 (the
+   * Half-2 contract at ENTRY_WELCOME_ANGLE): the entry-anchored
+   * row, selected ahead of both heard-state variants when the
+   * driver is already deep inside (see the selection rule at
+   * the choice below). Same subject, same ledger — the family
+   * spend is shared, exactly like a corridor rotation pair.
    */
   private async shelfIntroItem(
     name: string,
     deferrable = false,
     heardIntro = false,
+    entryPos?: { lat: number; lng: number } | null,
   ): Promise<AudibleItem | null> {
     const rows = await this.seams.fetchIntroRows(name);
-    const chosen = heardIntro
-      ? rows.greet
-        ? rows.plain
-        : null
-      : (rows.greet ?? rows.plain);
+    // Entry-variant selection (Nov 28, 2026 — the Half-2
+    // contract's selection rule): the ENTRY-ANCHORED variant
+    // (ENTRY_WELCOME_ANGLE) is preferred when the car is
+    // already inside — the current fix stands beyond the
+    // footprint radius from the entry fix, so the entry
+    // moment has passed and an arrival-framed original would
+    // speak to a moment the driver is no longer in. At
+    // approach (near the entry fix, or no entry fix on
+    // record) the ORIGINAL serves, in its heard-state variant
+    // below. One variant per place on the shelf; where no
+    // entry row exists, selection is exactly the historical
+    // rule.
+    const deepInside =
+      !!entryPos &&
+      !!this.position &&
+      calculateDistance(this.position.lat, this.position.lng, entryPos.lat, entryPos.lng) >
+        WELCOME_FOOTPRINT_RADIUS_M;
+    const chosen =
+      deepInside && rows.entry
+        ? rows.entry
+        : heardIntro
+          ? rows.greet
+            ? rows.plain
+            : null
+          : (rows.greet ?? rows.plain);
     if (!chosen || !chosen.audio_path) return null;
     let row = chosen;
     // Version assignment (Nov 15, 2026): the welcome lane
@@ -2368,8 +2508,23 @@ export class Tour {
         // twin's ' (short cut)' angle when a cut serves.
         angleOf: row.angle,
         storySource: 'library',
-        anchor: { lat: row.lat, lng: row.lng },
+        // The entry variant's anchor is the ENTRY POINT, not
+        // the row's centroid pin (Nov 28, 2026 — the Half-2
+        // contract): judgeStory's entry register measures
+        // boundary distance from where this drive crossed in,
+        // which is what makes the variant servable across the
+        // whole crossing window. Selection only picks the
+        // variant when an entry fix is on record; the row pin
+        // is the floor when one is not.
+        anchor:
+          isEntryWelcomeAngle(row.angle) && entryPos
+            ? { lat: entryPos.lat, lng: entryPos.lng }
+            : { lat: row.lat, lng: row.lng },
         regionAnchored: true,
+        // The obligation's entry fix rides the shelf item too
+        // (Nov 28, 2026): a stale judgment's conversion and
+        // re-arm read it exactly as they read a live item's.
+        ...(entryPos ? { entryAnchor: { lat: entryPos.lat, lng: entryPos.lng } } : {}),
         generatedAt: this.clock.now(),
         text: row.story_text,
         reserved: true,
@@ -2429,6 +2584,26 @@ export class Tour {
     // behind a playing story. Withdraw and re-tell it as a
     // pass-by (see maybeConvertWaitingWelcome).
     this.maybeConvertWaitingWelcome();
+    // Stale-conversion watch (Nov 28, 2026): a shelf welcome
+    // judged stale beyond its footprint left a watch behind
+    // (see onStorySettle outcome (c)). This area change IS
+    // the exit it waited for: at freeway pace the pass-by
+    // conversion fires now; below it, the moment passes and
+    // the watch lapses — either way the change consumes it.
+    // A change BACK into the watched place is no exit: the
+    // watch lapses and the fresh entry's own obligation (the
+    // O14 block below) re-owes the full welcome, unspent.
+    if (this.staleConversionWatch) {
+      const watch = this.staleConversionWatch;
+      this.staleConversionWatch = null;
+      if (
+        watch.name.toLowerCase() !== key &&
+        this.position &&
+        this.position.speedMps >= FREEWAY_MPS
+      ) {
+        void this.convertStaleWelcome(watch.name, watch.entryPos);
+      }
+    }
     // O14: entering an unwelcomed neighborhood creates an owed WELCOME.
     if (
       this.phase === 'active' &&
@@ -2573,7 +2748,7 @@ export class Tour {
         // live cannot produce it (failure, tripped breaker), the
         // owed record discharges silently rather than re-arming
         // on a cooldown and minting attempt after attempt.
-        item = await this.shelfIntroItem(name, true, true);
+        item = await this.shelfIntroItem(name, true, true, entryPos);
         if (!item && !this.welcomeWouldLand()) {
           // Fit gate (Nov 2): the live alternate is projected to
           // land beyond its ground — it is not generated at all,
@@ -2609,7 +2784,7 @@ export class Tour {
         // semantics unchanged. Mid-tour welcomes are the
         // deferrable kind (Nov 1): a Tier-1 newcomer may take
         // their waiting slot without dropping them.
-        item = await this.shelfIntroItem(name, true);
+        item = await this.shelfIntroItem(name, true, false, entryPos);
         if (!item && !this.welcomeWouldLand()) {
           // Fit gate (Nov 2): a live welcome projected to land
           // beyond its ground is not generated at all — the pass
@@ -2758,6 +2933,61 @@ export class Tour {
     const item = built.item;
     this.offeredWelcome = { name, item };
     this.player.offerStory(item, true);
+  }
+
+  /**
+   * The stale shelf welcome's pass-by conversion (Nov 28,
+   * 2026): the shelf counterpart of regeneratePassbyWelcome.
+   * A library welcome judged stale at dequeue cannot be
+   * re-framed — its audio is a frozen arrival telling — so
+   * the conversion is a fresh LIVE pass-by generation under
+   * the same subject, offered in the stale item's place. It
+   * files welcome_converted_passby at the offer, so a drive's
+   * telemetry separates converted welcomes (the place was
+   * still greeted, in past tense) from truly lost ones (a
+   * welcome_stale_dropped with no conversion behind it).
+   * Hearing the conversion spends the place's welcome through
+   * the ordinary sounded settle (same subject, family-style);
+   * a failed generation banks the stale item's lead fact as
+   * fold-in salvage when the item is at hand, and the place
+   * stays unspent either way.
+   */
+  private async convertStaleWelcome(
+    name: string,
+    entryPos?: { lat: number; lng: number } | null,
+    fromItem?: AudibleItem,
+  ): Promise<void> {
+    if (!this.position || this.phase !== 'active') return;
+    const built = await this.buildWelcomeItem(
+      name,
+      this.position,
+      true,
+      'passby',
+      undefined,
+      entryPos ?? undefined,
+    );
+    if (this.phase !== 'active') return;
+    if (!built) {
+      if (fromItem) this.bankPassbySalvage(name, fromItem);
+      return;
+    }
+    const item = built.item;
+    this.welcomePacks.set(`welcome:${name.toLowerCase()}`, built.pack);
+    this.welcomeOffered = true;
+    this.offeredWelcome = { name, item };
+    this.emit('welcome_converted_passby', {
+      subject: `welcome:${name.toLowerCase()}`,
+      topic: item.label,
+      source: 'library',
+      distance_m:
+        item.anchor && this.position
+          ? Math.round(
+              calculateDistance(this.position.lat, this.position.lng, item.anchor.lat, item.anchor.lng),
+            )
+          : null,
+    });
+    this.player.offerStory(item, true);
+    this.notify();
   }
 
   // ------------------------------------------------------------ corridors (O16, Q11)
@@ -2997,7 +3227,19 @@ export class Tour {
       .sort((a, b) => corridorAngleRank(a.angle) - corridorAngleRank(b.angle));
     if (family.length === 0) {
       this.inflight.delete(subject);
-      return; // banked only in the fresh shell; no banked row → no corridor serve
+      // No banked row → no corridor serve — but no longer
+      // silently (Nov 28, 2026): this return was the Nov 27
+      // drive's unexplained hole (a full highway tour with
+      // zero corridor offers and zero corridor telemetry of
+      // any kind). corridor_no_banked_row files once per
+      // segment per tour so the field can separate "the lane
+      // never matched" from "the shelf held nothing for the
+      // segment it matched".
+      if (!this.corridorNoRowFiled.has(segment.id)) {
+        this.corridorNoRowFiled.add(segment.id);
+        this.emit('corridor_no_banked_row', { segment_id: segment.id });
+      }
+      return;
     }
     let row: backend.LibraryRow | null = null;
     let firstFetched: backend.LibraryRow | null = null;
@@ -4196,6 +4438,7 @@ export class Tour {
     // O15: an unheard WELCOME remains owed, on the 180 s cooldown.
     if (subject.startsWith('welcome:')) {
       this.welcomeOffered = false;
+      if (rec.sounded) this.welcomeSoundedThisTour = true;
       if (
         !rec.sounded &&
         (rec.dropReason === 'welcome-outrun' || rec.dropReason === 'welcome-stale')
@@ -4212,12 +4455,8 @@ export class Tour {
         // tour opens without its first hello rather than
         // sounding it a mile behind.
         // Staleness discharge (Nov 16, 2026): the Day-12 gate's
-        // 'welcome-stale' discharges identically — the driver
-        // is beyond the telling's own reach (duration × speed),
-        // so re-arming the owed record would only re-offer a
-        // welcome whose moment has passed (the retry is not
-        // distance-gated) — with
-        // one difference: it FILES. welcome_stale_dropped is
+        // 'welcome-stale' discharges identically — with one
+        // difference: it FILES. welcome_stale_dropped is
         // the field's record that the gate fired, with the
         // distance that condemned the telling; the discharge
         // itself still files no story_dropped, counts no drop,
@@ -4239,6 +4478,70 @@ export class Tour {
                   )
                 : null,
           });
+          // Stale no longer spends the place (Nov 28, 2026 —
+          // Erik's ruling, the welcome-fix batch): the Nov 16
+          // discharge below burned the neighborhood's welcome
+          // for the whole drive on a judgment the Nov 27 drive
+          // proved unsound (centroid geometry, instantaneous
+          // speed), and a burned place got no second chance
+          // that drive. A LIBRARY welcome judged stale now
+          // lands in exactly one of three outcomes, none of
+          // which marks the place welcomed:
+          //  (a) the driver has ALREADY exited at freeway pace
+          //      (the live lane's pass-by gate reads true):
+          //      convert now — a short pass-by telling takes
+          //      the stale welcome's place, mirroring the live
+          //      rescue (convertStaleWelcome). Hearing the
+          //      conversion spends the welcome through the
+          //      ordinary sounded settle.
+          //  (b) the crossing is still in progress (the area
+          //      still resolves to the place, anchor not
+          //      astern beyond the footprint): the welcome
+          //      stays OWED on the O15 cooldown — the queue
+          //      that condemned it may clear while the driver
+          //      is still inside, and the re-offer is judged
+          //      under the boundary law like any other.
+          //  (c) the driver is beyond the footprint with the
+          //      anchor astern, but the area has not resolved
+          //      onward at freeway pace yet: the obligation
+          //      discharges WITHOUT burning, and the
+          //      stale-conversion watch arms — when the area
+          //      resolves onward at freeway pace, the pass-by
+          //      conversion fires from the watch. A later
+          //      genuine re-entry re-owes the full welcome,
+          //      because the place was never marked welcomed.
+          // (Only library items can carry 'welcome-stale' —
+          // the live arm's verdict is 'welcome-outrun' — so
+          // the branch below is the shelf's alone; any other
+          // source falls through to the historical discharge.)
+          if (item.storySource === 'library') {
+            const name = subject.slice('welcome:'.length);
+            const displayName = item.label.startsWith('Welcome to ')
+              ? item.label.slice('Welcome to '.length)
+              : name;
+            const standing =
+              this.owedWelcome?.name.toLowerCase() === name ? this.owedWelcome : null;
+            const entryPos = item.entryAnchor ?? standing?.entryPos;
+            if (this.passbyExitApplies(displayName)) {
+              this.owedWelcome = null;
+              void this.convertStaleWelcome(displayName, entryPos, item);
+            } else if (this.welcomeStillCrossing(name, item.anchor)) {
+              this.owedWelcome = {
+                name,
+                retryAt: this.clock.now() + WELCOME_COOLDOWN_MS,
+                entry: standing?.entry ?? false,
+                entryPos,
+              };
+            } else {
+              this.owedWelcome = null;
+              this.staleConversionWatch = { name: displayName, entryPos };
+            }
+            this.commitStamps.delete(item.id);
+            this.soundStamps.delete(item.id);
+            if (this.welcomeState === 'handed') this.welcomeState = 'none';
+            this.maybeOpenTour();
+            return;
+          }
         }
         const name = subject.slice('welcome:'.length);
         this.welcomed.add(name);
@@ -4652,6 +4955,76 @@ export class Tour {
 
   // ------------------------------------------------------------ player hooks: freshness & displacement
 
+  /**
+   * The welcome judge's speed (Nov 28, 2026): a SMOOTHED read
+   * of the position trail — the greater of the recent median
+   * sample speed and the trail's path speed (ground covered
+   * over the window's span) — never the instantaneous GPS
+   * value alone. A standing start reads ≈0 for seconds after
+   * the car begins to move; a merge dips the instantaneous
+   * read while the car is plainly at freeway pace around it;
+   * either one used to be able to zero a welcome's reach
+   * window at the single instant of judgment (the Nov 27
+   * University City kill: offered and judged the same second,
+   * 14 s after the tap, speed ≈0). Until this tour's first
+   * welcome has sounded, the floor WELCOME_JUDGE_FLOOR_MPS
+   * stands under the smoothed read (the opening phase is
+   * where a drive is getting underway); afterwards the
+   * historical 0.5 m/s floor is the only floor. With too
+   * little trail to smooth, the instantaneous read — floored
+   * the same way — is the honest fallback.
+   */
+  private welcomeJudgeSpeedMps(): number {
+    const floor = this.welcomeSoundedThisTour ? 0.5 : WELCOME_JUDGE_FLOOR_MPS;
+    if (!this.position) return floor;
+    const now = this.clock.now();
+    const win = this.posSamples.filter(s => now - s.at <= WELCOME_JUDGE_WINDOW_MS);
+    let smoothed = Math.max(this.position.speedMps, 0.5);
+    if (win.length >= 2) {
+      const spanS = (win[win.length - 1].at - win[0].at) / 1000;
+      if (spanS >= 3) {
+        let path = 0;
+        for (let i = 1; i < win.length; i++) {
+          path += calculateDistance(win[i - 1].lat, win[i - 1].lng, win[i].lat, win[i].lng);
+        }
+        const speeds = win.map(s => s.speedMps).sort((a, b) => a - b);
+        const median = speeds[Math.floor(speeds.length / 2)];
+        smoothed = Math.max(median, path / spanS, 0.5);
+      }
+    }
+    return Math.max(smoothed, floor);
+  }
+
+  /**
+   * Is this welcome's crossing still in progress (Nov 28,
+   * 2026)? The resolved area still names the place — the
+   * app's own geocoding places the driver inside it — and the
+   * anchor is not astern beyond the footprint (a driver who
+   * has run past the footprint with the place behind him has
+   * finished the crossing, whatever the geocoder's lag).
+   * judgeStory's boundary arm and onStorySettle's stale
+   * outcomes both read this one test, so the serve law and
+   * the discharge law can never disagree about where the
+   * driver stands.
+   */
+  private welcomeStillCrossing(
+    name: string,
+    anchor?: { lat: number; lng: number } | null,
+  ): boolean {
+    const current = this.area.neighborhood;
+    if (!current || current.toLowerCase() !== name.toLowerCase()) return false;
+    if (!anchor || !this.position || this.position.headingDeg === null) return true;
+    const delta = headingDelta(this.position.headingDeg, bearingDegrees(this.position, anchor));
+    if (
+      delta > 100 &&
+      calculateDistance(this.position.lat, this.position.lng, anchor.lat, anchor.lng) >
+        WELCOME_FOOTPRINT_RADIUS_M
+    ) {
+      return false;
+    }
+    return true;
+  }
+
   private judgeStory(item: AudibleItem): { ok: true } | { ok: false; reason: string } {
     if (!this.position) return { ok: true };
     const now = this.clock.now();
@@ -4696,13 +5069,16 @@ export class Tour {
     // outrun), cutting the corridor story behind it. So the
     // same reach test pierces the exemption for non-live
     // welcomes: beyond reach it discharges 'welcome-stale'
-    // (onStorySettle: the pass is spent, the place is NOT
-    // heard — and it FILES welcome_stale_dropped with the
-    // distance, the one discharge that is not silent, because
-    // the Day-12 harm was a stale welcome nobody could see in
-    // the logs). A welcome is judged once, by the arm its
-    // source selects; the two arms share this block, so no
-    // welcome can be judged twice.
+    // (onStorySettle: the place is NOT heard — and it FILES
+    // welcome_stale_dropped with the distance, the one
+    // discharge that is not silent, because the Day-12 harm
+    // was a stale welcome nobody could see in the logs).
+    // Since Nov 28, 2026 the stale discharge no longer spends
+    // the pass either — see the settle branch for the
+    // conversion / re-arm / watch outcomes. A welcome is
+    // judged once, by the arm its source selects; the two
+    // arms share this block, so no welcome can be judged
+    // twice.
     //
     // Correction (Nov 16, 2026, Erik's ruling): the Day-12 fix
     // as first built (391e470) tested shelf welcomes against a
@@ -4729,9 +5105,43 @@ export class Tour {
     // is true at any distance — "you passed this place" does
     // not expire as the driver continues — so neither arm may
     // kill it. The conversion checkpoint acts on waiting live
-    // items before dequeue, so a welcome that could convert
-    // already has; shelf welcomes never convert. The reach
-    // formula itself is untouched.
+    // items before dequeue; since Nov 28, 2026 a shelf
+    // welcome judged stale converts through the settle path
+    // instead (see onStorySettle) — the exemption's reason is
+    // unchanged: a pass-by telling cannot be stale.
+    //
+    // Welcome-fix batch (Nov 28, 2026 — Erik's ruling after
+    // the Nov 27 drive lost all four library welcomes to this
+    // test): three changes, all inside this block.
+    //  (1) BOUNDARY JUDGING for the library arm: the test
+    //      measures BOUNDARY distance (dist to the centroid
+    //      anchor minus WELCOME_FOOTPRINT_RADIUS_M, floored
+    //      at 0) while the crossing is in progress — the
+    //      resolved area still names the place and the anchor
+    //      is not astern beyond the footprint — with NO
+    //      freeway ceiling: a welcome is owed on entry, and
+    //      the telling's own span from the boundary is the
+    //      whole law while the driver is entering or inside.
+    //      The exited arm (anchor astern beyond the
+    //      footprint, or the area resolved onward) keeps the
+    //      Nov 16/20 law verbatim: centroid distance against
+    //      the ceiling-capped reach.
+    //  (2) SMOOTHED SPEED: both arms price the reach at
+    //      welcomeJudgeSpeedMps — the position trail's recent
+    //      median / path speed, floored for a tour whose
+    //      first welcome has not sounded — never the
+    //      instantaneous GPS read, which is ≈0 at a standing
+    //      start and dips in every merge.
+    //  (3) The entry-anchored variant (Half-2 contract,
+    //      ENTRY_WELCOME_ANGLE): judged in its own register —
+    //      boundary distance to its ENTRY anchor against the
+    //      uncapped reach, in any area state. Its anchor moves
+    //      with the crossing's start, so the test spans the
+    //      whole crossing window by construction.
+    // The LIVE arm keeps its Nov 2 geometry (centroid
+    // distance, ceiling-capped reach): a live welcome was
+    // generated for the ground the driver stood on, not for a
+    // footprint — only its speed input is smoothed now.
     if (subject.startsWith('welcome:') && item.anchor && item.framing !== 'passby') {
       const dist = calculateDistance(
         this.position.lat,
@@ -4739,22 +5149,38 @@ export class Tour {
         item.anchor.lat,
         item.anchor.lng,
       );
-      const reach = Math.max(item.durationSec, 5) * speed;
+      const judgeSpeed = this.welcomeJudgeSpeedMps();
+      const reach = Math.max(item.durationSec, 5) * judgeSpeed;
       const cappedReach =
-        speed >= FREEWAY_MPS ? Math.min(reach, WELCOME_REACH_CEILING_M) : reach;
+        judgeSpeed >= FREEWAY_MPS ? Math.min(reach, WELCOME_REACH_CEILING_M) : reach;
       // Walking regime (Nov 24, 2026): presence, not arrival
       // time — inside the presence bound the welcome serves
       // however slow the approach, so the Nov 24 stale-drop
       // (a centroid anchor 1,504 m from a walker inside the
       // neighborhood) cannot recur on foot. Regime-only: both
       // driving arms above keep their reach exactly as ruled.
-      const limit = this.walkingRegime
-        ? Math.max(cappedReach, WALKING_WELCOME_BOUND_M)
-        : cappedReach;
-      if (dist > limit) {
-        return item.storySource === 'live'
-          ? { ok: false, reason: 'welcome-outrun' }
-          : { ok: false, reason: 'welcome-stale' };
+      // The library arm measures the bound from the boundary,
+      // as it now measures everything.
+      if (this.walkingRegime) {
+        const limit = Math.max(cappedReach, WALKING_WELCOME_BOUND_M);
+        const judged = item.storySource === 'live' ? dist : Math.max(0, dist - WELCOME_FOOTPRINT_RADIUS_M);
+        if (judged > limit) {
+          return item.storySource === 'live'
+            ? { ok: false, reason: 'welcome-outrun' }
+            : { ok: false, reason: 'welcome-stale' };
+        }
+      } else if (item.storySource === 'live') {
+        if (dist > cappedReach) return { ok: false, reason: 'welcome-outrun' };
+      } else if (isEntryWelcomeAngle(item.angleOf)) {
+        const boundaryDist = Math.max(0, dist - WELCOME_FOOTPRINT_RADIUS_M);
+        if (boundaryDist > reach) return { ok: false, reason: 'welcome-stale' };
+      } else {
+        const boundaryDist = Math.max(0, dist - WELCOME_FOOTPRINT_RADIUS_M);
+        const name = subject.slice('welcome:'.length);
+        const crossing = this.welcomeStillCrossing(name, item.anchor);
+        if (crossing ? boundaryDist > reach : dist > cappedReach) {
+          return { ok: false, reason: 'welcome-stale' };
+        }
       }
     }
     // Orientation race discharge (Nov 2): a LIVE area story
@@ -4889,6 +5315,30 @@ export class Tour {
     if (this.opening !== 'open' && this.opening !== 'failed') return false;
     if (this.player.latch !== 'earned') return false;
     if (this.qaPhase !== 'idle') return false;
+    // Committed corridor protection (Nov 28, 2026 — Erik's
+    // ruling, the welcome-fix batch): a corridor item that
+    // has been COMMITTED to the waiting slot cannot be
+    // displaced by a WELCOME newcomer, on either displacement
+    // kind, at any pace. The Nov 27 field case: the SR-52
+    // East corridor story was displaced-priority twice in
+    // 18 s by live welcomes (Alcott Estates, then its
+    // re-serve), and the third landing died 'segment-exit' —
+    // the segment's telling never sounded although the driver
+    // never left the segment. A committed corridor item now
+    // holds its slot until it plays or genuinely expires
+    // (judgeStory's overshoot law is the expiry); the welcome
+    // keeps its own seniority everywhere else — it still
+    // takes the slot ahead of ordinary and Tier-1 waiters,
+    // and an owed welcome displaced FROM nothing simply waits
+    // the one story out, owed record intact. The opening
+    // welcome is untouched: corridor serves are gated on the
+    // opening (O16), so it never meets a corridor waiter.
+    if (
+      (waiter.storySource === 'corridor' || waiter.corridorSegmentId) &&
+      (newcomer.subject ?? '').startsWith('welcome:')
+    ) {
+      return false;
+    }
     // Freeway-pace ordering (Erik's ruling, Nov 24, 2026 —
     // the freeform limb of his Nov 15 speed-regime sketch,
     // ruled at last): at freeway pace the queue order is
@@ -4912,13 +5362,12 @@ export class Tour {
     // slot keeps it; the corridor's rank over Tier-1
     // expresses against the pendings, which is what
     // "competitive" has meant in this lane since Nov 15.
-    // Untouched, deliberately: the welcome's seniority (a
-    // reserved/welcome newcomer still displaces a corridor
-    // waiter), corridor succession (a corridor newcomer may
-    // still displace a corridor waiter — the segment behind
-    // yields to the segment under the car, and judgeStory's
-    // overshoot law kills a stale waiter at dequeue either
-    // way), and EVERYTHING below freeway pace — this block
+    // Untouched, deliberately: corridor succession (a
+    // corridor newcomer may still displace a corridor waiter
+    // — the segment behind yields to the segment under the
+    // car, and judgeStory's overshoot law kills a stale
+    // waiter at dequeue either way), and EVERYTHING below
+    // freeway pace — this block
     // runs only inside the regime, so the Nov 5
     // no-corridor-priority ruling survives intact at surface
     // pace, off the freeway.

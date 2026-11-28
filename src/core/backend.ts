@@ -190,7 +190,13 @@ export async function fetchLibraryIndex(): Promise<LibraryIndexEntry[]> {
   const { data, error } = await db
     .from('story_library')
     .select('place_key, place_name, angle, lat, lng')
-    .limit(5000);
+    // The cap is a page size, not a shelf size (Nov 28, 2026):
+    // the library passed 5,000 rows as the tranches merged,
+    // and a silent truncation here starves every index-driven
+    // lane (corridor families included) of whichever rows the
+    // unordered scan happened to cut — with no event anywhere
+    // to say so. 20,000 is headroom, not a target.
+    .limit(20000);
   if (error || !data) return [];
   const rows = data as LibraryIndexEntry[];
   lsJsonSet('libraryPlaceKeys', rows.map(r => r.place_key));
@@ -221,33 +227,43 @@ export async function fetchIntroRow(areaName: string): Promise<LibraryRow | null
   return fetchLibraryRow(normalizePlaceKey(areaName), 'neighborhood_intro');
 }
 
-/** The two intro variants an area may hold on the shelf (Nov 1). */
+/** The intro variants an area may hold on the shelf (Nov 1; the family grows Nov 28, 2026). */
 export interface IntroRows {
   /** The plain intro: angle 'neighborhood_intro'. */
   plain: LibraryRow | null;
   /** The greeting intro: angle 'neighborhood_intro_greet' — the plain body behind a greeting line, rendered as its own row. */
   greet: LibraryRow | null;
+  /**
+   * The entry-anchored variant: angle 'neighborhood_intro_entry'
+   * (Nov 28, 2026 — the welcome-fix program's Half-2 contract,
+   * defined at ENTRY_WELCOME_ANGLE in tour.ts): a telling written
+   * for a driver already inside the place, anchored at the entry
+   * point. At most one per place; null until the production run
+   * banks it.
+   */
+  entry: LibraryRow | null;
 }
 
 /**
- * Both intro variants for an area in ONE query (Nov 1): the
+ * The intro variants for an area in ONE query (Nov 1): the
  * welcome serve chooses between them by the listener's cross-day
  * heard state (first entry → greeting variant; re-entry → plain),
  * and the choice must not cost a second round trip on the serve
  * path. Either side is null when the shelf holds no such row.
  */
 export async function fetchIntroRows(areaName: string): Promise<IntroRows> {
-  if (!BACKEND_CONFIGURED) return { plain: null, greet: null };
+  if (!BACKEND_CONFIGURED) return { plain: null, greet: null, entry: null };
   const { data, error } = await db
     .from('story_library')
     .select('*')
     .eq('place_key', normalizePlaceKey(areaName))
-    .in('angle', ['neighborhood_intro', 'neighborhood_intro_greet']);
-  if (error || !data) return { plain: null, greet: null };
+    .in('angle', ['neighborhood_intro', 'neighborhood_intro_greet', 'neighborhood_intro_entry']);
+  if (error || !data) return { plain: null, greet: null, entry: null };
   const rows = data as LibraryRow[];
   return {
     plain: rows.find(r => r.angle === 'neighborhood_intro') ?? null,
     greet: rows.find(r => r.angle === 'neighborhood_intro_greet') ?? null,
+    entry: rows.find(r => r.angle === 'neighborhood_intro_entry') ?? null,
   };
 }
 

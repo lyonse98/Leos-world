@@ -9564,4 +9564,400 @@ export async function runScenarios(Tour, extras) {
       duoPersona.DUO_GENERATION_INSTRUCTION.includes('"old-man-beat"') &&
       !duoPersona.DUO_GENERATION_INSTRUCTION.includes('"anachronism"'));
   }
+
+  // ---------------------------------------------------------- WF: welcome-fix batch (Nov 28, 2026)
+  // Erik's ruling after the Nov 27 drive diagnosis: all four
+  // library welcomes on that drive died 'welcome-stale' at
+  // dequeue (centroid geometry × instantaneous GPS speed),
+  // the SR-52 corridor story was displaced twice in 18 s by
+  // live welcomes and then died 'segment-exit', and tour 2
+  // offered zero corridors in 6.5 min of highway driving.
+  // WF-1..WF-5 replay those shapes against the fixes:
+  // boundary judging + smoothed/floored judge speed (WF-1,
+  // WF-2a), stale → pass-by conversion without burning the
+  // place (WF-2b), committed-corridor displacement
+  // protection (WF-3), the corridor candidate path itself
+  // (WF-4), and the Half-2 entry-variant contract (WF-5).
+
+  suite('WF-1 standing start: the opening library welcome survives judgment at speed ≈ 0 (Nov 27 University City replay)');
+  {
+    // Field shape: the tour started 1,701 m from the UC intro
+    // anchor; the car had just begun to move (speed ≈ 0) when
+    // the shelf fallback was offered and judged the same
+    // second — reach = ~149 s × ~0 m/s ≈ 0 under the old law.
+    // Under the boundary law the driver is INSIDE the place
+    // (the start area itself): boundary distance 501 m, and
+    // the judge's floored smoothed speed (5 m/s before the
+    // first welcome sounds) prices the telling at ~745 m.
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      intros: [{
+        name: 'University City',
+        text: 'The banked intro to University City, its streets and its story. '.repeat(30),
+      }],
+    });
+    // Live generation hangs: the opening welcome falls back
+    // to the shelf row, as it did in the field.
+    world.genStoryBehavior = prompt => {
+      if (prompt.includes('NEIGHBORHOOD WELCOME')) return new Promise(() => {});
+      return 'A generated story about the road ahead, told with care and local color. '.repeat(3);
+    };
+    const audio = new FakeAudio(world.clock, okPolicy({ synth: 12_000 }));
+    const startPos = { lat: UTC.lat + 1701 / 111_320, lng: UTC.lng };
+    const tour = await startAt(world, audio, startPos, 0, 180);
+    await world.clock.advance(90_000);
+    const pb = playbacksFor(world, 'welcome:university city');
+    check('the opening shelf welcome sounded from a standing start', pb.some(p => p.payload.sounded),
+      JSON.stringify(pb.map(p => p.payload)));
+    check('no welcome_stale_dropped filed', world.eventsOf('welcome_stale_dropped').length === 0,
+      JSON.stringify(world.eventsOf('welcome_stale_dropped').map(e => e.payload)));
+    check('the heard ledger filed the welcome', world.heard.includes('Welcome to University City'),
+      world.heard.join(' | '));
+    tour.endTour();
+  }
+
+  // Shared geometry for WF-2: SR-52's Tierrasanta crossing.
+  // The intro pin is the field centroid (32.825, -117.095);
+  // the drive line runs east along lat 32.8465 (the freeway's
+  // own latitude there), so the centroid sits ~2.4 km south —
+  // abeam, never ahead — and centroid distance runs
+  // 2.4–3.9 km for the whole crossing, exactly the shape no
+  // centroid test can pass.
+  const wf2Path = { lat: 32.8465, centroid: { lat: 32.825, lng: -117.095 } };
+  const wf2Intro = {
+    name: 'Tierrasanta',
+    lat: wf2Path.centroid.lat,
+    lng: wf2Path.centroid.lng,
+    text: 'The banked intro to Tierrasanta, its mesa streets and canyon fingers. '.repeat(31),
+  };
+  const wf2Drive = async (world, tour, fromLng, toLng, speedMps = 28) => {
+    // Step east in ~140 m fixes (5 s at 28 m/s) until toLng.
+    let lng = fromLng;
+    while (lng < toLng) {
+      await world.clock.advance(5_000);
+      lng = Math.min(toLng, lng + (speedMps * 5) / 96_500);
+      tour.onPosition({ lat: wf2Path.lat, lng, speedMps, headingDeg: 90 });
+    }
+    return lng;
+  };
+
+  suite('WF-2a freeway crossing: a welcome queued behind a long story SOUNDS while the crossing is in progress (Nov 27 Tierrasanta replay)');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      library: [{ name: 'Balboa Park', lat: wf2Path.lat, lng: -117.128 }],
+      intros: [wf2Intro],
+      area: { neighborhood: 'Kearny Mesa', city: 'San Diego' },
+    });
+    // Balboa is the long story ahead of the welcome: 45 s of
+    // channel while the driver crosses at 28 m/s (~1.3 km of
+    // queue wait — the welcome dequeues mid-crossing, ~2.5 km
+    // from the centroid, where the old capped centroid law
+    // (1,500 m) killed it).
+    const audio = new FakeAudio(world.clock, ({ cls, src }) => ({
+      action: 'ok',
+      durationMs: typeof src === 'string' && src.includes('balboa-park') ? 45_000 : (DUR[cls] ?? 5000),
+    }));
+    const { tour } = await healthyOpening(world, audio, { lat: wf2Path.lat, lng: -117.131 }, 28);
+    world.candidates = [makeCandidate('Balboa Park', { lat: wf2Path.lat, lng: -117.128 })];
+    await wf2Drive(world, tour, -117.131, -117.128, 28);
+    for (let i = 0; i < 24 && tour.view().nowPlaying?.label !== 'Balboa Park'; i++) {
+      await world.clock.advance(5_000);
+    }
+    check('the long story is playing', tour.view().nowPlaying?.label === 'Balboa Park',
+      tour.view().nowPlaying?.label ?? 'none');
+    world.candidates = [];
+    // Enter Tierrasanta ~3,053 m from its centroid (the
+    // field's offer distance): the welcome registers owed and
+    // waits behind Balboa.
+    world.area = { neighborhood: 'Tierrasanta', city: 'San Diego' };
+    tour.onPosition({ lat: wf2Path.lat, lng: -117.1147, speedMps: 28, headingDeg: 90 });
+    await world.clock.advance(3_000);
+    check('the Tierrasanta welcome waits behind the long story',
+      tour.view().upNext === 'Welcome to Tierrasanta', `upNext=${tour.view().upNext}`);
+    // Cross on: Balboa ends ~45 s in; the welcome dequeues
+    // still inside Tierrasanta, centroid abeam.
+    await wf2Drive(world, tour, -117.1147, -117.1016, 28);
+    await world.clock.advance(60_000);
+    const pb = playbacksFor(world, 'welcome:tierrasanta');
+    check('the welcome sounded inside its crossing', pb.some(p => p.payload.sounded),
+      JSON.stringify(pb.map(p => p.payload)));
+    check('no welcome_stale_dropped filed', world.eventsOf('welcome_stale_dropped').length === 0,
+      JSON.stringify(world.eventsOf('welcome_stale_dropped').map(e => e.payload)));
+    check('no conversion was needed', world.eventsOf('welcome_converted_passby').length === 0,
+      JSON.stringify(world.eventsOf('welcome_converted_passby').map(e => e.payload)));
+    check('the heard ledger filed the welcome', world.heard.includes('Welcome to Tierrasanta'),
+      world.heard.join(' | '));
+    tour.endTour();
+  }
+
+  suite('WF-2b freeway crossing outlasted: the stale welcome CONVERTS to a pass-by instead of burning the place (Nov 27 Tierrasanta, the long-queue branch)');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      library: [{ name: 'Balboa Park', lat: wf2Path.lat, lng: -117.128 }],
+      intros: [wf2Intro],
+      area: { neighborhood: 'Kearny Mesa', city: 'San Diego' },
+    });
+    // A 131 s story ahead of the welcome (the field's I-5
+    // corridor length): the crossing ends before the channel
+    // frees, so at dequeue the driver has exited — the
+    // arrival telling is stale, and the conversion is the
+    // outcome the ruling promises.
+    const audio = new FakeAudio(world.clock, ({ cls, src }) => ({
+      action: 'ok',
+      durationMs: typeof src === 'string' && src.includes('balboa-park') ? 131_000 : (DUR[cls] ?? 5000),
+    }));
+    const { tour } = await healthyOpening(world, audio, { lat: wf2Path.lat, lng: -117.131 }, 28);
+    world.candidates = [makeCandidate('Balboa Park', { lat: wf2Path.lat, lng: -117.128 })];
+    await wf2Drive(world, tour, -117.131, -117.128, 28);
+    for (let i = 0; i < 24 && tour.view().nowPlaying?.label !== 'Balboa Park'; i++) {
+      await world.clock.advance(5_000);
+    }
+    check('the 131 s story is playing', tour.view().nowPlaying?.label === 'Balboa Park',
+      tour.view().nowPlaying?.label ?? 'none');
+    world.candidates = [];
+    world.area = { neighborhood: 'Tierrasanta', city: 'San Diego' };
+    tour.onPosition({ lat: wf2Path.lat, lng: -117.1147, speedMps: 28, headingDeg: 90 });
+    await world.clock.advance(3_000);
+    check('the Tierrasanta welcome waits behind the long story',
+      tour.view().upNext === 'Welcome to Tierrasanta', `upNext=${tour.view().upNext}`);
+    // Cross the rest of Tierrasanta and out the far side: the
+    // area resolves onward (Scripps Ranch) while the welcome
+    // still waits — a shelf welcome does not convert in the
+    // queue (checkpoint 3 is the live lane's); its conversion
+    // comes at the stale settle. (Long fixes, D12-1 style:
+    // the crossing's shape is what matters, and the exit must
+    // resolve well inside Balboa's 131 s.)
+    tour.onPosition({ lat: wf2Path.lat, lng: -117.100, speedMps: 28, headingDeg: 90 });
+    await world.clock.advance(15_000);
+    tour.onPosition({ lat: wf2Path.lat, lng: -117.085, speedMps: 28, headingDeg: 90 });
+    await world.clock.advance(15_000);
+    world.area = { neighborhood: 'Scripps Ranch', city: 'San Diego' };
+    tour.onPosition({ lat: wf2Path.lat, lng: -117.078, speedMps: 28, headingDeg: 90 });
+    await world.clock.advance(10_000);
+    // Balboa ends; the welcome is judged exited-stale, and
+    // the settle converts it.
+    await world.clock.advance(240_000);
+    const stale = world.eventsOf('welcome_stale_dropped').filter(e => e.payload.subject === 'welcome:tierrasanta');
+    check('the stale judgment filed honestly (welcome_stale_dropped ×1)', stale.length === 1,
+      JSON.stringify(world.eventsOf('welcome_stale_dropped').map(e => e.payload)));
+    const conv = world.eventsOf('welcome_converted_passby').filter(e => e.payload.subject === 'welcome:tierrasanta');
+    check('welcome_converted_passby fired for the stale welcome', conv.length === 1,
+      JSON.stringify(world.eventsOf('welcome_converted_passby').map(e => e.payload)));
+    const pb = playbacksFor(world, 'welcome:tierrasanta');
+    check('a Tierrasanta telling sounded (the conversion)', pb.some(p => p.payload.sounded),
+      JSON.stringify(pb.map(p => p.payload)));
+    check('the arrival audio itself never played',
+      !audio.log.some(e => typeof e.src === 'string' && e.src.includes('tierrasanta')),
+      JSON.stringify(audio.log.map(e => e.src)));
+    check('hearing the conversion spent the place (heard ledger filed)',
+      world.heard.includes('Welcome to Tierrasanta'), world.heard.join(' | '));
+    check('no story_dropped filed for the welcome (discharge discipline preserved)',
+      dropsFor(world, 'welcome:tierrasanta').length === 0,
+      JSON.stringify(dropsFor(world, 'welcome:tierrasanta').map(d => d.payload)));
+    tour.endTour();
+  }
+
+  suite('WF-3 committed corridor: a live welcome cannot displace a corridor story holding the waiting slot (Nov 27 SR-52 replay)');
+  {
+    resetLocalStorage();
+    const { seg, mid } = fp7Seg();
+    const world = makeWorld(Tour, {
+      candidates: [makeCandidate('Alpha Park', { lat: seg.polyline[0].lat, lng: seg.polyline[0].lng, distanceM: 100 })],
+      library: [
+        { name: 'Alpha Park', lat: seg.polyline[0].lat, lng: seg.polyline[0].lng },
+        seg.displayName,
+      ],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 90_000, synth: 12_000 }));
+    const tour = await startAt(world, audio, seg.polyline[0], 8, mid.heading);
+    const labels = watchLabels(world, tour);
+    await world.clock.advance(40_000); // Alpha playing (90 s)
+    tour.onPosition({ lat: mid.lat, lng: mid.lng, speedMps: 27, headingDeg: mid.heading });
+    await world.clock.advance(3_000);
+    check('corridor story holds the waiting slot', tour.view().upNext === seg.displayName,
+      `upNext=${tour.view().upNext}`);
+    // The Nov 27 contest: a LIVE welcome (Alcott Estates —
+    // no shelf row, so the owed serve generates) is offered
+    // priority against the corridor waiter, twice over in
+    // the field. Here it must pend, not displace.
+    world.area = { neighborhood: 'Alcott Estates', city: 'San Diego' };
+    tour.onPosition({ lat: mid.lat + 0.004, lng: mid.lng, speedMps: 27, headingDeg: mid.heading });
+    await world.clock.advance(20_000);
+    const corridorDrops = dropsFor(world, `corridor:${seg.id}`);
+    check('no displacement drop for the corridor story', corridorDrops.length === 0,
+      JSON.stringify(corridorDrops.map(d => d.payload)));
+    check('corridor story still holds the slot', tour.view().upNext === seg.displayName,
+      `upNext=${tour.view().upNext}`);
+    await world.clock.advance(300_000);
+    check('the corridor story sounded', labels.includes(seg.displayName), labels.join(','));
+    check('the welcome sounded after the corridor (pended, not lost)',
+      labels.indexOf('Welcome to Alcott Estates') > labels.indexOf(seg.displayName),
+      labels.join(','));
+    tour.endTour();
+  }
+
+  suite('WF-4a corridor candidate path: a fresh tour on SR-52 East at freeway pace IS offered its corridor stories (the Nov 27 tour-2 path, shelf banked)');
+  {
+    resetLocalStorage();
+    const segA = CORRIDOR_SEGMENTS.find(s => s.id === 'sr-52-eb-clairemont-kearny-mesa');
+    const segB = CORRIDOR_SEGMENTS.find(s => s.id === 'sr-52-eb-kearny-mesa-tierrasanta');
+    const world = makeWorld(Tour, {
+      candidates: [],
+      library: [segA.displayName, segB.displayName],
+      area: { neighborhood: 'Clairemont', city: 'San Diego' },
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 60_000, synth: 12_000 }));
+    const start = segA.polyline[0];
+    const tour = await startAt(world, audio, start, 8, 90);
+    await world.clock.advance(40_000); // opening complete
+    // Drive both segments' polylines at 25 m/s, fixes every
+    // ~50 m with the leg's own heading.
+    const driveSeg = async seg => {
+      for (let i = 1; i < seg.polyline.length; i++) {
+        const a = seg.polyline[i - 1];
+        const b = seg.polyline[i];
+        const legM = Math.hypot((b.lat - a.lat) * 111_320, (b.lng - a.lng) * 96_500);
+        const heading = ((Math.atan2((b.lng - a.lng) * 96_500, (b.lat - a.lat) * 111_320) * 180) / Math.PI + 360) % 360;
+        const steps = Math.max(1, Math.round(legM / 50));
+        for (let sIdx = 1; sIdx <= steps; sIdx++) {
+          const t = sIdx / steps;
+          tour.onPosition({
+            lat: a.lat + (b.lat - a.lat) * t,
+            lng: a.lng + (b.lng - a.lng) * t,
+            speedMps: 25,
+            headingDeg: heading,
+          });
+          await world.clock.advance(2_000);
+        }
+      }
+    };
+    await driveSeg(segA);
+    await driveSeg(segB);
+    await world.clock.advance(10_000);
+    const corridorPlayed = world.eventsOf('story_played').filter(e => e.payload.source === 'corridor');
+    check('a corridor story was offered on the SR-52 East path',
+      corridorPlayed.length >= 1,
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    check('the offered segment is one of the two driven',
+      corridorPlayed.some(e => e.payload.subject === `corridor:${segA.id}` || e.payload.subject === `corridor:${segB.id}`),
+      JSON.stringify(corridorPlayed.map(e => e.payload.subject)));
+    tour.endTour();
+  }
+
+  suite('WF-4b corridor candidate path: with NO banked row for the segment, the serve files corridor_no_banked_row once — the Nov 27 silence, made visible');
+  {
+    resetLocalStorage();
+    const segA = CORRIDOR_SEGMENTS.find(s => s.id === 'sr-52-eb-clairemont-kearny-mesa');
+    const world = makeWorld(Tour, {
+      candidates: [],
+      library: [], // the shelf holds nothing for the segment
+      area: { neighborhood: 'Clairemont', city: 'San Diego' },
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 60_000, synth: 12_000 }));
+    const tour = await startAt(world, audio, segA.polyline[0], 8, 90);
+    await world.clock.advance(40_000);
+    for (let i = 1; i < segA.polyline.length; i++) {
+      const a = segA.polyline[i - 1];
+      const b = segA.polyline[i];
+      const heading = ((Math.atan2((b.lng - a.lng) * 96_500, (b.lat - a.lat) * 111_320) * 180) / Math.PI + 360) % 360;
+      tour.onPosition({ lat: b.lat, lng: b.lng, speedMps: 25, headingDeg: heading });
+      await world.clock.advance(2_000);
+    }
+    await world.clock.advance(10_000);
+    const noRow = world.eventsOf('corridor_no_banked_row').filter(e => e.payload.segment_id === segA.id);
+    check('corridor_no_banked_row filed exactly once for the matched segment', noRow.length === 1,
+      JSON.stringify(world.eventsOf('corridor_no_banked_row').map(e => e.payload)));
+    check('no corridor story was offered (the family was empty)',
+      world.eventsOf('story_played').filter(e => e.payload.source === 'corridor').length === 0,
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    tour.endTour();
+  }
+
+  suite('WF-5a entry variant contract: at approach the ORIGINAL welcome serves, not the entry variant');
+  {
+    resetLocalStorage();
+    const world = makeWorld(Tour, {
+      candidates: [],
+      intros: ['Old Town'],
+      entryIntros: ['Old Town'],
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 30_000, synth: 12_000 }));
+    const { tour } = await healthyOpening(world, audio);
+    // Enter Old Town and stay at the entry point: the serve
+    // happens at approach, so the original (plain — no greet
+    // row banked here) is the variant that serves.
+    world.area = { neighborhood: 'Old Town', city: 'San Diego' };
+    tour.onPosition({ lat: UTC.lat + 0.004, lng: UTC.lng, speedMps: 8, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    const played = world.eventsOf('story_played').filter(e => e.payload.subject === 'welcome:old town');
+    check('the original intro served at approach (angle neighborhood_intro)',
+      played.length === 1 && played[0].payload.angle === 'neighborhood_intro',
+      JSON.stringify(played.map(e => e.payload)));
+    check('the welcome sounded', playbacksFor(world, 'welcome:old town').some(p => p.payload.sounded),
+      JSON.stringify(playbacksFor(world, 'welcome:old town').map(p => p.payload)));
+    tour.endTour();
+  }
+
+  suite('WF-5b entry variant contract: deep inside, the ENTRY variant serves — entry-anchored, sounding across the crossing — and hearing it spends the place');
+  {
+    resetLocalStorage();
+    // The centroid pin sits ~3 km south of the drive line:
+    // the original, judged from its centroid, could not
+    // sound here at freeway pace (the Nov 27 disease). The
+    // entry variant's anchor is the entry point itself.
+    const driveLat = UTC.lat + 0.027; // ~3,005 m north of the intro pin
+    const world = makeWorld(Tour, {
+      candidates: [],
+      intros: [{ name: 'Old Town', lat: UTC.lat, lng: UTC.lng }],
+      entryIntros: [{ name: 'Old Town', lat: UTC.lat, lng: UTC.lng }],
+      area: { neighborhood: 'Mission Valley', city: 'San Diego' },
+    });
+    const audio = new FakeAudio(world.clock, okPolicy({ library: 30_000, synth: 12_000 }));
+    // Start 445 m south of the drive line so the entry fix
+    // below clears trackNeighborhood's ≥300 m re-resolution
+    // step and the Old Town entry genuinely registers there.
+    const { tour } = await healthyOpening(world, audio, { lat: driveLat - 0.004, lng: UTC.lng }, 27);
+    // Cross into Old Town at the drive line; the entry
+    // registers at this fix, and the driver is ALREADY deep
+    // inside by the time the serve reads the position (the
+    // second fix lands in the same tick, before the async
+    // serve can choose its variant).
+    world.area = { neighborhood: 'Old Town', city: 'San Diego' };
+    tour.onPosition({ lat: driveLat, lng: UTC.lng, speedMps: 27, headingDeg: 0 });
+    tour.onPosition({ lat: driveLat + 1500 / 111_320, lng: UTC.lng, speedMps: 27, headingDeg: 0 });
+    await world.clock.advance(5_000);
+    const played = world.eventsOf('story_played').filter(e => e.payload.subject === 'welcome:old town');
+    check('the entry variant served (angle neighborhood_intro_entry)',
+      played.length === 1 && played[0].payload.angle === 'neighborhood_intro_entry',
+      JSON.stringify(played.map(e => e.payload)));
+    // Run on north at freeway pace: the variant, judged from
+    // its entry anchor in the entry register, sounds across
+    // the crossing window.
+    for (let i = 0; i < 10; i++) {
+      await world.clock.advance(5_000);
+      tour.onPosition({ lat: driveLat + (1500 + i * 135) / 111_320, lng: UTC.lng, speedMps: 27, headingDeg: 0 });
+    }
+    await world.clock.advance(60_000);
+    check('the entry variant sounded', playbacksFor(world, 'welcome:old town').some(p => p.payload.sounded),
+      JSON.stringify(playbacksFor(world, 'welcome:old town').map(p => p.payload)));
+    check('no welcome_stale_dropped filed', world.eventsOf('welcome_stale_dropped').length === 0,
+      JSON.stringify(world.eventsOf('welcome_stale_dropped').map(e => e.payload)));
+    // Family spend: leave and re-enter — no second welcome
+    // of any variant is owed for the place this drive.
+    world.area = { neighborhood: 'Mission Valley', city: 'San Diego' };
+    tour.onPosition({ lat: driveLat + 0.01, lng: UTC.lng, speedMps: 27, headingDeg: 0 });
+    await world.clock.advance(10_000);
+    world.area = { neighborhood: 'Old Town', city: 'San Diego' };
+    tour.onPosition({ lat: driveLat + 0.004, lng: UTC.lng, speedMps: 27, headingDeg: 180 });
+    await world.clock.advance(60_000);
+    check('re-entry serves no second welcome (the variant spent the place)',
+      world.eventsOf('story_played').filter(e => e.payload.subject === 'welcome:old town').length === 1,
+      JSON.stringify(world.eventsOf('story_played').map(e => e.payload.subject)));
+    tour.endTour();
+  }
 }

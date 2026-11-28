@@ -550,6 +550,10 @@ export function parseRouteInputLocal(raw: string, nowMs: number): ParsedRouteInp
 export const NON_STORY_ANGLES = new Set([
   'neighborhood_intro',
   'neighborhood_intro_greet',
+  // The entry-anchored welcome variant (Nov 28, 2026 — the
+  // Half-2 contract in tour.ts): welcome-lane material, never
+  // a tileable route story.
+  'neighborhood_intro_entry',
   'filler',
   'filler_hosted',
 ]);

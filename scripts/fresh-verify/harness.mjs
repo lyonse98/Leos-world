@@ -366,11 +366,31 @@ export function makeWorld(Tour, opts = {}) {
       lng: -117.18,
     });
   }
+  // Entry-anchored variant intros (Nov 28, 2026 — the Half-2
+  // contract): sibling rows keyed (name,
+  // 'neighborhood_intro_entry'), the telling for a driver
+  // already inside the place.
+  const entryRows = new Map();
+  for (const entry of opts.entryIntros ?? []) {
+    const name = typeof entry === 'string' ? entry : entry.name;
+    const key = normalizeKeyA(name);
+    entryRows.set(key, {
+      place_key: key,
+      place_name: name,
+      angle: 'neighborhood_intro_entry',
+      story_text:
+        (typeof entry === 'string' ? undefined : entry.text) ??
+        `The entry-anchored intro to ${name}, told from inside its streets. `.repeat(30),
+      audio_path: `library/${key.replace(/\s+/g, '-')}/neighborhood_intro_entry.wav`,
+      lat: typeof entry === 'string' ? 32.853 : entry.lat ?? 32.853,
+      lng: typeof entry === 'string' ? -117.18 : entry.lng ?? -117.18,
+    });
+  }
   // Production's library index carries EVERY row, intros included
   // (keyed by area name) — the fixture mirrors that reachability
   // so the tour's intro-angle guard is genuinely exercised, and
   // the row store resolves intro angles for the same reason.
-  for (const row of [...introRows.values(), ...greetRows.values()]) {
+  for (const row of [...introRows.values(), ...greetRows.values(), ...entryRows.values()]) {
     libraryIndex.push({
       place_key: row.place_key,
       place_name: row.place_name,
@@ -414,7 +434,11 @@ export function makeWorld(Tour, opts = {}) {
     fetchIntroRows: async areaName => {
       world.introFetches.push(areaName);
       const key = normalizeKeyA(areaName);
-      return { plain: introRows.get(key) ?? null, greet: greetRows.get(key) ?? null };
+      return {
+        plain: introRows.get(key) ?? null,
+        greet: greetRows.get(key) ?? null,
+        entry: entryRows.get(key) ?? null,
+      };
     },
     fetchFillerRows: async () => fillerRows,
     fetchHostedFillerRows: async () => hostedRows,
@@ -518,7 +542,7 @@ export function check(label, cond, detail = '') {
 // the floor FAILS, whatever its pass rate. run.mjs enforces
 // the floor on the full run (scenarios + Monte Carlo);
 // partial runs (--scenarios / --mc) skip it.
-export const FRESH_VERIFY_MIN_CHECKS = 1187;
+export const FRESH_VERIFY_MIN_CHECKS = 1219;
 export function summarize(minChecks = 0) {
   const failed = results.filter(r => !r.pass);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
